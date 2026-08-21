@@ -53,3 +53,39 @@ def test_rejects_unknown_fields():
     with pytest.raises(ValidationError):
         BridgeSettings.model_validate({"version": 1, "unknown": True})
 
+
+def test_task_profiles_require_a_durable_job_database(tmp_path):
+    repository = {
+        "id": "repo",
+        "path": tmp_path,
+        "tasks": [
+            {"id": "test", "name": "Test", "executable": "pytest"}
+        ],
+    }
+    with pytest.raises(ValidationError, match="jobs.database_path"):
+        BridgeSettings.model_validate(
+            {
+                "projects": [
+                    {"id": "project", "name": "Project", "repositories": [repository]}
+                ]
+            }
+        )
+
+
+def test_rejects_duplicate_task_ids(tmp_path):
+    task = {"id": "test", "name": "Test", "executable": "pytest"}
+    with pytest.raises(ValidationError, match="duplicate task id"):
+        BridgeSettings.model_validate(
+            {
+                "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+                "projects": [
+                    {
+                        "id": "project",
+                        "name": "Project",
+                        "repositories": [
+                            {"id": "repo", "path": tmp_path, "tasks": [task, task]}
+                        ],
+                    }
+                ],
+            }
+        )

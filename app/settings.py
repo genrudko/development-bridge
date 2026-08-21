@@ -20,11 +20,34 @@ class ServerSettings(BaseModel):
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*")
 
 
+class TaskProfileSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str = Field(pattern=IDENTIFIER_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    executable: str = Field(min_length=1, max_length=4096)
+    arguments: tuple[str, ...] = ()
+    timeout_seconds: float = Field(default=300, gt=0, le=3600)
+    output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
+
+
+class JobSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    database_path: Path | None = None
+
+
 class RepositorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(pattern=IDENTIFIER_PATTERN)
     path: Path
     capabilities: Mapping[str, bool] = Field(default_factory=dict)
+    tasks: tuple[TaskProfileSettings, ...] = ()
+
+    @model_validator(mode="after")
+    def task_ids_are_unique(self) -> RepositorySettings:
+        identifiers = [task.id for task in self.tasks]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError(f"duplicate task id in repository {self.id}")
+        return self
 
 
 class ProjectSettings(BaseModel):
@@ -45,6 +68,7 @@ class BridgeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     version: int = Field(default=1, ge=1, le=1)
     server: ServerSettings = Field(default_factory=ServerSettings)
+    jobs: JobSettings = Field(default_factory=JobSettings)
     projects: tuple[ProjectSettings, ...] = ()
 
     @model_validator(mode="after")
@@ -52,6 +76,12 @@ class BridgeSettings(BaseModel):
         identifiers = [project.id for project in self.projects]
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("duplicate project id")
+        if any(
+            repository.tasks
+            for project in self.projects
+            for repository in project.repositories
+        ) and self.jobs.database_path is None:
+            raise ValueError("jobs.database_path is required when task profiles exist")
         return self
 
 
@@ -85,4 +115,3 @@ def load_settings(
             {**settings.model_dump(), "server": validated_server}
         )
     return settings
-
