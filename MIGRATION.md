@@ -22,10 +22,14 @@ tools.
 
 ## Stage 2 — File Service
 
+Status: complete.
+
 Add repository-scoped `file_list`, `file_read`, and `file_search` with path,
 symlink, size, and output boundaries.
 
 ## Stage 3 — Git Read Layer
+
+Status: complete.
 
 Complete the shared Git service and add structured `git_diff`, `git_log`,
 `git_show`, and `git_refs` operations.
@@ -56,4 +60,3 @@ optional integration rather than a core runtime dependency.
 Migration of systemd, Caddy, credentials, and production traffic is a separate
 deployment activity after the corresponding application stage is verified. It
 is not part of repository preparation.
-

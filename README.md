@@ -5,17 +5,16 @@ Development Bridge is the successor repository for the existing
 legacy MCP implementation and the structural foundation for the staged
 Development Bridge v1 migration.
 
-Stage 1 of Development Bridge v1 is implemented alongside the preserved legacy
-API. The Streamable HTTP transport and existing MCP tool names remain available
-so later stages can be integrated and verified independently.
+Stages 1 through 3 of Development Bridge v1 are implemented alongside the
+remaining legacy API. The Streamable HTTP transport remains available so later
+stages can be integrated and verified independently.
 
 ## Current APIs
 
 The copied MCP exposes:
 
 - `workspace_status`, `read_file`, and `apply_patch`;
-- `git_status`, `git_diff`, `git_branch`, `git_log`, `git_commit`, and
-  `git_push`;
+- `git_status`, `git_branch`, `git_commit`, and `git_push`;
 - `search_workspace` and `run_command`;
 - `github_status`.
 
@@ -24,7 +23,10 @@ project and repository registries loaded from a validated Bridge configuration.
 It exposes `bridge_info`, `project_list`, `project_describe`, and
 `repository_status` without a global current repository. The Stage 2 File
 Service adds repository-scoped `file_list`, `file_read`, and `file_search`
-with bounded paths, symlink handling, file sizes, traversal, and output.
+with bounded paths, symlink handling, file sizes, traversal, and output. The
+Stage 3 Git Read API replaces the legacy `git_log` and `git_diff` names and
+adds `git_show` and `git_refs`. All four use explicit repository selection,
+structured results, the `GIT_READ` capability, and bounded output.
 
 ## Repository scope
 

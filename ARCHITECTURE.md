@@ -40,11 +40,12 @@ The package boundaries under `app/` are:
 - `tasks` and `jobs`: registered execution profiles and durable jobs;
 - `integrations`: optional external integrations such as GitHub.
 
-The Core packages for API results, projects, capabilities, audit, Git status,
+The Core packages for API results, projects, capabilities, audit, Git read,
 files, and integrations are implemented. The File Service provides bounded
 repository-scoped listing, UTF-8 text reads, and text search without following
-symbolic links. Change, task, and job packages remain reserved for their
-approved later stages.
+symbolic links. The Git Service provides structured, bounded log, show, diff,
+refs, and repository status operations through the single Git process boundary.
+Change, task, and job packages remain reserved for their approved later stages.
 
 ## Dependency direction
 
