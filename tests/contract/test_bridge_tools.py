@@ -10,6 +10,16 @@ V1_TOOLS = {
     "repository_status",
 }
 
+BRIDGE_CAPABILITIES = {
+    "multi-project",
+    "repository-status",
+    "repository-files",
+    "git-read",
+    "controlled-changes",
+    "tasks-jobs",
+    "git-write",
+}
+
 
 def test_v1_tool_surface_is_registered():
     registry = build_tool_registry(build_container(BridgeSettings()))
@@ -28,3 +38,19 @@ def test_v1_schemas_are_closed_objects():
         "repository_id",
     ]
 
+
+def test_bridge_info_reports_only_current_capabilities():
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    result = asyncio.run(
+        registry.get("bridge_info").handler(
+            None,
+            SimpleNamespace(arguments={}),
+            SimpleNamespace(request_id="contract-request"),
+        )
+    )
+    payload = json.loads(result.content[0].text)
+    assert set(payload["data"]["capabilities"]) == BRIDGE_CAPABILITIES

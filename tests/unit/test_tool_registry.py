@@ -29,7 +29,6 @@ def test_registry_preserves_registration_order():
 
 def test_registry_rejects_name_conflict_with_source_details():
     registry = ToolRegistry()
-    registry.register(registered("git_status", "legacy"))
-    with pytest.raises(ToolNameConflictError, match="legacy"):
-        registry.register(registered("git_status", "v1"))
-
+    registry.register(registered("duplicate", "first-source"))
+    with pytest.raises(ToolNameConflictError, match="first-source"):
+        registry.register(registered("duplicate", "second-source"))

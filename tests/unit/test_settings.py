@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from app.settings import BridgeSettings, load_settings
 
 
-def test_defaults_allow_legacy_startup_without_bridge_config():
+def test_defaults_allow_startup_without_registered_projects():
     settings = load_settings(environ={})
     assert settings.version == 1
     assert settings.server.host == "127.0.0.1"
