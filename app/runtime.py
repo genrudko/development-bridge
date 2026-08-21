@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 
 from mcp import types
 from mcp.server import Server
@@ -16,7 +17,16 @@ from app.tools.registry import build_tool_registry
 def create_server(container: ApplicationContainer | None = None) -> Server:
     application = container or build_container()
     registry = build_tool_registry(application)
-    bridge_server = Server(application.settings.server.name)
+
+    @asynccontextmanager
+    async def lifespan(server):
+        await application.jobs.start()
+        try:
+            yield application
+        finally:
+            await application.jobs.stop()
+
+    bridge_server = Server(application.settings.server.name, lifespan=lifespan)
 
     async def list_tools(ctx, params):
         return types.ListToolsResult(tools=list(registry.definitions))
@@ -67,4 +77,3 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
         "tools/call", types.CallToolRequestParams, handle_tool
     )
     return bridge_server
-

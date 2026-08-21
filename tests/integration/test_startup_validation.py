@@ -2,7 +2,7 @@ import pytest
 
 from app.api.errors import BridgeError, ErrorCode
 from app.container import build_container
-from app.settings import load_settings
+from app.settings import BridgeSettings, load_settings
 from tests.fixtures.repositories import create_git_repository
 from tests.fixtures.settings import write_bridge_config
 
@@ -28,3 +28,29 @@ def test_invalid_repository_stops_container_construction(tmp_path):
         build_container(load_settings(config, environ={}))
     assert raised.value.code is ErrorCode.INVALID_ARGUMENT
 
+
+def test_job_database_inside_repository_is_rejected(tmp_path):
+    repository = create_git_repository(tmp_path, "repository")
+    settings = {
+        "jobs": {"database_path": repository / ".bridge" / "jobs.sqlite3"},
+        "projects": [
+            {
+                "id": "project",
+                "name": "Project",
+                "repositories": [
+                    {
+                        "id": "repository",
+                        "path": repository,
+                        "tasks": [
+                            {"id": "test", "name": "Test", "executable": "pytest"}
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(BridgeError) as raised:
+        build_container(BridgeSettings.model_validate(settings))
+
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
