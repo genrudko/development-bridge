@@ -1,0 +1,21 @@
+version: 1
+server:
+  name: development-bridge
+  host: 127.0.0.1
+  port: 8789
+  endpoint: /mcp
+projects:
+  - id: printer-stack
+    name: Printer Stack
+    repositories:
+      - id: fluidd
+        path: /absolute/path/to/fluidd
+        capabilities:
+          read: true
+          git_read: true
+      - id: plugins-ad5x
+        path: /absolute/path/to/Plugins_AD5X
+        capabilities:
+          read: true
+          git_read: true
+
