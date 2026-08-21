@@ -48,15 +48,20 @@ refs, and repository status operations through the single Git process boundary.
 The Changes service validates self-contained plans, calculates its own strong
 working-tree revision, serializes application per repository, and persists
 idempotency receipts without changing the Git index, refs, or objects. Task and
-job packages remain reserved for their approved later stages. Destructive file
-changes are restricted to tracked files; Stage 4 does not maintain a separate
-backup or rollback store.
+job packages provide immutable repository task profiles and a durable SQLite
+queue with one worker, cancellation, restart recovery, lifecycle audit, and
+bounded live output. Destructive file changes are restricted to tracked files;
+Stage 4 does not maintain a separate backup or rollback store.
 
 ## Dependency direction
 
 MCP tool adapters depend on application services. Application services
 depend on domain models and narrow filesystem/process interfaces. Domain
 services must not depend on MCP types.
+
+Task processes use fixed executable and argument tuples from validated startup
+configuration. Clients select only a registered task ID; arbitrary shell,
+command, argument, environment, and working-directory input is not accepted.
 
 GitHub is not part of the core dependency graph. The legacy `github_status`
 tool reaches PyGithub through a lazy optional integration boundary. Core startup and local Git operations do not require the

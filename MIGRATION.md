@@ -43,6 +43,8 @@ idempotent application of changes.
 
 ## Stage 5 — Task and Job Engine
 
+Status: complete.
+
 Add registered task profiles and durable asynchronous jobs. Arbitrary shell
 commands are not part of the target API.
 

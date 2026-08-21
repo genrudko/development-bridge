@@ -5,7 +5,7 @@ Development Bridge is the successor repository for the existing
 legacy MCP implementation and the structural foundation for the staged
 Development Bridge v1 migration.
 
-Stages 1 through 4 of Development Bridge v1 are implemented alongside the
+Stages 1 through 5 of Development Bridge v1 are implemented alongside the
 remaining legacy API. The Streamable HTTP transport remains available so later
 stages can be integrated and verified independently.
 
@@ -15,7 +15,7 @@ The copied MCP exposes:
 
 - `workspace_status`, `read_file`, and `apply_patch`;
 - `git_status`, `git_branch`, `git_commit`, and `git_push`;
-- `search_workspace` and `run_command`;
+- `search_workspace`;
 - `github_status`.
 
 The legacy tools continue to use `WORKSPACE`. The v1 Core API uses immutable
@@ -31,7 +31,11 @@ Changes API adds `change_plan` and `change_apply` for revision-guarded UTF-8
 file creation, replacement, deletion, and rename. Plans are self-contained,
 repository-scoped, bounded, and idempotent across retries. Replacement,
 deletion, and rename are limited to tracked files so Git remains the recovery
-boundary; creation requires an absent path.
+boundary; creation requires an absent path. Stage 5 adds registered repository
+tasks and durable asynchronous jobs through `task_list`, `task_start`,
+`job_status`, `job_output`, and `job_cancel`. Jobs execute fixed configured
+argv without a shell, persist in SQLite, expose bounded live output, recover
+clear states after restart, and run with concurrency one.
 
 ## Repository scope
 

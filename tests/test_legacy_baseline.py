@@ -17,7 +17,6 @@ EXPECTED_LEGACY_TOOLS = {
     "git_commit",
     "git_push",
     "github_status",
-    "run_command",
     "search_workspace",
 }
 
@@ -45,14 +44,3 @@ def test_legacy_workspace_status_behavior_is_preserved():
     )
     assert result.is_error is False
     assert result.content[0].text.startswith("workspace: ")
-
-
-def test_legacy_command_blocking_behavior_is_preserved():
-    result = asyncio.run(
-        call_tool(
-            None,
-            types.CallToolRequestParams(name="run_command", arguments={"command": "sh"}),
-        )
-    )
-    assert result.is_error is True
-    assert result.content[0].text == "Command blocked"

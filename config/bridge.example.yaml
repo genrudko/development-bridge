@@ -5,6 +5,8 @@ server:
   port: 8789
   endpoint: /mcp
   allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
+jobs:
+  database_path: /absolute/path/to/development-bridge-jobs.sqlite3
 projects:
   - id: printer-stack
     name: Printer Stack
@@ -14,9 +16,16 @@ projects:
         capabilities:
           read: true
           git_read: true
+          execute: true
+        tasks:
+          - id: test
+            name: Run repository tests
+            executable: .venv/bin/pytest
+            arguments: ["-q"]
+            timeout_seconds: 300
+            output_limit_bytes: 262144
       - id: plugins-ad5x
         path: /absolute/path/to/Plugins_AD5X
         capabilities:
           read: true
           git_read: true
-

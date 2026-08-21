@@ -10,6 +10,7 @@ from .bridge import bridge_tools
 from .changes import change_tools
 from .files import file_tools
 from .git_read import git_read_tools
+from .jobs import job_tools
 from .projects import project_tools
 
 
@@ -41,5 +42,6 @@ def build_tool_registry(
         + file_tools(container)
         + git_read_tools(container)
         + change_tools(container)
+        + job_tools(container)
     )
     return registry
