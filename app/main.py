@@ -1,54 +1,20 @@
 import uvicorn
 
-from mcp import types
-from mcp.server import Server
-
-from app.tools import TOOLS, call_tool
-
-
-server = Server("development-mcp")
+from app.container import build_container
+from app.runtime import create_server
+from app.tools.registry import build_tool_registry
 
 
-async def list_tools(ctx, params):
-    return types.ListToolsResult(tools=TOOLS)
-
-
-async def handle_tool(ctx, params):
-    result = await call_tool(ctx, params)
-
-    if result is None:
-        return types.CallToolResult(
-            content=[
-                types.TextContent(
-                    type="text",
-                    text=f"Unknown tool: {params.name}",
-                )
-            ],
-            isError=True,
-        )
-
-    return result
-
-
-server.add_request_handler(
-    "tools/list",
-    types.PaginatedRequestParams,
-    list_tools,
-)
-
-server.add_request_handler(
-    "tools/call",
-    types.CallToolRequestParams,
-    handle_tool,
-)
-
+container = build_container()
+server = create_server(container)
+TOOLS = build_tool_registry(container).definitions
 app = server.streamable_http_app()
 
 
 if __name__ == "__main__":
     uvicorn.run(
         app,
-        host="127.0.0.1",
-        port=8789,
+        host=container.settings.server.host,
+        port=container.settings.server.port,
     )
 
