@@ -19,6 +19,7 @@ def bridge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                     "capabilities": [
                         "multi-project",
                         "repository-status",
+                        "repository-files",
                         "legacy-api",
                     ],
                     "project_count": len(container.projects.list()),
@@ -41,4 +42,3 @@ def bridge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             source="v1",
         ),
     )
-

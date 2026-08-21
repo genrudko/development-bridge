@@ -41,8 +41,10 @@ The package boundaries under `app/` are:
 - `integrations`: optional external integrations such as GitHub.
 
 The Core packages for API results, projects, capabilities, audit, Git status,
-and integrations are implemented. File, change, task, and job packages remain
-reserved for their approved later stages.
+files, and integrations are implemented. The File Service provides bounded
+repository-scoped listing, UTF-8 text reads, and text search without following
+symbolic links. Change, task, and job packages remain reserved for their
+approved later stages.
 
 ## Dependency direction
 
@@ -60,4 +62,3 @@ The Git repository is separate from the existing production directory at
 `/home/eodadmin/development-mcp`. Preparing this repository does not alter the
 running systemd unit, Caddy configuration, production environment, or current
 workspace repositories.
-

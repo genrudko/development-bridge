@@ -22,7 +22,9 @@ The copied MCP exposes:
 The legacy tools continue to use `WORKSPACE`. The v1 Core API uses immutable
 project and repository registries loaded from a validated Bridge configuration.
 It exposes `bridge_info`, `project_list`, `project_describe`, and
-`repository_status` without a global current repository.
+`repository_status` without a global current repository. The Stage 2 File
+Service adds repository-scoped `file_list`, `file_read`, and `file_search`
+with bounded paths, symlink handling, file sizes, traversal, and output.
 
 ## Repository scope
 
@@ -32,4 +34,3 @@ engineering repositories previously stored below `development-mcp/workspace`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md), [MIGRATION.md](MIGRATION.md), and
 [DEVELOPMENT.md](DEVELOPMENT.md) before making changes.
-

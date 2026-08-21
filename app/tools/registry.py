@@ -7,6 +7,7 @@ from app.container import ApplicationContainer
 
 from . import TOOLS, call_tool
 from .bridge import bridge_tools
+from .files import file_tools
 from .projects import project_tools
 
 
@@ -33,7 +34,6 @@ def build_tool_registry(
     registry.register_many(
         tuple(v1_tools)
         if v1_tools is not None
-        else bridge_tools(container) + project_tools(container)
+        else bridge_tools(container) + project_tools(container) + file_tools(container)
     )
     return registry
-

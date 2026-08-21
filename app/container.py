@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.audit import AuditSink, LoggingAuditSink
 from app.capabilities import CapabilityPolicy
+from app.files import FileService
 from app.git import GitRunner, GitService
 from app.projects import ProjectRegistry
 from app.settings import BridgeSettings, load_settings
@@ -16,6 +17,7 @@ class ApplicationContainer:
     capability_policy: CapabilityPolicy
     audit: AuditSink
     git: GitService
+    files: FileService
 
 
 def build_container(
@@ -32,5 +34,5 @@ def build_container(
         capability_policy=policy,
         audit=audit or LoggingAuditSink(),
         git=GitService(GitRunner(), policy),
+        files=FileService(policy),
     )
-
