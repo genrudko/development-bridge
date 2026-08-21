@@ -14,8 +14,6 @@ EXPECTED_LEGACY_TOOLS = {
     "apply_patch",
     "git_status",
     "git_branch",
-    "git_commit",
-    "git_push",
     "github_status",
     "search_workspace",
 }

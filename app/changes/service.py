@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-import asyncio
-import fcntl
 import hashlib
 import json
 import os
 import tempfile
-import time
-from contextlib import asynccontextmanager
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import Capability, CapabilityPolicy
-from app.projects import Repository
+from app.projects import Repository, RepositoryMutationLock
 
 from .models import ChangeApplyResult, ChangeOperation, ChangePlan
 from .revision import ChangeRevisionCalculator
@@ -26,11 +22,14 @@ class ChangeService:
     MAX_PLAN_BYTES = 4 * 1024 * 1024
 
     def __init__(
-        self, policy: CapabilityPolicy, revisions: ChangeRevisionCalculator
+        self,
+        policy: CapabilityPolicy,
+        revisions: ChangeRevisionCalculator,
+        mutations: RepositoryMutationLock | None = None,
     ) -> None:
         self._policy = policy
         self._revisions = revisions
-        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._mutations = mutations or RepositoryMutationLock()
 
     async def plan(
         self,
@@ -65,7 +64,7 @@ class ChangeService:
                 "plan_id does not match the normalized plan",
                 details={"plan_id": plan_id},
             )
-        async with self._repository_lock(repository):
+        async with self._mutations.acquire(repository):
             receipt = self._receipt_path(repository, plan_id)
             if receipt.exists():
                 self._verify_final_state(repository, normalized)
@@ -403,36 +402,6 @@ class ChangeService:
             except FileNotFoundError:
                 pass
             raise
-
-    @asynccontextmanager
-    async def _repository_lock(self, repository: Repository):
-        local = self._locks.setdefault(
-            (repository.project_id, repository.id), asyncio.Lock()
-        )
-        async with local:
-            directory = repository.root / ".git" / "development-bridge"
-            directory.mkdir(parents=True, exist_ok=True)
-            lock_path = directory / "changes.lock"
-            lock_file = lock_path.open("a+")
-            deadline = time.monotonic() + 5
-            try:
-                while True:
-                    try:
-                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        if time.monotonic() >= deadline:
-                            raise BridgeError(
-                                ErrorCode.CHANGE_APPLY_FAILED,
-                                "Repository change lock is busy",
-                                retryable=True,
-                                details={"repository_id": repository.id},
-                            )
-                        await asyncio.sleep(0.05)
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                lock_file.close()
 
     def _require_write(self, repository: Repository) -> None:
         self._policy.require(

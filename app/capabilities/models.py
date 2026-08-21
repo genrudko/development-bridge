@@ -12,7 +12,6 @@ class Capability(StrEnum):
     WRITE = "write"
     GIT_READ = "git_read"
     GIT_WRITE = "git_write"
-    GIT_PUSH = "git_push"
     EXECUTE = "execute"
 
 
@@ -41,4 +40,3 @@ class CapabilitySet:
 
     def as_dict(self) -> dict[str, bool]:
         return {capability.value: self.allows(capability) for capability in Capability}
-

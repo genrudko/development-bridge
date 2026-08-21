@@ -7,9 +7,9 @@ from app.audit import AuditSink, LoggingAuditSink
 from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
 from app.files import FileService
-from app.git import GitRunner, GitService
+from app.git import GitRunner, GitService, GitWriteService
 from app.jobs import JobService, JobStore
-from app.projects import ProjectRegistry
+from app.projects import ProjectRegistry, RepositoryMutationLock
 from app.settings import BridgeSettings, load_settings
 from app.tasks import TaskRegistry
 
@@ -21,6 +21,7 @@ class ApplicationContainer:
     capability_policy: CapabilityPolicy
     audit: AuditSink
     git: GitService
+    git_write: GitWriteService
     files: FileService
     changes: ChangeService
     tasks: TaskRegistry
@@ -37,6 +38,8 @@ def build_container(
     tasks = TaskRegistry.from_settings(configured)
     policy = CapabilityPolicy()
     runner = GitRunner()
+    mutations = RepositoryMutationLock()
+    revisions = ChangeRevisionCalculator(runner)
     audit_sink = audit or LoggingAuditSink()
     database_path = (
         configured.jobs.database_path.expanduser().resolve()
@@ -69,8 +72,9 @@ def build_container(
         capability_policy=policy,
         audit=audit_sink,
         git=GitService(runner, policy),
+        git_write=GitWriteService(runner, policy, revisions, mutations),
         files=FileService(policy),
-        changes=ChangeService(policy, ChangeRevisionCalculator(runner)),
+        changes=ChangeService(policy, revisions, mutations),
         tasks=tasks,
         jobs=JobService(job_store, tasks, projects, policy, audit_sink),
     )

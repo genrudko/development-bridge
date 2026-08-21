@@ -19,17 +19,22 @@ class GitRunner:
         arguments: list[str] | tuple[str, ...],
         *,
         check: bool = True,
+        input_text: str | None = None,
     ) -> GitCommandResult:
         process = await asyncio.create_subprocess_exec(
             "git",
             *arguments,
             cwd=repository.root,
+            stdin=asyncio.subprocess.PIPE if input_text is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                process.communicate(), timeout=self._timeout_seconds
+                process.communicate(
+                    input_text.encode("utf-8") if input_text is not None else None
+                ),
+                timeout=self._timeout_seconds,
             )
         except TimeoutError as exc:
             process.kill()
@@ -64,4 +69,3 @@ class GitRunner:
                 },
             )
         return result
-
