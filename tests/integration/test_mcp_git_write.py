@@ -41,7 +41,7 @@ async def test_git_write_cycle_over_http(tmp_path):
         }
     )
     container = build_container(settings)
-    app = create_streamable_http_app(create_server(container), settings)
+    app = create_streamable_http_app(create_server(container), settings, container)
 
     transport = httpx2.ASGITransport(app=app)
     async with app.router.lifespan_context(app):

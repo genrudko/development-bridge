@@ -30,6 +30,7 @@ SUPPORTED_TOOLS = {
     "job_status",
     "job_output",
     "job_cancel",
+    "job_artifact_list",
 }
 
 

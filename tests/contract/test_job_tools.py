@@ -3,7 +3,14 @@ from app.settings import BridgeSettings
 from app.tools.registry import build_tool_registry
 
 
-JOB_TOOLS = {"task_list", "task_start", "job_status", "job_output", "job_cancel"}
+JOB_TOOLS = {
+    "task_list",
+    "task_start",
+    "job_status",
+    "job_output",
+    "job_cancel",
+    "job_artifact_list",
+}
 
 
 def test_job_tools_are_registered_with_closed_repository_scoped_schemas():
@@ -23,7 +30,7 @@ def test_job_tools_are_registered_with_closed_repository_scoped_schemas():
         "repository_id",
         "task_id",
     ]
-    for name in ("job_status", "job_output", "job_cancel"):
+    for name in ("job_status", "job_output", "job_cancel", "job_artifact_list"):
         assert tools[name].input_schema["required"] == [
             "project_id",
             "repository_id",

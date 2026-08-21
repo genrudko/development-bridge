@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from app.api.errors import BridgeError, ErrorCode
 
-from .models import JobRecord, JobStatus
+from .models import JobArtifact, JobRecord, JobStatus
 
 
 def _now() -> str:
@@ -45,6 +45,20 @@ class JobStore:
                 );
                 CREATE INDEX IF NOT EXISTS jobs_queue
                 ON jobs(status, created_at);
+                CREATE TABLE IF NOT EXISTS job_artifacts (
+                    job_id TEXT NOT NULL,
+                    artifact_id TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    required INTEGER NOT NULL,
+                    available INTEGER NOT NULL,
+                    size_bytes INTEGER,
+                    sha256 TEXT,
+                    storage_path TEXT,
+                    error TEXT,
+                    PRIMARY KEY(job_id, artifact_id),
+                    FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+                );
                 """
             )
             interrupted = self._rows(
@@ -229,6 +243,56 @@ class JobStore:
                 (JobStatus.CANCELLED.value, _now(), job_id, JobStatus.QUEUED.value),
             )
             return cursor.rowcount == 1
+
+    def save_artifacts(
+        self, job_id: str, artifacts: tuple[JobArtifact, ...]
+    ) -> None:
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO job_artifacts (
+                    job_id, artifact_id, path, media_type, required, available,
+                    size_bytes, sha256, storage_path, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        job_id,
+                        artifact.artifact_id,
+                        artifact.path,
+                        artifact.media_type,
+                        int(artifact.required),
+                        int(artifact.available),
+                        artifact.size_bytes,
+                        artifact.sha256,
+                        artifact.storage_path,
+                        artifact.error,
+                    )
+                    for artifact in artifacts
+                ],
+            )
+
+    def artifacts(self, job_id: str) -> tuple[JobArtifact, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM job_artifacts WHERE job_id = ? ORDER BY artifact_id",
+                (job_id,),
+            ).fetchall()
+        return tuple(
+            JobArtifact(
+                job_id=row["job_id"],
+                artifact_id=row["artifact_id"],
+                path=row["path"],
+                media_type=row["media_type"],
+                required=bool(row["required"]),
+                available=bool(row["available"]),
+                size_bytes=row["size_bytes"],
+                sha256=row["sha256"],
+                storage_path=row["storage_path"],
+                error=row["error"],
+            )
+            for row in rows
+        )
 
     @contextmanager
     def _connect(self):

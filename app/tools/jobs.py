@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from mcp import types
 
 from app.api.registry import RegisteredTool
@@ -51,6 +53,35 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         job = await container.jobs.cancel(repository(arguments), arguments["job_id"])
         return to_mcp_result(success(request_context.request_id, job.status_dict()))
 
+    async def job_artifact_list(ctx, params, request_context):
+        arguments = params.arguments
+        artifacts = container.jobs.list_artifacts(
+            repository(arguments), arguments["job_id"]
+        )
+        base = container.settings.server.endpoint.rstrip("/") + "/artifacts"
+        prefix = "/".join(
+            quote(arguments[key], safe="")
+            for key in ("project_id", "repository_id", "job_id")
+        )
+        return to_mcp_result(
+            success(
+                request_context.request_id,
+                {
+                    "job_id": arguments["job_id"],
+                    "artifacts": [
+                        artifact.public_dict(
+                            download_path=(
+                                f"{base}/{prefix}/{quote(artifact.artifact_id, safe='')}"
+                                if artifact.available
+                                else None
+                            )
+                        )
+                        for artifact in artifacts
+                    ],
+                },
+            )
+        )
+
     base_properties = {
         "project_id": IDENTIFIER_SCHEMA,
         "repository_id": IDENTIFIER_SCHEMA,
@@ -87,6 +118,11 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 ("job_status", "Show durable job status", job_status),
                 ("job_output", "Read bounded accumulated job output", job_output),
                 ("job_cancel", "Cancel a queued or running job", job_cancel),
+                (
+                    "job_artifact_list",
+                    "List immutable artifacts captured for a job",
+                    job_artifact_list,
+                ),
             )
         ),
     )

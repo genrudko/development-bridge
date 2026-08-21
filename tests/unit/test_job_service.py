@@ -7,7 +7,7 @@ import pytest
 
 from app.audit import AuditOutcome
 from app.capabilities import CapabilityPolicy
-from app.jobs import JobService, JobStatus, JobStore
+from app.jobs import ArtifactStorage, JobService, JobStatus, JobStore
 from app.projects import ProjectRegistry
 from app.settings import BridgeSettings
 from app.tasks import TaskRegistry
@@ -22,11 +22,18 @@ class RecordingAuditSink:
         self.events.append(event)
 
 
-def configured(tmp_path, script, *, output_limit=1024, timeout=5):
+def configured(tmp_path, script, *, output_limit=1024, timeout=5, artifacts=()):
     repository = create_git_repository(tmp_path, "repository")
     settings = BridgeSettings.model_validate(
         {
-            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "jobs": {
+                "database_path": tmp_path / "jobs.sqlite3",
+                **(
+                    {"artifact_directory": tmp_path / "artifacts"}
+                    if artifacts
+                    else {}
+                ),
+            },
             "projects": [
                 {
                     "id": "project",
@@ -44,6 +51,7 @@ def configured(tmp_path, script, *, output_limit=1024, timeout=5):
                                     "arguments": ["-c", script],
                                     "timeout_seconds": timeout,
                                     "output_limit_bytes": output_limit,
+                                    "artifacts": artifacts,
                                 }
                             ],
                         }
@@ -61,6 +69,7 @@ def configured(tmp_path, script, *, output_limit=1024, timeout=5):
         projects,
         CapabilityPolicy(),
         audit,
+        ArtifactStorage(settings.jobs.artifact_directory) if artifacts else None,
     )
     return jobs, projects.repositories.get("project", "repository"), audit
 
@@ -168,4 +177,40 @@ async def test_idempotent_start_returns_same_job(tmp_path):
         assert first.job_id == second.job_id
     finally:
         await wait_for_status(jobs, repository, first.job_id, {JobStatus.SUCCEEDED})
+        await jobs.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("required", "expected_status"),
+    [(True, JobStatus.FAILED), (False, JobStatus.SUCCEEDED)],
+)
+async def test_missing_artifact_only_fails_job_when_required(
+    tmp_path, required, expected_status
+):
+    jobs, repository, _ = configured(
+        tmp_path,
+        "pass",
+        artifacts=(
+            {
+                "id": "report",
+                "path": "missing.txt",
+                "media_type": "text/plain",
+                "required": required,
+            },
+        ),
+    )
+    await jobs.start()
+    try:
+        started = await jobs.start_task(repository, "task", "req_artifact")
+        finished = await wait_for_status(
+            jobs, repository, started.job_id, {JobStatus.SUCCEEDED, JobStatus.FAILED}
+        )
+        artifacts = jobs.list_artifacts(repository, started.job_id)
+
+        assert finished.status is expected_status
+        assert artifacts[0].available is False
+        if required:
+            assert finished.failure_reason == "required_artifact_missing"
+    finally:
         await jobs.stop()

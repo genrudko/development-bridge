@@ -8,7 +8,7 @@ from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
 from app.files import FileService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
-from app.jobs import JobService, JobStore
+from app.jobs import ArtifactStorage, JobService, JobStore
 from app.projects import ProjectRegistry, RepositoryMutationLock
 from app.settings import BridgeSettings, load_settings
 from app.tasks import TaskRegistry
@@ -47,16 +47,26 @@ def build_container(
         if configured.jobs.database_path is not None
         else None
     )
-    if database_path is not None and tasks:
+    artifact_directory = (
+        configured.jobs.artifact_directory.expanduser().resolve()
+        if configured.jobs.artifact_directory is not None
+        else None
+    )
+    for state_path, label in (
+        (database_path, "Job database"),
+        (artifact_directory, "Artifact directory"),
+    ):
+        if state_path is None or not tasks:
+            continue
         for project in projects.list():
             for repository in project.repositories:
                 try:
-                    database_path.relative_to(repository.root)
+                    state_path.relative_to(repository.root)
                 except ValueError:
                     continue
                 raise BridgeError(
                     ErrorCode.INVALID_ARGUMENT,
-                    "Job database must be outside registered repositories",
+                    f"{label} must be outside registered repositories",
                     details={
                         "project_id": repository.project_id,
                         "repository_id": repository.id,
@@ -78,5 +88,14 @@ def build_container(
         files=FileService(policy),
         changes=ChangeService(policy, revisions, mutations),
         tasks=tasks,
-        jobs=JobService(job_store, tasks, projects, policy, audit_sink),
+        jobs=JobService(
+            job_store,
+            tasks,
+            projects,
+            policy,
+            audit_sink,
+            ArtifactStorage(artifact_directory)
+            if artifact_directory is not None
+            else None,
+        ),
     )

@@ -57,3 +57,32 @@ class JobRecord:
             "stdout_truncated": self.stdout_truncated,
             "stderr_truncated": self.stderr_truncated,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class JobArtifact:
+    job_id: str
+    artifact_id: str
+    path: str
+    media_type: str
+    required: bool
+    available: bool
+    size_bytes: int | None = None
+    sha256: str | None = None
+    storage_path: str | None = None
+    error: str | None = None
+
+    def public_dict(self, *, download_path: str | None = None) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "artifact_id": self.artifact_id,
+            "path": self.path,
+            "media_type": self.media_type,
+            "required": self.required,
+            "available": self.available,
+        }
+        if self.available:
+            result["size_bytes"] = self.size_bytes
+            result["sha256"] = self.sha256
+            if download_path is not None:
+                result["download_path"] = download_path
+        return result

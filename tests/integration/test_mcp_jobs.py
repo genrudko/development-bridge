@@ -50,7 +50,7 @@ async def test_job_api_exposes_live_output_and_queued_cancellation(tmp_path):
         }
     )
     container = build_container(settings)
-    app = create_streamable_http_app(create_server(container), settings)
+    app = create_streamable_http_app(create_server(container), settings, container)
     scope = {"project_id": "engineering", "repository_id": "service"}
 
     transport = httpx2.ASGITransport(app=app)
@@ -113,3 +113,87 @@ async def test_job_api_exposes_live_output_and_queued_cancellation(tmp_path):
                     output_payload = json.loads(final_output.content[0].text)["data"]
                     assert output_payload["stdout"] == "early\nlate\n"
                     assert output_payload["stdout_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_job_artifacts_are_listed_and_downloaded_as_snapshots(tmp_path):
+    repository = create_git_repository(tmp_path, "artifact-service")
+    script = "from pathlib import Path; Path('report.txt').write_text('captured')"
+    settings = BridgeSettings.model_validate(
+        {
+            "server": {"name": "artifact-test"},
+            "jobs": {
+                "database_path": tmp_path / "jobs.sqlite3",
+                "artifact_directory": tmp_path / "artifacts",
+            },
+            "projects": [
+                {
+                    "id": "engineering",
+                    "name": "Engineering",
+                    "repositories": [
+                        {
+                            "id": "service",
+                            "path": repository,
+                            "capabilities": {"execute": True},
+                            "tasks": [
+                                {
+                                    "id": "report",
+                                    "name": "Report",
+                                    "executable": sys.executable,
+                                    "arguments": ["-c", script],
+                                    "artifacts": [
+                                        {
+                                            "id": "report",
+                                            "path": "report.txt",
+                                            "media_type": "text/plain",
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    container = build_container(settings)
+    app = create_streamable_http_app(create_server(container), settings, container)
+    scope = {"project_id": "engineering", "repository_id": "service"}
+
+    transport = httpx2.ASGITransport(app=app)
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1"
+        ) as http_client:
+            async with streamable_http_client(
+                "http://127.0.0.1/mcp", http_client=http_client
+            ) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    started = await session.call_tool(
+                        "task_start", {**scope, "task_id": "report"}
+                    )
+                    job_id = json.loads(started.content[0].text)["data"]["job_id"]
+                    for _ in range(100):
+                        status = await session.call_tool(
+                            "job_status", {**scope, "job_id": job_id}
+                        )
+                        if json.loads(status.content[0].text)["data"]["status"] == "succeeded":
+                            break
+                        await asyncio.sleep(0.01)
+
+                    listed = await session.call_tool(
+                        "job_artifact_list", {**scope, "job_id": job_id}
+                    )
+                    artifact = json.loads(listed.content[0].text)["data"]["artifacts"][0]
+
+            (repository / "report.txt").write_text("changed", encoding="utf-8")
+            response = await http_client.get(artifact["download_path"])
+
+    assert artifact["available"] is True
+    assert artifact["size_bytes"] == 8
+    assert artifact["sha256"].startswith("sha256:")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["etag"] == f'"{artifact["sha256"]}"'
+    assert response.content == b"captured"

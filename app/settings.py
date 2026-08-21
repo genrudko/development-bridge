@@ -20,6 +20,28 @@ class ServerSettings(BaseModel):
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*")
 
 
+class ArtifactSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str = Field(pattern=IDENTIFIER_PATTERN)
+    path: str = Field(min_length=1, max_length=4096)
+    media_type: str = Field(
+        min_length=3,
+        max_length=255,
+        pattern=r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$",
+    )
+    required: bool = True
+    max_bytes: int = Field(default=67_108_864, ge=1, le=1_073_741_824)
+
+    @model_validator(mode="after")
+    def path_is_repository_relative(self) -> ArtifactSettings:
+        path = Path(self.path)
+        if path.is_absolute() or ".." in path.parts or path.parts[0] == ".git":
+            raise ValueError("artifact path must be repository-relative")
+        if "\0" in self.path or self.path in {"", "."}:
+            raise ValueError("artifact path is invalid")
+        return self
+
+
 class TaskProfileSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(pattern=IDENTIFIER_PATTERN)
@@ -28,11 +50,20 @@ class TaskProfileSettings(BaseModel):
     arguments: tuple[str, ...] = ()
     timeout_seconds: float = Field(default=300, gt=0, le=3600)
     output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
+    artifacts: tuple[ArtifactSettings, ...] = ()
+
+    @model_validator(mode="after")
+    def artifact_ids_are_unique(self) -> TaskProfileSettings:
+        identifiers = [artifact.id for artifact in self.artifacts]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError(f"duplicate artifact id in task {self.id}")
+        return self
 
 
 class JobSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     database_path: Path | None = None
+    artifact_directory: Path | None = None
 
 
 class RepositorySettings(BaseModel):
@@ -82,6 +113,15 @@ class BridgeSettings(BaseModel):
             for repository in project.repositories
         ) and self.jobs.database_path is None:
             raise ValueError("jobs.database_path is required when task profiles exist")
+        if any(
+            task.artifacts
+            for project in self.projects
+            for repository in project.repositories
+            for task in repository.tasks
+        ) and self.jobs.artifact_directory is None:
+            raise ValueError(
+                "jobs.artifact_directory is required when task artifacts exist"
+            )
         return self
 
 

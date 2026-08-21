@@ -44,6 +44,7 @@ def test_registry_is_repository_scoped_and_hides_command_details(tmp_path):
         "name": "Run tests",
         "timeout_seconds": 300.0,
         "output_limit_bytes": 262144,
+        "artifacts": [],
     }
     assert registry.list("project", "other") == ()
 

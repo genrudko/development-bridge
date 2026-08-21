@@ -9,7 +9,7 @@ from app.tools.registry import build_tool_registry
 container = build_container()
 server = create_server(container)
 TOOLS = build_tool_registry(container).definitions
-app = create_streamable_http_app(server, container.settings)
+app = create_streamable_http_app(server, container.settings, container)
 
 
 if __name__ == "__main__":
@@ -18,4 +18,3 @@ if __name__ == "__main__":
         host=container.settings.server.host,
         port=container.settings.server.port,
     )
-

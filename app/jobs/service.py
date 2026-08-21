@@ -4,6 +4,7 @@ import asyncio
 import os
 import signal
 import time
+from pathlib import Path
 
 from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditEvent, AuditOutcome, AuditSink
@@ -11,7 +12,8 @@ from app.capabilities import Capability, CapabilityPolicy
 from app.projects import ProjectRegistry, Repository
 from app.tasks import TaskProfile, TaskRegistry
 
-from .models import JobRecord, JobStatus
+from .artifacts import ArtifactStorage
+from .models import JobArtifact, JobRecord, JobStatus
 from .store import JobStore
 
 
@@ -25,12 +27,14 @@ class JobService:
         projects: ProjectRegistry,
         policy: CapabilityPolicy,
         audit: AuditSink,
+        artifacts: ArtifactStorage | None = None,
     ) -> None:
         self._store = store
         self._tasks = tasks
         self._projects = projects
         self._policy = policy
         self._audit = audit
+        self._artifacts = artifacts
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._processes: dict[str, asyncio.subprocess.Process] = {}
@@ -97,6 +101,54 @@ class JobService:
 
     def output(self, repository: Repository, job_id: str) -> JobRecord:
         return self.status(repository, job_id)
+
+    def list_artifacts(
+        self, repository: Repository, job_id: str
+    ) -> tuple[JobArtifact, ...]:
+        job = self.status(repository, job_id)
+        stored = self._require_store().artifacts(job_id)
+        if stored:
+            return stored
+        profile = self._tasks.get(job.project_id, job.repository_id, job.task_id)
+        return tuple(
+            JobArtifact(
+                job.job_id,
+                declaration.id,
+                declaration.path,
+                declaration.media_type,
+                declaration.required,
+                False,
+            )
+            for declaration in profile.artifacts
+        )
+
+    def artifact_file(
+        self, repository: Repository, job_id: str, artifact_id: str
+    ) -> tuple[JobArtifact, Path]:
+        job = self.status(repository, job_id)
+        if job.status not in {
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }:
+            raise BridgeError(ErrorCode.ARTIFACT_NOT_FOUND, "Artifact is not available")
+        artifact = next(
+            (
+                candidate
+                for candidate in self._require_store().artifacts(job_id)
+                if candidate.artifact_id == artifact_id and candidate.available
+            ),
+            None,
+        )
+        if artifact is None or self._artifacts is None:
+            raise BridgeError(ErrorCode.ARTIFACT_NOT_FOUND, "Artifact is not available")
+        try:
+            path = self._artifacts.path_for(artifact)
+        except FileNotFoundError as exc:
+            raise BridgeError(
+                ErrorCode.ARTIFACT_NOT_FOUND, "Artifact is not available"
+            ) from exc
+        return artifact, path
 
     async def cancel(self, repository: Repository, job_id: str) -> JobRecord:
         job = self.status(repository, job_id)
@@ -221,13 +273,47 @@ class JobService:
             await asyncio.gather(stdout_reader, stderr_reader)
             self._processes.pop(job_id, None)
 
+        artifact_failure = None
+        if profile.artifacts:
+            if self._artifacts is None:
+                artifact_failure = "storage_unavailable"
+                captured = tuple(
+                    JobArtifact(
+                        job.job_id,
+                        declaration.id,
+                        declaration.path,
+                        declaration.media_type,
+                        declaration.required,
+                        False,
+                        error="storage_unavailable",
+                    )
+                    for declaration in profile.artifacts
+                )
+            else:
+                captured = await asyncio.to_thread(
+                    self._artifacts.capture, job, profile, repository
+                )
+            store.save_artifacts(job_id, captured)
+            required_failure = next(
+                (
+                    artifact.error or "unavailable"
+                    for artifact in captured
+                    if artifact.required and not artifact.available
+                ),
+                None,
+            )
+            if required_failure is not None:
+                artifact_failure = f"required_artifact_{required_failure}"
+
         if job_id in self._cancel_requested:
             self._cancel_requested.discard(job_id)
             store.finish(job_id, JobStatus.CANCELLED, exit_code=process.returncode)
             final = store.get(job.project_id, job.repository_id, job_id)
             await self._emit(final, "cancel", AuditOutcome.SUCCESS)
-        elif failure_reason is not None or process.returncode != 0:
-            reason = failure_reason or "nonzero_exit"
+        elif failure_reason is not None or process.returncode != 0 or artifact_failure:
+            reason = failure_reason or (
+                "nonzero_exit" if process.returncode != 0 else artifact_failure
+            )
             store.finish(
                 job_id,
                 JobStatus.FAILED,

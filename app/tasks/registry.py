@@ -5,7 +5,7 @@ from types import MappingProxyType
 from app.api.errors import BridgeError, ErrorCode
 from app.settings import BridgeSettings
 
-from .models import TaskProfile
+from .models import ArtifactDeclaration, TaskProfile
 
 
 class TaskRegistry:
@@ -27,6 +27,16 @@ class TaskRegistry:
                         configured.arguments,
                         configured.timeout_seconds,
                         configured.output_limit_bytes,
+                        tuple(
+                            ArtifactDeclaration(
+                                artifact.id,
+                                artifact.path,
+                                artifact.media_type,
+                                artifact.required,
+                                artifact.max_bytes,
+                            )
+                            for artifact in configured.artifacts
+                        ),
                     )
                     profiles[(project.id, repository.id, configured.id)] = profile
         return cls(profiles)

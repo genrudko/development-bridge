@@ -72,6 +72,37 @@ def test_task_profiles_require_a_durable_job_database(tmp_path):
         )
 
 
+def test_task_artifacts_require_external_storage_and_safe_unique_paths(tmp_path):
+    task = {
+        "id": "test",
+        "name": "Test",
+        "executable": "pytest",
+        "artifacts": [
+            {"id": "report", "path": "report.txt", "media_type": "text/plain"}
+        ],
+    }
+    base = {
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+        "projects": [
+            {
+                "id": "project",
+                "name": "Project",
+                "repositories": [{"id": "repo", "path": tmp_path, "tasks": [task]}],
+            }
+        ],
+    }
+
+    with pytest.raises(ValidationError, match="jobs.artifact_directory"):
+        BridgeSettings.model_validate(base)
+
+    base["jobs"]["artifact_directory"] = tmp_path / "artifacts"
+    task["artifacts"].append(
+        {"id": "report", "path": "../escape", "media_type": "text/plain"}
+    )
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate(base)
+
+
 def test_rejects_duplicate_task_ids(tmp_path):
     task = {"id": "test", "name": "Test", "executable": "pytest"}
     with pytest.raises(ValidationError, match="duplicate task id"):

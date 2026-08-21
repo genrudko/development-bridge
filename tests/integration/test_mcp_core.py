@@ -73,7 +73,7 @@ async def test_full_streamable_http_lifecycle_with_two_repositories(tmp_path):
     audit = RecordingAuditSink()
     container = build_container(bridge_settings(first, second), audit=audit)
     server = create_server(container)
-    app = create_streamable_http_app(server, container.settings)
+    app = create_streamable_http_app(server, container.settings, container)
     lifecycle = []
 
     transport = httpx2.ASGITransport(app=app)
@@ -125,4 +125,3 @@ async def test_full_streamable_http_lifecycle_with_two_repositories(tmp_path):
         "repository_status",
         "repository_status",
     ]
-

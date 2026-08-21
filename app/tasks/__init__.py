@@ -1,4 +1,4 @@
-from .models import TaskProfile
+from .models import ArtifactDeclaration, TaskProfile
 from .registry import TaskRegistry
 
-__all__ = ["TaskProfile", "TaskRegistry"]
+__all__ = ["ArtifactDeclaration", "TaskProfile", "TaskRegistry"]
