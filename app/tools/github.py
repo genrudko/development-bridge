@@ -1,4 +1,4 @@
-from github import Github
+from app.integrations.github import github_status_text
 from mcp import types
 
 from app.config import GITHUB_TOKEN
@@ -17,12 +17,7 @@ async def github_call(ctx, params):
     if params.name != "github_status":
         return None
 
-    if not GITHUB_TOKEN:
-        text = "GitHub token missing"
-    else:
-        github = Github(GITHUB_TOKEN)
-        user = github.get_user()
-        text = f"GitHub connected: {user.login}"
+    text = github_status_text(GITHUB_TOKEN)
 
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=text)]
