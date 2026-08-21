@@ -17,6 +17,7 @@ class ServerSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8789, ge=1, le=65535)
     endpoint: str = "/mcp"
+    allowed_hosts: tuple[str, ...] = ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*")
 
 
 class RepositorySettings(BaseModel):

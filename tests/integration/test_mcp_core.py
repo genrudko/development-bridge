@@ -7,11 +7,11 @@ import pytest
 from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.server.transport_security import TransportSecuritySettings
 
 from app.container import build_container
 from app.runtime import create_server
 from app.settings import BridgeSettings
+from app.transport import create_streamable_http_app
 from tests.fixtures.repositories import create_git_repository
 
 
@@ -72,9 +72,8 @@ async def test_full_streamable_http_lifecycle_with_two_repositories(tmp_path):
     second = create_git_repository(tmp_path, "second", branch="develop")
     audit = RecordingAuditSink()
     container = build_container(bridge_settings(first, second), audit=audit)
-    app = create_server(container).streamable_http_app(
-        transport_security=TransportSecuritySettings(allowed_hosts=["127.0.0.1"])
-    )
+    server = create_server(container)
+    app = create_streamable_http_app(server, container.settings)
     lifecycle = []
 
     transport = httpx2.ASGITransport(app=app)

@@ -4,6 +4,7 @@ server:
   host: 127.0.0.1
   port: 8789
   endpoint: /mcp
+  allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
 projects:
   - id: printer-stack
     name: Printer Stack
