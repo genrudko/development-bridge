@@ -45,7 +45,12 @@ files, and integrations are implemented. The File Service provides bounded
 repository-scoped listing, UTF-8 text reads, and text search without following
 symbolic links. The Git Service provides structured, bounded log, show, diff,
 refs, and repository status operations through the single Git process boundary.
-Change, task, and job packages remain reserved for their approved later stages.
+The Changes service validates self-contained plans, calculates its own strong
+working-tree revision, serializes application per repository, and persists
+idempotency receipts without changing the Git index, refs, or objects. Task and
+job packages remain reserved for their approved later stages. Destructive file
+changes are restricted to tracked files; Stage 4 does not maintain a separate
+backup or rollback store.
 
 ## Dependency direction
 

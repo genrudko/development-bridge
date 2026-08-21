@@ -36,6 +36,8 @@ Complete the shared Git service and add structured `git_diff`, `git_log`,
 
 ## Stage 4 — Controlled Changes
 
+Status: complete.
+
 Add revision calculation, repository locking, validated change plans, and
 idempotent application of changes.
 

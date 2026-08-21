@@ -7,6 +7,7 @@ from app.container import ApplicationContainer
 
 from . import TOOLS, call_tool
 from .bridge import bridge_tools
+from .changes import change_tools
 from .files import file_tools
 from .git_read import git_read_tools
 from .projects import project_tools
@@ -39,5 +40,6 @@ def build_tool_registry(
         + project_tools(container)
         + file_tools(container)
         + git_read_tools(container)
+        + change_tools(container)
     )
     return registry

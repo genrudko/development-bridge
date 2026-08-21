@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.audit import AuditSink, LoggingAuditSink
 from app.capabilities import CapabilityPolicy
+from app.changes import ChangeRevisionCalculator, ChangeService
 from app.files import FileService
 from app.git import GitRunner, GitService
 from app.projects import ProjectRegistry
@@ -18,6 +19,7 @@ class ApplicationContainer:
     audit: AuditSink
     git: GitService
     files: FileService
+    changes: ChangeService
 
 
 def build_container(
@@ -28,11 +30,13 @@ def build_container(
     configured = settings or load_settings()
     projects = ProjectRegistry.from_settings(configured)
     policy = CapabilityPolicy()
+    runner = GitRunner()
     return ApplicationContainer(
         settings=configured,
         projects=projects,
         capability_policy=policy,
         audit=audit or LoggingAuditSink(),
-        git=GitService(GitRunner(), policy),
+        git=GitService(runner, policy),
         files=FileService(policy),
+        changes=ChangeService(policy, ChangeRevisionCalculator(runner)),
     )

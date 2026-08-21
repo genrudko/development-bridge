@@ -5,7 +5,7 @@ Development Bridge is the successor repository for the existing
 legacy MCP implementation and the structural foundation for the staged
 Development Bridge v1 migration.
 
-Stages 1 through 3 of Development Bridge v1 are implemented alongside the
+Stages 1 through 4 of Development Bridge v1 are implemented alongside the
 remaining legacy API. The Streamable HTTP transport remains available so later
 stages can be integrated and verified independently.
 
@@ -26,7 +26,12 @@ Service adds repository-scoped `file_list`, `file_read`, and `file_search`
 with bounded paths, symlink handling, file sizes, traversal, and output. The
 Stage 3 Git Read API replaces the legacy `git_log` and `git_diff` names and
 adds `git_show` and `git_refs`. All four use explicit repository selection,
-structured results, the `GIT_READ` capability, and bounded output.
+structured results, the `GIT_READ` capability, and bounded output. The Stage 4
+Changes API adds `change_plan` and `change_apply` for revision-guarded UTF-8
+file creation, replacement, deletion, and rename. Plans are self-contained,
+repository-scoped, bounded, and idempotent across retries. Replacement,
+deletion, and rename are limited to tracked files so Git remains the recovery
+boundary; creation requires an absent path.
 
 ## Repository scope
 
