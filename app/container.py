@@ -7,7 +7,7 @@ from app.audit import AuditSink, LoggingAuditSink
 from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
 from app.files import FileService
-from app.git import GitRunner, GitService, GitWriteService
+from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.jobs import JobService, JobStore
 from app.projects import ProjectRegistry, RepositoryMutationLock
 from app.settings import BridgeSettings, load_settings
@@ -22,6 +22,7 @@ class ApplicationContainer:
     audit: AuditSink
     git: GitService
     git_write: GitWriteService
+    git_workspace: GitWorkspaceService
     files: FileService
     changes: ChangeService
     tasks: TaskRegistry
@@ -73,6 +74,7 @@ def build_container(
         audit=audit_sink,
         git=GitService(runner, policy),
         git_write=GitWriteService(runner, policy, revisions, mutations),
+        git_workspace=GitWorkspaceService(runner, policy, revisions, mutations),
         files=FileService(policy),
         changes=ChangeService(policy, revisions, mutations),
         tasks=tasks,
