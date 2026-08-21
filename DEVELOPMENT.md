@@ -10,14 +10,16 @@
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev,github]'
-cp .env.example .env
+.venv/bin/pip install -e '.[dev]'
+cp config/bridge.example.yaml bridge.local.yaml
 ```
 
-Set `WORKSPACE` to a disposable local Git repository. Do not point development
-or automated tests at the production workspace.
+Set `DEVELOPMENT_BRIDGE_CONFIG=bridge.local.yaml` and edit the file so every
+configured repository points to a disposable local Git repository. Install the
+`github` extra only when testing that optional integration. Do not point tests
+at the production workspace.
 
-## Run the legacy baseline
+## Run Development Bridge
 
 ```bash
 .venv/bin/python -m app.main

@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from mcp import types
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .errors import BridgeError
 
@@ -14,7 +14,7 @@ class ErrorPayload(BaseModel):
     code: str
     message: str
     retryable: bool = False
-    details: dict[str, Any] = {}
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResultEnvelope(BaseModel):

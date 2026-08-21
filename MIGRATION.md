@@ -13,6 +13,8 @@ before work starts on the next stage.
 
 ## Stage 1 — Bridge Core Foundation
 
+Status: complete.
+
 Add validated settings, the project and repository registries, structured
 results and errors, request IDs, audit and capability interfaces, and the
 `bridge_info`, `project_list`, `project_describe`, and `repository_status`

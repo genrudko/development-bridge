@@ -5,11 +5,11 @@ Development Bridge is the successor repository for the existing
 legacy MCP implementation and the structural foundation for the staged
 Development Bridge v1 migration.
 
-This baseline is intentionally not Development Bridge v1. It preserves the
-current Streamable HTTP transport and the existing MCP tool names so that each
-future migration stage can be integrated and verified independently.
+Stage 1 of Development Bridge v1 is implemented alongside the preserved legacy
+API. The Streamable HTTP transport and existing MCP tool names remain available
+so later stages can be integrated and verified independently.
 
-## Current baseline
+## Current APIs
 
 The copied MCP exposes:
 
@@ -19,8 +19,10 @@ The copied MCP exposes:
 - `search_workspace` and `run_command`;
 - `github_status`.
 
-The baseline uses one `WORKSPACE` environment variable. Multi-project and
-multi-repository behavior is planned but is not implemented in this commit.
+The legacy tools continue to use `WORKSPACE`. The v1 Core API uses immutable
+project and repository registries loaded from a validated Bridge configuration.
+It exposes `bridge_info`, `project_list`, `project_describe`, and
+`repository_status` without a global current repository.
 
 ## Repository scope
 

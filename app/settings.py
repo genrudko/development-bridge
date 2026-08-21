@@ -78,8 +78,11 @@ def load_settings(
     if port := environment.get("DEVELOPMENT_BRIDGE_PORT"):
         server_updates["port"] = int(port)
     if server_updates:
-        settings = settings.model_copy(
-            update={"server": settings.server.model_copy(update=server_updates)}
+        validated_server = ServerSettings.model_validate(
+            {**settings.server.model_dump(), **server_updates}
+        )
+        settings = BridgeSettings.model_validate(
+            {**settings.model_dump(), "server": validated_server}
         )
     return settings
 

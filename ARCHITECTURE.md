@@ -28,7 +28,7 @@ Bridge
 Repository-scoped calls will carry explicit `project_id` and `repository_id`
 values. There will be no mutable global current repository.
 
-The future package boundaries are reserved under `app/`:
+The package boundaries under `app/` are:
 
 - `api`: tool registration, schemas, results, and errors;
 - `projects`: project and repository models and registries;
@@ -40,18 +40,19 @@ The future package boundaries are reserved under `app/`:
 - `tasks` and `jobs`: registered execution profiles and durable jobs;
 - `integrations`: optional external integrations such as GitHub.
 
-These packages are placeholders in the baseline commit. They contain no v1
-implementation yet.
+The Core packages for API results, projects, capabilities, audit, Git status,
+and integrations are implemented. File, change, task, and job packages remain
+reserved for their approved later stages.
 
 ## Dependency direction
 
-MCP tool adapters will depend on application services. Application services
-will depend on domain models and narrow filesystem/process interfaces. Domain
+MCP tool adapters depend on application services. Application services
+depend on domain models and narrow filesystem/process interfaces. Domain
 services must not depend on MCP types.
 
-GitHub is not part of the core dependency graph. The legacy module still uses
-PyGithub to preserve current behavior; it will be moved behind an optional
-integration boundary during the staged migration.
+GitHub is not part of the core dependency graph. The legacy `github_status`
+tool reaches PyGithub through a lazy optional integration boundary. Core startup and local Git operations do not require the
+SDK or GitHub availability.
 
 ## Runtime isolation
 
