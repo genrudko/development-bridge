@@ -1,0 +1,6 @@
+mcp==2.0.0
+uvicorn>=0.52,<1
+patch-ng>=1.19,<2
+python-dotenv>=1.2,<2
+PyGithub>=2.10,<3
+
