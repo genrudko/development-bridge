@@ -53,6 +53,16 @@ queue with one worker, cancellation, restart recovery, lifecycle audit, and
 bounded live output. Destructive file changes are restricted to tracked files;
 Stage 4 does not maintain a separate backup or rollback store.
 
+The Git Write service owns explicit path staging, index-only commits, push
+planning, and guarded non-force pushes. It shares a cross-process repository
+mutation lock with the Changes service, so filesystem plans cannot race index
+or ref mutations. Commit and push receipts live under the repository Git
+directory and make retried writes idempotent without process-global state.
+Push plans inspect the configured remote directly, bind exact local and remote
+object IDs, and must be re-created after either side changes. Git write uses one
+repository capability, `git_write`; arbitrary commands, arguments, refspecs,
+identity, and environment input are outside the API.
+
 ## Dependency direction
 
 MCP tool adapters depend on application services. Application services

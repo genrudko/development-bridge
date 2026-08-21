@@ -5,7 +5,7 @@ Development Bridge is the successor repository for the existing
 legacy MCP implementation and the structural foundation for the staged
 Development Bridge v1 migration.
 
-Stages 1 through 5 of Development Bridge v1 are implemented alongside the
+Stages 1 through 6 of Development Bridge v1 are implemented alongside the
 remaining legacy API. The Streamable HTTP transport remains available so later
 stages can be integrated and verified independently.
 
@@ -14,7 +14,7 @@ stages can be integrated and verified independently.
 The copied MCP exposes:
 
 - `workspace_status`, `read_file`, and `apply_patch`;
-- `git_status`, `git_branch`, `git_commit`, and `git_push`;
+- `git_status` and `git_branch` (legacy read helpers);
 - `search_workspace`;
 - `github_status`.
 
@@ -36,6 +36,18 @@ tasks and durable asynchronous jobs through `task_list`, `task_start`,
 `job_status`, `job_output`, and `job_cancel`. Jobs execute fixed configured
 argv without a shell, persist in SQLite, expose bounded live output, recover
 clear states after restart, and run with concurrency one.
+
+Stage 6 completes the repository-scoped development cycle with `git_stage`,
+`git_commit`, `git_push_plan`, and `git_push`. These tools require the
+`git_write` capability. Staging accepts only explicit literal repository paths;
+commits use only the already prepared index and never run an implicit add.
+Optional revision, HEAD, and index guards reject concurrent changes when used.
+Push plans bind the current named branch and exact local and remote heads into
+a deterministic plan ID. Push revalidates that snapshot and permits only
+branch creation or fast-forward updates; it never performs merge, rebase,
+checkout, or force push. Commit and push writes are idempotent across retries.
+The old global-workspace `git_commit` and `git_push` implementations were
+removed rather than retained as parallel APIs.
 
 ## Repository scope
 
