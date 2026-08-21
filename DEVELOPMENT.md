@@ -15,9 +15,8 @@ cp config/bridge.example.yaml bridge.local.yaml
 ```
 
 Set `DEVELOPMENT_BRIDGE_CONFIG=bridge.local.yaml` and edit the file so every
-configured repository points to a disposable local Git repository. Install the
-`github` extra only when testing that optional integration. Do not point tests
-at the production workspace.
+configured repository points to a disposable local Git repository. Do not point
+tests at the production workspace.
 
 ## Run Development Bridge
 
@@ -45,4 +44,3 @@ network access, production credentials, or production filesystem state.
 - Keep GitHub and other hosted services optional.
 - Add contract and boundary tests with each behavior change.
 - Do not modify systemd or Caddy as part of application commits.
-

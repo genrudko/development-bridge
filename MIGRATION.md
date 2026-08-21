@@ -65,9 +65,13 @@ were replaced by the v1 tools under their existing names.
 
 ## Stage 7 — Legacy migration
 
-Route existing MCP tool names through the new services. Legacy adapters remain
-temporarily available and cannot bypass v1 safety controls. GitHub becomes an
-optional integration rather than a core runtime dependency.
+Status: complete.
+
+Remove the obsolete global-workspace adapters after their functionality is
+covered by the repository-scoped services. The completed surface contains only
+the 22 Stage 1–6 tools. The legacy dispatcher, workspace configuration,
+baseline tests, GitHub status probe, and their unused third-party dependencies
+were removed; no compatibility aliases remain.
 
 ## Deployment
 

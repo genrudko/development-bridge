@@ -1,31 +1,31 @@
 # Development Bridge
 
 Development Bridge is the successor repository for the existing
-`development-mcp` service. The repository currently contains the preserved
-legacy MCP implementation and the structural foundation for the staged
-Development Bridge v1 migration.
+`development-mcp` service. The staged Development Bridge v1 migration is
+complete and the preserved global-workspace API has been removed.
 
-Stages 1 through 6 of Development Bridge v1 are implemented alongside the
-remaining legacy API. The Streamable HTTP transport remains available so later
-stages can be integrated and verified independently.
+Stages 1 through 7 are implemented. The Streamable HTTP transport exposes one
+repository-scoped API with explicit project and repository selection.
 
 ## Current APIs
 
-The copied MCP exposes:
+The Bridge exposes:
 
-- `workspace_status`, `read_file`, and `apply_patch`;
-- `git_status` and `git_branch` (legacy read helpers);
-- `search_workspace`;
-- `github_status`.
+- Core: `bridge_info`, `project_list`, `project_describe`, and
+  `repository_status`;
+- Files: `file_list`, `file_read`, and `file_search`;
+- Git read: `git_log`, `git_show`, `git_diff`, and `git_refs`;
+- Changes: `change_plan` and `change_apply`;
+- Tasks and jobs: `task_list`, `task_start`, `job_status`, `job_output`, and
+  `job_cancel`;
+- Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
 
-The legacy tools continue to use `WORKSPACE`. The v1 Core API uses immutable
-project and repository registries loaded from a validated Bridge configuration.
-It exposes `bridge_info`, `project_list`, `project_describe`, and
-`repository_status` without a global current repository. The Stage 2 File
+The Core API uses immutable project and repository registries loaded from a
+validated Bridge configuration. It has no global current repository. The Stage 2 File
 Service adds repository-scoped `file_list`, `file_read`, and `file_search`
 with bounded paths, symlink handling, file sizes, traversal, and output. The
-Stage 3 Git Read API replaces the legacy `git_log` and `git_diff` names and
-adds `git_show` and `git_refs`. All four use explicit repository selection,
+Stage 3 Git Read API provides `git_log`, `git_diff`, `git_show`, and `git_refs`.
+All four use explicit repository selection,
 structured results, the `GIT_READ` capability, and bounded output. The Stage 4
 Changes API adds `change_plan` and `change_apply` for revision-guarded UTF-8
 file creation, replacement, deletion, and rename. Plans are self-contained,
@@ -46,8 +46,9 @@ Push plans bind the current named branch and exact local and remote heads into
 a deterministic plan ID. Push revalidates that snapshot and permits only
 branch creation or fast-forward updates; it never performs merge, rebase,
 checkout, or force push. Commit and push writes are idempotent across retries.
-The old global-workspace `git_commit` and `git_push` implementations were
-removed rather than retained as parallel APIs.
+Stage 7 removed all remaining global-workspace tools and their configuration,
+dispatch, tests, and dependencies. No compatibility aliases or parallel legacy
+API remain.
 
 ## Repository scope
 

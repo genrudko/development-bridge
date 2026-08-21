@@ -1,15 +1,14 @@
 # Architecture
 
-## Baseline state
+## Migration result
 
-The current code is a preserved copy of the active `development-mcp` Python
-application. It uses MCP Streamable HTTP, a Starlette application, and Uvicorn.
-Tool definitions and handlers are grouped under `app/tools` and dispatched by
-`app/tools/__init__.py`.
+Development Bridge uses MCP Streamable HTTP, a Starlette application, and
+Uvicorn. Tool definitions are thin adapters under `app/tools` and are composed
+by the explicit tool registry.
 
-All filesystem, Git, search, and execution tools currently depend on one
-process-wide `WORKSPACE`. This limitation is retained only to establish a
-faithful migration baseline.
+The original process-wide `WORKSPACE` tools and dispatcher have been removed.
+Every repository operation resolves explicit `project_id` and `repository_id`
+values through the immutable registry.
 
 ## Development Bridge v1 target
 
@@ -38,10 +37,10 @@ The package boundaries under `app/` are:
 - `git`: the single Git process boundary and Git services;
 - `changes`: validated, revision-guarded changes;
 - `tasks` and `jobs`: registered execution profiles and durable jobs;
-- `integrations`: optional external integrations such as GitHub.
+- `integrations`: boundary for future optional external integrations.
 
 The Core packages for API results, projects, capabilities, audit, Git read,
-files, and integrations are implemented. The File Service provides bounded
+and files are implemented. The File Service provides bounded
 repository-scoped listing, UTF-8 text reads, and text search without following
 symbolic links. The Git Service provides structured, bounded log, show, diff,
 refs, and repository status operations through the single Git process boundary.
@@ -73,9 +72,9 @@ Task processes use fixed executable and argument tuples from validated startup
 configuration. Clients select only a registered task ID; arbitrary shell,
 command, argument, environment, and working-directory input is not accepted.
 
-GitHub is not part of the core dependency graph. The legacy `github_status`
-tool reaches PyGithub through a lazy optional integration boundary. Core startup and local Git operations do not require the
-SDK or GitHub availability.
+External hosted-service SDKs are not part of the core dependency graph. The
+current API performs local repository operations and remote Git pushes through
+the Git executable; it does not expose a global integration-status tool.
 
 ## Runtime isolation
 
