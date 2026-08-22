@@ -48,6 +48,16 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
             success(request_context.request_id, data, revision=revision)
         )
 
+    async def repository_clone(ctx, params, request_context):
+        arguments = params.arguments
+        data = await container.managed_repositories.clone(
+            arguments["project_id"],
+            arguments["repository_id"],
+            arguments["url"],
+            arguments.get("depth", 50),
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
     project_schema = {
         "type": "object",
         "properties": {"project_id": IDENTIFIER_SCHEMA},
@@ -88,6 +98,32 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
         ),
         RegisteredTool(
             types.Tool(
+                name="repository_clone",
+                description=(
+                    "Clone and register a managed read-only external Git repository"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "project_id": IDENTIFIER_SCHEMA,
+                        "repository_id": IDENTIFIER_SCHEMA,
+                        "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+                        "depth": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10000,
+                            "default": 50,
+                        },
+                    },
+                    "required": ["project_id", "repository_id", "url"],
+                    "additionalProperties": False,
+                },
+            ),
+            repository_clone,
+            "v1",
+        ),
+        RegisteredTool(
+            types.Tool(
                 name="repository_status",
                 description="Show structured status for one registered repository",
                 inputSchema=repository_schema,
@@ -96,4 +132,3 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
             "v1",
         ),
     )
-

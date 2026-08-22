@@ -8,6 +8,7 @@ V1_TOOLS = {
     "project_list",
     "project_describe",
     "repository_status",
+    "repository_clone",
 }
 
 BRIDGE_CAPABILITIES = {
@@ -38,6 +39,17 @@ def test_v1_schemas_are_closed_objects():
         "project_id",
         "repository_id",
     ]
+    assert tools["repository_clone"].input_schema["required"] == [
+        "project_id",
+        "repository_id",
+        "url",
+    ]
+    assert tools["repository_clone"].input_schema["properties"]["depth"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000,
+        "default": 50,
+    }
 
 
 def test_bridge_info_reports_only_current_capabilities():

@@ -8,7 +8,9 @@ by the explicit tool registry.
 
 The original process-wide `WORKSPACE` tools and dispatcher have been removed.
 Every repository operation resolves explicit `project_id` and `repository_id`
-values through the immutable registry.
+values through an immutable registry snapshot. A managed-repository service can
+atomically publish a replacement snapshot after a completed clone; there is no
+global current repository.
 
 ## Development Bridge v1 target
 
@@ -72,11 +74,26 @@ object IDs, and must be re-created after either side changes. Git write uses one
 repository capability, `git_write`; arbitrary commands, arguments, refspecs,
 identity, and environment input are outside the API.
 
+Configured repositories remain startup configuration. Managed external
+repositories are cloned with fixed argv into staging below a separate data
+root, validated as Git worktrees, atomically installed, and then registered in
+the current process. A bounded, atomically replaced JSON manifest persists only
+validated IDs, public HTTPS origin, depth, and creation time. Local paths are
+always derived from the managed root and IDs. Managed clones expose only
+`read`/`git_read`; `git_fetch` is their update operation, while changes, Git
+writes, and task execution continue to fail through the capability policy.
+
 ## Dependency direction
 
 MCP tool adapters depend on application services. Application services
 depend on domain models and narrow filesystem/process interfaces. Domain
 services must not depend on MCP types.
+
+The MCP API boundary also owns a generic file-resource helper. Given an
+already-authorized path and caller-provided URI/metadata, it returns a standard
+`ResourceLink` and optionally a byte-exact base64
+`EmbeddedResource<BlobResourceContents>` under a caller-selected inline limit.
+It does not construct URLs or know about Knowledge, Telegram, or OpenAI APIs.
 
 Task processes use fixed executable and argument tuples from validated startup
 configuration. Clients select only a registered task ID; arbitrary shell,

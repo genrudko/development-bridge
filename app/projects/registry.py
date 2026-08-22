@@ -13,6 +13,7 @@ from .models import Project, Repository
 class RepositoryRegistry:
     def __init__(self, repositories: Mapping[tuple[str, str], Repository]) -> None:
         self._repositories = MappingProxyType(dict(repositories))
+        self._configured = frozenset(repositories)
 
     @classmethod
     def from_settings(cls, settings: BridgeSettings) -> RepositoryRegistry:
@@ -68,6 +69,19 @@ class RepositoryRegistry:
             if registered_project == project_id
         )
 
+    def is_configured(self, project_id: str, repository_id: str) -> bool:
+        return (project_id, repository_id) in self._configured
+
+    def register_managed(self, repository: Repository) -> None:
+        key = (repository.project_id, repository.id)
+        if key in self._repositories:
+            raise BridgeError(
+                ErrorCode.REPOSITORY_CONFLICT,
+                "Repository identifier is already registered",
+                details={"project_id": repository.project_id, "repository_id": repository.id},
+            )
+        self._repositories = MappingProxyType({**self._repositories, key: repository})
+
 
 class ProjectRegistry:
     def __init__(
@@ -92,7 +106,7 @@ class ProjectRegistry:
         return cls(projects, repositories)
 
     def list(self) -> tuple[Project, ...]:
-        return tuple(self._projects.values())
+        return tuple(self.get(project_id) for project_id in self._projects)
 
     def get(self, project_id: str) -> Project:
         project = self._projects.get(project_id)
@@ -102,5 +116,8 @@ class ProjectRegistry:
                 "Project is not registered",
                 details={"project_id": project_id},
             )
-        return project
-
+        return Project(
+            id=project.id,
+            name=project.name,
+            repositories=self.repositories.for_project(project.id),
+        )

@@ -12,6 +12,14 @@ def test_defaults_allow_startup_without_registered_projects():
     assert settings.projects == ()
 
 
+def test_managed_repository_root_has_default_and_optional_override(tmp_path):
+    assert BridgeSettings().managed_repositories.root.name == "repositories"
+    settings = BridgeSettings.model_validate({
+        "managed_repositories": {"root": tmp_path / "managed"}
+    })
+    assert settings.managed_repositories.root == tmp_path / "managed"
+
+
 def test_loads_yaml_and_environment_server_overrides(tmp_path):
     config = tmp_path / "bridge.yaml"
     config.write_text(

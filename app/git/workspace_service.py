@@ -37,7 +37,7 @@ class GitWorkspaceService:
     async def fetch(
         self, repository: Repository, *, remote: str | None = None
     ) -> GitFetchResult:
-        self._require_write(repository)
+        self._require_fetch(repository)
         async with self._mutations.acquire(repository):
             await self._ensure_no_operation(repository)
             if remote is None:
@@ -190,6 +190,16 @@ class GitWorkspaceService:
         self._policy.require(
             repository.capabilities,
             Capability.GIT_WRITE,
+            project_id=repository.project_id,
+            repository_id=repository.id,
+        )
+
+    def _require_fetch(self, repository: Repository) -> None:
+        if repository.capabilities.allows(Capability.GIT_WRITE):
+            return
+        self._policy.require(
+            repository.capabilities,
+            Capability.GIT_READ,
             project_id=repository.project_id,
             repository_id=repository.id,
         )

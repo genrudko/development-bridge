@@ -84,6 +84,17 @@ class JobSettings(BaseModel):
     artifact_directory: Path | None = None
 
 
+def _default_managed_repository_root() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME")
+    base = Path(data_home) if data_home else Path.home() / ".local" / "share"
+    return base / "development-bridge" / "repositories"
+
+
+class ManagedRepositorySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    root: Path = Field(default_factory=_default_managed_repository_root)
+
+
 class TelegramKnowledgeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     api_id: int | None = Field(default=None, gt=0)
@@ -172,6 +183,9 @@ class BridgeSettings(BaseModel):
     version: int = Field(default=1, ge=1, le=1)
     server: ServerSettings = Field(default_factory=ServerSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
+    managed_repositories: ManagedRepositorySettings = Field(
+        default_factory=ManagedRepositorySettings
+    )
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     projects: tuple[ProjectSettings, ...] = ()

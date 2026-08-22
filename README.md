@@ -18,8 +18,8 @@ default for local development.
 
 The Bridge exposes:
 
-- Core: `bridge_info`, `project_list`, `project_describe`, and
-  `repository_status`;
+- Core: `bridge_info`, `project_list`, `project_describe`, `repository_status`,
+  and `repository_clone`;
 - Files: `file_list`, `file_read`, and `file_search`;
 - Git read: `git_log`, `git_show`, `git_diff`, and `git_refs`;
 - Git workspace: `git_fetch`, `git_branch_create`, `git_branch_switch`, and
@@ -32,7 +32,23 @@ The Bridge exposes:
   `knowledge_message`, `knowledge_thread`, `knowledge_source_add`, and
   `knowledge_source_sync`; `knowledge_attachment_open` lazily snapshots one
   corpus-validated attachment, while `knowledge_attachment_export` issues a
-  short-lived external URL for the same immutable snapshot.
+  short-lived external URL plus standard MCP file resource blocks for the same
+  immutable snapshot.
+
+## Managed external repositories
+
+Projects combine repositories declared in `bridge.yaml` with managed external
+clones. `repository_clone` accepts only a public HTTPS Git URL and installs a
+completed shallow, single-branch clone under
+`$XDG_DATA_HOME/development-bridge/repositories` (or
+`~/.local/share/development-bridge/repositories`), with an optional
+`managed_repositories.root` override. An atomically written JSON manifest makes
+these registrations available after restart; `bridge.yaml` is never rewritten.
+
+Managed clones are reference repositories: `read` and `git_read` are enabled,
+while file/Git writes and task execution are disabled. Existing Files, Git Read,
+repository status, and `git_fetch` APIs operate on them immediately. Use
+`git_fetch` for later remote updates; no separate pull or sync API is added.
 
 ## Community Knowledge
 
@@ -90,6 +106,12 @@ copy: it issues a random process-local token with a configurable 10-minute
 default TTL. The repeatable `/mcp/knowledge/exports/{token}` route uses
 `private, no-store` and reveals neither corpus identity nor a filesystem path.
 Service restart invalidates outstanding export tokens.
+
+The shared MCP API file-resource helper emits a `ResourceLink` for every file
+and, up to the conservative 4 MiB inline limit, an
+`EmbeddedResource<BlobResourceContents>` containing byte-exact base64. The
+knowledge export adapter uses this helper without exposing its cached local
+path; larger files retain the HTTPS export as fallback.
 
 Archives also remain outside Git. The fallback JSON import is a local CLI
 operation; MCP clients cannot supply filesystem paths or trigger file imports.

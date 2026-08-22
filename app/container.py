@@ -20,7 +20,12 @@ from app.knowledge import (
     TelegramKnowledgeService,
 )
 from app.knowledge.telegram import TelegramAdapter, TelethonTelegramAdapter
-from app.projects import ProjectRegistry, RepositoryMutationLock
+from app.projects import (
+    ManagedCloneRunner,
+    ManagedRepositoryService,
+    ProjectRegistry,
+    RepositoryMutationLock,
+)
 from app.settings import BridgeSettings, load_settings
 from app.tasks import TaskRegistry
 
@@ -29,6 +34,7 @@ from app.tasks import TaskRegistry
 class ApplicationContainer:
     settings: BridgeSettings
     projects: ProjectRegistry
+    managed_repositories: ManagedRepositoryService
     capability_policy: CapabilityPolicy
     audit: AuditSink
     git: GitService
@@ -50,6 +56,7 @@ def build_container(
     *,
     audit: AuditSink | None = None,
     telegram_adapter: TelegramAdapter | None = None,
+    managed_clone_runner: ManagedCloneRunner | None = None,
 ) -> ApplicationContainer:
     configured = settings or load_settings()
     projects = ProjectRegistry.from_settings(configured)
@@ -89,6 +96,7 @@ def build_container(
         if configured.knowledge.attachment_directory is not None
         else None
     )
+    managed_repository_root = configured.managed_repositories.root.expanduser().resolve()
     for state_path, label in (
         (database_path, "Job database"),
         (artifact_directory, "Artifact directory"),
@@ -96,6 +104,7 @@ def build_container(
         (knowledge_database_path, "Knowledge database"),
         (telegram_session_path, "Telegram session"),
         (knowledge_attachment_directory, "Knowledge attachment directory"),
+        (managed_repository_root, "Managed repository root"),
     ):
         if state_path is None:
             continue
@@ -113,6 +122,9 @@ def build_container(
                         "repository_id": repository.id,
                     },
                 )
+    managed_repositories = ManagedRepositoryService(
+        managed_repository_root, projects, managed_clone_runner
+    )
     job_store = (
         JobStore(database_path)
         if tasks and database_path is not None
@@ -189,6 +201,7 @@ def build_container(
     return ApplicationContainer(
         settings=configured,
         projects=projects,
+        managed_repositories=managed_repositories,
         capability_policy=policy,
         audit=audit_sink,
         git=GitService(runner, policy),

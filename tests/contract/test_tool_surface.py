@@ -8,6 +8,7 @@ SUPPORTED_TOOLS = {
     "project_list",
     "project_describe",
     "repository_status",
+    "repository_clone",
     "file_list",
     "file_read",
     "file_search",
@@ -47,7 +48,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 36
+    assert len(registry.definitions) == 37
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {"v1", "community-knowledge"}
 
 
