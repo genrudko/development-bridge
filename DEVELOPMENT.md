@@ -26,16 +26,49 @@ tests at the production workspace.
 
 The default local endpoint is `http://127.0.0.1:8789/mcp`.
 
-## Import a community archive
+## Configure link-first Telegram knowledge
 
 Configure an external runtime database:
 
 ```yaml
 knowledge:
   database_path: /home/user/.local/state/development-bridge/knowledge.sqlite3
+  telegram:
+    api_id: 12345
+    api_hash: replace-with-my-telegram-api-hash
+    session_path: /home/user/.local/state/development-bridge/telegram.session
+    sync_batch_size: 2000
+    recent_window_size: 100
 ```
 
-Then import a Telegram Desktop JSON export locally:
+Authorize the Telegram user account once. Telethon prompts for the phone, login
+code, and the 2FA password when required:
+
+```bash
+.venv/bin/python -m app.knowledge.telegram_auth --config bridge.local.yaml
+```
+
+Afterward the normal MCP workflow requires only the public link:
+
+```json
+{"name":"knowledge_source_add","arguments":{"url":"https://t.me/example"}}
+```
+
+Continue bounded history acquisition, or later perform incremental refreshes:
+
+```json
+{"name":"knowledge_source_sync","arguments":{"source_id":"telegram-example"}}
+```
+
+`api_id`, `api_hash`, and `session_path` may instead be supplied through
+`DEVELOPMENT_BRIDGE_TELEGRAM_API_ID`,
+`DEVELOPMENT_BRIDGE_TELEGRAM_API_HASH`, and
+`DEVELOPMENT_BRIDGE_TELEGRAM_SESSION_PATH`.
+
+## Offline Telegram JSON fallback
+
+Import a Telegram Desktop JSON export locally when MTProto is unavailable or an
+offline archive is required:
 
 ```bash
 .venv/bin/python -m app.knowledge.cli \

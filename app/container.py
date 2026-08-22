@@ -10,7 +10,8 @@ from app.changes import ChangeRevisionCalculator, ChangeService
 from app.files import FileService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.jobs import ArtifactStorage, JobService, JobStore
-from app.knowledge import KnowledgeService, KnowledgeStore
+from app.knowledge import KnowledgeService, KnowledgeStore, TelegramKnowledgeService
+from app.knowledge.telegram import TelegramAdapter, TelethonTelegramAdapter
 from app.projects import ProjectRegistry, RepositoryMutationLock
 from app.settings import BridgeSettings, load_settings
 from app.tasks import TaskRegistry
@@ -31,12 +32,14 @@ class ApplicationContainer:
     jobs: JobService
     oauth: BridgeOAuthProvider | None
     knowledge: KnowledgeService | None
+    telegram_knowledge: TelegramKnowledgeService | None
 
 
 def build_container(
     settings: BridgeSettings | None = None,
     *,
     audit: AuditSink | None = None,
+    telegram_adapter: TelegramAdapter | None = None,
 ) -> ApplicationContainer:
     configured = settings or load_settings()
     projects = ProjectRegistry.from_settings(configured)
@@ -66,11 +69,17 @@ def build_container(
         if configured.knowledge.database_path is not None
         else None
     )
+    telegram_session_path = (
+        configured.knowledge.telegram.session_path.expanduser().resolve()
+        if configured.knowledge.telegram.session_path is not None
+        else None
+    )
     for state_path, label in (
         (database_path, "Job database"),
         (artifact_directory, "Artifact directory"),
         (oauth_database_path, "OAuth database"),
         (knowledge_database_path, "Knowledge database"),
+        (telegram_session_path, "Telegram session"),
     ):
         if state_path is None:
             continue
@@ -113,6 +122,31 @@ def build_container(
             access_token_ttl_seconds=configured.oauth.access_token_ttl_seconds,
             refresh_token_ttl_seconds=configured.oauth.refresh_token_ttl_seconds,
         )
+    knowledge_store = (
+        KnowledgeStore(knowledge_database_path)
+        if knowledge_database_path is not None
+        else None
+    )
+    telegram = configured.knowledge.telegram
+    telegram_knowledge = None
+    configured_adapter = telegram_adapter
+    if configured_adapter is None and (
+        telegram.api_id is not None
+        and telegram.api_hash is not None
+        and telegram_session_path is not None
+    ):
+        configured_adapter = TelethonTelegramAdapter(
+            telegram.api_id,
+            telegram.api_hash.get_secret_value(),
+            telegram_session_path,
+        )
+    if knowledge_store is not None and configured_adapter is not None:
+        telegram_knowledge = TelegramKnowledgeService(
+            knowledge_store,
+            configured_adapter,
+            default_batch_size=telegram.sync_batch_size,
+            recent_window_size=telegram.recent_window_size,
+        )
     return ApplicationContainer(
         settings=configured,
         projects=projects,
@@ -136,8 +170,9 @@ def build_container(
         ),
         oauth=oauth,
         knowledge=(
-            KnowledgeService(KnowledgeStore(knowledge_database_path))
-            if knowledge_database_path is not None
+            KnowledgeService(knowledge_store)
+            if knowledge_store is not None
             else None
         ),
+        telegram_knowledge=telegram_knowledge,
     )

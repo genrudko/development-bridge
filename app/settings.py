@@ -66,9 +66,19 @@ class JobSettings(BaseModel):
     artifact_directory: Path | None = None
 
 
+class TelegramKnowledgeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    api_id: int | None = Field(default=None, gt=0)
+    api_hash: SecretStr | None = Field(default=None, repr=False)
+    session_path: Path | None = None
+    sync_batch_size: int = Field(default=2000, ge=1, le=5000)
+    recent_window_size: int = Field(default=100, ge=0, le=500)
+
+
 class KnowledgeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     database_path: Path | None = None
+    telegram: TelegramKnowledgeSettings = Field(default_factory=TelegramKnowledgeSettings)
 
 
 class OAuthSettings(BaseModel):
@@ -226,5 +236,22 @@ def load_settings(
         )
         settings = BridgeSettings.model_validate(
             {**settings.model_dump(), "oauth": validated_oauth}
+        )
+    telegram_updates: dict[str, Any] = {}
+    if api_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_API_ID"):
+        telegram_updates["api_id"] = int(api_id)
+    if api_hash := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_API_HASH"):
+        telegram_updates["api_hash"] = api_hash
+    if session_path := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SESSION_PATH"):
+        telegram_updates["session_path"] = session_path
+    if telegram_updates:
+        telegram = TelegramKnowledgeSettings.model_validate(
+            {**settings.knowledge.telegram.model_dump(), **telegram_updates}
+        )
+        knowledge = KnowledgeSettings.model_validate(
+            {**settings.knowledge.model_dump(), "telegram": telegram}
+        )
+        settings = BridgeSettings.model_validate(
+            {**settings.model_dump(), "knowledge": knowledge}
         )
     return settings

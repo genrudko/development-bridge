@@ -117,3 +117,28 @@ def test_knowledge_database_inside_repository_is_rejected(tmp_path):
     with pytest.raises(BridgeError) as raised:
         build_container(settings)
     assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+
+
+def test_telegram_session_inside_repository_is_rejected(tmp_path):
+    repository = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "knowledge": {
+                "database_path": tmp_path / "knowledge.sqlite3",
+                "telegram": {
+                    "api_id": 12345,
+                    "api_hash": "secret",
+                    "session_path": repository / "telegram.session",
+                },
+            },
+            "projects": [
+                {
+                    "id": "project", "name": "Project",
+                    "repositories": [{"id": "repository", "path": repository}],
+                }
+            ],
+        }
+    )
+    with pytest.raises(BridgeError) as raised:
+        build_container(settings)
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT

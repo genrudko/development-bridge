@@ -41,7 +41,8 @@ The package boundaries under `app/` are:
 - `tasks` and `jobs`: registered execution profiles, durable jobs, and
   immutable artifact snapshots;
 - `knowledge`: Telegram JSON import, normalized corpus persistence, FTS search,
-  exact lookup, neighborhoods, and bounded reply reconstruction;
+  exact lookup, neighborhoods, bounded reply reconstruction, and link-first
+  MTProto synchronization;
 - `integrations`: boundary for future optional external integrations.
 
 The Core packages for API results, projects, capabilities, audit, Git read,
@@ -126,3 +127,22 @@ in memory while its messages are written incrementally in one SQLite
 transaction; it does not materialize a second in-memory message corpus. Live
 sync, social-network login, background scheduling, semantic ranking, media
 download, and automated truth scoring remain outside this contour.
+
+The primary link-first path adds one narrow transport boundary:
+
+```text
+knowledge_source_add / knowledge_source_sync MCP adapters
+                    ↓
+TelegramKnowledgeService (batch/cursor policy and corpus writes)
+                    ↓
+TelegramAdapter
+                    ↓
+Telethon MTProto client and external session file
+```
+
+`source_sync_state` stores only the provider entity identity and bounded sync
+cursors in the existing knowledge database. Initial synchronization walks from
+the newest batch toward older IDs. Once history is complete, synchronization
+requests IDs newer than the cursor and refreshes a small recent window for
+edits. Telegram RPC exceptions are normalized at the adapter/service boundary;
+MCP adapters never import or call Telethon directly.

@@ -18,6 +18,27 @@ def knowledge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ..
             raise BridgeError(ErrorCode.KNOWLEDGE_NOT_CONFIGURED, "Community knowledge store is not configured")
         return container.knowledge
 
+    def telegram_service():
+        if container.knowledge is None:
+            raise BridgeError(ErrorCode.KNOWLEDGE_NOT_CONFIGURED, "Community knowledge store is not configured")
+        if container.telegram_knowledge is None:
+            raise BridgeError(
+                ErrorCode.TELEGRAM_NOT_CONFIGURED,
+                "Telegram MTProto credentials and session path are not configured",
+            )
+        return container.telegram_knowledge
+
+    async def source_add(ctx, params, request_context):
+        data = await telegram_service().source_add(params.arguments["url"])
+        return to_mcp_result(success(request_context.request_id, data))
+
+    async def source_sync(ctx, params, request_context):
+        arguments = params.arguments
+        data = await telegram_service().source_sync(
+            arguments["source_id"], limit=arguments.get("limit")
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
     async def source_list(ctx, params, request_context):
         return to_mcp_result(success(request_context.request_id, {"sources": service().source_list()}))
 
@@ -43,6 +64,13 @@ def knowledge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ..
         return to_mcp_result(success(request_context.request_id, data))
 
     definitions = (
+        ("knowledge_source_add", "Resolve a public Telegram URL and import one bounded history batch", {
+            "url": {"type": "string", "minLength": 1, "maxLength": 500},
+        }, ["url"], source_add),
+        ("knowledge_source_sync", "Continue bounded history or incremental Telegram synchronization", {
+            "source_id": SOURCE_ID,
+            "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+        }, ["source_id"], source_sync),
         ("knowledge_source_list", "List imported community knowledge sources", {}, [], source_list),
         ("knowledge_search", "Full-text search community messages with provenance", {
             "query": {"type": "string", "minLength": 1, "maxLength": 1000},

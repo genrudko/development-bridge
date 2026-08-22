@@ -29,11 +29,27 @@ The Bridge exposes:
   `job_cancel`, `job_artifact_list`, and `job_artifact_view`;
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
 - Community Knowledge: `knowledge_source_list`, `knowledge_search`,
-  `knowledge_message`, and `knowledge_thread`.
+  `knowledge_message`, `knowledge_thread`, `knowledge_source_add`, and
+  `knowledge_source_sync`.
 
 ## Community Knowledge
 
-Community Knowledge is an optional, repository-independent evidence contour:
+Community Knowledge is an optional, repository-independent evidence contour.
+The primary product workflow is link-first:
+
+```text
+public Telegram URL
+        ↓
+knowledge_source_add
+        ↓
+Telegram MTProto through an authorized Telethon session
+        ↓
+bounded history batches → normalized SQLite corpus + FTS5
+        ↓
+knowledge_source_sync / knowledge_search / message / thread
+```
+
+Telegram Desktop JSON remains an offline/fallback workflow:
 
 ```text
 Telegram Desktop JSON export
@@ -49,12 +65,18 @@ thin knowledge_* MCP tools
 ChatGPT analysis
 ```
 
-Set `knowledge.database_path` to a SQLite file outside every registered Git
-repository. Archives also remain outside Git. Import is a local CLI operation;
-MCP clients cannot supply filesystem paths or trigger imports. The first
-importer accepts Telegram Desktop JSON, while stored sources and messages use
-platform-neutral identifiers so another provider can be added without turning
-the repository API into a social-network client.
+Set `knowledge.database_path` and the nested Telegram credentials/session path
+outside every registered Git repository. After the one-time local Telegram
+authorization, `knowledge_source_add` needs only a public `t.me` URL and imports
+one bounded batch. Repeated `knowledge_source_sync` calls continue older history
+and later fetch new messages plus a bounded recent edit window. Private invite
+joining, media download, background polling, Bot API, and scraping are absent.
+
+Archives also remain outside Git. The fallback JSON import is a local CLI
+operation; MCP clients cannot supply filesystem paths or trigger file imports.
+Stored sources and messages use platform-neutral identifiers so another
+provider can be added without turning the repository API into a social-network
+client.
 
 The corpus is an evidence source, not an automatically trustworthy source of
 truth. Search and lookup preserve source, author, timestamp, message ID, reply

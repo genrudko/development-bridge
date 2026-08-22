@@ -10,6 +10,12 @@ jobs:
 # Optional Community Knowledge corpus; keep it outside registered repositories.
 # knowledge:
 #   database_path: /absolute/path/to/development-bridge-knowledge.sqlite3
+#   telegram:
+#     api_id: 12345
+#     api_hash: replace-with-my-telegram-api-hash
+#     session_path: /absolute/path/to/development-bridge-telegram.session
+#     sync_batch_size: 2000
+#     recent_window_size: 100
 # OAuth is optional for local development. A remote private deployment enables it
 # and supplies DEVELOPMENT_BRIDGE_OWNER_VERIFIER through its secret environment.
 # oauth:

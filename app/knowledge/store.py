@@ -53,6 +53,18 @@ CREATE TABLE IF NOT EXISTS attachments (
     exported_path TEXT,
     metadata_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS source_sync_state (
+    source_fk INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    username TEXT,
+    source_kind TEXT NOT NULL,
+    oldest_message_id INTEGER,
+    newest_message_id INTEGER,
+    history_complete INTEGER NOT NULL DEFAULT 0,
+    last_sync_at TEXT,
+    UNIQUE(provider, entity_id)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     text, content='messages', content_rowid='id', tokenize='unicode61'
 );
