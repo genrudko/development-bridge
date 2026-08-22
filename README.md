@@ -1,6 +1,6 @@
 # Development Bridge
 
-Development Bridge is the successor repository for the existing
+Development Bridge is the successor repository for the former
 `development-mcp` service. The staged Development Bridge v1 migration is
 complete and the preserved global-workspace API has been removed.
 
@@ -21,9 +21,11 @@ The Bridge exposes:
   `repository_status`;
 - Files: `file_list`, `file_read`, and `file_search`;
 - Git read: `git_log`, `git_show`, `git_diff`, and `git_refs`;
+- Git workspace: `git_fetch`, `git_branch_create`, `git_branch_switch`, and
+  `git_fast_forward`;
 - Changes: `change_plan` and `change_apply`;
-- Tasks and jobs: `task_list`, `task_start`, `job_status`, `job_output`, and
-  `job_cancel`;
+- Tasks and jobs: `task_list`, `task_start`, `job_status`, `job_output`,
+  `job_cancel`, and `job_artifact_list`;
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
 
 The Core API uses immutable project and repository registries loaded from a
@@ -56,11 +58,18 @@ Stage 7 removed all remaining global-workspace tools and their configuration,
 dispatch, tests, and dependencies. No compatibility aliases or parallel legacy
 API remain.
 
+The post-migration operational surface also includes explicit Git workspace
+operations (`git_fetch`, branch creation and switching, and upstream-only
+fast-forward) plus immutable job artifact snapshots. Declared artifacts are
+captured into job-specific storage and exposed through `job_artifact_list` and
+the authenticated HTTP artifact route; they are never served from the mutable
+working tree.
+
 ## Repository scope
 
-This repository does not contain production state. In particular, it excludes
-environment files, credentials, virtual environments, logs, archives, and the
-engineering repositories previously stored below `development-mcp/workspace`.
+This repository does not contain runtime state. In particular, it excludes
+environment files, credentials, virtual environments, logs, job and OAuth
+databases, artifact snapshots, and archives.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md), [MIGRATION.md](MIGRATION.md), and
 [DEVELOPMENT.md](DEVELOPMENT.md) before making changes.

@@ -19,13 +19,13 @@ Bridge
 └── Project
     └── Repository
         ├── Files
-        ├── Git state
+        ├── Git state and workspace operations
         ├── Controlled changes
-        └── Registered tasks and jobs
+        └── Registered tasks, jobs, and artifacts
 ```
 
-Repository-scoped calls will carry explicit `project_id` and `repository_id`
-values. There will be no mutable global current repository.
+Repository-scoped calls carry explicit `project_id` and `repository_id`
+values. There is no mutable global current repository.
 
 The package boundaries under `app/` are:
 
@@ -36,21 +36,26 @@ The package boundaries under `app/` are:
 - `files`: bounded repository-scoped file access;
 - `git`: the single Git process boundary and Git services;
 - `changes`: validated, revision-guarded changes;
-- `tasks` and `jobs`: registered execution profiles and durable jobs;
+- `tasks` and `jobs`: registered execution profiles, durable jobs, and
+  immutable artifact snapshots;
 - `integrations`: boundary for future optional external integrations.
 
 The Core packages for API results, projects, capabilities, audit, Git read,
 and files are implemented. The File Service provides bounded
 repository-scoped listing, UTF-8 text reads, and text search without following
 symbolic links. The Git Service provides structured, bounded log, show, diff,
-refs, and repository status operations through the single Git process boundary.
+refs, repository status, fetch, branch creation and switching, and upstream
+fast-forward operations through the single Git process boundary.
 The Changes service validates self-contained plans, calculates its own strong
 working-tree revision, serializes application per repository, and persists
-idempotency receipts without changing the Git index, refs, or objects. Task and
-job packages provide immutable repository task profiles and a durable SQLite
-queue with one worker, cancellation, restart recovery, lifecycle audit, and
-bounded live output. Destructive file changes are restricted to tracked files;
-Stage 4 does not maintain a separate backup or rollback store.
+idempotency receipts without changing the Git index, refs, or objects. Its
+revision combines HEAD, index state, tracked working-tree drift, and untracked
+non-ignored files; Git-ignored content is excluded. Task and job packages
+provide immutable repository task profiles and a durable SQLite queue with one
+worker, cancellation, restart recovery, lifecycle audit, bounded live output,
+and immutable job-specific artifact snapshots. Destructive file changes are
+restricted to tracked files; the Changes service does not maintain a separate
+backup or rollback store.
 
 The Git Write service owns explicit path staging, index-only commits, push
 planning, and guarded non-force pushes. It shares a cross-process repository
@@ -94,7 +99,9 @@ passthrough.
 
 ## Runtime isolation
 
-The Git repository is separate from the existing production directory at
-`/home/eodadmin/development-mcp`. Preparing this repository does not alter the
-running systemd unit, Caddy configuration, production environment, or current
-workspace repositories.
+Runtime configuration, credentials, job state, OAuth state, and artifact
+snapshots live outside registered Git repositories. A deployed Bridge may run
+directly from a registered source checkout for dogfooding, but service state
+must not be written into that checkout. This keeps repository operations and
+runtime persistence separate while still allowing Development Bridge to manage
+and test its own source repository.
