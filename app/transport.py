@@ -90,8 +90,36 @@ def create_streamable_http_app(
                 )
             )
 
+    async def knowledge_attachment_download(request: Request):
+        try:
+            if not _host_allowed(request.headers.get("host", ""), settings):
+                return JSONResponse({"error": "Host is not allowed"}, status_code=421)
+            if container.knowledge_attachments is None:
+                raise BridgeError(
+                    ErrorCode.KNOWLEDGE_NOT_CONFIGURED,
+                    "Knowledge attachment storage is not configured",
+                )
+            snapshot, path = container.knowledge_attachments.snapshot_file(
+                request.path_params["source_id"],
+                request.path_params["message_id"],
+                request.path_params["attachment_id"],
+            )
+            return FileResponse(
+                path,
+                media_type=snapshot["media_type"],
+                filename=snapshot["file_name"],
+                headers={"ETag": f'"{snapshot["sha256"]}"'},
+            )
+        except (BridgeError, OSError):
+            return JSONResponse(
+                {"error": "Knowledge attachment is not available"}, status_code=404
+            )
+
     artifact_path = settings.server.endpoint.rstrip("/") + (
         "/artifacts/{project_id}/{repository_id}/{job_id}/{artifact_id}"
+    )
+    knowledge_attachment_path = settings.server.endpoint.rstrip("/") + (
+        "/knowledge/attachments/{source_id}/{message_id}/{attachment_id}"
     )
     artifact_endpoint = artifact_download
     auth_settings = None
@@ -122,6 +150,11 @@ def create_streamable_http_app(
         artifact_endpoint = RequireAuthMiddleware(
             request_response(artifact_download), ["bridge"], resource_metadata_url
         )
+        knowledge_attachment_endpoint = RequireAuthMiddleware(
+            request_response(knowledge_attachment_download),
+            ["bridge"],
+            resource_metadata_url,
+        )
         custom_routes.append(
             Route(
                 "/oauth/approve",
@@ -130,12 +163,22 @@ def create_streamable_http_app(
                 name="oauth_approve",
             )
         )
+    if container.oauth is None:
+        knowledge_attachment_endpoint = knowledge_attachment_download
     custom_routes.append(
         Route(
             artifact_path,
             artifact_endpoint,
             methods=["GET", "HEAD"],
             name="job_artifact_download",
+        )
+    )
+    custom_routes.append(
+        Route(
+            knowledge_attachment_path,
+            knowledge_attachment_endpoint,
+            methods=["GET", "HEAD"],
+            name="knowledge_attachment_download",
         )
     )
     app = server.streamable_http_app(

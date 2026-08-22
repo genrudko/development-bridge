@@ -9,6 +9,7 @@ from typing import Any
 from app.api.errors import BridgeError, ErrorCode
 
 from .store import KnowledgeStore
+from .attachment_identity import attachment_fields, stable_attachment_id
 from .telegram import (
     TelegramAdapter,
     TelegramAuthorizationRequired,
@@ -254,14 +255,26 @@ class TelegramKnowledgeService:
                     "SELECT id FROM messages WHERE source_fk=? AND platform_message_id=?",
                     (source_fk, str(message.message_id)),
                 ).fetchone()[0]
-                connection.execute("DELETE FROM attachments WHERE message_fk=?", (message_fk,))
-                for attachment in message.attachments:
-                    connection.execute(
-                        """INSERT INTO attachments(
-                             message_fk, attachment_type, exported_path, metadata_json)
-                           VALUES (?, ?, NULL, ?)""",
-                        (message_fk, attachment.attachment_type, json.dumps(attachment.metadata, ensure_ascii=False)),
+                attachments = []
+                for index, attachment in enumerate(message.attachments):
+                    media_type, file_name, declared_size = attachment_fields(
+                        attachment.attachment_type, attachment.metadata, None
                     )
+                    attachments.append(
+                        {
+                            "attachment_id": stable_attachment_id(
+                                attachment.attachment_type, attachment.metadata,
+                                fallback_index=index,
+                            ),
+                            "type": attachment.attachment_type,
+                            "exported_path": None,
+                            "metadata": attachment.metadata,
+                            "media_type": media_type,
+                            "file_name": file_name,
+                            "declared_size": declared_size,
+                        }
+                    )
+                self.store.replace_attachments(connection, message_fk, attachments)
                 inserted += existed is None
                 updated += existed is not None
             connection.execute(

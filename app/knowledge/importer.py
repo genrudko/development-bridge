@@ -8,6 +8,7 @@ from typing import Any
 from app.api.errors import BridgeError, ErrorCode
 
 from .store import KnowledgeStore
+from .attachment_identity import attachment_fields, stable_attachment_id
 
 
 def plain_text(value: Any) -> str:
@@ -132,13 +133,29 @@ class TelegramJsonImporter:
                     "SELECT id FROM messages WHERE source_fk=? AND platform_message_id=?",
                     (source_fk, platform_message_id),
                 ).fetchone()[0]
-                connection.execute("DELETE FROM attachments WHERE message_fk=?", (message_fk,))
                 attachment = self._attachment(message)
+                attachments = []
                 if attachment is not None:
-                    connection.execute(
-                        "INSERT INTO attachments(message_fk, attachment_type, exported_path, metadata_json) VALUES (?, ?, ?, ?)",
-                        (message_fk, *attachment),
+                    attachment_type, exported_path, metadata_json = attachment
+                    metadata = json.loads(metadata_json)
+                    media_type, file_name, declared_size = attachment_fields(
+                        attachment_type, metadata, exported_path
                     )
+                    attachments.append(
+                        {
+                            "attachment_id": stable_attachment_id(
+                                attachment_type, metadata,
+                                exported_path=exported_path, fallback_index=0,
+                            ),
+                            "type": attachment_type,
+                            "exported_path": exported_path,
+                            "metadata": metadata,
+                            "media_type": media_type,
+                            "file_name": file_name,
+                            "declared_size": declared_size,
+                        }
+                    )
+                self.store.replace_attachments(connection, message_fk, attachments)
                 if existed is None:
                     inserted += 1
                 else:

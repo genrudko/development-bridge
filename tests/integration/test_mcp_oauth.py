@@ -229,3 +229,32 @@ async def test_artifact_download_requires_the_same_bearer_token(tmp_path):
 
     assert response.status_code == 401
     assert "resource_metadata=" in response.headers["www-authenticate"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_attachment_download_requires_the_same_bearer_token(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "oauth": {
+            "enabled": True,
+            "issuer_url": "http://127.0.0.1",
+            "resource_url": "http://127.0.0.1/mcp",
+            "database_path": tmp_path / "oauth.sqlite3",
+            "owner_verifier": create_owner_verifier("owner-password"),
+        },
+        "knowledge": {
+            "database_path": tmp_path / "knowledge.sqlite3",
+            "attachment_directory": tmp_path / "attachments",
+        },
+    })
+    container = build_container(settings)
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.get(
+            "/mcp/knowledge/attachments/telegram-example/1/document-example"
+        )
+
+    assert response.status_code == 401
+    assert "resource_metadata=" in response.headers["www-authenticate"]

@@ -146,3 +146,14 @@ the newest batch toward older IDs. Once history is complete, synchronization
 requests IDs newer than the cursor and refreshes a small recent window for
 edits. Telegram RPC exceptions are normalized at the adapter/service boundary;
 MCP adapters never import or call Telethon directly.
+
+Attachment access is a lazy layer over the normalized corpus. Stable
+provider-derived identities remain valid across message refreshes, while an
+additive SQLite snapshot table records opaque storage name, SHA-256, actual
+size, MIME, safe filename, timestamp, and source/message/provider provenance.
+The attachment service validates this corpus identity before the Telegram
+adapter re-fetches the original message and downloads matching media. Files are
+atomically placed in content-addressed runtime storage with directory mode 0700
+and file mode 0600. Import, sync, search, and normal message lookup never
+download media. The OAuth-protected HTTP route serves cached snapshots only and
+never exposes a filesystem path or proxies a live Telegram stream.

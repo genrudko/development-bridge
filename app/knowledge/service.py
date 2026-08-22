@@ -253,8 +253,45 @@ class KnowledgeService:
             "original_text": _json(row["original_text_json"]),
             "metadata": _json(row["metadata_json"]),
             "attachments": [
-                {"type": item["attachment_type"], "exported_path": item["exported_path"], "metadata": _json(item["metadata_json"])}
-                for item in connection.execute("SELECT * FROM attachments WHERE message_fk=? ORDER BY id", (row["id"],))
+                {
+                    "attachment_id": item["attachment_id"],
+                    "type": item["attachment_type"],
+                    "media_type": item["media_type"],
+                    "file_name": item["file_name"],
+                    "declared_size": item["declared_size"],
+                    "exported_path": item["exported_path"],
+                    # Keep the original field for existing corpus consumers while
+                    # exposing the provider-specific meaning explicitly.
+                    "metadata": _json(item["metadata_json"]),
+                    "provider_metadata": _json(item["metadata_json"]),
+                    "cached": item["snapshot_size"] is not None,
+                    "snapshot": (
+                        {
+                            "size_bytes": item["snapshot_size"],
+                            "sha256": item["snapshot_sha256"],
+                            "media_type": item["snapshot_media_type"],
+                            "file_name": item["snapshot_file_name"],
+                            "snapshot_at": item["snapshot_at"],
+                        }
+                        if item["snapshot_size"] is not None else None
+                    ),
+                }
+                for item in connection.execute(
+                    """SELECT a.*, x.size_bytes AS snapshot_size,
+                              x.sha256 AS snapshot_sha256,
+                              x.media_type AS snapshot_media_type,
+                              x.file_name AS snapshot_file_name,
+                              x.snapshot_at
+                       FROM attachments a
+                       JOIN messages m ON m.id=a.message_fk
+                       JOIN sources s ON s.id=m.source_fk
+                       LEFT JOIN attachment_snapshots x
+                         ON x.source_id=s.source_id
+                        AND x.message_id=m.platform_message_id
+                        AND x.attachment_id=a.attachment_id
+                       WHERE a.message_fk=? ORDER BY a.id""",
+                    (row["id"],),
+                )
             ],
         })
         return result

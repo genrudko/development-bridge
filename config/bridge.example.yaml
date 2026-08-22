@@ -10,6 +10,8 @@ jobs:
 # Optional Community Knowledge corpus; keep it outside registered repositories.
 # knowledge:
 #   database_path: /absolute/path/to/development-bridge-knowledge.sqlite3
+#   attachment_directory: /absolute/path/to/development-bridge-knowledge-attachments
+#   attachment_max_bytes: 536870912
 #   telegram:
 #     api_id: 12345
 #     api_hash: replace-with-my-telegram-api-hash

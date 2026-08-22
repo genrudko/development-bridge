@@ -78,6 +78,10 @@ class TelegramKnowledgeSettings(BaseModel):
 class KnowledgeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     database_path: Path | None = None
+    attachment_directory: Path | None = None
+    attachment_max_bytes: int = Field(
+        default=536_870_912, ge=1_048_576, le=4_294_967_296
+    )
     telegram: TelegramKnowledgeSettings = Field(default_factory=TelegramKnowledgeSettings)
 
 

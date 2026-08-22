@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+from urllib.parse import quote
+
 from mcp import types
 
 from app.api.errors import BridgeError, ErrorCode
@@ -27,6 +30,37 @@ def knowledge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ..
                 "Telegram MTProto credentials and session path are not configured",
             )
         return container.telegram_knowledge
+
+    def attachment_service():
+        if container.knowledge_attachments is None:
+            raise BridgeError(
+                ErrorCode.KNOWLEDGE_NOT_CONFIGURED,
+                "Knowledge attachment storage is not configured",
+            )
+        return container.knowledge_attachments
+
+    async def attachment_open(ctx, params, request_context):
+        arguments = params.arguments
+        result = await attachment_service().open(
+            arguments["source_id"], arguments["message_id"], arguments["attachment_id"]
+        )
+        base = container.settings.server.endpoint.rstrip("/") + "/knowledge/attachments"
+        result.metadata["download_path"] = base + "/" + "/".join(
+            quote(arguments[key], safe="")
+            for key in ("source_id", "message_id", "attachment_id")
+        )
+        response = to_mcp_result(success(request_context.request_id, result.metadata))
+        if result.text_preview is not None:
+            response.content.append(types.TextContent(type="text", text=result.text_preview))
+        for frame in result.images:
+            response.content.append(
+                types.ImageContent(
+                    type="image",
+                    data=base64.b64encode(frame.data).decode("ascii"),
+                    mimeType=frame.media_type,
+                )
+            )
+        return response
 
     async def source_add(ctx, params, request_context):
         data = await telegram_service().source_add(params.arguments["url"])
@@ -64,6 +98,11 @@ def knowledge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ..
         return to_mcp_result(success(request_context.request_id, data))
 
     definitions = (
+        ("knowledge_attachment_open", "Open and cache one corpus-validated community attachment", {
+            "source_id": SOURCE_ID,
+            "message_id": MESSAGE_ID,
+            "attachment_id": {"type": "string", "minLength": 1, "maxLength": 200},
+        }, ["source_id", "message_id", "attachment_id"], attachment_open),
         ("knowledge_source_add", "Resolve a public Telegram URL and import one bounded history batch", {
             "url": {"type": "string", "minLength": 1, "maxLength": 500},
         }, ["url"], source_add),

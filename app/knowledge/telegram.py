@@ -41,6 +41,13 @@ class TelegramRequestFailed(Exception):
     pass
 
 
+class TelegramAttachmentTooLarge(Exception):
+    def __init__(self, actual_size: int, limit: int) -> None:
+        super().__init__("Telegram attachment exceeds the download size limit")
+        self.actual_size = actual_size
+        self.limit = limit
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramSource:
     entity_id: str
@@ -84,6 +91,17 @@ class TelegramAdapter(Protocol):
     ) -> tuple[TelegramMessage, ...]:
         """Fetch history newest-first, or incremental messages oldest-first."""
         ...
+
+    async def download_attachment(
+        self,
+        source: TelegramSource,
+        *,
+        message_id: int,
+        attachment_id: str,
+        expected_metadata: dict[str, object],
+        destination: Path,
+        max_bytes: int,
+    ) -> None: ...
 
 
 def ensure_session_file(session_path: Path) -> Path:
@@ -196,6 +214,75 @@ class TelethonTelegramAdapter:
             except FloodWaitError as error:
                 raise TelegramFloodWait(int(error.seconds)) from error
             except TelegramAuthorizationRequired:
+                raise
+            except (RPCError, OSError, asyncio.TimeoutError) as error:
+                raise TelegramRequestFailed("Telegram request failed") from error
+            finally:
+                await client.disconnect()
+
+    async def download_attachment(
+        self,
+        source: TelegramSource,
+        *,
+        message_id: int,
+        attachment_id: str,
+        expected_metadata: dict[str, object],
+        destination: Path,
+        max_bytes: int,
+    ) -> None:
+        from .attachment_identity import stable_attachment_id
+
+        async with self._lock:
+            client = self._client()
+            try:
+                await client.connect()
+                await self._require_authorized(client)
+                entity = await client.get_entity(source.canonical_url)
+                message = await client.get_messages(entity, ids=message_id)
+                if message is None:
+                    raise TelegramSourceNotFound("Telegram message is not available")
+                normalized = self._normalize_message(message, source)
+                matched = None
+                for index, attachment in enumerate(normalized.attachments):
+                    candidate = stable_attachment_id(
+                        attachment.attachment_type,
+                        attachment.metadata,
+                        fallback_index=index,
+                    )
+                    if candidate == attachment_id:
+                        matched = attachment
+                        break
+                if matched is None or (
+                    expected_metadata.get("telegram_media_id")
+                    != matched.metadata.get("telegram_media_id")
+                ):
+                    raise TelegramSourceNotFound("Telegram attachment identity changed")
+                written = 0
+                download = client.iter_download(message.media)
+                try:
+                    with destination.open("wb") as stream:
+                        async for chunk in download:
+                            chunk = bytes(chunk)
+                            remaining = max_bytes - written
+                            if len(chunk) > remaining:
+                                if remaining:
+                                    stream.write(chunk[:remaining])
+                                    written += remaining
+                                raise TelegramAttachmentTooLarge(
+                                    written + len(chunk) - remaining, max_bytes
+                                )
+                            stream.write(chunk)
+                            written += len(chunk)
+                finally:
+                    await download.close()
+            except (UsernameInvalidError, UsernameNotOccupiedError, ChannelPrivateError, ValueError) as error:
+                raise TelegramSourceNotFound("Telegram source or attachment is inaccessible") from error
+            except FloodWaitError as error:
+                raise TelegramFloodWait(int(error.seconds)) from error
+            except (
+                TelegramAuthorizationRequired, TelegramSourceNotFound,
+                TelegramRequestFailed, TelegramAttachmentTooLarge,
+            ):
                 raise
             except (RPCError, OSError, asyncio.TimeoutError) as error:
                 raise TelegramRequestFailed("Telegram request failed") from error

@@ -30,7 +30,8 @@ The Bridge exposes:
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
 - Community Knowledge: `knowledge_source_list`, `knowledge_search`,
   `knowledge_message`, `knowledge_thread`, `knowledge_source_add`, and
-  `knowledge_source_sync`.
+  `knowledge_source_sync`; `knowledge_attachment_open` lazily snapshots one
+  corpus-validated attachment.
 
 ## Community Knowledge
 
@@ -69,8 +70,18 @@ Set `knowledge.database_path` and the nested Telegram credentials/session path
 outside every registered Git repository. After the one-time local Telegram
 authorization, `knowledge_source_add` needs only a public `t.me` URL and imports
 one bounded batch. Repeated `knowledge_source_sync` calls continue older history
-and later fetch new messages plus a bounded recent edit window. Private invite
-joining, media download, background polling, Bot API, and scraping are absent.
+and later fetch new messages plus a bounded recent edit window. Import and sync
+store attachment metadata only. `knowledge_attachment_open` downloads one
+selected Telegram attachment on demand and reuses its immutable local snapshot.
+Private invite joining, bulk media download, background polling, Bot API, and
+scraping are absent.
+
+Attachment snapshots use configurable runtime storage outside Git. Images are
+returned as MCP image content, UTF-8 text/config/log files as bounded text, and
+PDFs as bounded extracted text without OCR. Videos retain the raw original and,
+when `ffmpeg` and `ffprobe` are installed, include bounded metadata and up to
+eight preview frames. Other binary files remain available from the OAuth-
+protected raw route without execution or automatic extraction.
 
 Archives also remain outside Git. The fallback JSON import is a local CLI
 operation; MCP clients cannot supply filesystem paths or trigger file imports.

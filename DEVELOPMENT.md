@@ -33,6 +33,8 @@ Configure an external runtime database:
 ```yaml
 knowledge:
   database_path: /home/user/.local/state/development-bridge/knowledge.sqlite3
+  attachment_directory: /home/user/.local/state/development-bridge/knowledge-attachments
+  attachment_max_bytes: 536870912
   telegram:
     api_id: 12345
     api_hash: replace-with-my-telegram-api-hash

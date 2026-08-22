@@ -205,10 +205,15 @@ async def test_live_normalization_preserves_author_reply_topic_and_attachment_me
     assert normalized["author_id"] == "user-1"
     assert normalized["reply_to_message_id"] == "4"
     assert normalized["topic"] == {"reply_to_top_id": 4, "forum_topic": True}
-    assert normalized["attachments"] == [{
-        "type": "document", "exported_path": None,
-        "metadata": {"telegram_media_id": "doc-5", "mime_type": "application/pdf", "size": 1234},
-    }]
+    attachment = normalized["attachments"][0]
+    assert attachment["attachment_id"] == "document-doc-5"
+    assert attachment["type"] == "document"
+    assert attachment["media_type"] == "application/pdf"
+    assert attachment["declared_size"] == 1234
+    assert attachment["metadata"] == {
+        "telegram_media_id": "doc-5", "mime_type": "application/pdf", "size": 1234,
+    }
+    assert attachment["cached"] is False
 
 
 @pytest.mark.asyncio
