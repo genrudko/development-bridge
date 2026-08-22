@@ -39,6 +39,22 @@ def knowledge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ..
             )
         return container.knowledge_attachments
 
+    def attachment_export_service():
+        if container.knowledge_attachment_exports is None:
+            raise BridgeError(
+                ErrorCode.KNOWLEDGE_NOT_CONFIGURED,
+                "Knowledge attachment storage is not configured",
+            )
+        return container.knowledge_attachment_exports
+
+    async def attachment_export(ctx, params, request_context):
+        arguments = params.arguments
+        data = await attachment_export_service().export(
+            arguments["source_id"], arguments["message_id"],
+            arguments["attachment_id"],
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
     async def attachment_open(ctx, params, request_context):
         arguments = params.arguments
         result = await attachment_service().open(
@@ -98,6 +114,11 @@ def knowledge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ..
         return to_mcp_result(success(request_context.request_id, data))
 
     definitions = (
+        ("knowledge_attachment_export", "Create a short-lived HTTPS export URL for one attachment snapshot", {
+            "source_id": SOURCE_ID,
+            "message_id": MESSAGE_ID,
+            "attachment_id": {"type": "string", "minLength": 1, "maxLength": 200},
+        }, ["source_id", "message_id", "attachment_id"], attachment_export),
         ("knowledge_attachment_open", "Open and cache one corpus-validated community attachment", {
             "source_id": SOURCE_ID,
             "message_id": MESSAGE_ID,

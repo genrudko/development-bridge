@@ -157,3 +157,11 @@ atomically placed in content-addressed runtime storage with directory mode 0700
 and file mode 0600. Import, sync, search, and normal message lookup never
 download media. The OAuth-protected HTTP route serves cached snapshots only and
 never exposes a filesystem path or proxies a live Telegram stream.
+
+The optional export layer reuses those exact snapshot bytes. A bounded
+process-local registry maps cryptographically random, expiring tokens to one
+corpus attachment identity. `knowledge_attachment_export` constructs an
+absolute URL only from canonical HTTPS `server.public_base_url` plus the
+configured MCP endpoint. Its token route deliberately does not require the MCP
+OAuth bearer, but serves only a valid registry grant and never accepts source
+IDs, media IDs, or filesystem paths from the downloader.

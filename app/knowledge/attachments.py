@@ -187,13 +187,8 @@ class KnowledgeAttachmentService:
         self._lock = asyncio.Lock()
 
     async def open(self, source_id: str, message_id: str, attachment_id: str) -> AttachmentResult:
-        async with self._lock:
-            attachment = self._attachment(source_id, message_id, attachment_id)
-            snapshot = self._snapshot(source_id, message_id, attachment_id)
-            if snapshot is None:
-                snapshot = await self._download(source_id, message_id, attachment)
-            path = self.storage.path_for(snapshot["storage_name"])
-            self.storage.validate(path, snapshot["size_bytes"], snapshot["sha256"])
+        snapshot, path = await self.ensure_snapshot(source_id, message_id, attachment_id)
+        attachment = self._attachment(source_id, message_id, attachment_id)
         metadata = self._public_metadata(attachment, snapshot)
         text_preview = None
         images: tuple[PreviewFrame, ...] = ()
@@ -218,6 +213,18 @@ class KnowledgeAttachmentService:
         elif media_type in {"application/zip", "application/x-zip-compressed"}:
             metadata["archive_listing"] = self._zip_listing(path)
         return AttachmentResult(metadata, path, text_preview, images)
+
+    async def ensure_snapshot(
+        self, source_id: str, message_id: str, attachment_id: str
+    ):
+        async with self._lock:
+            attachment = self._attachment(source_id, message_id, attachment_id)
+            snapshot = self._snapshot(source_id, message_id, attachment_id)
+            if snapshot is None:
+                snapshot = await self._download(source_id, message_id, attachment)
+            path = self.storage.path_for(snapshot["storage_name"])
+            self.storage.validate(path, snapshot["size_bytes"], snapshot["sha256"])
+            return snapshot, path
 
     def snapshot_file(self, source_id: str, message_id: str, attachment_id: str):
         self._attachment(source_id, message_id, attachment_id)

@@ -12,7 +12,9 @@ from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.jobs import ArtifactStorage, JobService, JobStore
 from app.knowledge import (
     AttachmentStorage,
+    AttachmentExportRegistry,
     KnowledgeAttachmentService,
+    KnowledgeAttachmentExportService,
     KnowledgeService,
     KnowledgeStore,
     TelegramKnowledgeService,
@@ -40,6 +42,7 @@ class ApplicationContainer:
     knowledge: KnowledgeService | None
     telegram_knowledge: TelegramKnowledgeService | None
     knowledge_attachments: KnowledgeAttachmentService | None
+    knowledge_attachment_exports: KnowledgeAttachmentExportService | None
 
 
 def build_container(
@@ -161,6 +164,7 @@ def build_container(
             recent_window_size=telegram.recent_window_size,
         )
     knowledge_attachments = None
+    knowledge_attachment_exports = None
     if knowledge_store is not None and knowledge_attachment_directory is not None:
         knowledge_attachments = KnowledgeAttachmentService(
             knowledge_store,
@@ -169,6 +173,18 @@ def build_container(
                 configured.knowledge.attachment_max_bytes,
             ),
             configured_adapter,
+        )
+        knowledge_attachment_exports = KnowledgeAttachmentExportService(
+            knowledge_attachments,
+            AttachmentExportRegistry(
+                configured.knowledge.attachment_export_ttl_seconds
+            ),
+            (
+                str(configured.server.public_base_url)
+                if configured.server.public_base_url is not None
+                else None
+            ),
+            configured.server.endpoint,
         )
     return ApplicationContainer(
         settings=configured,
@@ -199,4 +215,5 @@ def build_container(
         ),
         telegram_knowledge=telegram_knowledge,
         knowledge_attachments=knowledge_attachments,
+        knowledge_attachment_exports=knowledge_attachment_exports,
     )

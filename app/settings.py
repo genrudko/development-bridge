@@ -17,7 +17,25 @@ class ServerSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8789, ge=1, le=65535)
     endpoint: str = "/mcp"
+    public_base_url: AnyHttpUrl | None = None
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*")
+
+    @model_validator(mode="after")
+    def public_base_url_is_canonical_https_origin(self) -> ServerSettings:
+        if self.public_base_url is None:
+            return self
+        if self.public_base_url.scheme != "https":
+            raise ValueError("server.public_base_url must use HTTPS")
+        if (
+            self.public_base_url.username is not None
+            or self.public_base_url.password is not None
+        ):
+            raise ValueError("server.public_base_url must not contain credentials")
+        if self.public_base_url.path not in {None, "", "/"}:
+            raise ValueError("server.public_base_url must not contain a path")
+        if self.public_base_url.query is not None or self.public_base_url.fragment is not None:
+            raise ValueError("server.public_base_url must not contain query or fragment")
+        return self
 
 
 class ArtifactSettings(BaseModel):
@@ -82,6 +100,7 @@ class KnowledgeSettings(BaseModel):
     attachment_max_bytes: int = Field(
         default=536_870_912, ge=1_048_576, le=4_294_967_296
     )
+    attachment_export_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     telegram: TelegramKnowledgeSettings = Field(default_factory=TelegramKnowledgeSettings)
 
 

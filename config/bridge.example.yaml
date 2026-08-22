@@ -4,6 +4,8 @@ server:
   host: 127.0.0.1
   port: 8789
   endpoint: /mcp
+# Canonical HTTPS origin used only to construct short-lived external export URLs.
+# public_base_url: https://bridge.example
   allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
 jobs:
   database_path: /absolute/path/to/development-bridge-jobs.sqlite3
@@ -12,6 +14,7 @@ jobs:
 #   database_path: /absolute/path/to/development-bridge-knowledge.sqlite3
 #   attachment_directory: /absolute/path/to/development-bridge-knowledge-attachments
 #   attachment_max_bytes: 536870912
+#   attachment_export_ttl_seconds: 600
 #   telegram:
 #     api_id: 12345
 #     api_hash: replace-with-my-telegram-api-hash

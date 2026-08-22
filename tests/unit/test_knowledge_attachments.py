@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -13,6 +14,10 @@ from app.knowledge.attachments import (
     AttachmentStorage,
     KnowledgeAttachmentService,
     PreviewFrame,
+)
+from app.knowledge.exports import (
+    AttachmentExportRegistry,
+    KnowledgeAttachmentExportService,
 )
 from app.knowledge.service import KnowledgeService
 from app.knowledge.store import KnowledgeStore
@@ -253,3 +258,47 @@ def test_legacy_attachment_schema_is_migrated_without_recreating_rows(tmp_path):
     assert attachment["attachment_id"].startswith("file-")
     assert attachment["media_type"] == "text/plain"
     assert attachment["file_name"] == "run.log"
+
+
+def test_export_tokens_are_opaque_bounded_repeatable_and_expire():
+    current = {"monotonic": 100.0}
+    registry = AttachmentExportRegistry(
+        600,
+        capacity=2,
+        monotonic=lambda: current["monotonic"],
+        utcnow=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    first_token, first = registry.issue("source-secret", "123", "attachment-secret")
+    second_token, _ = registry.issue("other", "456", "second")
+    assert first_token != second_token
+    assert len(first_token) >= 43
+    assert "source-secret" not in first_token
+    assert (first.source_id, first.message_id, first.attachment_id) == (
+        "source-secret", "123", "attachment-secret",
+    )
+    assert registry.lookup(first_token) == first
+    assert registry.lookup(first_token) == first
+
+    # Capacity is bounded; the grant nearest expiry is evicted when issuing more.
+    third_token, _ = registry.issue("third", "789", "third")
+    assert registry.lookup(first_token) is None
+    assert registry.lookup(third_token) is not None
+
+    current["monotonic"] = 701.0
+    assert registry.lookup(second_token) is None
+    assert registry.lookup(third_token) is None
+
+
+@pytest.mark.asyncio
+async def test_export_without_public_origin_is_a_configuration_error(tmp_path):
+    metadata = {"telegram_media_id": "export-5", "mime_type": "text/plain"}
+    _, adapter, attachments, source_id, attachment_id = await configured(
+        tmp_path, b"export", metadata
+    )
+    exports = KnowledgeAttachmentExportService(
+        attachments, AttachmentExportRegistry(600), None, "/mcp"
+    )
+    with pytest.raises(BridgeError) as missing:
+        await exports.export(source_id, "5", attachment_id)
+    assert missing.value.code is ErrorCode.KNOWLEDGE_EXPORT_NOT_CONFIGURED
+    assert adapter.download_calls == []

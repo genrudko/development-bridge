@@ -31,7 +31,8 @@ The Bridge exposes:
 - Community Knowledge: `knowledge_source_list`, `knowledge_search`,
   `knowledge_message`, `knowledge_thread`, `knowledge_source_add`, and
   `knowledge_source_sync`; `knowledge_attachment_open` lazily snapshots one
-  corpus-validated attachment.
+  corpus-validated attachment, while `knowledge_attachment_export` issues a
+  short-lived external URL for the same immutable snapshot.
 
 ## Community Knowledge
 
@@ -82,6 +83,13 @@ PDFs as bounded extracted text without OCR. Videos retain the raw original and,
 when `ffmpeg` and `ffprobe` are installed, include bounded metadata and up to
 eight preview frames. Other binary files remain available from the OAuth-
 protected raw route without execution or automatic extraction.
+
+External file delivery is opt-in through `server.public_base_url`, which must
+be a canonical HTTPS origin. `knowledge_attachment_export` creates no file
+copy: it issues a random process-local token with a configurable 10-minute
+default TTL. The repeatable `/mcp/knowledge/exports/{token}` route uses
+`private, no-store` and reveals neither corpus identity nor a filesystem path.
+Service restart invalidates outstanding export tokens.
 
 Archives also remain outside Git. The fallback JSON import is a local CLI
 operation; MCP clients cannot supply filesystem paths or trigger file imports.

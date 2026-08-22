@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 
 import httpx2
@@ -11,9 +12,11 @@ from mcp.client.streamable_http import streamable_http_client
 
 from app.auth import create_owner_verifier
 from app.container import build_container
+from app.knowledge.telegram import TelegramAttachment
 from app.runtime import create_server
 from app.settings import BridgeSettings
 from app.transport import create_streamable_http_app
+from tests.fixtures.telegram_adapter import FakeTelegramAdapter, message as telegram_message
 
 
 def pkce_challenge(verifier: str) -> str:
@@ -258,3 +261,50 @@ async def test_knowledge_attachment_download_requires_the_same_bearer_token(tmp_
 
     assert response.status_code == 401
     assert "resource_metadata=" in response.headers["www-authenticate"]
+
+
+@pytest.mark.asyncio
+async def test_valid_export_token_bypasses_oauth_but_not_attachment_validation(tmp_path):
+    attachment_message = replace(
+        telegram_message(5),
+        attachments=(TelegramAttachment("document", {
+            "telegram_media_id": "export-5", "mime_type": "application/octet-stream",
+            "file_name": "firmware.bin", "size": 6,
+        }),),
+    )
+    adapter = FakeTelegramAdapter(
+        [attachment_message], attachment_bytes={"document-export-5": b"binary"}
+    )
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "oauth": {
+            "enabled": True,
+            "issuer_url": "http://127.0.0.1",
+            "resource_url": "http://127.0.0.1/mcp",
+            "database_path": tmp_path / "oauth.sqlite3",
+            "owner_verifier": create_owner_verifier("owner-password"),
+        },
+        "knowledge": {
+            "database_path": tmp_path / "knowledge.sqlite3",
+            "attachment_directory": tmp_path / "attachments",
+        },
+    })
+    container = build_container(settings, telegram_adapter=adapter)
+    added = await container.telegram_knowledge.source_add("@ad5x_community")
+    exported = await container.knowledge_attachment_exports.export(
+        added["source_id"], "5", "document-export-5"
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.get(urlparse(exported["export_url"]).path)
+        protected = await client.get(
+            "/mcp/knowledge/attachments/" + added["source_id"]
+            + "/5/document-export-5"
+        )
+
+    assert response.status_code == 200
+    assert response.content == b"binary"
+    assert protected.status_code == 401

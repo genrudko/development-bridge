@@ -35,6 +35,7 @@ knowledge:
   database_path: /home/user/.local/state/development-bridge/knowledge.sqlite3
   attachment_directory: /home/user/.local/state/development-bridge/knowledge-attachments
   attachment_max_bytes: 536870912
+  attachment_export_ttl_seconds: 600
   telegram:
     api_id: 12345
     api_hash: replace-with-my-telegram-api-hash
@@ -42,6 +43,17 @@ knowledge:
     sync_batch_size: 2000
     recent_window_size: 100
 ```
+
+To enable short-lived URLs for an external file downloader, configure the
+canonical origin without the MCP endpoint:
+
+```yaml
+server:
+  public_base_url: https://bridge.example
+```
+
+With the default endpoint, URLs are
+`https://bridge.example/mcp/knowledge/exports/{opaque-token}`.
 
 Authorize the Telegram user account once. Telethon prompts for the phone, login
 code, and the 2FA password when required:

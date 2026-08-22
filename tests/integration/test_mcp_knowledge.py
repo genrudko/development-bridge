@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx2
 import pytest
@@ -11,6 +12,10 @@ from mcp.client.streamable_http import streamable_http_client
 
 from app.container import build_container
 from app.knowledge import KnowledgeStore, TelegramJsonImporter
+from app.knowledge.exports import (
+    AttachmentExportRegistry,
+    KnowledgeAttachmentExportService,
+)
 from app.knowledge.telegram import TelegramAttachment
 from app.runtime import create_server
 from app.settings import BridgeSettings
@@ -43,7 +48,7 @@ async def test_full_mcp_session_exercises_all_knowledge_tools(tmp_path):
                 async with ClientSession(*streams) as session:
                     await session.initialize()
                     listed = await session.list_tools()
-                    assert len(listed.tools) == 35
+                    assert len(listed.tools) == 36
 
                     sources = await session.call_tool("knowledge_source_list", {})
                     source_payload = json.loads(sources.content[0].text)
@@ -98,7 +103,10 @@ async def test_full_link_first_mcp_flow_adds_syncs_and_queries_telegram(tmp_path
         messages, attachment_bytes={"document-cfg-5": b"z_offset: -1.25\n"}
     )
     settings = BridgeSettings.model_validate({
-        "server": {"name": "telegram-knowledge-test"},
+        "server": {
+            "name": "telegram-knowledge-test",
+            "public_base_url": "https://downloads.example",
+        },
         "knowledge": {
             "database_path": database,
             "attachment_directory": tmp_path / "attachments",
@@ -106,6 +114,18 @@ async def test_full_link_first_mcp_flow_adds_syncs_and_queries_telegram(tmp_path
         },
     })
     container = build_container(settings, telegram_adapter=adapter)
+    export_clock = {"value": 100.0}
+    container = replace(
+        container,
+        knowledge_attachment_exports=KnowledgeAttachmentExportService(
+            container.knowledge_attachments,
+            AttachmentExportRegistry(
+                600, monotonic=lambda: export_clock["value"]
+            ),
+            str(settings.server.public_base_url),
+            settings.server.endpoint,
+        ),
+    )
     app = create_streamable_http_app(create_server(container), settings, container)
 
     async with app.router.lifespan_context(app):
@@ -142,6 +162,43 @@ async def test_full_link_first_mcp_flow_adds_syncs_and_queries_telegram(tmp_path
                     exact_data = json.loads(exact.content[0].text)["data"]
                     assert exact_data["reply_parent"]["message_id"] == "4"
                     attachment_id = exact_data["attachments"][0]["attachment_id"]
+                    assert adapter.download_calls == []
+
+                    exported = await session.call_tool("knowledge_attachment_export", {
+                        "source_id": source_id, "message_id": "5",
+                        "attachment_id": attachment_id,
+                    })
+                    exported_data = json.loads(exported.content[0].text)["data"]
+                    assert exported_data["export_url"].startswith(
+                        "https://downloads.example/mcp/knowledge/exports/"
+                    )
+                    assert str(tmp_path) not in json.dumps(exported_data)
+                    assert len(adapter.download_calls) == 1
+                    export_path = urlparse(exported_data["export_url"]).path
+
+                    first_get = await client.get(export_path)
+                    repeated_get = await client.get(export_path)
+                    export_head = await client.head(export_path)
+                    assert first_get.content == repeated_get.content == b"z_offset: -1.25\n"
+                    assert export_head.status_code == 200
+                    assert first_get.headers["content-type"].startswith("text/plain")
+                    assert int(first_get.headers["content-length"]) == len(b"z_offset: -1.25\n")
+                    assert "printer.cfg" in first_get.headers["content-disposition"]
+                    assert first_get.headers["etag"] == f'"{exported_data["sha256"]}"'
+                    assert first_get.headers["cache-control"] == "private, no-store"
+                    assert (await client.get("/mcp/knowledge/exports/random-token")).status_code == 404
+                    assert (await client.get(export_path + "/different-attachment")).status_code == 404
+
+                    second_export = await session.call_tool("knowledge_attachment_export", {
+                        "source_id": source_id, "message_id": "5",
+                        "attachment_id": attachment_id,
+                    })
+                    second_data = json.loads(second_export.content[0].text)["data"]
+                    assert second_data["export_url"] != exported_data["export_url"]
+                    assert second_data["sha256"] == exported_data["sha256"]
+                    assert len(adapter.download_calls) == 1
+                    export_clock["value"] = 701.0
+                    assert (await client.get(export_path)).status_code == 404
 
                     opened = await session.call_tool("knowledge_attachment_open", {
                         "source_id": source_id, "message_id": "5",

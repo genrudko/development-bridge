@@ -115,11 +115,42 @@ def create_streamable_http_app(
                 {"error": "Knowledge attachment is not available"}, status_code=404
             )
 
+    async def knowledge_attachment_export_download(request: Request):
+        try:
+            if not _host_allowed(request.headers.get("host", ""), settings):
+                return JSONResponse({"error": "Host is not allowed"}, status_code=421)
+            if container.knowledge_attachment_exports is None:
+                raise LookupError
+            resolved = container.knowledge_attachment_exports.resolve(
+                request.path_params["token"]
+            )
+            if resolved is None:
+                raise LookupError
+            snapshot, path = resolved
+            return FileResponse(
+                path,
+                media_type=snapshot["media_type"],
+                filename=snapshot["file_name"],
+                headers={
+                    "ETag": f'"{snapshot["sha256"]}"',
+                    "Cache-Control": "private, no-store",
+                },
+            )
+        except (LookupError, OSError):
+            return JSONResponse(
+                {"error": "Knowledge attachment export is not available"},
+                status_code=404,
+                headers={"Cache-Control": "private, no-store"},
+            )
+
     artifact_path = settings.server.endpoint.rstrip("/") + (
         "/artifacts/{project_id}/{repository_id}/{job_id}/{artifact_id}"
     )
     knowledge_attachment_path = settings.server.endpoint.rstrip("/") + (
         "/knowledge/attachments/{source_id}/{message_id}/{attachment_id}"
+    )
+    knowledge_attachment_export_path = settings.server.endpoint.rstrip("/") + (
+        "/knowledge/exports/{token}"
     )
     artifact_endpoint = artifact_download
     auth_settings = None
@@ -179,6 +210,14 @@ def create_streamable_http_app(
             knowledge_attachment_endpoint,
             methods=["GET", "HEAD"],
             name="knowledge_attachment_download",
+        )
+    )
+    custom_routes.append(
+        Route(
+            knowledge_attachment_export_path,
+            knowledge_attachment_export_download,
+            methods=["GET", "HEAD"],
+            name="knowledge_attachment_export_download",
         )
     )
     app = server.streamable_http_app(

@@ -39,6 +39,7 @@ SUPPORTED_TOOLS = {
     "knowledge_source_add",
     "knowledge_source_sync",
     "knowledge_attachment_open",
+    "knowledge_attachment_export",
 }
 
 
@@ -46,7 +47,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 35
+    assert len(registry.definitions) == 36
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {"v1", "community-knowledge"}
 
 

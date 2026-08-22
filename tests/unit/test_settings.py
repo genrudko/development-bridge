@@ -55,6 +55,21 @@ def test_rejects_unknown_fields():
         BridgeSettings.model_validate({"version": 1, "unknown": True})
 
 
+def test_public_base_url_is_an_optional_canonical_https_origin():
+    assert BridgeSettings().server.public_base_url is None
+    configured = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+    })
+    assert str(configured.server.public_base_url) == "https://bridge.example/"
+    for invalid in (
+        "http://bridge.example", "https://bridge.example/mcp",
+        "https://bridge.example/?query=yes",
+        "https://user:password@bridge.example",
+    ):
+        with pytest.raises(ValidationError):
+            BridgeSettings.model_validate({"server": {"public_base_url": invalid}})
+
+
 def test_task_profiles_require_a_durable_job_database(tmp_path):
     repository = {
         "id": "repo",
