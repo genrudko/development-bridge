@@ -1,0 +1,55 @@
+{
+  "name": "AD5X Community",
+  "type": "public_supergroup",
+  "id": 123456,
+  "messages": [
+    {
+      "id": 102,
+      "type": "message",
+      "date": "2025-02-03T10:10:00+00:00",
+      "from": "Bob Builder",
+      "from_id": "user200",
+      "reply_to_message_id": 100,
+      "text": [
+        "Confirmed: ",
+        {"type": "bold", "text": "Z-offset"},
+        " remains stable after restart."
+      ],
+      "text_entities": [{"type": "bold", "text": "Z-offset"}],
+      "unknown_future_field": {"safe": true}
+    },
+    {
+      "id": 100,
+      "type": "message",
+      "date": "2025-02-03T10:00:00+00:00",
+      "edited": "2025-02-03T10:01:00+00:00",
+      "from": "Alice Admin",
+      "from_id": "user100",
+      "text": "AD5X Z-offset drifts by 0.2 mm after restart",
+      "permalink": "https://t.me/ad5x/100"
+    },
+    {
+      "id": 103,
+      "type": "service",
+      "date_unixtime": "1738578000",
+      "actor": "System User",
+      "actor_id": "user300",
+      "action": "pin_message",
+      "text": "Pinned the diagnostic procedure"
+    },
+    {
+      "id": 101,
+      "type": "message",
+      "date": "2025-02-03T10:05:00+00:00",
+      "from": "Carol",
+      "reply_to_message_id": 999,
+      "reply_to_top_id": 100,
+      "topic_id": 42,
+      "text": "Attached calibration plot",
+      "photo": "photos/photo_1.jpg",
+      "width": 1280,
+      "height": 720,
+      "file_size": 45678
+    }
+  ]
+}

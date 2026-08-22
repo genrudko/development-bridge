@@ -98,3 +98,22 @@ def test_enabled_oauth_requires_owner_verifier_at_startup(tmp_path):
 
     with pytest.raises(BridgeError, match="DEVELOPMENT_BRIDGE_OWNER_VERIFIER"):
         build_container(settings)
+
+
+def test_knowledge_database_inside_repository_is_rejected(tmp_path):
+    repository = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "knowledge": {"database_path": repository / ".bridge" / "knowledge.sqlite3"},
+            "projects": [
+                {
+                    "id": "project",
+                    "name": "Project",
+                    "repositories": [{"id": "repository", "path": repository}],
+                }
+            ],
+        }
+    )
+    with pytest.raises(BridgeError) as raised:
+        build_container(settings)
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT

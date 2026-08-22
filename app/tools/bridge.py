@@ -24,6 +24,7 @@ def bridge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                         "controlled-changes",
                         "tasks-jobs",
                         "git-write",
+                        "community-knowledge",
                     ],
                     "project_count": len(container.projects.list()),
                 },

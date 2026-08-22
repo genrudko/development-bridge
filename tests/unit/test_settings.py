@@ -181,3 +181,10 @@ def test_rejects_inconsistent_remote_oauth_urls(tmp_path, issuer, resource):
                 }
             }
         )
+
+
+def test_loads_optional_knowledge_database_path(tmp_path):
+    settings = BridgeSettings.model_validate(
+        {"knowledge": {"database_path": tmp_path / "knowledge.sqlite3"}}
+    )
+    assert settings.knowledge.database_path == tmp_path / "knowledge.sqlite3"

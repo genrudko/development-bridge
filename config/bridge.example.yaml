@@ -7,6 +7,9 @@ server:
   allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
 jobs:
   database_path: /absolute/path/to/development-bridge-jobs.sqlite3
+# Optional Community Knowledge corpus; keep it outside registered repositories.
+# knowledge:
+#   database_path: /absolute/path/to/development-bridge-knowledge.sqlite3
 # OAuth is optional for local development. A remote private deployment enables it
 # and supplies DEVELOPMENT_BRIDGE_OWNER_VERIFIER through its secret environment.
 # oauth:

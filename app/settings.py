@@ -66,6 +66,11 @@ class JobSettings(BaseModel):
     artifact_directory: Path | None = None
 
 
+class KnowledgeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    database_path: Path | None = None
+
+
 class OAuthSettings(BaseModel):
     model_config = ConfigDict(
         extra="forbid", frozen=True, url_preserve_empty_path=True
@@ -134,6 +139,7 @@ class BridgeSettings(BaseModel):
     version: int = Field(default=1, ge=1, le=1)
     server: ServerSettings = Field(default_factory=ServerSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
+    knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     projects: tuple[ProjectSettings, ...] = ()
 

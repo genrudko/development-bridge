@@ -32,15 +32,19 @@ SUPPORTED_TOOLS = {
     "job_cancel",
     "job_artifact_list",
     "job_artifact_view",
+    "knowledge_source_list",
+    "knowledge_search",
+    "knowledge_message",
+    "knowledge_thread",
 }
 
 
-def test_registered_tool_surface_is_exact_and_repository_scoped():
+def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 28
-    assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {"v1"}
+    assert len(registry.definitions) == 32
+    assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {"v1", "community-knowledge"}
 
 
 def test_legacy_global_workspace_names_are_absent():

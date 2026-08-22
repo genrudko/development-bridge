@@ -15,6 +15,9 @@ dependencies = [
     "uvicorn>=0.52,<1",
 ]
 
+[project.scripts]
+development-bridge-import-telegram = "app.knowledge.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8,<9", "pytest-asyncio>=0.24,<2"]
 

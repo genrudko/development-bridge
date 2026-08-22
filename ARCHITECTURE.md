@@ -16,12 +16,14 @@ The approved target model is:
 
 ```text
 Bridge
-└── Project
-    └── Repository
-        ├── Files
-        ├── Git state and workspace operations
-        ├── Controlled changes
-        └── Registered tasks, jobs, and artifacts
+├── Project
+│   └── Repository
+│       ├── Files
+│       ├── Git state and workspace operations
+│       ├── Controlled changes
+│       └── Registered tasks, jobs, and artifacts
+└── Community Knowledge (optional, repository-independent)
+    └── normalized local SQLite/FTS5 evidence corpus
 ```
 
 Repository-scoped calls carry explicit `project_id` and `repository_id`
@@ -38,6 +40,8 @@ The package boundaries under `app/` are:
 - `changes`: validated, revision-guarded changes;
 - `tasks` and `jobs`: registered execution profiles, durable jobs, and
   immutable artifact snapshots;
+- `knowledge`: Telegram JSON import, normalized corpus persistence, FTS search,
+  exact lookup, neighborhoods, and bounded reply reconstruction;
 - `integrations`: boundary for future optional external integrations.
 
 The Core packages for API results, projects, capabilities, audit, Git read,
@@ -100,8 +104,25 @@ passthrough.
 ## Runtime isolation
 
 Runtime configuration, credentials, job state, OAuth state, and artifact
-snapshots live outside registered Git repositories. A deployed Bridge may run
+snapshots live outside registered Git repositories. Community archive exports
+and the knowledge SQLite corpus are runtime state and follow the same rule.
+A deployed Bridge may run
 directly from a registered source checkout for dogfooding, but service state
 must not be written into that checkout. This keeps repository operations and
 runtime persistence separate while still allowing Development Bridge to manage
 and test its own source repository.
+
+## Community evidence boundary
+
+The Telegram Desktop importer is an explicit local CLI, not an MCP tool. It
+normalizes messages and attachment metadata without copying media, and updates
+the FTS5 index transactionally on repeated imports. MCP exposes only bounded,
+read-only knowledge operations. These operations intentionally omit
+`project_id` and `repository_id`: the corpus is external evidence, not a Git
+checkout and not mutable global workspace state.
+
+The MVP uses the standard-library JSON decoder, so one export document is held
+in memory while its messages are written incrementally in one SQLite
+transaction; it does not materialize a second in-memory message corpus. Live
+sync, social-network login, background scheduling, semantic ranking, media
+download, and automated truth scoring remain outside this contour.

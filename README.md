@@ -4,8 +4,9 @@ Development Bridge is the successor repository for the former
 `development-mcp` service. The staged Development Bridge v1 migration is
 complete and the preserved global-workspace API has been removed.
 
-Stages 1 through 7 are implemented. The Streamable HTTP transport exposes one
-repository-scoped API with explicit project and repository selection.
+Stages 1 through 7 are implemented. The Streamable HTTP transport exposes the
+development API with explicit project and repository selection plus an
+optional repository-independent Community Knowledge evidence API.
 
 Private remote deployments can enable the built-in single-owner OAuth server.
 It follows MCP protected-resource and authorization-server discovery, supports
@@ -27,6 +28,39 @@ The Bridge exposes:
 - Tasks and jobs: `task_list`, `task_start`, `job_status`, `job_output`,
   `job_cancel`, `job_artifact_list`, and `job_artifact_view`;
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
+- Community Knowledge: `knowledge_source_list`, `knowledge_search`,
+  `knowledge_message`, and `knowledge_thread`.
+
+## Community Knowledge
+
+Community Knowledge is an optional, repository-independent evidence contour:
+
+```text
+Telegram Desktop JSON export
+        ↓
+local one-shot importer
+        ↓
+normalized SQLite corpus + FTS5
+        ↓
+KnowledgeService
+        ↓
+thin knowledge_* MCP tools
+        ↓
+ChatGPT analysis
+```
+
+Set `knowledge.database_path` to a SQLite file outside every registered Git
+repository. Archives also remain outside Git. Import is a local CLI operation;
+MCP clients cannot supply filesystem paths or trigger imports. The first
+importer accepts Telegram Desktop JSON, while stored sources and messages use
+platform-neutral identifiers so another provider can be added without turning
+the repository API into a social-network client.
+
+The corpus is an evidence source, not an automatically trustworthy source of
+truth. Search and lookup preserve source, author, timestamp, message ID, reply
+relationships, topic metadata, permalink, and a stable reference. Community
+claims should be compared with code, documentation, logs, measurements, and
+other evidence before they are treated as reproducible facts.
 
 The Core API uses immutable project and repository registries loaded from a
 validated Bridge configuration. It has no global current repository. The Stage 2 File
@@ -72,7 +106,7 @@ remain available through the existing authenticated HTTP download route.
 
 This repository does not contain runtime state. In particular, it excludes
 environment files, credentials, virtual environments, logs, job and OAuth
-databases, artifact snapshots, and archives.
+databases, knowledge databases, artifact snapshots, and community archives.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md), [MIGRATION.md](MIGRATION.md), and
 [DEVELOPMENT.md](DEVELOPMENT.md) before making changes.

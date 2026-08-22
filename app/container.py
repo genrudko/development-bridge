@@ -10,6 +10,7 @@ from app.changes import ChangeRevisionCalculator, ChangeService
 from app.files import FileService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.jobs import ArtifactStorage, JobService, JobStore
+from app.knowledge import KnowledgeService, KnowledgeStore
 from app.projects import ProjectRegistry, RepositoryMutationLock
 from app.settings import BridgeSettings, load_settings
 from app.tasks import TaskRegistry
@@ -29,6 +30,7 @@ class ApplicationContainer:
     tasks: TaskRegistry
     jobs: JobService
     oauth: BridgeOAuthProvider | None
+    knowledge: KnowledgeService | None
 
 
 def build_container(
@@ -59,10 +61,16 @@ def build_container(
         if configured.oauth.database_path is not None
         else None
     )
+    knowledge_database_path = (
+        configured.knowledge.database_path.expanduser().resolve()
+        if configured.knowledge.database_path is not None
+        else None
+    )
     for state_path, label in (
         (database_path, "Job database"),
         (artifact_directory, "Artifact directory"),
         (oauth_database_path, "OAuth database"),
+        (knowledge_database_path, "Knowledge database"),
     ):
         if state_path is None:
             continue
@@ -127,4 +135,9 @@ def build_container(
             else None,
         ),
         oauth=oauth,
+        knowledge=(
+            KnowledgeService(KnowledgeStore(knowledge_database_path))
+            if knowledge_database_path is not None
+            else None
+        ),
     )

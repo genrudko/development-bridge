@@ -18,6 +18,7 @@ BRIDGE_CAPABILITIES = {
     "controlled-changes",
     "tasks-jobs",
     "git-write",
+    "community-knowledge",
 }
 
 

@@ -26,6 +26,29 @@ tests at the production workspace.
 
 The default local endpoint is `http://127.0.0.1:8789/mcp`.
 
+## Import a community archive
+
+Configure an external runtime database:
+
+```yaml
+knowledge:
+  database_path: /home/user/.local/state/development-bridge/knowledge.sqlite3
+```
+
+Then import a Telegram Desktop JSON export locally:
+
+```bash
+.venv/bin/python -m app.knowledge.cli \
+  --config bridge.local.yaml \
+  --source-id ad5x-public \
+  --source-url https://t.me/example \
+  --title "AD5X Public Community" \
+  /home/user/.local/share/development-bridge/knowledge-imports/ad5x/result.json
+```
+
+The import is idempotent by source and Telegram message ID. It reads attachment
+metadata but does not open, copy, or store exported media files.
+
 OAuth is disabled by default for local development. A private remote deployment
 enables the built-in OAuth server with canonical HTTPS issuer and MCP resource
 URLs, an OAuth SQLite database outside every registered repository, and one
