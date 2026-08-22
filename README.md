@@ -32,6 +32,7 @@ The Bridge exposes:
   repositories with `execute`, using the same durable jobs and artifacts;
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
 - GitHub host: repository status, checks, issues, pull requests, reviews,
+  issue/PR discussion, inline review comments, bounded PR file patches,
   exact-head merge, and Actions runs/jobs/logs/artifacts/lifecycle.
 - Community Knowledge: `knowledge_source_list`, `knowledge_search`,
   `knowledge_message`, `knowledge_thread`, `knowledge_source_add`, and

@@ -42,6 +42,10 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         a = params.arguments
         return result(rc, await container.github.issue_get(repository(a), a["issue_number"]))
 
+    async def issue_comments(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.issue_comments(repository(a), a["issue_number"], a.get("limit", 50)))
+
     async def issue_create(ctx, params, rc):
         a = params.arguments
         payload = {key: a[key] for key in ("title", "body", "labels", "assignees", "milestone") if key in a}
@@ -83,6 +87,14 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     async def pull_reviews(ctx, params, rc):
         a = params.arguments
         return result(rc, await container.github.pull_reviews(repository(a), a["pull_number"], a.get("limit", 50)))
+
+    async def pull_review_comments(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.pull_review_comments(repository(a), a["pull_number"], a.get("limit", 50)))
+
+    async def pull_files(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.pull_files(repository(a), a["pull_number"], a.get("limit", 50)))
 
     async def pull_review(ctx, params, rc):
         a = params.arguments
@@ -153,6 +165,7 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         ("github_commit_checks", "Show check runs and commit status contexts", {"sha": SHA}, ["sha"], commit_checks),
         ("github_issue_list", "List bounded GitHub issues", {**state, "labels": NAMES, **limit}, [], issue_list),
         ("github_issue_get", "Get one GitHub issue", issue_number, ["issue_number"], issue_get),
+        ("github_issue_comments", "List bounded GitHub issue conversation comments", {**issue_number, **limit}, ["issue_number"], issue_comments),
         ("github_issue_create", "Create a GitHub issue", issue_fields, ["title"], issue_create),
         ("github_issue_update", "Update a GitHub issue", {**issue_number, **issue_fields, "state": {"type": "string", "enum": ["open", "closed"]}, "state_reason": {"type": "string", "enum": ["completed", "not_planned", "reopened"]}}, ["issue_number"], issue_update),
         ("github_issue_comment", "Comment on a GitHub issue", {**issue_number, "body": NONEMPTY_TEXT}, ["issue_number", "body"], issue_comment),
@@ -162,6 +175,8 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         ("github_pull_request_update", "Update a GitHub pull request including draft state", {**pull_number, "title": issue_fields["title"], "body": TEXT, "state": {"type": "string", "enum": ["open", "closed"]}, "base": NAME, "draft": {"type": "boolean"}}, ["pull_number"], pull_update),
         ("github_pull_request_comment", "Comment on a GitHub pull request", {**pull_number, "body": NONEMPTY_TEXT}, ["pull_number", "body"], pull_comment),
         ("github_pull_request_reviews", "List bounded pull request reviews", {**pull_number, **limit}, ["pull_number"], pull_reviews),
+        ("github_pull_request_review_comments", "List bounded inline pull request review comments", {**pull_number, **limit}, ["pull_number"], pull_review_comments),
+        ("github_pull_request_files", "List bounded pull request file and patch evidence", {**pull_number, **limit}, ["pull_number"], pull_files),
         ("github_pull_request_review", "Submit a pull request review", {**pull_number, "event": {"type": "string", "enum": ["COMMENT", "APPROVE", "REQUEST_CHANGES"]}, "body": TEXT}, ["pull_number", "event"], pull_review),
         ("github_pull_request_request_reviewers", "Request pull request reviewers", {**pull_number, "reviewers": NAMES, "team_reviewers": NAMES}, ["pull_number"], request_reviewers),
         ("github_pull_request_merge", "Merge a pull request only at an exact expected head", {**pull_number, "expected_head": SHA, "method": {"type": "string", "enum": ["merge", "squash", "rebase"], "default": "merge"}}, ["pull_number", "expected_head"], pull_merge),

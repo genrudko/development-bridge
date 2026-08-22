@@ -237,3 +237,81 @@ async def test_workflow_identifier_is_one_escaped_path_segment(
     ) == {"runs": []}
     dispatched = await service.actions_dispatch(repository, workflow, "main", {})
     assert dispatched["workflow"] == workflow
+
+
+@pytest.mark.asyncio
+async def test_github_review_read_surfaces_are_bounded_and_normalized(tmp_path):
+    repository = github_repository(tmp_path, {"git_read": True})
+    transport = FakeGitHubTransport()
+    service = GitHubHostService(GitRunner(), CapabilityPolicy(), transport)
+    repo = "/repos/acme/widgets"
+    conversation = {
+        "id": 11,
+        "body": "discussion",
+        "user": {"login": "alice"},
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "html_url": "https://github.com/acme/widgets/issues/2#issuecomment-11",
+    }
+    transport.add(
+        "GET", repo + "/issues/2/comments?per_page=2", [conversation] * 3
+    )
+    comments = await service.issue_comments(repository, 2, 2)
+    assert comments == {"comments": [{
+        "id": 11,
+        "body": "discussion",
+        "author": "alice",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+        "url": "https://github.com/acme/widgets/issues/2#issuecomment-11",
+    }] * 2}
+
+    inline = {
+        "id": 12,
+        "body": "inline",
+        "user": {"login": "bob"},
+        "commit_id": "a" * 40,
+        "original_commit_id": "b" * 40,
+        "path": "src/app.py",
+        "line": 20,
+        "original_line": 18,
+        "start_line": 17,
+        "side": "RIGHT",
+        "start_side": "RIGHT",
+        "in_reply_to_id": 10,
+        "created_at": "2026-01-03T00:00:00Z",
+        "updated_at": "2026-01-04T00:00:00Z",
+        "html_url": "https://github.com/acme/widgets/pull/2#discussion_r12",
+    }
+    transport.add("GET", repo + "/pulls/2/comments?per_page=1", [inline, inline])
+    review_comments = await service.pull_review_comments(repository, 2, 1)
+    assert review_comments["comments"] == [{
+        "id": 12,
+        "body": "inline",
+        "author": "bob",
+        "commit_sha": "a" * 40,
+        "original_commit_sha": "b" * 40,
+        "path": "src/app.py",
+        "line": 20,
+        "original_line": 18,
+        "start_line": 17,
+        "side": "RIGHT",
+        "start_side": "RIGHT",
+        "in_reply_to_id": 10,
+        "created_at": "2026-01-03T00:00:00Z",
+        "updated_at": "2026-01-04T00:00:00Z",
+        "url": "https://github.com/acme/widgets/pull/2#discussion_r12",
+    }]
+
+    oversized_patch = "я" * 40_000
+    transport.add("GET", repo + "/pulls/2/files?per_page=3", [
+        {"filename": "src/app.py", "status": "modified", "additions": 2, "deletions": 1, "changes": 3, "patch": "@@ normal"},
+        {"filename": "src/large.py", "status": "modified", "additions": 1, "deletions": 1, "changes": 2, "patch": oversized_patch},
+        {"filename": "new.py", "previous_filename": "old.py", "status": "renamed", "additions": 0, "deletions": 0, "changes": 0},
+    ])
+    files = (await service.pull_files(repository, 2, 3))["files"]
+    assert files[0]["patch"] == "@@ normal" and files[0]["patch_truncated"] is False
+    assert len(files[1]["patch"].encode("utf-8")) <= 65_536
+    assert files[1]["patch_truncated"] is True
+    assert files[2]["previous_filename"] == "old.py"
+    assert files[2]["patch"] is None and files[2]["patch_truncated"] is False

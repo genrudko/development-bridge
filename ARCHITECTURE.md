@@ -145,6 +145,10 @@ exact-head merge, checks, and Actions are semantic service operations rather
 than a REST/GraphQL passthrough. Actions archives are streamed into immutable
 runtime snapshots, then handed off with common MCP file-resource blocks and a
 process-local capability URL.
+Issue comments, inline PR review comments, and PR file evidence are normalized
+read surfaces rather than raw GitHub payloads. PR patches are capped per file at
+65,536 UTF-8 bytes; full repository content remains the responsibility of the
+existing Git/file APIs.
 
 ## Runtime isolation
 

@@ -13,6 +13,9 @@ from app.projects import Repository
 from .client import GitHubTransport, _http_error
 
 
+PULL_REQUEST_PATCH_LIMIT_BYTES = 65_536
+
+
 @dataclass(frozen=True, slots=True)
 class GitHubRepositoryIdentity:
     owner: str
@@ -87,6 +90,18 @@ class GitHubHostService:
         data, _ = await self._request(repository, "GET", f"{self._repo(identity)}/issues/{number}", write=False)
         return self._issue(data)
 
+    async def issue_comments(self, repository, number, limit=50):
+        bounded_limit = self._limit(limit)
+        data = await self._repo_request(
+            repository,
+            "GET",
+            f"/issues/{number}/comments?per_page={bounded_limit}",
+            None,
+            False,
+            None,
+        )
+        return {"comments": [self._comment(item) for item in data[:bounded_limit]]}
+
     async def issue_create(self, repository, payload):
         return await self._repo_request(repository, "POST", "/issues", payload, True, self._issue)
 
@@ -140,6 +155,32 @@ class GitHubHostService:
     async def pull_reviews(self, repository, number, limit=50):
         data = await self._repo_request(repository, "GET", f"/pulls/{number}/reviews?per_page={self._limit(limit)}", None, False, None)
         return {"reviews": [self._review(item) for item in data[:limit]]}
+
+    async def pull_review_comments(self, repository, number, limit=50):
+        bounded_limit = self._limit(limit)
+        data = await self._repo_request(
+            repository,
+            "GET",
+            f"/pulls/{number}/comments?per_page={bounded_limit}",
+            None,
+            False,
+            None,
+        )
+        return {
+            "comments": [self._review_comment(item) for item in data[:bounded_limit]]
+        }
+
+    async def pull_files(self, repository, number, limit=50):
+        bounded_limit = self._limit(limit)
+        data = await self._repo_request(
+            repository,
+            "GET",
+            f"/pulls/{number}/files?per_page={bounded_limit}",
+            None,
+            False,
+            None,
+        )
+        return {"files": [self._pull_file(item) for item in data[:bounded_limit]]}
 
     async def pull_review(self, repository, number, payload):
         return await self._repo_request(repository, "POST", f"/pulls/{number}/reviews", payload, True, self._review)
@@ -234,6 +275,21 @@ class GitHubHostService:
     def _comment(cls, x): return {"id": x.get("id"), "body": x.get("body"), "author": cls._user(x.get("user")), "created_at": x.get("created_at"), "updated_at": x.get("updated_at"), "url": x.get("html_url")}
     @classmethod
     def _review(cls, x): return {"id": x.get("id"), "author": cls._user(x.get("user")), "state": x.get("state"), "body": x.get("body"), "commit_sha": x.get("commit_id"), "submitted_at": x.get("submitted_at"), "url": x.get("html_url")}
+    @classmethod
+    def _review_comment(cls, x):
+        return {"id": x.get("id"), "body": x.get("body"), "author": cls._user(x.get("user")), "commit_sha": x.get("commit_id"), "original_commit_sha": x.get("original_commit_id"), "path": x.get("path"), "line": x.get("line"), "original_line": x.get("original_line"), "start_line": x.get("start_line"), "side": x.get("side"), "start_side": x.get("start_side"), "in_reply_to_id": x.get("in_reply_to_id"), "created_at": x.get("created_at"), "updated_at": x.get("updated_at"), "url": x.get("html_url")}
+    @staticmethod
+    def _pull_file(x):
+        patch = x.get("patch")
+        patch_truncated = False
+        if patch is not None:
+            encoded = str(patch).encode("utf-8")
+            patch_truncated = len(encoded) > PULL_REQUEST_PATCH_LIMIT_BYTES
+            if patch_truncated:
+                patch = encoded[:PULL_REQUEST_PATCH_LIMIT_BYTES].decode(
+                    "utf-8", errors="ignore"
+                )
+        return {"filename": x.get("filename"), "status": x.get("status"), "previous_filename": x.get("previous_filename"), "additions": x.get("additions"), "deletions": x.get("deletions"), "changes": x.get("changes"), "patch": patch, "patch_truncated": patch_truncated}
     @staticmethod
     def _check_run(x): return {key: x.get(key) for key in ("id", "name", "status", "conclusion", "started_at", "completed_at", "html_url")}
     @staticmethod
