@@ -7,6 +7,13 @@ server:
   allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
 jobs:
   database_path: /absolute/path/to/development-bridge-jobs.sqlite3
+# OAuth is optional for local development. A remote private deployment enables it
+# and supplies DEVELOPMENT_BRIDGE_OWNER_VERIFIER through its secret environment.
+# oauth:
+#   enabled: true
+#   issuer_url: https://bridge.example
+#   resource_url: https://bridge.example/mcp
+#   database_path: /absolute/path/to/development-bridge-oauth.sqlite3
 projects:
   - id: printer-stack
     name: Printer Stack

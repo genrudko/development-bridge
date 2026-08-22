@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.api.errors import BridgeError, ErrorCode
+from app.auth import BridgeOAuthProvider, OAuthStore
 from app.audit import AuditSink, LoggingAuditSink
 from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
@@ -27,6 +28,7 @@ class ApplicationContainer:
     changes: ChangeService
     tasks: TaskRegistry
     jobs: JobService
+    oauth: BridgeOAuthProvider | None
 
 
 def build_container(
@@ -52,11 +54,17 @@ def build_container(
         if configured.jobs.artifact_directory is not None
         else None
     )
+    oauth_database_path = (
+        configured.oauth.database_path.expanduser().resolve()
+        if configured.oauth.database_path is not None
+        else None
+    )
     for state_path, label in (
         (database_path, "Job database"),
         (artifact_directory, "Artifact directory"),
+        (oauth_database_path, "OAuth database"),
     ):
-        if state_path is None or not tasks:
+        if state_path is None:
             continue
         for project in projects.list():
             for repository in project.repositories:
@@ -77,6 +85,26 @@ def build_container(
         if tasks and database_path is not None
         else None
     )
+    oauth = None
+    if configured.oauth.enabled:
+        if configured.oauth.owner_verifier is None:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "DEVELOPMENT_BRIDGE_OWNER_VERIFIER is required when OAuth is enabled",
+            )
+        assert oauth_database_path is not None
+        assert configured.oauth.issuer_url is not None
+        assert configured.oauth.resource_url is not None
+        oauth_store = OAuthStore(oauth_database_path)
+        oauth_store.initialize()
+        oauth = BridgeOAuthProvider(
+            oauth_store,
+            issuer_url=str(configured.oauth.issuer_url),
+            resource_url=str(configured.oauth.resource_url),
+            owner_verifier=configured.oauth.owner_verifier.get_secret_value(),
+            access_token_ttl_seconds=configured.oauth.access_token_ttl_seconds,
+            refresh_token_ttl_seconds=configured.oauth.refresh_token_ttl_seconds,
+        )
     return ApplicationContainer(
         settings=configured,
         projects=projects,
@@ -98,4 +126,5 @@ def build_container(
             if artifact_directory is not None
             else None,
         ),
+        oauth=oauth,
     )

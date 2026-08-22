@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 
 IDENTIFIER_PATTERN = r"^[a-z][a-z0-9-]{0,62}$"
@@ -66,6 +66,40 @@ class JobSettings(BaseModel):
     artifact_directory: Path | None = None
 
 
+class OAuthSettings(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, url_preserve_empty_path=True
+    )
+    enabled: bool = False
+    issuer_url: AnyHttpUrl | None = None
+    resource_url: AnyHttpUrl | None = None
+    database_path: Path | None = None
+    owner_verifier: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    access_token_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    refresh_token_ttl_seconds: int = Field(
+        default=2_592_000, ge=3600, le=31_536_000
+    )
+
+    @model_validator(mode="after")
+    def enabled_oauth_is_complete(self) -> OAuthSettings:
+        if not self.enabled:
+            return self
+        missing = [
+            name
+            for name, value in (
+                ("issuer_url", self.issuer_url),
+                ("resource_url", self.resource_url),
+                ("database_path", self.database_path),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                "enabled OAuth requires " + ", ".join(f"oauth.{name}" for name in missing)
+            )
+        return self
+
+
 class RepositorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(pattern=IDENTIFIER_PATTERN)
@@ -100,6 +134,7 @@ class BridgeSettings(BaseModel):
     version: int = Field(default=1, ge=1, le=1)
     server: ServerSettings = Field(default_factory=ServerSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
+    oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     projects: tuple[ProjectSettings, ...] = ()
 
     @model_validator(mode="after")
@@ -122,6 +157,27 @@ class BridgeSettings(BaseModel):
             raise ValueError(
                 "jobs.artifact_directory is required when task artifacts exist"
             )
+        if self.oauth.enabled:
+            assert self.oauth.issuer_url is not None
+            assert self.oauth.resource_url is not None
+            issuer = self.oauth.issuer_url
+            resource = self.oauth.resource_url
+            if (issuer.scheme, issuer.host, issuer.port) != (
+                resource.scheme,
+                resource.host,
+                resource.port,
+            ):
+                raise ValueError("embedded OAuth issuer and resource must share an origin")
+            if resource.path != self.server.endpoint:
+                raise ValueError("oauth.resource_url must identify the MCP endpoint")
+            if resource.query or resource.fragment:
+                raise ValueError("oauth.resource_url cannot contain query or fragment")
+            if issuer.scheme != "https" and issuer.host not in {
+                "localhost",
+                "127.0.0.1",
+                "[::1]",
+            }:
+                raise ValueError("remote OAuth URLs must use HTTPS")
         return self
 
 
@@ -140,6 +196,10 @@ def load_settings(
             raw: Any = yaml.safe_load(config_file) or {}
         if not isinstance(raw, dict):
             raise ValueError("Bridge configuration root must be an object")
+        if isinstance(raw.get("oauth"), dict) and "owner_verifier" in raw["oauth"]:
+            raise ValueError(
+                "OAuth owner verifier must be supplied through the deployment environment"
+            )
         settings = BridgeSettings.model_validate(raw)
 
     server_updates: dict[str, Any] = {}
@@ -153,5 +213,12 @@ def load_settings(
         )
         settings = BridgeSettings.model_validate(
             {**settings.model_dump(), "server": validated_server}
+        )
+    if owner_verifier := environment.get("DEVELOPMENT_BRIDGE_OWNER_VERIFIER"):
+        validated_oauth = OAuthSettings.model_validate(
+            {**settings.oauth.model_dump(), "owner_verifier": owner_verifier}
+        )
+        settings = BridgeSettings.model_validate(
+            {**settings.model_dump(), "oauth": validated_oauth}
         )
     return settings

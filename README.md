@@ -7,6 +7,12 @@ complete and the preserved global-workspace API has been removed.
 Stages 1 through 7 are implemented. The Streamable HTTP transport exposes one
 repository-scoped API with explicit project and repository selection.
 
+Private remote deployments can enable the built-in single-owner OAuth server.
+It follows MCP protected-resource and authorization-server discovery, supports
+public and confidential DCR clients, and protects the entire MCP and artifact
+HTTP surface with resource-bound Bearer tokens. OAuth remains disabled by
+default for local development.
+
 ## Current APIs
 
 The Bridge exposes:

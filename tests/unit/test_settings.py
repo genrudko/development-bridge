@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from app.auth import create_owner_verifier
 from app.settings import BridgeSettings, load_settings
 
 
@@ -118,5 +119,65 @@ def test_rejects_duplicate_task_ids(tmp_path):
                         ],
                     }
                 ],
+            }
+        )
+
+
+def test_loads_owner_verifier_only_from_environment(tmp_path):
+    config = tmp_path / "bridge.yaml"
+    config.write_text(
+        "version: 1\n"
+        "oauth:\n"
+        "  enabled: true\n"
+        "  issuer_url: https://bridge.example\n"
+        "  resource_url: https://bridge.example/mcp\n"
+        f"  database_path: {tmp_path / 'oauth.sqlite3'}\n",
+        encoding="utf-8",
+    )
+    verifier = create_owner_verifier("password")
+
+    settings = load_settings(
+        config, environ={"DEVELOPMENT_BRIDGE_OWNER_VERIFIER": verifier}
+    )
+
+    assert settings.oauth.owner_verifier is not None
+    assert settings.oauth.owner_verifier.get_secret_value() == verifier
+    assert "owner_verifier" not in settings.model_dump()["oauth"]
+
+
+def test_rejects_owner_verifier_in_yaml(tmp_path):
+    config = tmp_path / "bridge.yaml"
+    config.write_text(
+        "oauth:\n"
+        "  enabled: true\n"
+        "  issuer_url: https://bridge.example\n"
+        "  resource_url: https://bridge.example/mcp\n"
+        f"  database_path: {tmp_path / 'oauth.sqlite3'}\n"
+        "  owner_verifier: secret\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="deployment environment"):
+        load_settings(config, environ={})
+
+
+@pytest.mark.parametrize(
+    ("issuer", "resource"),
+    [
+        ("http://bridge.example", "http://bridge.example/mcp"),
+        ("https://auth.example", "https://bridge.example/mcp"),
+        ("https://bridge.example", "https://bridge.example/other"),
+    ],
+)
+def test_rejects_inconsistent_remote_oauth_urls(tmp_path, issuer, resource):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate(
+            {
+                "oauth": {
+                    "enabled": True,
+                    "issuer_url": issuer,
+                    "resource_url": resource,
+                    "database_path": tmp_path / "oauth.sqlite3",
+                }
             }
         )

@@ -76,6 +76,22 @@ External hosted-service SDKs are not part of the core dependency graph. The
 current API performs local repository operations and remote Git pushes through
 the Git executable; it does not expose a global integration-status tool.
 
+## Remote authorization
+
+Remote private deployments use the OAuth authorization primitives supplied by
+the pinned MCP Python SDK. Development Bridge implements only the durable
+single-owner provider boundary: DCR client records, pending approvals,
+one-time authorization codes, audience-bound access tokens, and rotating
+refresh tokens. OAuth state is stored in a dedicated SQLite database outside
+registered repositories. Opaque codes and tokens are stored only as digests;
+the owner verifier is supplied through the deployment environment.
+
+The canonical MCP resource and its artifact download subtree share one Bearer
+token and the single `bridge` scope. Discovery, client registration,
+authorization, token, revocation, and the owner approval page are the only
+public OAuth routes. There is no user registry, RBAC, external IAM, or token
+passthrough.
+
 ## Runtime isolation
 
 The Git repository is separate from the existing production directory at

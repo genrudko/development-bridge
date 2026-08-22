@@ -26,6 +26,14 @@ tests at the production workspace.
 
 The default local endpoint is `http://127.0.0.1:8789/mcp`.
 
+OAuth is disabled by default for local development. A private remote deployment
+enables the built-in OAuth server with canonical HTTPS issuer and MCP resource
+URLs, an OAuth SQLite database outside every registered repository, and one
+`DEVELOPMENT_BRIDGE_OWNER_VERIFIER` deployment secret. The server uses DCR,
+authorization code with PKCE S256, short-lived access tokens, and rotating
+refresh tokens. Both `/mcp` and artifact downloads require the same `bridge`
+scope and Bearer token when OAuth is enabled.
+
 ## Tests
 
 ```bash
