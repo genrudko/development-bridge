@@ -287,13 +287,8 @@ def load_settings(
         settings = BridgeSettings.model_validate(
             {**settings.model_dump(), "server": validated_server}
         )
-    if owner_verifier := environment.get("DEVELOPMENT_BRIDGE_OWNER_VERIFIER"):
-        validated_oauth = OAuthSettings.model_validate(
-            {**settings.oauth.model_dump(), "owner_verifier": owner_verifier}
-        )
-        settings = BridgeSettings.model_validate(
-            {**settings.model_dump(), "oauth": validated_oauth}
-        )
+    environment_updates: dict[str, Any] = {}
+
     telegram_updates: dict[str, Any] = {}
     if api_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_API_ID"):
         telegram_updates["api_id"] = int(api_id)
@@ -305,17 +300,22 @@ def load_settings(
         telegram = TelegramKnowledgeSettings.model_validate(
             {**settings.knowledge.telegram.model_dump(), **telegram_updates}
         )
-        knowledge = KnowledgeSettings.model_validate(
+        environment_updates["knowledge"] = KnowledgeSettings.model_validate(
             {**settings.knowledge.model_dump(), "telegram": telegram}
         )
-        settings = BridgeSettings.model_validate(
-            {**settings.model_dump(), "knowledge": knowledge}
+
+    if owner_verifier := environment.get("DEVELOPMENT_BRIDGE_OWNER_VERIFIER"):
+        environment_updates["oauth"] = OAuthSettings.model_validate(
+            {**settings.oauth.model_dump(), "owner_verifier": owner_verifier}
         )
+
     if github_token := environment.get("DEVELOPMENT_BRIDGE_GITHUB_TOKEN"):
-        github = GitHubSettings.model_validate(
+        environment_updates["github"] = GitHubSettings.model_validate(
             {**settings.github.model_dump(), "token": github_token}
         )
+
+    if environment_updates:
         settings = BridgeSettings.model_validate(
-            {**settings.model_dump(), "github": github}
+            {**settings.model_dump(), **environment_updates}
         )
     return settings
