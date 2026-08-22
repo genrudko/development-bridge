@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -7,6 +8,7 @@ from urllib.parse import urlparse
 
 import httpx2
 import pytest
+from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -92,7 +94,9 @@ async def test_unconfigured_knowledge_store_returns_structured_error(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_full_link_first_mcp_flow_adds_syncs_and_queries_telegram(tmp_path):
+async def test_full_link_first_mcp_flow_adds_syncs_and_queries_telegram(
+    tmp_path, monkeypatch
+):
     database = tmp_path / "knowledge.sqlite3"
     messages = [telegram_message(value) for value in range(1, 6)]
     messages[-1] = replace(messages[-1], attachments=(TelegramAttachment("document", {
@@ -172,6 +176,21 @@ async def test_full_link_first_mcp_flow_adds_syncs_and_queries_telegram(tmp_path
                     assert exported_data["export_url"].startswith(
                         "https://downloads.example/mcp/knowledge/exports/"
                     )
+                    assert isinstance(exported.content[1], types.ResourceLink)
+                    assert exported.content[1].uri == exported_data["export_url"]
+                    assert exported.content[1].name == exported_data["file_name"]
+                    assert exported.content[1].title == exported_data["file_name"]
+                    assert exported.content[1].mime_type == exported_data["media_type"]
+                    assert exported.content[1].size == exported_data["size_bytes"]
+                    assert isinstance(exported.content[2], types.EmbeddedResource)
+                    assert isinstance(
+                        exported.content[2].resource, types.BlobResourceContents
+                    )
+                    assert exported.content[2].resource.uri == exported_data["export_url"]
+                    assert exported.content[2].resource.mime_type == exported_data["media_type"]
+                    assert base64.b64decode(exported.content[2].resource.blob) == (
+                        b"z_offset: -1.25\n"
+                    )
                     assert str(tmp_path) not in json.dumps(exported_data)
                     assert len(adapter.download_calls) == 1
                     export_path = urlparse(exported_data["export_url"]).path
@@ -196,7 +215,23 @@ async def test_full_link_first_mcp_flow_adds_syncs_and_queries_telegram(tmp_path
                     second_data = json.loads(second_export.content[0].text)["data"]
                     assert second_data["export_url"] != exported_data["export_url"]
                     assert second_data["sha256"] == exported_data["sha256"]
+                    assert isinstance(second_export.content[1], types.ResourceLink)
+                    assert isinstance(second_export.content[2], types.EmbeddedResource)
                     assert len(adapter.download_calls) == 1
+
+                    monkeypatch.setattr(
+                        "app.tools.knowledge.KNOWLEDGE_ATTACHMENT_INLINE_LIMIT", 1
+                    )
+                    oversized_export = await session.call_tool(
+                        "knowledge_attachment_export", {
+                            "source_id": source_id, "message_id": "5",
+                            "attachment_id": attachment_id,
+                        }
+                    )
+                    assert len(oversized_export.content) == 2
+                    assert isinstance(oversized_export.content[1], types.ResourceLink)
+                    assert len(adapter.download_calls) == 1
+
                     export_clock["value"] = 701.0
                     assert (await client.get(export_path)).status_code == 404
 

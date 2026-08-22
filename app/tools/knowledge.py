@@ -13,6 +13,7 @@ from app.container import ApplicationContainer
 
 SOURCE_ID = {"type": "string", "minLength": 1, "maxLength": 200}
 MESSAGE_ID = {"type": "string", "minLength": 1, "maxLength": 200}
+KNOWLEDGE_ATTACHMENT_INLINE_LIMIT = 4 * 1024 * 1024
 
 
 def knowledge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
@@ -53,7 +54,28 @@ def knowledge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ..
             arguments["source_id"], arguments["message_id"],
             arguments["attachment_id"],
         )
-        return to_mcp_result(success(request_context.request_id, data))
+        snapshot, path = attachment_service().snapshot_file(
+            arguments["source_id"], arguments["message_id"], arguments["attachment_id"]
+        )
+        response = to_mcp_result(success(request_context.request_id, data))
+        response.content.append(types.ResourceLink(
+            uri=data["export_url"],
+            name=data["file_name"],
+            title=data["file_name"],
+            mimeType=data["media_type"],
+            size=data["size_bytes"],
+            description="Short-lived HTTPS link to the immutable attachment snapshot",
+        ))
+        if snapshot["size_bytes"] <= KNOWLEDGE_ATTACHMENT_INLINE_LIMIT:
+            response.content.append(types.EmbeddedResource(
+                type="resource",
+                resource=types.BlobResourceContents(
+                    uri=data["export_url"],
+                    mimeType=data["media_type"],
+                    blob=base64.b64encode(path.read_bytes()).decode("ascii"),
+                ),
+            ))
+        return response
 
     async def attachment_open(ctx, params, request_context):
         arguments = params.arguments
