@@ -82,6 +82,7 @@ class JobSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     database_path: Path | None = None
     artifact_directory: Path | None = None
+    artifact_export_ttl_seconds: int = Field(default=600, ge=60, le=3600)
 
 
 def _default_managed_repository_root() -> Path:
@@ -93,6 +94,22 @@ def _default_managed_repository_root() -> Path:
 class ManagedRepositorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     root: Path = Field(default_factory=_default_managed_repository_root)
+
+
+def _default_github_artifact_root() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME")
+    base = Path(data_home) if data_home else Path.home() / ".local" / "share"
+    return base / "development-bridge" / "github-artifacts"
+
+
+class GitHubSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    token: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    timeout_seconds: float = Field(default=20, gt=0, le=120)
+    response_limit_bytes: int = Field(default=2_097_152, ge=65_536, le=16_777_216)
+    artifact_directory: Path = Field(default_factory=_default_github_artifact_root)
+    artifact_max_bytes: int = Field(default=268_435_456, ge=1_048_576, le=1_073_741_824)
+    artifact_export_ttl_seconds: int = Field(default=600, ge=60, le=3600)
 
 
 class TelegramKnowledgeSettings(BaseModel):
@@ -186,6 +203,7 @@ class BridgeSettings(BaseModel):
     managed_repositories: ManagedRepositorySettings = Field(
         default_factory=ManagedRepositorySettings
     )
+    github: GitHubSettings = Field(default_factory=GitHubSettings)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     projects: tuple[ProjectSettings, ...] = ()
@@ -253,6 +271,8 @@ def load_settings(
             raise ValueError(
                 "OAuth owner verifier must be supplied through the deployment environment"
             )
+        if isinstance(raw.get("github"), dict) and "token" in raw["github"]:
+            raise ValueError("GitHub token must be supplied through the deployment environment")
         settings = BridgeSettings.model_validate(raw)
 
     server_updates: dict[str, Any] = {}
@@ -290,5 +310,12 @@ def load_settings(
         )
         settings = BridgeSettings.model_validate(
             {**settings.model_dump(), "knowledge": knowledge}
+        )
+    if github_token := environment.get("DEVELOPMENT_BRIDGE_GITHUB_TOKEN"):
+        github = GitHubSettings.model_validate(
+            {**settings.github.model_dump(), "token": github_token}
+        )
+        settings = BridgeSettings.model_validate(
+            {**settings.model_dump(), "github": github}
         )
     return settings

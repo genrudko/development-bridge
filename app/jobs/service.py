@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import signal
 import time
@@ -11,6 +13,7 @@ from app.audit import AuditEvent, AuditOutcome, AuditSink
 from app.capabilities import Capability, CapabilityPolicy
 from app.projects import ProjectRegistry, Repository
 from app.tasks import TaskProfile, TaskRegistry
+from app.settings import ArtifactSettings
 
 from .artifacts import ArtifactStorage
 from .models import JobArtifact, JobRecord, JobStatus
@@ -95,6 +98,75 @@ class JobService:
             self._queue.put_nowait(job.job_id)
         return job
 
+    async def start_execution(
+        self,
+        repository: Repository,
+        executable: str,
+        arguments: list[str] | tuple[str, ...],
+        request_id: str,
+        *,
+        timeout_seconds: float = 300,
+        output_limit_bytes: int = 262_144,
+        artifacts: list[dict] | tuple[dict, ...] = (),
+        idempotency_key: str | None = None,
+    ) -> JobRecord:
+        self._require_execute(repository)
+        if not isinstance(executable, str) or not 1 <= len(executable) <= 4096 or "\0" in executable:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "executable is invalid")
+        if not isinstance(arguments, (list, tuple)) or len(arguments) > 256 or any(
+            not isinstance(value, str) or len(value) > 4096 or "\0" in value
+            for value in arguments
+        ):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "arguments are invalid")
+        if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or not 0 < timeout_seconds <= 3600:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "timeout_seconds is invalid")
+        if not isinstance(output_limit_bytes, int) or isinstance(output_limit_bytes, bool) or not 1024 <= output_limit_bytes <= 1_048_576:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "output_limit_bytes is invalid")
+        if not isinstance(artifacts, (list, tuple)) or len(artifacts) > 32:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "artifacts are invalid")
+        try:
+            configured_artifacts = tuple(
+                ArtifactSettings.model_validate(item) for item in artifacts
+            )
+        except Exception as exc:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "artifact declaration is invalid") from exc
+        identifiers = [artifact.id for artifact in configured_artifacts]
+        if len(identifiers) != len(set(identifiers)):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "artifact ids must be unique")
+        if idempotency_key is not None and not 1 <= len(idempotency_key) <= 128:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "idempotency_key is invalid")
+        payload = {
+            "project_id": repository.project_id,
+            "repository_id": repository.id,
+            "executable": executable,
+            "arguments": list(arguments),
+            "timeout_seconds": float(timeout_seconds),
+            "output_limit_bytes": output_limit_bytes,
+            "artifacts": [
+                {
+                    "id": item.id,
+                    "path": item.path,
+                    "media_type": item.media_type,
+                    "required": item.required,
+                    "max_bytes": item.max_bytes,
+                }
+                for item in configured_artifacts
+            ],
+        }
+        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        store = self._require_store(execution=True)
+        job, created = store.create_execution(
+            project_id=repository.project_id,
+            repository_id=repository.id,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            payload_json=payload_json,
+            payload_digest=hashlib.sha256(payload_json.encode()).hexdigest(),
+        )
+        if created:
+            self._queue.put_nowait(job.job_id)
+        return job
+
     def status(self, repository: Repository, job_id: str) -> JobRecord:
         self._require_execute(repository)
         return self._require_store().get(repository.project_id, repository.id, job_id)
@@ -109,7 +181,9 @@ class JobService:
         stored = self._require_store().artifacts(job_id)
         if stored:
             return stored
-        profile = self._tasks.get(job.project_id, job.repository_id, job.task_id)
+        profile = self._require_store().execution_profile(job_id)
+        if profile is None:
+            profile = self._tasks.get(job.project_id, job.repository_id, job.task_id)
         return tuple(
             JobArtifact(
                 job.job_id,
@@ -221,7 +295,9 @@ class JobService:
             await self._emit(final, "cancel", AuditOutcome.SUCCESS)
             return
         try:
-            profile = self._tasks.get(job.project_id, job.repository_id, job.task_id)
+            profile = store.execution_profile(job_id)
+            if profile is None:
+                profile = self._tasks.get(job.project_id, job.repository_id, job.task_id)
             repository = self._projects.repositories.get(
                 job.project_id, job.repository_id
             )
@@ -384,7 +460,12 @@ class JobService:
             repository_id=repository.id,
         )
 
-    def _require_store(self) -> JobStore:
+    def _require_store(self, *, execution: bool = False) -> JobStore:
         if self._store is None:
+            if execution:
+                raise BridgeError(
+                    ErrorCode.JOB_EXECUTION_NOT_CONFIGURED,
+                    "jobs.database_path is required for repository execution",
+                )
             raise BridgeError(ErrorCode.TASK_NOT_FOUND, "No task profiles are configured")
         return self._store

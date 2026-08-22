@@ -3,13 +3,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.api.errors import BridgeError, ErrorCode
+from app.api.capability_exports import CapabilityExportRegistry
 from app.auth import BridgeOAuthProvider, OAuthStore
 from app.audit import AuditSink, LoggingAuditSink
 from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
 from app.files import FileService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
-from app.jobs import ArtifactStorage, JobService, JobStore
+from app.github import (
+    GitHubActionsArtifactExportService,
+    GitHubArtifactSnapshot,
+    GitHubHostService,
+    GitHubTransport,
+    UrllibGitHubTransport,
+)
+from app.jobs import (
+    ArtifactStorage,
+    JobArtifactExportService,
+    JobArtifactExportSubject,
+    JobService,
+    JobStore,
+)
 from app.knowledge import (
     AttachmentStorage,
     AttachmentExportRegistry,
@@ -44,6 +58,9 @@ class ApplicationContainer:
     changes: ChangeService
     tasks: TaskRegistry
     jobs: JobService
+    job_artifact_exports: JobArtifactExportService
+    github: GitHubHostService
+    github_artifact_exports: GitHubActionsArtifactExportService
     oauth: BridgeOAuthProvider | None
     knowledge: KnowledgeService | None
     telegram_knowledge: TelegramKnowledgeService | None
@@ -57,6 +74,7 @@ def build_container(
     audit: AuditSink | None = None,
     telegram_adapter: TelegramAdapter | None = None,
     managed_clone_runner: ManagedCloneRunner | None = None,
+    github_transport: GitHubTransport | None = None,
 ) -> ApplicationContainer:
     configured = settings or load_settings()
     projects = ProjectRegistry.from_settings(configured)
@@ -97,6 +115,7 @@ def build_container(
         else None
     )
     managed_repository_root = configured.managed_repositories.root.expanduser().resolve()
+    github_artifact_directory = configured.github.artifact_directory.expanduser().resolve()
     for state_path, label in (
         (database_path, "Job database"),
         (artifact_directory, "Artifact directory"),
@@ -105,6 +124,7 @@ def build_container(
         (telegram_session_path, "Telegram session"),
         (knowledge_attachment_directory, "Knowledge attachment directory"),
         (managed_repository_root, "Managed repository root"),
+        (github_artifact_directory, "GitHub artifact directory"),
     ):
         if state_path is None:
             continue
@@ -127,7 +147,7 @@ def build_container(
     )
     job_store = (
         JobStore(database_path)
-        if tasks and database_path is not None
+        if database_path is not None
         else None
     )
     oauth = None
@@ -198,6 +218,46 @@ def build_container(
             ),
             configured.server.endpoint,
         )
+    jobs = JobService(
+        job_store,
+        tasks,
+        projects,
+        policy,
+        audit_sink,
+        ArtifactStorage(artifact_directory)
+        if artifact_directory is not None
+        else None,
+    )
+    job_artifact_exports = JobArtifactExportService(
+        jobs,
+        projects,
+        CapabilityExportRegistry[JobArtifactExportSubject](
+            configured.jobs.artifact_export_ttl_seconds
+        ),
+        (
+            str(configured.server.public_base_url)
+            if configured.server.public_base_url is not None
+            else None
+        ),
+        configured.server.endpoint,
+    )
+    if github_transport is None and configured.github.token is not None:
+        github_transport = UrllibGitHubTransport(
+            configured.github.token.get_secret_value(),
+            timeout_seconds=configured.github.timeout_seconds,
+            response_limit_bytes=configured.github.response_limit_bytes,
+        )
+    github = GitHubHostService(runner, policy, github_transport)
+    github_artifact_exports = GitHubActionsArtifactExportService(
+        github,
+        CapabilityExportRegistry[GitHubArtifactSnapshot](
+            configured.github.artifact_export_ttl_seconds
+        ),
+        github_artifact_directory,
+        str(configured.server.public_base_url) if configured.server.public_base_url else None,
+        configured.server.endpoint,
+        configured.github.artifact_max_bytes,
+    )
     return ApplicationContainer(
         settings=configured,
         projects=projects,
@@ -210,16 +270,10 @@ def build_container(
         files=FileService(policy),
         changes=ChangeService(policy, revisions, mutations),
         tasks=tasks,
-        jobs=JobService(
-            job_store,
-            tasks,
-            projects,
-            policy,
-            audit_sink,
-            ArtifactStorage(artifact_directory)
-            if artifact_directory is not None
-            else None,
-        ),
+        jobs=jobs,
+        job_artifact_exports=job_artifact_exports,
+        github=github,
+        github_artifact_exports=github_artifact_exports,
         oauth=oauth,
         knowledge=(
             KnowledgeService(knowledge_store)

@@ -19,3 +19,15 @@ def test_telegram_credentials_and_session_path_can_come_from_environment(tmp_pat
     assert telegram.api_id == 12345
     assert telegram.api_hash.get_secret_value() == "secret-hash"
     assert telegram.session_path == tmp_path / "telegram.session"
+
+
+def test_github_token_survives_other_environment_overrides():
+    settings = load_settings(environ={
+        "DEVELOPMENT_BRIDGE_GITHUB_TOKEN": "github-secret",
+        "DEVELOPMENT_BRIDGE_TELEGRAM_API_ID": "12345",
+        "DEVELOPMENT_BRIDGE_TELEGRAM_API_HASH": "telegram-secret",
+    })
+
+    assert settings.github.token is not None
+    assert settings.github.token.get_secret_value() == "github-secret"
+    assert "github-secret" not in repr(settings)

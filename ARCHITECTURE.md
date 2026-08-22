@@ -78,10 +78,13 @@ Configured repositories remain startup configuration. Managed external
 repositories are cloned with fixed argv into staging below a separate data
 root, validated as Git worktrees, atomically installed, and then registered in
 the current process. A bounded, atomically replaced JSON manifest persists only
-validated IDs, public HTTPS origin, depth, and creation time. Local paths are
-always derived from the managed root and IDs. Managed clones expose only
+validated IDs, public HTTPS origin, optional requested branch/tag, depth, and
+creation time. Old manifest records without a requested ref load as `null`.
+Local paths are always derived from the managed root and IDs. Managed clones expose only
 `read`/`git_read`; `git_fetch` is their update operation, while changes, Git
 writes, and task execution continue to fail through the capability policy.
+The optional clone ref is passed only as fixed `git clone --branch` argv; the
+contract covers branch/tag selection, not arbitrary commit-SHA checkout.
 
 ## Dependency direction
 
@@ -94,6 +97,10 @@ already-authorized path and caller-provided URI/metadata, it returns a standard
 `ResourceLink` and optionally a byte-exact base64
 `EmbeddedResource<BlobResourceContents>` under a caller-selected inline limit.
 It does not construct URLs or know about Knowledge, Telegram, or OpenAI APIs.
+Knowledge attachments and immutable job artifacts share the neutral bounded,
+process-local capability-token registry. `job_artifact_export` resolves the
+captured snapshot through `JobService.artifact_file`, emits native file blocks,
+and exposes a short-lived bearer-free GET/HEAD fallback without copying bytes.
 
 Task processes use fixed executable and argument tuples from validated startup
 configuration. Clients select only a registered task ID; arbitrary shell,
@@ -113,11 +120,31 @@ refresh tokens. OAuth state is stored in a dedicated SQLite database outside
 registered repositories. Opaque codes and tokens are stored only as digests;
 the owner verifier is supplied through the deployment environment.
 
-The canonical MCP resource and its artifact download subtree share one Bearer
-token and the single `bridge` scope. Discovery, client registration,
+The canonical MCP resource and ordinary artifact download subtree share one
+Bearer token and the single `bridge` scope. Opaque capability export URLs for
+knowledge attachments and job artifacts are deliberately bearer-free and
+short-lived. Discovery, client registration,
 authorization, token, revocation, and the owner approval page are the only
 public OAuth routes. There is no user registry, RBAC, external IAM, or token
 passthrough.
+
+Ad-hoc `repository_exec` shares the existing `JobService`, job store, process
+group lifecycle, bounded output, and immutable artifact storage. It stores an
+additive canonical execution-spec row keyed to the job, allowing queued work to
+be reconstructed after restart while old task-only databases migrate through
+`CREATE TABLE IF NOT EXISTS`. Execution is fixed argv in the repository root;
+the API has no shell, cwd, environment, or privilege override.
+
+The optional GitHub Host Service resolves `OWNER/REPO` exclusively from a
+registered repository's GitHub `origin`. Read methods require `git_read`, and
+mutations require `git_write`; consequently managed reference clones are
+host-readable but host-read-only. A bounded HTTP client obtains its secret only
+from `DEVELOPMENT_BRIDGE_GITHUB_TOKEN`. Git protocol operations, including
+push, remain in the Git service. GitHub issues, pull requests, reviews,
+exact-head merge, checks, and Actions are semantic service operations rather
+than a REST/GraphQL passthrough. Actions archives are streamed into immutable
+runtime snapshots, then handed off with common MCP file-resource blocks and a
+process-local capability URL.
 
 ## Runtime isolation
 

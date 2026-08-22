@@ -10,6 +10,7 @@ from .changes import change_tools
 from .files import file_tools
 from .git_read import git_read_tools
 from .git_write import git_write_tools
+from .github import github_tools
 from .git_workspace import git_workspace_tools
 from .jobs import job_tools
 from .knowledge import knowledge_tools
@@ -33,5 +34,6 @@ def build_tool_registry(
         + change_tools(container)
         + job_tools(container)
         + knowledge_tools(container)
+        + github_tools(container)
     )
     return registry

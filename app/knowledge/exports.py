@@ -1,20 +1,26 @@
 from __future__ import annotations
 
-import secrets
-import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
+from app.api.capability_exports import CapabilityExportRegistry
 from app.api.errors import BridgeError, ErrorCode
 
 from .attachments import KnowledgeAttachmentService
 
 
 MAX_EXPORT_TOKENS = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentExportSubject:
+    source_id: str
+    message_id: str
+    attachment_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,52 +45,39 @@ class AttachmentExportRegistry:
     ) -> None:
         if ttl_seconds <= 0 or capacity <= 0:
             raise ValueError("Export token TTL and capacity must be positive")
-        self.ttl_seconds = ttl_seconds
-        self.capacity = capacity
-        self._monotonic = monotonic
-        self._utcnow = utcnow
-        self._grants: dict[str, AttachmentExportGrant] = {}
-        self._lock = threading.Lock()
+        self._registry = CapabilityExportRegistry[AttachmentExportSubject](
+            ttl_seconds,
+            capacity=capacity,
+            monotonic=monotonic,
+            utcnow=utcnow,
+        )
 
     def issue(
         self, source_id: str, message_id: str, attachment_id: str
     ) -> tuple[str, AttachmentExportGrant]:
-        with self._lock:
-            now = self._monotonic()
-            self._cleanup(now)
-            if len(self._grants) >= self.capacity:
-                oldest = min(
-                    self._grants,
-                    key=lambda token: self._grants[token].expires_monotonic,
-                )
-                del self._grants[oldest]
-            token = secrets.token_urlsafe(32)
-            while token in self._grants:
-                token = secrets.token_urlsafe(32)
-            grant = AttachmentExportGrant(
-                source_id=source_id,
-                message_id=message_id,
-                attachment_id=attachment_id,
-                expires_at=self._utcnow() + timedelta(seconds=self.ttl_seconds),
-                expires_monotonic=now + self.ttl_seconds,
-            )
-            self._grants[token] = grant
-            return token, grant
+        token, grant = self._registry.issue(
+            AttachmentExportSubject(source_id, message_id, attachment_id)
+        )
+        return token, AttachmentExportGrant(
+            source_id,
+            message_id,
+            attachment_id,
+            grant.expires_at,
+            grant.expires_monotonic,
+        )
 
     def lookup(self, token: str) -> AttachmentExportGrant | None:
-        with self._lock:
-            now = self._monotonic()
-            self._cleanup(now)
-            return self._grants.get(token)
-
-    def _cleanup(self, now: float) -> None:
-        expired = [
-            token
-            for token, grant in self._grants.items()
-            if grant.expires_monotonic <= now
-        ]
-        for token in expired:
-            del self._grants[token]
+        grant = self._registry.lookup(token)
+        if grant is None:
+            return None
+        subject = grant.subject
+        return AttachmentExportGrant(
+            subject.source_id,
+            subject.message_id,
+            subject.attachment_id,
+            grant.expires_at,
+            grant.expires_monotonic,
+        )
 
 
 class KnowledgeAttachmentExportService:

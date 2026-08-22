@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +27,9 @@ REFERENCE_CAPABILITIES = CapabilitySet.from_mapping({"read": True, "git_read": T
 
 
 class ManagedCloneRunner(Protocol):
-    async def clone(self, url: str, destination: Path, depth: int) -> None: ...
+    async def clone(
+        self, url: str, destination: Path, depth: int, requested_ref: str | None
+    ) -> None: ...
 
     async def inspect(self, repository: Path) -> tuple[str, str]: ...
 
@@ -35,11 +38,14 @@ class SubprocessManagedCloneRunner:
     def __init__(self, timeout_seconds: float = 300) -> None:
         self.timeout_seconds = timeout_seconds
 
-    async def clone(self, url: str, destination: Path, depth: int) -> None:
-        await self._run(
-            "git", "clone", "--depth", str(depth), "--single-branch", "--", url,
-            str(destination),
-        )
+    async def clone(
+        self, url: str, destination: Path, depth: int, requested_ref: str | None
+    ) -> None:
+        arguments = ["git", "clone", "--depth", str(depth), "--single-branch"]
+        if requested_ref is not None:
+            arguments.extend(["--branch", requested_ref])
+        arguments.extend(["--", url, str(destination)])
+        await self._run(*arguments)
 
     async def inspect(self, repository: Path) -> tuple[str, str]:
         inside = await self._run(
@@ -98,14 +104,16 @@ class ManagedRepositoryRecord:
     origin_url: str
     depth: int
     created_at: str
+    requested_ref: str | None = None
 
-    def as_dict(self) -> dict[str, str | int]:
+    def as_dict(self) -> dict[str, str | int | None]:
         return {
             "project_id": self.project_id,
             "repository_id": self.repository_id,
             "origin_url": self.origin_url,
             "depth": self.depth,
             "created_at": self.created_at,
+            "requested_ref": self.requested_ref,
         }
 
 
@@ -125,7 +133,12 @@ class ManagedRepositoryService:
         self._load()
 
     async def clone(
-        self, project_id: str, repository_id: str, url: str, depth: int = 50
+        self,
+        project_id: str,
+        repository_id: str,
+        url: str,
+        depth: int = 50,
+        requested_ref: str | None = None,
     ) -> dict:
         self.projects.get(project_id)
         origin_url = self._validate_url(url)
@@ -133,13 +146,17 @@ class ManagedRepositoryService:
             raise BridgeError(
                 ErrorCode.INVALID_ARGUMENT, "Clone depth must be between 1 and 10000"
             )
+        requested_ref = self._validate_ref(requested_ref)
         async with self._lock:
             key = (project_id, repository_id)
             if self.projects.repositories.is_configured(*key):
                 raise self._conflict(project_id, repository_id)
             existing = self._records.get(key)
             if existing is not None:
-                if existing.origin_url != origin_url:
+                if (
+                    existing.origin_url != origin_url
+                    or existing.requested_ref != requested_ref
+                ):
                     raise self._conflict(project_id, repository_id)
                 if not self._valid_managed_target(self._target(*key)):
                     raise BridgeError(
@@ -165,7 +182,7 @@ class ManagedRepositoryService:
             clone_path = staging / "repository"
             installed = False
             try:
-                await self.runner.clone(origin_url, clone_path, depth)
+                await self.runner.clone(origin_url, clone_path, depth, requested_ref)
                 if not self._valid_managed_target(clone_path):
                     raise BridgeError(
                         ErrorCode.REPOSITORY_CLONE_FAILED,
@@ -180,6 +197,7 @@ class ManagedRepositoryService:
                     origin_url,
                     depth,
                     datetime.now(UTC).isoformat(),
+                    requested_ref,
                 )
                 updated = {**self._records, key: record}
                 self._write_manifest(updated)
@@ -214,11 +232,17 @@ class ManagedRepositoryService:
                 raise ValueError("too many entries")
             records: dict[tuple[str, str], ManagedRepositoryRecord] = {}
             for entry in entries:
-                if not isinstance(entry, dict) or set(entry) != {
+                old_keys = {
                     "project_id", "repository_id", "origin_url", "depth", "created_at"
+                }
+                if not isinstance(entry, dict) or frozenset(entry) not in {
+                    frozenset(old_keys), frozenset({*old_keys, "requested_ref"})
                 }:
                     raise ValueError("invalid entry shape")
-                record = ManagedRepositoryRecord(**entry)
+                record = ManagedRepositoryRecord(
+                    **entry,
+                    **({"requested_ref": None} if "requested_ref" not in entry else {}),
+                )
                 self._validate_record(record)
                 key = (record.project_id, record.repository_id)
                 if key in records or self.projects.repositories.is_configured(*key):
@@ -251,6 +275,7 @@ class ManagedRepositoryService:
             raise ValueError("invalid depth")
         if not isinstance(record.created_at, str) or len(record.created_at) > 100:
             raise ValueError("invalid timestamp")
+        self._validate_ref(record.requested_ref)
 
     @staticmethod
     def _validate_url(url: str) -> str:
@@ -283,6 +308,35 @@ class ManagedRepositoryService:
         if not IDENTIFIER.fullmatch(project_id) or not IDENTIFIER.fullmatch(repository_id):
             raise ValueError("invalid managed repository identifier")
         return self.root / project_id / repository_id
+
+    @staticmethod
+    def _validate_ref(requested_ref: str | None) -> str | None:
+        if requested_ref is None:
+            return None
+        forbidden = " ~^:?*[\\"
+        if (
+            not isinstance(requested_ref, str)
+            or not 1 <= len(requested_ref) <= 1024
+            or requested_ref.startswith("-")
+            or requested_ref in {"@", "."}
+            or requested_ref.startswith("/")
+            or requested_ref.endswith(("/", "."))
+            or ".." in requested_ref
+            or "//" in requested_ref
+            or "@{" in requested_ref
+            or any(character in forbidden for character in requested_ref)
+            or any(
+                character.isspace()
+                or unicodedata.category(character).startswith("C")
+                for character in requested_ref
+            )
+            or any(part.startswith(".") for part in requested_ref.split("/"))
+        ):
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "ref must be a safe Git branch or tag name",
+            )
+        return requested_ref
 
     @staticmethod
     def _valid_managed_target(target: Path) -> bool:
@@ -321,6 +375,7 @@ class ManagedRepositoryService:
             "project_id": record.project_id,
             "repository_id": record.repository_id,
             "origin_url": record.origin_url,
+            "requested_ref": record.requested_ref,
             "branch": branch,
             "head": head,
             "depth": record.depth,

@@ -55,6 +55,7 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
             arguments["repository_id"],
             arguments["url"],
             arguments.get("depth", 50),
+            arguments.get("ref"),
         )
         return to_mcp_result(success(request_context.request_id, data))
 
@@ -108,6 +109,7 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
                         "project_id": IDENTIFIER_SCHEMA,
                         "repository_id": IDENTIFIER_SCHEMA,
                         "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+                        "ref": {"type": "string", "minLength": 1, "maxLength": 1024},
                         "depth": {
                             "type": "integer",
                             "minimum": 1,

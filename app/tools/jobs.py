@@ -6,13 +6,16 @@ from mcp import types
 from mcp.server.mcpserver.utilities.types import Image
 
 from app.api.registry import RegisteredTool
+from app.api.resources import DEFAULT_FILE_RESOURCE_INLINE_LIMIT, file_resource_blocks
 from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
 from app.container import ApplicationContainer
 from app.jobs import read_visual_artifact
+from app.settings import ArtifactSettings
 
 
 JOB_ID_SCHEMA = {"type": "string", "pattern": "^job_[0-9a-f]{32}$"}
+JOB_ARTIFACT_INLINE_LIMIT = DEFAULT_FILE_RESOURCE_INLINE_LIMIT
 
 
 def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
@@ -36,6 +39,20 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             repository(arguments),
             arguments["task_id"],
             request_context.request_id,
+            idempotency_key=arguments.get("idempotency_key"),
+        )
+        return to_mcp_result(success(request_context.request_id, job.status_dict()))
+
+    async def repository_exec(ctx, params, request_context):
+        arguments = params.arguments
+        job = await container.jobs.start_execution(
+            repository(arguments),
+            arguments["executable"],
+            arguments.get("arguments", []),
+            request_context.request_id,
+            timeout_seconds=arguments.get("timeout_seconds", 300),
+            output_limit_bytes=arguments.get("output_limit_bytes", 262_144),
+            artifacts=arguments.get("artifacts", []),
             idempotency_key=arguments.get("idempotency_key"),
         )
         return to_mcp_result(success(request_context.request_id, job.status_dict()))
@@ -109,12 +126,61 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         )
         return result
 
+    async def job_artifact_export(ctx, params, request_context):
+        arguments = params.arguments
+        data, artifact, path = container.job_artifact_exports.export(
+            repository(arguments), arguments["job_id"], arguments["artifact_id"]
+        )
+        assert artifact.size_bytes is not None
+        result = to_mcp_result(success(request_context.request_id, data))
+        result.content.extend(file_resource_blocks(
+            path,
+            uri=data["export_url"],
+            file_name=data["file_name"],
+            media_type=artifact.media_type,
+            size_bytes=artifact.size_bytes,
+            inline_limit=JOB_ARTIFACT_INLINE_LIMIT,
+            description="Short-lived HTTPS link to the immutable job artifact",
+        ))
+        return result
+
     base_properties = {
         "project_id": IDENTIFIER_SCHEMA,
         "repository_id": IDENTIFIER_SCHEMA,
     }
     repository_required = ["project_id", "repository_id"]
     definitions = (
+        (
+            "repository_exec",
+            "Execute structured argv in a repository through the durable job engine",
+            {
+                **base_properties,
+                "executable": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "arguments": {
+                    "type": "array",
+                    "maxItems": 256,
+                    "items": {"type": "string", "maxLength": 4096},
+                    "default": [],
+                },
+                "timeout_seconds": {
+                    "type": "number", "exclusiveMinimum": 0,
+                    "maximum": 3600, "default": 300,
+                },
+                "output_limit_bytes": {
+                    "type": "integer", "minimum": 1024,
+                    "maximum": 1048576, "default": 262144,
+                },
+                "artifacts": {
+                    "type": "array", "maxItems": 32,
+                    "items": ArtifactSettings.model_json_schema(), "default": [],
+                },
+                "idempotency_key": {
+                    "type": "string", "minLength": 1, "maxLength": 128,
+                },
+            },
+            repository_required + ["executable"],
+            repository_exec,
+        ),
         (
             "task_list",
             "List registered tasks for a repository",
@@ -151,6 +217,17 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                     job_artifact_list,
                 ),
             )
+        ),
+        (
+            "job_artifact_export",
+            "Export an immutable job artifact through native MCP file resources",
+            {
+                **base_properties,
+                "job_id": JOB_ID_SCHEMA,
+                "artifact_id": IDENTIFIER_SCHEMA,
+            },
+            repository_required + ["job_id", "artifact_id"],
+            job_artifact_export,
         ),
         (
             "job_artifact_view",

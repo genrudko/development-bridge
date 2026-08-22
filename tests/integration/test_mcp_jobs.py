@@ -4,13 +4,20 @@ import asyncio
 import base64
 import json
 import sys
+from dataclasses import replace
+from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import httpx2
 import pytest
+from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from app.container import build_container
+from app.api.capability_exports import CapabilityExportRegistry
+from app.auth import create_owner_verifier
+from app.jobs import JobArtifactExportService, JobArtifactExportSubject
 from app.runtime import create_server
 from app.settings import BridgeSettings
 from app.transport import create_streamable_http_app
@@ -122,12 +129,17 @@ async def test_job_api_exposes_live_output_and_queued_cancellation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_job_artifacts_are_listed_and_downloaded_as_snapshots(tmp_path):
+async def test_job_artifacts_are_listed_exported_and_downloaded_as_snapshots(
+    tmp_path, monkeypatch
+):
     repository = create_git_repository(tmp_path, "artifact-service")
     script = "from pathlib import Path; Path('report.txt').write_text('captured')"
     settings = BridgeSettings.model_validate(
         {
-            "server": {"name": "artifact-test"},
+            "server": {
+                "name": "artifact-test",
+                "public_base_url": "https://bridge.example",
+            },
             "jobs": {
                 "database_path": tmp_path / "jobs.sqlite3",
                 "artifact_directory": tmp_path / "artifacts",
@@ -163,6 +175,21 @@ async def test_job_artifacts_are_listed_and_downloaded_as_snapshots(tmp_path):
         }
     )
     container = build_container(settings)
+    export_clock = {"value": 100.0}
+    container = replace(
+        container,
+        job_artifact_exports=JobArtifactExportService(
+            container.jobs,
+            container.projects,
+            CapabilityExportRegistry[JobArtifactExportSubject](
+                600,
+                monotonic=lambda: export_clock["value"],
+                utcnow=lambda: datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            "https://bridge.example",
+            settings.server.endpoint,
+        ),
+    )
     app = create_streamable_http_app(create_server(container), settings, container)
     scope = {"project_id": "engineering", "repository_id": "service"}
 
@@ -193,8 +220,64 @@ async def test_job_artifacts_are_listed_and_downloaded_as_snapshots(tmp_path):
                     )
                     artifact = json.loads(listed.content[0].text)["data"]["artifacts"][0]
 
+                    original_artifact_file = container.jobs.artifact_file
+                    authority_calls = []
+
+                    def counted_artifact_file(repository, selected_job, artifact_id):
+                        authority_calls.append((selected_job, artifact_id))
+                        return original_artifact_file(
+                            repository, selected_job, artifact_id
+                        )
+
+                    monkeypatch.setattr(
+                        container.jobs, "artifact_file", counted_artifact_file
+                    )
+                    snapshots_before = tuple(
+                        path for path in (tmp_path / "artifacts").rglob("*")
+                        if path.is_file()
+                    )
+                    exported = await session.call_tool(
+                        "job_artifact_export",
+                        {**scope, "job_id": job_id, "artifact_id": "report"},
+                    )
+                    exported_data = json.loads(exported.content[0].text)["data"]
+                    assert authority_calls == [(job_id, "report")]
+                    assert isinstance(exported.content[1], types.ResourceLink)
+                    assert exported.content[1].uri == exported_data["export_url"]
+                    assert exported.content[1].name == exported.content[1].title == "report.txt"
+                    assert exported.content[1].mime_type == "text/plain"
+                    assert exported.content[1].size == 8
+                    assert isinstance(exported.content[2], types.EmbeddedResource)
+                    assert isinstance(
+                        exported.content[2].resource, types.BlobResourceContents
+                    )
+                    assert exported.content[2].resource.uri == exported_data["export_url"]
+                    assert base64.b64decode(exported.content[2].resource.blob) == b"captured"
+                    assert exported_data["artifact"]["artifact_id"] == "report"
+                    assert exported_data["file_name"] == "report.txt"
+                    assert exported_data["media_type"] == "text/plain"
+                    assert exported_data["size_bytes"] == 8
+                    assert exported_data["sha256"] == artifact["sha256"]
+                    assert str(tmp_path) not in json.dumps(exported_data)
+                    assert tuple(
+                        path for path in (tmp_path / "artifacts").rglob("*")
+                        if path.is_file()
+                    ) == snapshots_before
+
+                    monkeypatch.setattr("app.tools.jobs.JOB_ARTIFACT_INLINE_LIMIT", 1)
+                    oversized = await session.call_tool(
+                        "job_artifact_export",
+                        {**scope, "job_id": job_id, "artifact_id": "report"},
+                    )
+                    assert len(oversized.content) == 2
+                    assert isinstance(oversized.content[1], types.ResourceLink)
+                    export_path = urlparse(exported_data["export_url"]).path
+
             (repository / "report.txt").write_text("changed", encoding="utf-8")
             response = await http_client.get(artifact["download_path"])
+            exported_get = await http_client.get(export_path)
+            exported_head = await http_client.head(export_path)
+            invalid = await http_client.get("/mcp/job-artifacts/exports/invalid")
 
     assert artifact["available"] is True
     assert artifact["size_bytes"] == 8
@@ -203,6 +286,56 @@ async def test_job_artifacts_are_listed_and_downloaded_as_snapshots(tmp_path):
     assert response.headers["content-type"].startswith("text/plain")
     assert response.headers["etag"] == f'"{artifact["sha256"]}"'
     assert response.content == b"captured"
+    assert exported_get.status_code == exported_head.status_code == 200
+    assert exported_get.content == b"captured"
+    assert int(exported_head.headers["content-length"]) == 8
+    assert exported_get.headers["cache-control"] == "private, no-store"
+    assert exported_get.headers["etag"] == f'"{artifact["sha256"]}"'
+    assert "report.txt" in exported_get.headers["content-disposition"]
+    assert invalid.status_code == 404
+
+    oauth_data = settings.model_dump(mode="python")
+    oauth_data["oauth"] = {
+        "enabled": True,
+        "issuer_url": "http://127.0.0.1",
+        "resource_url": "http://127.0.0.1/mcp",
+        "database_path": tmp_path / "oauth.sqlite3",
+        "owner_verifier": create_owner_verifier("owner-password"),
+    }
+    oauth_settings = BridgeSettings.model_validate(oauth_data)
+    restarted = build_container(oauth_settings)
+    restarted_repository = restarted.projects.repositories.get(
+        "engineering", "service"
+    )
+    restarted_data, _, _ = restarted.job_artifact_exports.export(
+        restarted_repository, job_id, "report"
+    )
+    restarted_app = create_streamable_http_app(
+        create_server(restarted), oauth_settings, restarted
+    )
+    assert container.job_artifact_exports.resolve(
+        urlparse(exported_data["export_url"]).path.rsplit("/", 1)[-1]
+    ) is not None
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=restarted_app),
+        base_url="http://127.0.0.1",
+    ) as restarted_client:
+        old_token = await restarted_client.get(export_path)
+        bearer_free = await restarted_client.get(
+            urlparse(restarted_data["export_url"]).path
+        )
+        oauth_protected = await restarted_client.get(artifact["download_path"])
+    assert old_token.status_code == 404
+    assert bearer_free.status_code == 200
+    assert bearer_free.content == b"captured"
+    assert oauth_protected.status_code == 401
+
+    export_clock["value"] = 701.0
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as expired_client:
+        expired = await expired_client.get(export_path)
+    assert expired.status_code == 404
 
 
 @pytest.mark.asyncio

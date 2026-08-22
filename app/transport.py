@@ -143,6 +143,53 @@ def create_streamable_http_app(
                 headers={"Cache-Control": "private, no-store"},
             )
 
+    async def job_artifact_export_download(request: Request):
+        try:
+            if not _host_allowed(request.headers.get("host", ""), settings):
+                return JSONResponse({"error": "Host is not allowed"}, status_code=421)
+            resolved = container.job_artifact_exports.resolve(
+                request.path_params["token"]
+            )
+            if resolved is None:
+                raise LookupError
+            artifact, path = resolved
+            assert artifact.sha256 is not None
+            return FileResponse(
+                path,
+                media_type=artifact.media_type,
+                filename=PurePosixPath(artifact.path).name,
+                headers={
+                    "ETag": f'"{artifact.sha256}"',
+                    "Cache-Control": "private, no-store",
+                },
+            )
+        except (LookupError, OSError):
+            return JSONResponse(
+                {"error": "Job artifact export is not available"},
+                status_code=404,
+                headers={"Cache-Control": "private, no-store"},
+            )
+
+    async def github_artifact_export_download(request: Request):
+        try:
+            if not _host_allowed(request.headers.get("host", ""), settings):
+                return JSONResponse({"error": "Host is not allowed"}, status_code=421)
+            snapshot = container.github_artifact_exports.resolve(request.path_params["token"])
+            if snapshot is None:
+                raise LookupError
+            return FileResponse(
+                snapshot.path,
+                media_type=snapshot.media_type,
+                filename=snapshot.file_name,
+                headers={"ETag": f'"{snapshot.sha256}"', "Cache-Control": "private, no-store"},
+            )
+        except (LookupError, OSError):
+            return JSONResponse(
+                {"error": "GitHub Actions artifact export is not available"},
+                status_code=404,
+                headers={"Cache-Control": "private, no-store"},
+            )
+
     artifact_path = settings.server.endpoint.rstrip("/") + (
         "/artifacts/{project_id}/{repository_id}/{job_id}/{artifact_id}"
     )
@@ -151,6 +198,12 @@ def create_streamable_http_app(
     )
     knowledge_attachment_export_path = settings.server.endpoint.rstrip("/") + (
         "/knowledge/exports/{token}"
+    )
+    job_artifact_export_path = settings.server.endpoint.rstrip("/") + (
+        "/job-artifacts/exports/{token}"
+    )
+    github_artifact_export_path = settings.server.endpoint.rstrip("/") + (
+        "/github-actions-artifacts/exports/{token}"
     )
     artifact_endpoint = artifact_download
     auth_settings = None
@@ -210,6 +263,22 @@ def create_streamable_http_app(
             knowledge_attachment_endpoint,
             methods=["GET", "HEAD"],
             name="knowledge_attachment_download",
+        )
+    )
+    custom_routes.append(
+        Route(
+            github_artifact_export_path,
+            github_artifact_export_download,
+            methods=["GET", "HEAD"],
+            name="github_actions_artifact_export_download",
+        )
+    )
+    custom_routes.append(
+        Route(
+            job_artifact_export_path,
+            job_artifact_export_download,
+            methods=["GET", "HEAD"],
+            name="job_artifact_export_download",
         )
     )
     custom_routes.append(

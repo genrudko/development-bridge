@@ -7,6 +7,7 @@ import pytest
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import Capability
 from app.container import build_container
+from app.projects.managed import SubprocessManagedCloneRunner
 from app.settings import BridgeSettings
 from tests.fixtures.managed_clone import FakeManagedCloneRunner
 from tests.fixtures.repositories import create_git_repository
@@ -58,6 +59,78 @@ async def test_managed_clone_is_idempotent_and_persists_across_container_rebuild
     restored = rebuilt.projects.repositories.get("project", "upstream")
     assert restored.root == tmp_path / "managed" / "project" / "upstream"
     assert len(runner.clone_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_clone_ref_is_persisted_and_part_of_idempotency(tmp_path):
+    runner = FakeManagedCloneRunner()
+    configured = settings(tmp_path)
+    container = build_container(configured, managed_clone_runner=runner)
+
+    cloned = await container.managed_repositories.clone(
+        "project", "tagged", URL, depth=20, requested_ref="1.7"
+    )
+    repeated = await container.managed_repositories.clone(
+        "project", "tagged", URL, depth=99, requested_ref="1.7"
+    )
+    assert cloned["requested_ref"] == repeated["requested_ref"] == "1.7"
+    assert cloned["branch"] == "1.7"
+    assert repeated["status"] == "already_present"
+    assert runner.clone_calls[0][3] == "1.7"
+    with pytest.raises(BridgeError) as changed:
+        await container.managed_repositories.clone(
+            "project", "tagged", URL, requested_ref="main"
+        )
+    assert changed.value.code is ErrorCode.REPOSITORY_CONFLICT
+
+    rebuilt = build_container(configured, managed_clone_runner=runner)
+    restored = await rebuilt.managed_repositories.clone(
+        "project", "tagged", URL, requested_ref="1.7"
+    )
+    assert restored["status"] == "already_present"
+    assert restored["requested_ref"] == "1.7"
+    assert len(runner.clone_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_old_manifest_schema_loads_with_null_requested_ref(tmp_path):
+    runner = FakeManagedCloneRunner()
+    configured = settings(tmp_path)
+    first = build_container(configured, managed_clone_runner=runner)
+    await first.managed_repositories.clone("project", "legacy", URL)
+    manifest_path = tmp_path / "managed" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["repositories"][0].pop("requested_ref")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    rebuilt = build_container(configured, managed_clone_runner=runner)
+    restored = await rebuilt.managed_repositories.clone("project", "legacy", URL)
+    assert restored["status"] == "already_present"
+    assert restored["requested_ref"] is None
+    assert len(runner.clone_calls) == 1
+
+    with pytest.raises(BridgeError) as changed:
+        await rebuilt.managed_repositories.clone(
+            "project", "legacy", URL, requested_ref="1.7"
+        )
+    assert changed.value.code is ErrorCode.REPOSITORY_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_clone_runner_uses_fixed_branch_argv(monkeypatch, tmp_path):
+    runner = SubprocessManagedCloneRunner()
+    calls = []
+
+    async def capture(*arguments):
+        calls.append(arguments)
+        return ""
+
+    monkeypatch.setattr(runner, "_run", capture)
+    await runner.clone(URL, tmp_path / "destination", 20, "1.7")
+    assert calls == [(
+        "git", "clone", "--depth", "20", "--single-branch",
+        "--branch", "1.7", "--", URL, str(tmp_path / "destination"),
+    )]
 
 
 @pytest.mark.asyncio
@@ -117,6 +190,22 @@ async def test_managed_clone_rejects_unsafe_urls_without_calling_runner(tmp_path
     assert runner.clone_calls == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_ref", [
+    "", "-branch", "feature:target", "refs/*", "bad..ref", "bad ref",
+    "bad\x00ref", "bad\nref", "@{previous}", ".hidden/main",
+])
+async def test_managed_clone_rejects_unsafe_refs(tmp_path, requested_ref):
+    runner = FakeManagedCloneRunner()
+    container = build_container(settings(tmp_path), managed_clone_runner=runner)
+    with pytest.raises(BridgeError) as raised:
+        await container.managed_repositories.clone(
+            "project", "upstream", URL, requested_ref=requested_ref
+        )
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+    assert runner.clone_calls == []
+
+
 def test_manifest_path_is_not_authority_and_malformed_entry_fails_closed(tmp_path):
     managed = tmp_path / "managed"
     managed.mkdir()
@@ -142,4 +231,6 @@ def test_clone_tool_identity_schema_prevents_traversal(tmp_path):
     schema = build_tool_registry(container).get("repository_clone").definition.input_schema
     assert schema["properties"]["project_id"]["pattern"] == "^[a-z][a-z0-9-]{0,62}$"
     assert schema["properties"]["repository_id"]["pattern"] == "^[a-z][a-z0-9-]{0,62}$"
-    assert set(schema["properties"]) == {"project_id", "repository_id", "url", "depth"}
+    assert set(schema["properties"]) == {
+        "project_id", "repository_id", "url", "depth", "ref"
+    }

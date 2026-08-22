@@ -18,7 +18,9 @@ BRIDGE_CAPABILITIES = {
     "git-read",
     "controlled-changes",
     "tasks-jobs",
+    "repository-exec",
     "git-write",
+    "github-host",
     "community-knowledge",
 }
 
@@ -49,6 +51,11 @@ def test_v1_schemas_are_closed_objects():
         "minimum": 1,
         "maximum": 10000,
         "default": 50,
+    }
+    assert tools["repository_clone"].input_schema["properties"]["ref"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024,
     }
 
 

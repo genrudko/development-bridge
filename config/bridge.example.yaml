@@ -9,6 +9,14 @@ server:
   allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
 jobs:
   database_path: /absolute/path/to/development-bridge-jobs.sqlite3
+# GitHub host workflows are optional. The token is supplied only through
+# DEVELOPMENT_BRIDGE_GITHUB_TOKEN, never in this file.
+# github:
+#   timeout_seconds: 20
+#   response_limit_bytes: 2097152
+#   artifact_directory: /absolute/path/to/development-bridge-github-artifacts
+#   artifact_max_bytes: 268435456
+#   artifact_export_ttl_seconds: 600
 # Optional Community Knowledge corpus; keep it outside registered repositories.
 # knowledge:
 #   database_path: /absolute/path/to/development-bridge-knowledge.sqlite3

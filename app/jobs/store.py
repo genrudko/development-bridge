@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,6 +10,10 @@ from uuid import uuid4
 from app.api.errors import BridgeError, ErrorCode
 
 from .models import JobArtifact, JobRecord, JobStatus
+from app.tasks import ArtifactDeclaration, TaskProfile
+
+
+REPOSITORY_EXEC_TASK_ID = "__repository_exec__"
 
 
 def _now() -> str:
@@ -57,6 +62,12 @@ class JobStore:
                     storage_path TEXT,
                     error TEXT,
                     PRIMARY KEY(job_id, artifact_id),
+                    FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+                );
+                CREATE TABLE IF NOT EXISTS job_execution_specs (
+                    job_id TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id)
                 );
                 """
@@ -135,6 +146,83 @@ class JobStore:
                 assert row is not None
                 return self._row(row), False
         return self.get(project_id, repository_id, job_id), True
+
+    def create_execution(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        request_id: str,
+        idempotency_key: str | None,
+        payload_json: str,
+        payload_digest: str,
+    ) -> tuple[JobRecord, bool]:
+        job_id = "job_" + uuid4().hex
+        created_at = _now()
+        with self._connect() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id, project_id, repository_id, task_id, request_id,
+                        idempotency_key, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id, project_id, repository_id, REPOSITORY_EXEC_TASK_ID,
+                        request_id, idempotency_key, JobStatus.QUEUED.value, created_at,
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO job_execution_specs
+                       (job_id, payload_json, payload_digest) VALUES (?, ?, ?)""",
+                    (job_id, payload_json, payload_digest),
+                )
+            except sqlite3.IntegrityError:
+                if idempotency_key is None:
+                    raise
+                row = connection.execute(
+                    """SELECT j.*, s.payload_digest
+                       FROM jobs j LEFT JOIN job_execution_specs s ON s.job_id=j.job_id
+                       WHERE j.project_id=? AND j.repository_id=?
+                         AND j.task_id=? AND j.idempotency_key=?""",
+                    (project_id, repository_id, REPOSITORY_EXEC_TASK_ID, idempotency_key),
+                ).fetchone()
+                assert row is not None
+                if row["payload_digest"] != payload_digest:
+                    raise BridgeError(
+                        ErrorCode.IDEMPOTENCY_CONFLICT,
+                        "idempotency_key is already bound to another execution specification",
+                    )
+                return self._row(row), False
+        return self.get(project_id, repository_id, job_id), True
+
+    def execution_profile(self, job_id: str) -> TaskProfile | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM job_execution_specs WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"])
+        return TaskProfile(
+            payload["project_id"],
+            payload["repository_id"],
+            REPOSITORY_EXEC_TASK_ID,
+            "Ad-hoc repository execution",
+            payload["executable"],
+            tuple(payload["arguments"]),
+            payload["timeout_seconds"],
+            payload["output_limit_bytes"],
+            tuple(
+                ArtifactDeclaration(
+                    item["id"], item["path"], item["media_type"],
+                    item["required"], item["max_bytes"],
+                )
+                for item in payload["artifacts"]
+            ),
+        )
 
     def get(self, project_id: str, repository_id: str, job_id: str) -> JobRecord:
         with self._connect() as connection:

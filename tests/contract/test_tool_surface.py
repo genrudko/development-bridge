@@ -33,6 +33,33 @@ SUPPORTED_TOOLS = {
     "job_cancel",
     "job_artifact_list",
     "job_artifact_view",
+    "job_artifact_export",
+    "repository_exec",
+    "github_repository_status",
+    "github_commit_checks",
+    "github_issue_list",
+    "github_issue_get",
+    "github_issue_create",
+    "github_issue_update",
+    "github_issue_comment",
+    "github_pull_request_list",
+    "github_pull_request_get",
+    "github_pull_request_create",
+    "github_pull_request_update",
+    "github_pull_request_comment",
+    "github_pull_request_reviews",
+    "github_pull_request_review",
+    "github_pull_request_request_reviewers",
+    "github_pull_request_merge",
+    "github_actions_runs",
+    "github_actions_run",
+    "github_actions_jobs",
+    "github_actions_job_logs",
+    "github_actions_artifacts",
+    "github_actions_artifact_export",
+    "github_actions_dispatch",
+    "github_actions_rerun",
+    "github_actions_cancel",
     "knowledge_source_list",
     "knowledge_search",
     "knowledge_message",
@@ -48,8 +75,12 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 37
-    assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {"v1", "community-knowledge"}
+    assert len(registry.definitions) == 64
+    assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
+        "v1",
+        "community-knowledge",
+        "github-host",
+    }
 
 
 def test_legacy_global_workspace_names_are_absent():

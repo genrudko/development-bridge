@@ -26,8 +26,13 @@ The Bridge exposes:
   `git_fast_forward`;
 - Changes: `change_plan` and `change_apply`;
 - Tasks and jobs: `task_list`, `task_start`, `job_status`, `job_output`,
-  `job_cancel`, `job_artifact_list`, and `job_artifact_view`;
+  `job_cancel`, `job_artifact_list`, `job_artifact_view`, and
+  `job_artifact_export`;
+- Ad-hoc execution: `repository_exec` for structured executable/argv runs in
+  repositories with `execute`, using the same durable jobs and artifacts;
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
+- GitHub host: repository status, checks, issues, pull requests, reviews,
+  exact-head merge, and Actions runs/jobs/logs/artifacts/lifecycle.
 - Community Knowledge: `knowledge_source_list`, `knowledge_search`,
   `knowledge_message`, `knowledge_thread`, `knowledge_source_add`, and
   `knowledge_source_sync`; `knowledge_attachment_open` lazily snapshots one
@@ -49,6 +54,9 @@ Managed clones are reference repositories: `read` and `git_read` are enabled,
 while file/Git writes and task execution are disabled. Existing Files, Git Read,
 repository status, and `git_fetch` APIs operate on them immediately. Use
 `git_fetch` for later remote updates; no separate pull or sync API is added.
+An optional `repository_clone.ref` selects an initial branch or tag through the
+fixed `git clone --branch` invocation and is persisted as clone intent. It does
+not promise arbitrary commit-SHA checkout support.
 
 ## Community Knowledge
 
@@ -164,6 +172,27 @@ working tree. Visual review follows the bounded path job artifact → immutable
 snapshot → `job_artifact_view` → MCP `ImageContent` → visual review. Inline
 viewing supports PNG, JPEG, and WebP snapshots up to 8 MiB; larger artifacts
 remain available through the existing authenticated HTTP download route.
+For arbitrary binary artifacts, `job_artifact_export` emits a native MCP
+`ResourceLink` plus byte-exact `EmbeddedResource` up to 4 MiB. Its short-lived,
+bearer-free capability URL remains the fallback for larger files, uses the same
+bounded process-local token primitive as knowledge exports, and never creates a
+second artifact copy.
+
+`task_start` remains the canonical reusable-command API. `repository_exec` is
+the ad-hoc engineering path: it always runs in the selected repository root,
+does not use a shell, and accepts no cwd, environment, stdin, or privilege
+override. Its execution specification and idempotency digest are stored in the
+job database, so queued runs retain their meaning across restart.
+
+GitHub host integration is optional and reads
+`DEVELOPMENT_BRIDGE_GITHUB_TOKEN` only from the runtime environment. Repository
+identity is derived from the registered Git `origin`; tools cannot supply an
+owner, repository, or arbitrary API URL. Managed external repositories retain
+GitHub read access through `git_read` but cannot mutate host state because they
+lack `git_write`. Git push remains `git_push`; the GitHub service owns issues,
+PRs, reviews, checks, merge, and Actions. Actions artifacts are snapshotted as
+original ZIP bytes and use the same native resource handoff and short-lived
+capability fallback as other Bridge files.
 
 ## Repository scope
 
