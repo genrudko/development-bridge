@@ -10,6 +10,7 @@ JOB_TOOLS = {
     "job_output",
     "job_cancel",
     "job_artifact_list",
+    "job_artifact_view",
 }
 
 
@@ -36,3 +37,9 @@ def test_job_tools_are_registered_with_closed_repository_scoped_schemas():
             "repository_id",
             "job_id",
         ]
+    assert tools["job_artifact_view"].input_schema["required"] == [
+        "project_id",
+        "repository_id",
+        "job_id",
+        "artifact_id",
+    ]

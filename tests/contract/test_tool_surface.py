@@ -31,6 +31,7 @@ SUPPORTED_TOOLS = {
     "job_output",
     "job_cancel",
     "job_artifact_list",
+    "job_artifact_view",
 }
 
 
@@ -38,6 +39,7 @@ def test_registered_tool_surface_is_exact_and_repository_scoped():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
+    assert len(registry.definitions) == 28
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {"v1"}
 
 

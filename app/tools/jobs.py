@@ -3,11 +3,13 @@ from __future__ import annotations
 from urllib.parse import quote
 
 from mcp import types
+from mcp.server.mcpserver.utilities.types import Image
 
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
 from app.container import ApplicationContainer
+from app.jobs import read_visual_artifact
 
 
 JOB_ID_SCHEMA = {"type": "string", "pattern": "^job_[0-9a-f]{32}$"}
@@ -82,6 +84,31 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             )
         )
 
+    async def job_artifact_view(ctx, params, request_context):
+        arguments = params.arguments
+        artifact, path = container.jobs.artifact_file(
+            repository(arguments), arguments["job_id"], arguments["artifact_id"]
+        )
+        image_bytes = read_visual_artifact(artifact, path)
+        result = to_mcp_result(
+            success(
+                request_context.request_id,
+                {
+                    "job_id": arguments["job_id"],
+                    "artifact": artifact.public_dict(),
+                },
+            )
+        )
+        image_format = {
+            "image/png": "png",
+            "image/jpeg": "jpeg",
+            "image/webp": "webp",
+        }[artifact.media_type]
+        result.content.append(
+            Image(data=image_bytes, format=image_format).to_image_content()
+        )
+        return result
+
     base_properties = {
         "project_id": IDENTIFIER_SCHEMA,
         "repository_id": IDENTIFIER_SCHEMA,
@@ -124,6 +151,17 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                     job_artifact_list,
                 ),
             )
+        ),
+        (
+            "job_artifact_view",
+            "View an immutable image artifact through MCP",
+            {
+                **base_properties,
+                "job_id": JOB_ID_SCHEMA,
+                "artifact_id": IDENTIFIER_SCHEMA,
+            },
+            repository_required + ["job_id", "artifact_id"],
+            job_artifact_view,
         ),
     )
     return tuple(

@@ -25,7 +25,7 @@ The Bridge exposes:
   `git_fast_forward`;
 - Changes: `change_plan` and `change_apply`;
 - Tasks and jobs: `task_list`, `task_start`, `job_status`, `job_output`,
-  `job_cancel`, and `job_artifact_list`;
+  `job_cancel`, `job_artifact_list`, and `job_artifact_view`;
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
 
 The Core API uses immutable project and repository registries loaded from a
@@ -63,7 +63,10 @@ operations (`git_fetch`, branch creation and switching, and upstream-only
 fast-forward) plus immutable job artifact snapshots. Declared artifacts are
 captured into job-specific storage and exposed through `job_artifact_list` and
 the authenticated HTTP artifact route; they are never served from the mutable
-working tree.
+working tree. Visual review follows the bounded path job artifact → immutable
+snapshot → `job_artifact_view` → MCP `ImageContent` → visual review. Inline
+viewing supports PNG, JPEG, and WebP snapshots up to 8 MiB; larger artifacts
+remain available through the existing authenticated HTTP download route.
 
 ## Repository scope
 
