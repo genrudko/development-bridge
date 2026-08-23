@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Mapping
 
 from app.api.errors import BridgeError, ErrorCode
 from app.projects import Repository
@@ -20,7 +22,12 @@ class GitRunner:
         *,
         check: bool = True,
         input_text: str | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> GitCommandResult:
+        process_environment = None
+        if environment is not None:
+            process_environment = os.environ.copy()
+            process_environment.update(environment)
         process = await asyncio.create_subprocess_exec(
             "git",
             *arguments,
@@ -28,6 +35,7 @@ class GitRunner:
             stdin=asyncio.subprocess.PIPE if input_text is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=process_environment,
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(

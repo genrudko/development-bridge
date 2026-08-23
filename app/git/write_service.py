@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 import re
 import tempfile
 from pathlib import PurePosixPath
+from urllib.parse import urlsplit
 from typing import TYPE_CHECKING, Any
 
 from app.api.errors import BridgeError, ErrorCode
@@ -32,11 +34,13 @@ class GitWriteService:
         policy: CapabilityPolicy,
         revisions: ChangeRevisionCalculator,
         mutations: RepositoryMutationLock,
+        github_token: str | None = None,
     ) -> None:
         self._runner = runner
         self._policy = policy
         self._revisions = revisions
         self._mutations = mutations
+        self._github_token = github_token
 
     async def stage(
         self,
@@ -265,7 +269,11 @@ class GitWriteService:
                 if set_upstream:
                     arguments.append("--set-upstream")
                 arguments.extend([remote, f"{local_head}:{remote_ref}"])
-                pushed = await self._runner.run(repository, arguments, check=False)
+                remote_url = await self._remote_url(repository, remote)
+                with self._github_https_environment(remote_url) as environment:
+                    pushed = await self._runner.run(
+                        repository, arguments, check=False, environment=environment
+                    )
                 if pushed.returncode != 0:
                     raise BridgeError(
                         ErrorCode.GIT_PUSH_REJECTED,
@@ -384,12 +392,69 @@ class GitWriteService:
         return f"{remote}/{branch}" if remote and branch else None
 
     async def _require_remote(self, repository: Repository, remote: str) -> None:
-        result = await self._runner.run(repository, ["remote", "get-url", remote], check=False)
-        if result.returncode != 0:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Git remote is not configured", details={"remote": remote})
+        await self._remote_url(repository, remote)
+
+    async def _remote_url(self, repository: Repository, remote: str) -> str:
+        result = await self._runner.run(
+            repository, ["remote", "get-url", remote], check=False
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Git remote is not configured",
+                details={"remote": remote},
+            )
+        return result.stdout.strip()
+
+    @contextmanager
+    def _github_https_environment(self, remote_url: str):
+        if self._github_token is None:
+            yield None
+            return
+        parsed = urlsplit(remote_url)
+        if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() != "github.com":
+            yield None
+            return
+        if parsed.username is not None or parsed.password is not None:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "GitHub HTTPS remote must not contain embedded credentials",
+            )
+        descriptor, askpass_path = tempfile.mkstemp(
+            prefix=".development-bridge-git-askpass-", text=True
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as askpass:
+                askpass.write(
+                    "#!/bin/sh\n"
+                    "case \"$1\" in\n"
+                    "  *sername*) printf '%s\\n' \"$DEVELOPMENT_BRIDGE_GIT_USERNAME\" ;;\n"
+                    "  *assword*) printf '%s\\n' \"$DEVELOPMENT_BRIDGE_GIT_PASSWORD\" ;;\n"
+                    "  *) exit 1 ;;\n"
+                    "esac\n"
+                )
+            os.chmod(askpass_path, 0o700)
+            yield {
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_ASKPASS_REQUIRE": "force",
+                "GIT_ASKPASS": askpass_path,
+                "DEVELOPMENT_BRIDGE_GIT_USERNAME": "x-access-token",
+                "DEVELOPMENT_BRIDGE_GIT_PASSWORD": self._github_token,
+            }
+        finally:
+            try:
+                os.unlink(askpass_path)
+            except FileNotFoundError:
+                pass
 
     async def _remote_head(self, repository: Repository, remote: str, remote_ref: str) -> str | None:
-        result = await self._runner.run(repository, ["ls-remote", "--heads", remote, remote_ref])
+        remote_url = await self._remote_url(repository, remote)
+        with self._github_https_environment(remote_url) as environment:
+            result = await self._runner.run(
+                repository,
+                ["ls-remote", "--heads", remote, remote_ref],
+                environment=environment,
+            )
         line = result.stdout.strip()
         return line.split("\t", 1)[0] if line else None
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -21,13 +22,14 @@ def repository(root, *, writable=True):
     )
 
 
-def service():
+def service(*, github_token: str | None = None):
     runner = GitRunner()
     return GitWriteService(
         runner,
         CapabilityPolicy(),
         ChangeRevisionCalculator(runner),
         RepositoryMutationLock(),
+        github_token=github_token,
     )
 
 
@@ -226,3 +228,28 @@ async def test_git_write_capability_is_required(tmp_path):
     with pytest.raises(BridgeError) as raised:
         await service().stage(repository(root, writable=False), ["README.md"])
     assert raised.value.code is ErrorCode.PERMISSION_DENIED
+
+
+def test_github_https_credentials_are_ephemeral_and_secret_free():
+    write = service(github_token="github-secret")
+
+    with write._github_https_environment("https://github.com/example/repo.git") as environment:
+        assert environment is not None
+        assert environment["DEVELOPMENT_BRIDGE_GIT_PASSWORD"] == "github-secret"
+        assert environment["GIT_TERMINAL_PROMPT"] == "0"
+        askpass = Path(environment["GIT_ASKPASS"])
+        assert askpass.exists()
+        assert askpass.stat().st_mode & 0o777 == 0o700
+        assert "github-secret" not in askpass.read_text(encoding="utf-8")
+
+    assert not askpass.exists()
+
+    with write._github_https_environment("git@github.com:example/repo.git") as environment:
+        assert environment is None
+
+    with pytest.raises(BridgeError) as raised:
+        with write._github_https_environment(
+            "https://user:secret@github.com/example/repo.git"
+        ):
+            pass
+    assert raised.value.code is ErrorCode.POLICY_VIOLATION

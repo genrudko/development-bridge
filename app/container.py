@@ -241,9 +241,14 @@ def build_container(
         ),
         configured.server.endpoint,
     )
-    if github_transport is None and configured.github.token is not None:
+    github_token = (
+        configured.github.token.get_secret_value()
+        if configured.github.token is not None
+        else None
+    )
+    if github_transport is None and github_token is not None:
         github_transport = UrllibGitHubTransport(
-            configured.github.token.get_secret_value(),
+            github_token,
             timeout_seconds=configured.github.timeout_seconds,
             response_limit_bytes=configured.github.response_limit_bytes,
         )
@@ -265,7 +270,9 @@ def build_container(
         capability_policy=policy,
         audit=audit_sink,
         git=GitService(runner, policy),
-        git_write=GitWriteService(runner, policy, revisions, mutations),
+        git_write=GitWriteService(
+            runner, policy, revisions, mutations, github_token=github_token
+        ),
         git_workspace=GitWorkspaceService(runner, policy, revisions, mutations),
         files=FileService(policy),
         changes=ChangeService(policy, revisions, mutations),
