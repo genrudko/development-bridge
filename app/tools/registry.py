@@ -20,6 +20,7 @@ from .guide import guide_tools
 from .jobs import job_tools
 from .knowledge import knowledge_tools
 from .projects import project_tools
+from .telegram_supervisor import telegram_supervisor_tools
 
 
 def build_tool_registry(
@@ -44,6 +45,7 @@ def build_tool_registry(
         + github_tools(container)
         + chatgpt_share_tools(container)
         + coordinator_tools(container)
+        + telegram_supervisor_tools(container)
         + command_tools(container)
     )
     registry.register_many(guide_tools(registry))

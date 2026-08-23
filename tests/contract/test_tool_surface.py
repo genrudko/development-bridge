@@ -77,6 +77,8 @@ SUPPORTED_TOOLS = {
     "coordinator_continue",
     "coordinator_wake_on_jobs",
     "run_command",
+    "telegram_supervisor_status",
+    "telegram_send",
 }
 
 
@@ -84,13 +86,14 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 74
+    assert len(registry.definitions) == 76
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",
         "github-host",
         "chatgpt-share",
         "coordinator-x",
+        "telegram-supervisor",
     }
 
 

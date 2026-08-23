@@ -129,6 +129,13 @@ class TelegramKnowledgeSettings(BaseModel):
     recent_window_size: int = Field(default=100, ge=0, le=500)
 
 
+class TelegramSupervisorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    chat_id: int | None = None
+    channel_id: str = Field(default="telegram-supervisor", min_length=1, max_length=64)
+
+
 class KnowledgeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     database_path: Path | None = None
@@ -213,6 +220,7 @@ class BridgeSettings(BaseModel):
     )
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
+    telegram_supervisor: TelegramSupervisorSettings = Field(default_factory=TelegramSupervisorSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     projects: tuple[ProjectSettings, ...] = ()
 
@@ -322,6 +330,21 @@ def load_settings(
         )
         environment_updates["knowledge"] = KnowledgeSettings.model_validate(
             {**settings.knowledge.model_dump(), "telegram": telegram}
+        )
+
+    supervisor_updates: dict[str, Any] = {}
+    if raw_enabled := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_ENABLED"):
+        normalized = raw_enabled.strip().lower()
+        if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise ValueError("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_ENABLED must be a boolean")
+        supervisor_updates["enabled"] = normalized in {"1", "true", "yes", "on"}
+    if chat_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_CHAT_ID"):
+        supervisor_updates["chat_id"] = int(chat_id)
+    if channel_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_CHANNEL_ID"):
+        supervisor_updates["channel_id"] = channel_id
+    if supervisor_updates:
+        environment_updates["telegram_supervisor"] = TelegramSupervisorSettings.model_validate(
+            {**settings.telegram_supervisor.model_dump(), **supervisor_updates}
         )
 
     if owner_verifier := environment.get("DEVELOPMENT_BRIDGE_OWNER_VERIFIER"):

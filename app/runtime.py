@@ -24,9 +24,13 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
     @asynccontextmanager
     async def lifespan(server):
         await application.jobs.start()
+        if application.telegram_supervisor is not None:
+            await application.telegram_supervisor.start()
         try:
             yield application
         finally:
+            if application.telegram_supervisor is not None:
+                await application.telegram_supervisor.stop()
             await application.jobs.stop()
 
     bridge_server = Server(application.settings.server.name, lifespan=lifespan)

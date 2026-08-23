@@ -50,6 +50,7 @@ from app.projects import (
 )
 from app.settings import BridgeSettings, load_settings
 from app.tasks import TaskRegistry
+from app.telegram_supervisor import TelegramSupervisorService
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,7 @@ class ApplicationContainer:
     oauth: BridgeOAuthProvider | None
     knowledge: KnowledgeService | None
     telegram_knowledge: TelegramKnowledgeService | None
+    telegram_supervisor: TelegramSupervisorService | None
     knowledge_attachments: KnowledgeAttachmentService | None
     knowledge_attachment_exports: KnowledgeAttachmentExportService | None
     chatgpt_share: ChatGPTShareService
@@ -276,6 +278,19 @@ def build_container(
         configured.server.endpoint,
         configured.github.artifact_max_bytes,
     )
+    coordinator = CoordinatorService()
+    supervisor_settings = configured.telegram_supervisor
+    telegram_supervisor = None
+    if supervisor_settings.enabled:
+        telegram_supervisor = TelegramSupervisorService(
+            enabled=True,
+            api_id=telegram.api_id,
+            api_hash=(telegram.api_hash.get_secret_value() if telegram.api_hash is not None else None),
+            session_path=telegram_session_path,
+            chat_id=supervisor_settings.chat_id,
+            channel_id=supervisor_settings.channel_id,
+            coordinator=coordinator,
+        )
     commands = RepositoryCommandService(jobs, policy)
     return ApplicationContainer(
         settings=configured,
@@ -302,12 +317,13 @@ def build_container(
             else None
         ),
         telegram_knowledge=telegram_knowledge,
+        telegram_supervisor=telegram_supervisor,
         knowledge_attachments=knowledge_attachments,
         knowledge_attachment_exports=knowledge_attachment_exports,
         chatgpt_share=ChatGPTShareService(
             chatgpt_share_transport or UrllibChatGPTShareTransport()
         ),
-        coordinator=CoordinatorService(),
+        coordinator=coordinator,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
     )
