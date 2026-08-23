@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import sqlite3
 import json
+import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 from app.api.errors import BridgeError, ErrorCode
-
-from .models import JobArtifact, JobRecord, JobStatus
 from app.tasks import ArtifactDeclaration, TaskProfile
 
+from .models import JobArtifact, JobRecord, JobStatus
 
 REPOSITORY_EXEC_TASK_ID = "__repository_exec__"
 
@@ -100,6 +99,14 @@ class JobStore:
                     (JobStatus.QUEUED.value,),
                 ).fetchall()
             )
+
+    def has_active(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM jobs WHERE status IN (?, ?) LIMIT 1",
+                (JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+            ).fetchone()
+        return row is not None
 
     def create(
         self,

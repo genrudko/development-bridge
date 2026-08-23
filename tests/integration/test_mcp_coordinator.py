@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import json
+
+import httpx2
+import pytest
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+from app.container import build_container
+from app.runtime import create_server
+from app.settings import BridgeSettings, load_settings
+from app.tools.coordinator import COORDINATOR_UI_URI
+from app.transport import create_streamable_http_app
+
+
+@pytest.mark.asyncio
+async def test_resource_mount_routing_and_internal_continue():
+    settings = BridgeSettings.model_validate(
+        {"server": {"public_base_url": "https://bridge.example"}}
+    )
+    container = build_container(settings)
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client:
+            async with streamable_http_client(
+                "http://127.0.0.1/mcp", http_client=client
+            ) as streams:
+                async with ClientSession(*streams) as session:
+                    await session.initialize()
+                    resources = await session.list_resources()
+                    assert [str(item.uri) for item in resources.resources] == [COORDINATOR_UI_URI]
+                    resource = await session.read_resource(COORDINATOR_UI_URI)
+                    assert "app.sendMessage" in resource.contents[0].text
+                    assert 'new URL("https://bridge.example/mcp/x/coordinator/"' in resource.contents[0].text
+                    assert "if (!ackResponse.ok)" in resource.contents[0].text
+                    mounted = await session.call_tool(
+                        "coordinator_x_mount", {"channel_id": "chat-42"}
+                    )
+                    assert mounted.structured_content == {
+                        "channel_id": "chat-42",
+                        "trigger_url": "https://bridge.example/mcp/x/coordinator/",
+                    }
+                    continued = await session.call_tool(
+                        "coordinator_continue",
+                        {"channel_id": "chat-42", "message": "resume", "delay_seconds": 0},
+                    )
+                    assert json.loads(continued.content[0].text)["data"]["state"] == "pending"
+                    listed = await session.list_tools()
+                    continue_tool = next(
+                        tool for tool in listed.tools if tool.name == "coordinator_continue"
+                    )
+                    assert continue_tool.input_schema["required"] == ["message"]
+            claim = await client.post("/mcp/x/coordinator/claim?channel_id=chat-42")
+            assert claim.json()["message"] == "resume"
+
+
+@pytest.mark.asyncio
+async def test_external_trigger_is_unavailable_unset_and_token_protected():
+    unset = build_container(BridgeSettings())
+    unset_app = create_streamable_http_app(create_server(unset), unset.settings, unset)
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=unset_app), base_url="http://127.0.0.1"
+    ) as client:
+        assert (await client.post("/mcp/x/coordinator/trigger", json={"message": "x"})).status_code == 404
+
+    settings = load_settings(environ={"DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN": "secret"})
+    container = build_container(settings)
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        assert (await client.post("/mcp/x/coordinator/trigger", json={"message": "x"})).status_code == 401
+        missing_message = await client.post(
+            "/mcp/x/coordinator/trigger",
+            headers={"X-Development-Bridge-Trigger-Token": "secret"},
+            json={"channel_id": "external"},
+        )
+        assert missing_message.status_code == 400
+        armed = await client.post(
+            "/mcp/x/coordinator/trigger",
+            headers={"Authorization": "Bearer secret"},
+            json={"channel_id": "external", "message": "wake", "delay": 0},
+        )
+        assert armed.status_code == 202
+        assert (await client.post("/mcp/x/coordinator/claim?channel_id=external")).json()["message"] == "wake"

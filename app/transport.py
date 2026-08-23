@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hmac
 import time
 from pathlib import PurePosixPath
 
 from mcp.server import Server
 from mcp.server.auth.handlers.metadata import MetadataHandler
-from mcp.server.auth.middleware.client_auth import ClientAuthenticator
 from mcp.server.auth.middleware.bearer_auth import RequireAuthMiddleware
+from mcp.server.auth.middleware.client_auth import ClientAuthenticator
 from mcp.server.auth.provider import ProviderTokenVerifier
 from mcp.server.auth.routes import (
     build_metadata,
@@ -26,12 +27,12 @@ from starlette.routing import Route, request_response
 
 from app.api.context import new_request_context
 from app.api.errors import BridgeError, ErrorCode
+from app.audit import AuditEvent, AuditOutcome
 from app.auth import (
     PublicClientRevocationHandler,
     ResourceBoundTokenHandler,
     approval_route,
 )
-from app.audit import AuditEvent, AuditOutcome
 from app.container import ApplicationContainer
 from app.settings import BridgeSettings
 
@@ -190,6 +191,73 @@ def create_streamable_http_app(
                 headers={"Cache-Control": "private, no-store"},
             )
 
+    async def coordinator_status(request: Request):
+        try:
+            return JSONResponse(
+                await container.coordinator.status(
+                    request.query_params.get("channel_id", "coordinator")
+                ),
+                headers={"Cache-Control": "no-store"},
+            )
+        except BridgeError as error:
+            return JSONResponse({"error": error.message}, status_code=400)
+
+    async def coordinator_claim(request: Request):
+        try:
+            return JSONResponse(
+                await container.coordinator.claim(
+                    request.query_params.get("channel_id", "coordinator")
+                ),
+                headers={"Cache-Control": "no-store"},
+            )
+        except BridgeError as error:
+            return JSONResponse({"error": error.message}, status_code=400)
+
+    async def coordinator_ack(request: Request):
+        try:
+            return JSONResponse(
+                await container.coordinator.ack(
+                    request.query_params.get("channel_id", "coordinator"),
+                    request.query_params.get("claim_id", ""),
+                ),
+                headers={"Cache-Control": "no-store"},
+            )
+        except BridgeError as error:
+            return JSONResponse({"error": error.message}, status_code=400)
+
+    async def coordinator_trigger(request: Request):
+        configured_token = settings.server.x_trigger_token
+        if configured_token is None:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        authorization = request.headers.get("authorization", "")
+        supplied = (
+            authorization.removeprefix("Bearer ")
+            if authorization.startswith("Bearer ")
+            else request.headers.get("x-development-bridge-trigger-token", "")
+        )
+        if not hmac.compare_digest(supplied, configured_token.get_secret_value()):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        try:
+            if int(request.headers.get("content-length", "0") or 0) > 8192:
+                raise ValueError
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise TypeError
+            if "message" not in body:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "message is required")
+            result = await container.coordinator.arm(
+                body["message"],
+                channel_id=body.get("channel_id", "coordinator"),
+                delay_seconds=body.get("delay", 0),
+                conflict=body.get("conflict", "coalesce"),
+            )
+            return JSONResponse(result, status_code=202)
+        except BridgeError as error:
+            status = 409 if error.code is ErrorCode.POLICY_VIOLATION else 400
+            return JSONResponse({"error": error.message}, status_code=status)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "Invalid JSON request"}, status_code=400)
+
     artifact_path = settings.server.endpoint.rstrip("/") + (
         "/artifacts/{project_id}/{repository_id}/{job_id}/{artifact_id}"
     )
@@ -205,6 +273,7 @@ def create_streamable_http_app(
     github_artifact_export_path = settings.server.endpoint.rstrip("/") + (
         "/github-actions-artifacts/exports/{token}"
     )
+    coordinator_base_path = settings.server.endpoint.rstrip("/") + "/x/coordinator"
     artifact_endpoint = artifact_download
     auth_settings = None
     token_verifier = None
@@ -249,6 +318,38 @@ def create_streamable_http_app(
         )
     if container.oauth is None:
         knowledge_attachment_endpoint = knowledge_attachment_download
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/status",
+            coordinator_status,
+            methods=["GET"],
+            name="coordinator_x_status",
+        )
+    )
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/claim",
+            coordinator_claim,
+            methods=["POST"],
+            name="coordinator_x_claim",
+        )
+    )
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/ack",
+            coordinator_ack,
+            methods=["POST"],
+            name="coordinator_x_ack",
+        )
+    )
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/trigger",
+            coordinator_trigger,
+            methods=["POST"],
+            name="coordinator_x_trigger",
+        )
+    )
     custom_routes.append(
         Route(
             artifact_path,

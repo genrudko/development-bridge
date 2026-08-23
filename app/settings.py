@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, model_validator
-
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    model_validator,
+)
 
 IDENTIFIER_PATTERN = r"^[a-z][a-z0-9-]{0,62}$"
 
@@ -19,6 +26,7 @@ class ServerSettings(BaseModel):
     endpoint: str = "/mcp"
     public_base_url: AnyHttpUrl | None = None
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*")
+    x_trigger_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
 
     @model_validator(mode="after")
     def public_base_url_is_canonical_https_origin(self) -> ServerSettings:
@@ -273,6 +281,10 @@ def load_settings(
             )
         if isinstance(raw.get("github"), dict) and "token" in raw["github"]:
             raise ValueError("GitHub token must be supplied through the deployment environment")
+        if isinstance(raw.get("server"), dict) and "x_trigger_token" in raw["server"]:
+            raise ValueError(
+                "X trigger token must be supplied through the deployment environment"
+            )
         settings = BridgeSettings.model_validate(raw)
 
     server_updates: dict[str, Any] = {}
@@ -280,13 +292,21 @@ def load_settings(
         server_updates["host"] = host
     if port := environment.get("DEVELOPMENT_BRIDGE_PORT"):
         server_updates["port"] = int(port)
+    if token := environment.get("DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN"):
+        server_updates["x_trigger_token"] = token
     if server_updates:
         validated_server = ServerSettings.model_validate(
-            {**settings.server.model_dump(), **server_updates}
+            {
+                **settings.server.model_dump(),
+                **(
+                    {"x_trigger_token": settings.server.x_trigger_token}
+                    if settings.server.x_trigger_token is not None
+                    else {}
+                ),
+                **server_updates,
+            }
         )
-        settings = BridgeSettings.model_validate(
-            {**settings.model_dump(), "server": validated_server}
-        )
+        settings = settings.model_copy(update={"server": validated_server})
     environment_updates: dict[str, Any] = {}
 
     telegram_updates: dict[str, Any] = {}
@@ -315,7 +335,5 @@ def load_settings(
         )
 
     if environment_updates:
-        settings = BridgeSettings.model_validate(
-            {**settings.model_dump(), **environment_updates}
-        )
+        settings = settings.model_copy(update=environment_updates)
     return settings

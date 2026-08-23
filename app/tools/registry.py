@@ -7,14 +7,18 @@ from app.container import ApplicationContainer
 
 from .bridge import bridge_tools
 from .changes import change_tools
+from .chatgpt_share import chatgpt_share_tools
+from .commands import command_tools
+from .coordinator import coordinator_tools
 from .files import file_tools
 from .git_read import git_read_tools
+from .git_workspace import git_workspace_tools
 from .git_write import git_write_tools
 from .github import github_tools
-from .git_workspace import git_workspace_tools
 from .jobs import job_tools
 from .knowledge import knowledge_tools
 from .projects import project_tools
+
 
 def build_tool_registry(
     container: ApplicationContainer,
@@ -35,5 +39,8 @@ def build_tool_registry(
         + job_tools(container)
         + knowledge_tools(container)
         + github_tools(container)
+        + chatgpt_share_tools(container)
+        + coordinator_tools(container)
+        + command_tools(container)
     )
     return registry

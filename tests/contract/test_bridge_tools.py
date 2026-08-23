@@ -2,7 +2,6 @@ from app.container import build_container
 from app.settings import BridgeSettings
 from app.tools.registry import build_tool_registry
 
-
 V1_TOOLS = {
     "bridge_info",
     "project_list",
@@ -22,6 +21,9 @@ BRIDGE_CAPABILITIES = {
     "git-write",
     "github-host",
     "community-knowledge",
+    "chatgpt-share",
+    "coordinator-x",
+    "structured-command",
 }
 
 

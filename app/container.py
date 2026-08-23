@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.api.errors import BridgeError, ErrorCode
 from app.api.capability_exports import CapabilityExportRegistry
-from app.auth import BridgeOAuthProvider, OAuthStore
+from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditSink, LoggingAuditSink
+from app.auth import BridgeOAuthProvider, OAuthStore
 from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
+from app.chatgpt_share import (
+    ChatGPTShareService,
+    ChatGPTShareTransport,
+    UrllibChatGPTShareTransport,
+)
+from app.commands import RepositoryCommandService
+from app.coordinator import CoordinatorService
 from app.files import FileService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
@@ -25,10 +32,10 @@ from app.jobs import (
     JobStore,
 )
 from app.knowledge import (
-    AttachmentStorage,
     AttachmentExportRegistry,
-    KnowledgeAttachmentService,
+    AttachmentStorage,
     KnowledgeAttachmentExportService,
+    KnowledgeAttachmentService,
     KnowledgeService,
     KnowledgeStore,
     TelegramKnowledgeService,
@@ -66,6 +73,9 @@ class ApplicationContainer:
     telegram_knowledge: TelegramKnowledgeService | None
     knowledge_attachments: KnowledgeAttachmentService | None
     knowledge_attachment_exports: KnowledgeAttachmentExportService | None
+    chatgpt_share: ChatGPTShareService
+    coordinator: CoordinatorService
+    commands: RepositoryCommandService
 
 
 def build_container(
@@ -75,6 +85,7 @@ def build_container(
     telegram_adapter: TelegramAdapter | None = None,
     managed_clone_runner: ManagedCloneRunner | None = None,
     github_transport: GitHubTransport | None = None,
+    chatgpt_share_transport: ChatGPTShareTransport | None = None,
 ) -> ApplicationContainer:
     configured = settings or load_settings()
     projects = ProjectRegistry.from_settings(configured)
@@ -263,6 +274,7 @@ def build_container(
         configured.server.endpoint,
         configured.github.artifact_max_bytes,
     )
+    commands = RepositoryCommandService(jobs, policy)
     return ApplicationContainer(
         settings=configured,
         projects=projects,
@@ -290,4 +302,9 @@ def build_container(
         telegram_knowledge=telegram_knowledge,
         knowledge_attachments=knowledge_attachments,
         knowledge_attachment_exports=knowledge_attachment_exports,
+        chatgpt_share=ChatGPTShareService(
+            chatgpt_share_transport or UrllibChatGPTShareTransport()
+        ),
+        coordinator=CoordinatorService(),
+        commands=commands,
     )

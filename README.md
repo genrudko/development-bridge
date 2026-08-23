@@ -40,6 +40,19 @@ The Bridge exposes:
   corpus-validated attachment, while `knowledge_attachment_export` issues a
   short-lived external URL plus standard MCP file resource blocks for the same
   immutable snapshot.
+- Public ChatGPT shares: `chatgpt_share_read` reads a cookie-free public
+  `https://chatgpt.com/share/<id>` in bounded `recent`, `search`, or `full`
+  mode and returns only visible user/assistant text.
+- Coordinator X routes live under `/mcp/x/coordinator/`. The mounted app polls
+  the reliable default `coordinator` channel without depending on dynamic
+  tool-result routing; an optional channel from `coordinator_x_mount` is an
+  optimization. External arming uses `POST .../trigger` with an Authorization
+  bearer token (or `X-Development-Bridge-Trigger-Token`) and JSON fields
+  `message`, `channel_id`, `delay`, and `conflict`.
+- `run_command` executes one structured executable/argv call in the selected
+  repository when the global durable job store is idle. Its admission check
+  and process start are serialized against bridge job admissions, but external
+  database writers remain a documented check-then-start race.
 
 ## Managed external repositories
 

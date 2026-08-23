@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Development Bridge Coordinator</title>
+<style>
+body { font: 13px system-ui, sans-serif; margin: 12px; color: #333 }
+#status { white-space: pre-wrap }
+</style>
+<div id="status">Connecting coordinator…</div>
+<script type="module">
+import { App } from "https://unpkg.com/@modelcontextprotocol/ext-apps@1.7.5/dist/src/app-with-deps.js";
+
+const output = document.getElementById("status");
+const app = new App({ name: "Development Bridge Coordinator", version: "1.0.0" }, {});
+let channelId = "coordinator";
+let busy = false;
+// Rendered by the server. In public deployments this is an absolute URL; the
+// relative value is only the local-development fallback.
+let endpoint = new URL(__COORDINATOR_ENDPOINT__, window.location.href);
+const show = (message) => { output.textContent = message; };
+
+app.ontoolresult = (result) => {
+  const routed = result?.structuredContent?.channel_id;
+  if (typeof routed === "string" && routed.length) channelId = routed;
+  const triggerUrl = result?.structuredContent?.trigger_url;
+  if (typeof triggerUrl === "string" && triggerUrl.length) {
+    endpoint = new URL(triggerUrl, window.location.href);
+  }
+};
+
+async function request(name, init = {}) {
+  const url = new URL(name, endpoint);
+  url.searchParams.set("channel_id", channelId);
+  const response = await fetch(url, { cache: "no-store", ...init });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+async function poll() {
+  if (busy) return;
+  try {
+    const state = await request("status");
+    show(`Coordinator: ${channelId} (${state.state})`);
+    if (!state.ready) return;
+    busy = true;
+    const claim = await request("claim", { method: "POST" });
+    if (!claim.claimed) return;
+    await app.sendMessage({
+      role: "user",
+      content: [{ type: "text", text: String(claim.message) }],
+    });
+    const ackUrl = new URL("ack", endpoint);
+    ackUrl.searchParams.set("channel_id", channelId);
+    ackUrl.searchParams.set("claim_id", claim.claim_id);
+    const ackResponse = await fetch(ackUrl, { method: "POST", cache: "no-store" });
+    if (!ackResponse.ok) throw new Error(`ACK HTTP ${ackResponse.status}`);
+    const ack = await ackResponse.json();
+    if (!ack.acknowledged) throw new Error("ACK was rejected");
+    show(`Coordinator: ${channelId} (wake delivered)`);
+  } catch (error) {
+    show(`Coordinator error: ${String(error)}`);
+  } finally {
+    busy = false;
+  }
+}
+
+try {
+  await app.connect();
+  show(`Coordinator: ${channelId} (mounted)`);
+  setInterval(poll, 1000);
+} catch (error) {
+  show(`Coordinator connect error: ${String(error)}`);
+}
+</script>

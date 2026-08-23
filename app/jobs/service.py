@@ -6,14 +6,15 @@ import json
 import os
 import signal
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditEvent, AuditOutcome, AuditSink
 from app.capabilities import Capability, CapabilityPolicy
 from app.projects import ProjectRegistry, Repository
-from app.tasks import TaskProfile, TaskRegistry
 from app.settings import ArtifactSettings
+from app.tasks import TaskProfile, TaskRegistry
 
 from .artifacts import ArtifactStorage
 from .models import JobArtifact, JobRecord, JobStatus
@@ -43,6 +44,7 @@ class JobService:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._cancel_requested: set[str] = set()
         self._stopping = False
+        self._admission_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._store is None or self._worker is not None:
@@ -87,15 +89,16 @@ class JobService:
                 "idempotency_key is outside the allowed length",
             )
         store = self._require_store()
-        job, created = store.create(
-            project_id=repository.project_id,
-            repository_id=repository.id,
-            task_id=task_id,
-            request_id=request_id,
-            idempotency_key=idempotency_key,
-        )
-        if created:
-            self._queue.put_nowait(job.job_id)
+        async with self._admission_lock:
+            job, created = store.create(
+                project_id=repository.project_id,
+                repository_id=repository.id,
+                task_id=task_id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+            )
+            if created:
+                self._queue.put_nowait(job.job_id)
         return job
 
     async def start_execution(
@@ -155,17 +158,34 @@ class JobService:
         }
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         store = self._require_store(execution=True)
-        job, created = store.create_execution(
-            project_id=repository.project_id,
-            repository_id=repository.id,
-            request_id=request_id,
-            idempotency_key=idempotency_key,
-            payload_json=payload_json,
-            payload_digest=hashlib.sha256(payload_json.encode()).hexdigest(),
-        )
-        if created:
-            self._queue.put_nowait(job.job_id)
+        async with self._admission_lock:
+            job, created = store.create_execution(
+                project_id=repository.project_id,
+                repository_id=repository.id,
+                request_id=request_id,
+                idempotency_key=idempotency_key,
+                payload_json=payload_json,
+                payload_digest=hashlib.sha256(payload_json.encode()).hexdigest(),
+            )
+            if created:
+                self._queue.put_nowait(job.job_id)
         return job
+
+    async def run_when_globally_idle(self, operation: Callable[[], Awaitable[object]]):
+        """Serialize synchronous execution against all durable job admissions."""
+        async with self._admission_lock:
+            if self._store is None:
+                raise BridgeError(
+                    ErrorCode.JOB_EXECUTION_NOT_CONFIGURED,
+                    "run_command requires a configured durable job store",
+                )
+            if self._store.has_active():
+                raise BridgeError(
+                    ErrorCode.JOB_BUSY,
+                    "run_command is unavailable while a durable job is queued or running",
+                    retryable=True,
+                )
+            return await operation()
 
     def status(self, repository: Repository, job_id: str) -> JobRecord:
         self._require_execute(repository)

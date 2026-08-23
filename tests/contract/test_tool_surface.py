@@ -2,7 +2,6 @@ from app.container import build_container
 from app.settings import BridgeSettings
 from app.tools.registry import build_tool_registry
 
-
 SUPPORTED_TOOLS = {
     "bridge_info",
     "project_list",
@@ -71,6 +70,10 @@ SUPPORTED_TOOLS = {
     "knowledge_source_sync",
     "knowledge_attachment_open",
     "knowledge_attachment_export",
+    "chatgpt_share_read",
+    "coordinator_x_mount",
+    "coordinator_continue",
+    "run_command",
 }
 
 
@@ -78,11 +81,13 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 67
+    assert len(registry.definitions) == 71
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",
         "github-host",
+        "chatgpt-share",
+        "coordinator-x",
     }
 
 
