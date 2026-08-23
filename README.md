@@ -53,6 +53,8 @@ The Bridge exposes:
   repository when the global durable job store is idle. Its admission check
   and process start are serialized against bridge job admissions, but external
   database writers remain a documented check-then-start race.
+- `bridge_restart` schedules a fixed, delayed restart of
+  `development-bridge.service` only when the global durable job store is idle.
 
 ## Managed external repositories
 

@@ -6,6 +6,7 @@ from app.api.registry import RegisteredTool, ToolRegistry
 from app.container import ApplicationContainer
 
 from .bridge import bridge_tools
+from .bridge_restart import bridge_restart_tools
 from .changes import change_tools
 from .chatgpt_share import chatgpt_share_tools
 from .commands import command_tools
@@ -30,6 +31,7 @@ def build_tool_registry(
         tuple(v1_tools)
         if v1_tools is not None
         else bridge_tools(container)
+        + bridge_restart_tools(container)
         + project_tools(container)
         + file_tools(container)
         + git_read_tools(container)

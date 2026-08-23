@@ -6,6 +6,7 @@ from app.api.capability_exports import CapabilityExportRegistry
 from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditSink, LoggingAuditSink
 from app.auth import BridgeOAuthProvider, OAuthStore
+from app.bridge_restart import BridgeRestartService
 from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
 from app.chatgpt_share import (
@@ -76,6 +77,7 @@ class ApplicationContainer:
     chatgpt_share: ChatGPTShareService
     coordinator: CoordinatorService
     commands: RepositoryCommandService
+    bridge_restart: BridgeRestartService
 
 
 def build_container(
@@ -307,4 +309,5 @@ def build_container(
         ),
         coordinator=CoordinatorService(),
         commands=commands,
+        bridge_restart=BridgeRestartService(jobs),
     )

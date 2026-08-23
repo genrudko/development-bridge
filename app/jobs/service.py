@@ -171,18 +171,23 @@ class JobService:
                 self._queue.put_nowait(job.job_id)
         return job
 
-    async def run_when_globally_idle(self, operation: Callable[[], Awaitable[object]]):
+    async def run_when_globally_idle(
+        self,
+        operation: Callable[[], Awaitable[object]],
+        *,
+        operation_name: str = "run_command",
+    ):
         """Serialize synchronous execution against all durable job admissions."""
         async with self._admission_lock:
             if self._store is None:
                 raise BridgeError(
                     ErrorCode.JOB_EXECUTION_NOT_CONFIGURED,
-                    "run_command requires a configured durable job store",
+                    f"{operation_name} requires a configured durable job store",
                 )
             if self._store.has_active():
                 raise BridgeError(
                     ErrorCode.JOB_BUSY,
-                    "run_command is unavailable while a durable job is queued or running",
+                    f"{operation_name} is unavailable while a durable job is queued or running",
                     retryable=True,
                 )
             return await operation()
