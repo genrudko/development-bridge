@@ -15,6 +15,7 @@ from .git_workspace import git_workspace_tools
 from .jobs import job_tools
 from .knowledge import knowledge_tools
 from .projects import project_tools
+from .probe import probe_tools
 
 def build_tool_registry(
     container: ApplicationContainer,
@@ -35,5 +36,6 @@ def build_tool_registry(
         + job_tools(container)
         + knowledge_tools(container)
         + github_tools(container)
+        + probe_tools(container)
     )
     return registry
