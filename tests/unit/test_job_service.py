@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditOutcome
 from app.capabilities import CapabilityPolicy
 from app.jobs import ArtifactStorage, JobService, JobStatus, JobStore
@@ -81,6 +82,66 @@ async def wait_for_status(jobs, repository, job_id, statuses):
             return job
         await asyncio.sleep(0.01)
     raise AssertionError(f"job did not reach {statuses}")
+
+
+@pytest.mark.asyncio
+async def test_terminal_waiters_are_event_driven_race_safe_and_one_shot(tmp_path):
+    jobs, repository, _ = configured(tmp_path, "print('secret-output')")
+    jobs._store.initialize()
+    first = await jobs.start_task(repository, "task", "req_1")
+    second = await jobs.start_task(repository, "task", "req_2")
+    wakes = []
+
+    async def wake(records, reason):
+        wakes.append(([record.job_id for record in records], reason))
+
+    waiting = await jobs.wake_on_jobs(
+        repository, (first.job_id, second.job_id), "all_terminal", wake
+    )
+    assert waiting["state"] == "waiting"
+    assert jobs._store.start(first.job_id)
+    await jobs._finish_job(first.job_id, JobStatus.SUCCEEDED)
+    assert wakes == []
+    assert jobs._store.start(second.job_id)
+    await jobs._finish_job(second.job_id, JobStatus.SUCCEEDED)
+    assert wakes == [([first.job_id, second.job_id], "all_terminal")]
+    await jobs._finish_job(second.job_id, JobStatus.SUCCEEDED)
+    assert len(wakes) == 1
+
+    immediate = await jobs.wake_on_jobs(
+        repository, (first.job_id,), "all_terminal", wake
+    )
+    assert immediate["state"] == "fired"
+    assert wakes[-1] == ([first.job_id], "all_terminal")
+
+    third = await jobs.start_task(repository, "task", "req_3")
+    fourth = await jobs.start_task(repository, "task", "req_4")
+    await jobs.wake_on_jobs(
+        repository,
+        (third.job_id, fourth.job_id),
+        "failure_or_all_terminal",
+        wake,
+    )
+    assert jobs._store.start(third.job_id)
+    await jobs._finish_job(third.job_id, JobStatus.FAILED)
+    assert wakes[-1] == ([third.job_id, fourth.job_id], "failure")
+
+    with pytest.raises(BridgeError) as unknown:
+        await jobs.wake_on_jobs(
+            repository, ("job_" + "0" * 32,), "all_terminal", wake
+        )
+    assert unknown.value.code is ErrorCode.JOB_NOT_FOUND
+
+    foreign, _ = jobs._store.create(
+        project_id="other-project",
+        repository_id="other-repository",
+        task_id="task",
+        request_id="foreign",
+        idempotency_key=None,
+    )
+    with pytest.raises(BridgeError) as scoped:
+        await jobs.wake_on_jobs(repository, (foreign.job_id,), "all_terminal", wake)
+    assert scoped.value.code is ErrorCode.JOB_NOT_FOUND
 
 
 @pytest.mark.asyncio

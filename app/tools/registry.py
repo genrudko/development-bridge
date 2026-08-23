@@ -16,6 +16,7 @@ from .git_read import git_read_tools
 from .git_workspace import git_workspace_tools
 from .git_write import git_write_tools
 from .github import github_tools
+from .guide import guide_tools
 from .jobs import job_tools
 from .knowledge import knowledge_tools
 from .projects import project_tools
@@ -45,4 +46,5 @@ def build_tool_registry(
         + coordinator_tools(container)
         + command_tools(container)
     )
+    registry.register_many(guide_tools(registry))
     return registry

@@ -16,6 +16,9 @@ default for local development.
 
 ## Current APIs
 
+Start each new coordinator chat with `bridge_guide`; it returns bounded
+operating guidance and the complete live tool catalog grouped by category.
+
 The Bridge exposes:
 
 - Core: `bridge_info`, `project_list`, `project_describe`, `repository_status`,
@@ -30,6 +33,11 @@ The Bridge exposes:
   `job_artifact_export`;
 - Ad-hoc execution: `repository_exec` for structured executable/argv runs in
   repositories with `execute`, using the same durable jobs and artifacts;
+- Event-driven completion: mount `coordinator_x_mount`, register
+  `coordinator_wake_on_jobs`, and end the model turn. X wakes a fresh turn when
+  the selected jobs meet the policy; read terminal `job_status` and
+  `job_output` once. Initial `queued` is normal. Waiter registrations are
+  process-local and do not survive a Bridge restart;
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
 - GitHub host: repository status, checks, issues, pull requests, reviews,
   issue/PR discussion, inline review comments, bounded PR file patches,

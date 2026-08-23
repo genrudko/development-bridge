@@ -7,7 +7,9 @@ import os
 import signal
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
+from secrets import token_urlsafe
 
 from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditEvent, AuditOutcome, AuditSink
@@ -20,9 +22,19 @@ from .artifacts import ArtifactStorage
 from .models import JobArtifact, JobRecord, JobStatus
 from .store import JobStore
 
+TerminalCallback = Callable[[tuple[JobRecord, ...], str], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class TerminalWaiter:
+    job_ids: tuple[str, ...]
+    policy: str
+    callback: TerminalCallback
+
 
 class JobService:
     CANCEL_GRACE_SECONDS = 2
+    MAX_TERMINAL_WAITERS = 256
 
     def __init__(
         self,
@@ -45,6 +57,119 @@ class JobService:
         self._cancel_requested: set[str] = set()
         self._stopping = False
         self._admission_lock = asyncio.Lock()
+        self._terminal_lock = asyncio.Lock()
+        self._terminal_waiters: dict[str, TerminalWaiter] = {}
+
+    async def wake_on_jobs(
+        self,
+        repository: Repository,
+        job_ids: tuple[str, ...],
+        policy: str,
+        callback: TerminalCallback,
+    ) -> dict:
+        """Register a race-free, one-shot callback for terminal job transitions."""
+        self._require_execute(repository)
+        store = self._require_store()
+        if not 1 <= len(job_ids) <= 64 or len(set(job_ids)) != len(job_ids):
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "job_ids must contain 1 to 64 unique job IDs",
+            )
+        if policy not in {"all_terminal", "failure_or_all_terminal"}:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "policy is invalid")
+        waiter_id = token_urlsafe(18)
+        fire: tuple[tuple[JobRecord, ...], str] | None = None
+        async with self._terminal_lock:
+            jobs = tuple(
+                store.get(repository.project_id, repository.id, job_id)
+                for job_id in job_ids
+            )
+            reason = self._waiter_reason(jobs, policy)
+            if reason is None:
+                if len(self._terminal_waiters) >= self.MAX_TERMINAL_WAITERS:
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "Job wake waiter capacity is full",
+                        retryable=True,
+                    )
+                self._terminal_waiters[waiter_id] = TerminalWaiter(
+                    job_ids, policy, callback
+                )
+            else:
+                fire = (jobs, reason)
+        if fire is not None:
+            await callback(*fire)
+        return {
+            "waiter_id": waiter_id,
+            "job_ids": list(job_ids),
+            "policy": policy,
+            "state": "fired" if fire is not None else "waiting",
+        }
+
+    async def _finish_job(
+        self,
+        job_id: str,
+        status: JobStatus,
+        *,
+        exit_code: int | None = None,
+        failure_reason: str | None = None,
+    ) -> None:
+        async with self._terminal_lock:
+            store = self._require_store()
+            store.finish(
+                job_id, status, exit_code=exit_code, failure_reason=failure_reason
+            )
+            ready = self._collect_terminal_callbacks(store)
+        await self._invoke_terminal_callbacks(ready)
+
+    async def _cancel_queued(self, job_id: str) -> bool:
+        async with self._terminal_lock:
+            store = self._require_store()
+            changed = store.cancel_queued(job_id)
+            ready = self._collect_terminal_callbacks(store) if changed else []
+        await self._invoke_terminal_callbacks(ready)
+        return changed
+
+    async def _fail_active(self, job_id: str, reason: str) -> None:
+        async with self._terminal_lock:
+            store = self._require_store()
+            store.fail_active(job_id, reason)
+            ready = self._collect_terminal_callbacks(store)
+        await self._invoke_terminal_callbacks(ready)
+
+    def _collect_terminal_callbacks(
+        self, store: JobStore
+    ) -> list[tuple[TerminalCallback, tuple[JobRecord, ...], str]]:
+        ready: list[tuple[TerminalCallback, tuple[JobRecord, ...], str]] = []
+        for waiter_id, waiter in tuple(self._terminal_waiters.items()):
+            jobs = tuple(store.get_by_id(job_id) for job_id in waiter.job_ids)
+            if any(job is None for job in jobs):
+                continue
+            records = tuple(job for job in jobs if job is not None)
+            reason = self._waiter_reason(records, waiter.policy)
+            if reason is not None:
+                del self._terminal_waiters[waiter_id]
+                ready.append((waiter.callback, records, reason))
+        return ready
+
+    @staticmethod
+    async def _invoke_terminal_callbacks(
+        ready: list[tuple[TerminalCallback, tuple[JobRecord, ...], str]],
+    ) -> None:
+        # Removal happens before invocation, so duplicate transitions cannot re-fire.
+        for callback, jobs, reason in ready:
+            await callback(jobs, reason)
+
+    @staticmethod
+    def _waiter_reason(jobs: tuple[JobRecord, ...], policy: str) -> str | None:
+        terminal = {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}
+        if policy == "failure_or_all_terminal" and any(
+            job.status in {JobStatus.FAILED, JobStatus.CANCELLED} for job in jobs
+        ):
+            return "failure"
+        if all(job.status in terminal for job in jobs):
+            return "all_terminal"
+        return None
 
     async def start(self) -> None:
         if self._store is None or self._worker is not None:
@@ -261,7 +386,7 @@ class JobService:
                 details={"job_id": job_id, "status": job.status.value},
             )
         if job.status is JobStatus.QUEUED:
-            if store.cancel_queued(job_id):
+            if await self._cancel_queued(job_id):
                 cancelled = store.get(repository.project_id, repository.id, job_id)
                 await self._emit(cancelled, "cancel", AuditOutcome.SUCCESS)
                 return cancelled
@@ -292,9 +417,9 @@ class JobService:
                 if not self._stopping and job_id:
                     try:
                         await self._execute(job_id)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - contain worker/task failures
                         store = self._require_store()
-                        store.fail_active(job_id, "internal_worker_error")
+                        await self._fail_active(job_id, "internal_worker_error")
                         failed = store.get_by_id(job_id)
                         if failed is not None:
                             await self._emit(
@@ -315,7 +440,9 @@ class JobService:
             return
         job = store.get(job.project_id, job.repository_id, job_id)
         if self._stopping:
-            store.finish(job_id, JobStatus.CANCELLED, failure_reason="shutdown")
+            await self._finish_job(
+                job_id, JobStatus.CANCELLED, failure_reason="shutdown"
+            )
             final = store.get(job.project_id, job.repository_id, job_id)
             await self._emit(final, "cancel", AuditOutcome.SUCCESS)
             return
@@ -327,7 +454,7 @@ class JobService:
                 job.project_id, job.repository_id
             )
         except BridgeError:
-            store.finish(
+            await self._finish_job(
                 job_id, JobStatus.FAILED, failure_reason="task_profile_unavailable"
             )
             final = store.get_by_id(job_id)
@@ -351,7 +478,9 @@ class JobService:
                 stderr=asyncio.subprocess.PIPE,
             )
         except OSError:
-            store.finish(job_id, JobStatus.FAILED, failure_reason="process_start_failed")
+            await self._finish_job(
+                job_id, JobStatus.FAILED, failure_reason="process_start_failed"
+            )
             await self._emit(job, "fail", AuditOutcome.ERROR, "process_start_failed")
             return
         self._processes[job_id] = process
@@ -408,14 +537,16 @@ class JobService:
 
         if job_id in self._cancel_requested:
             self._cancel_requested.discard(job_id)
-            store.finish(job_id, JobStatus.CANCELLED, exit_code=process.returncode)
+            await self._finish_job(
+                job_id, JobStatus.CANCELLED, exit_code=process.returncode
+            )
             final = store.get(job.project_id, job.repository_id, job_id)
             await self._emit(final, "cancel", AuditOutcome.SUCCESS)
         elif failure_reason is not None or process.returncode != 0 or artifact_failure:
             reason = failure_reason or (
                 "nonzero_exit" if process.returncode != 0 else artifact_failure
             )
-            store.finish(
+            await self._finish_job(
                 job_id,
                 JobStatus.FAILED,
                 exit_code=process.returncode,
@@ -424,7 +555,9 @@ class JobService:
             final = store.get(job.project_id, job.repository_id, job_id)
             await self._emit(final, "fail", AuditOutcome.ERROR, reason, started)
         else:
-            store.finish(job_id, JobStatus.SUCCEEDED, exit_code=process.returncode)
+            await self._finish_job(
+                job_id, JobStatus.SUCCEEDED, exit_code=process.returncode
+            )
             final = store.get(job.project_id, job.repository_id, job_id)
             await self._emit(final, "finish", AuditOutcome.SUCCESS, started=started)
 

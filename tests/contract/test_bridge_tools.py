@@ -4,6 +4,7 @@ from app.tools.registry import build_tool_registry
 
 V1_TOOLS = {
     "bridge_info",
+    "bridge_guide",
     "bridge_restart",
     "project_list",
     "project_describe",
@@ -82,3 +83,4 @@ def test_bridge_info_reports_only_current_capabilities():
     )
     payload = json.loads(result.content[0].text)
     assert set(payload["data"]["capabilities"]) == BRIDGE_CAPABILITIES
+    assert payload["data"]["recommended_first_tool"] == "bridge_guide"

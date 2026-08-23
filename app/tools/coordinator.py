@@ -4,7 +4,9 @@ from mcp import types
 
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
+from app.api.schemas import IDENTIFIER_SCHEMA
 from app.container import ApplicationContainer
+from app.tools.jobs import JOB_ID_SCHEMA
 
 COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v1.html"
 
@@ -48,12 +50,41 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         )
         return to_mcp_result(success(request_context.request_id, data))
 
+    async def wake_on_jobs(ctx, params, request_context):
+        arguments = params.arguments or {}
+        channel_id = container.coordinator.validate_channel(
+            arguments.get("channel_id", "coordinator")
+        )
+        message = arguments.get("message")
+
+        async def wake(jobs, reason):
+            job_ids = ",".join(job.job_id for job in jobs)
+            suffix = f"; message={message}" if message else ""
+            await container.coordinator.arm(
+                f"jobs={job_ids}; reason={reason}{suffix}",
+                channel_id=channel_id,
+                delay_seconds=0,
+                conflict="coalesce",
+            )
+
+        repository = container.projects.repositories.get(
+            arguments["project_id"], arguments["repository_id"]
+        )
+        data = await container.jobs.wake_on_jobs(
+            repository,
+            tuple(arguments["job_ids"]),
+            arguments.get("policy", "all_terminal"),
+            wake,
+        )
+        data["channel_id"] = channel_id
+        return to_mcp_result(success(request_context.request_id, data))
+
     common_meta = {"ui/resourceUri": COORDINATOR_UI_URI}
     return (
         RegisteredTool(
             types.Tool(
                 name="coordinator_x_mount",
-                description="Mount the coordinator wake listener in this chat",
+                description="Mount the coordinator X wake listener for this chat/channel before arming wakes",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -73,7 +104,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_continue",
-                description="Arm one bounded delayed wake/checkpoint for a mounted channel",
+                description="Arm one bounded delayed X wake/checkpoint for an already mounted channel",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -97,6 +128,48 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 },
             ),
             continue_,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_wake_on_jobs",
+                description=(
+                    "Event-driven one-shot X wake for durable jobs. Requires an active "
+                    "coordinator_x_mount for the same channel; end the model turn after "
+                    "registering, then read job_status/job_output in the fresh turn. "
+                    "Waiters are process-local and do not survive a Bridge restart."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "project_id": IDENTIFIER_SCHEMA,
+                        "repository_id": IDENTIFIER_SCHEMA,
+                        "job_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 64,
+                            "uniqueItems": True,
+                            "items": JOB_ID_SCHEMA,
+                        },
+                        "channel_id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+                            "default": "coordinator",
+                        },
+                        "message": {
+                            "type": "string", "minLength": 1, "maxLength": 200
+                        },
+                        "policy": {
+                            "type": "string",
+                            "enum": ["all_terminal", "failure_or_all_terminal"],
+                            "default": "all_terminal",
+                        },
+                    },
+                    "required": ["project_id", "repository_id", "job_ids"],
+                    "additionalProperties": False,
+                },
+            ),
+            wake_on_jobs,
             "coordinator-x",
         ),
     )

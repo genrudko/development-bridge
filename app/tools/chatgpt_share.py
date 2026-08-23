@@ -21,7 +21,7 @@ def chatgpt_share_tools(container: ApplicationContainer) -> tuple[RegisteredTool
         RegisteredTool(
             types.Tool(
                 name="chatgpt_share_read",
-                description="Read visible user and assistant text from a public ChatGPT share URL",
+                description="Read visible text from a cookie-free public ChatGPT share in recent/search/full mode; private shares are unsupported",
                 inputSchema={
                     "type": "object",
                     "properties": {

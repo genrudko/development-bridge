@@ -13,7 +13,6 @@ from app.container import ApplicationContainer
 from app.jobs import read_visual_artifact
 from app.settings import ArtifactSettings
 
-
 JOB_ID_SCHEMA = {"type": "string", "pattern": "^job_[0-9a-f]{32}$"}
 JOB_ARTIFACT_INLINE_LIMIT = DEFAULT_FILE_RESOURCE_INLINE_LIMIT
 
@@ -152,7 +151,7 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     definitions = (
         (
             "repository_exec",
-            "Execute structured argv in a repository through the durable job engine",
+            "Asynchronously queue structured argv in the durable job engine; queued is normal, then use job_status and terminal job_output",
             {
                 **base_properties,
                 "executable": {"type": "string", "minLength": 1, "maxLength": 4096},
@@ -208,8 +207,8 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 handler,
             )
             for name, description, handler in (
-                ("job_status", "Show durable job status", job_status),
-                ("job_output", "Read bounded accumulated job output", job_output),
+                ("job_status", "Read durable job lifecycle status; queued alone is normal, not a worker failure", job_status),
+                ("job_output", "Read bounded stdout/stderr, preferably once after job_status is terminal", job_output),
                 ("job_cancel", "Cancel a queued or running job", job_cancel),
                 (
                     "job_artifact_list",

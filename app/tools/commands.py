@@ -28,8 +28,8 @@ def command_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
             types.Tool(
                 name="run_command",
                 description=(
-                    "Run structured argv synchronously only when the global durable job "
-                    "queue is idle"
+                    "Run a short structured argv call synchronously (30s maximum) only "
+                    "when the global durable job queue is idle; use repository_exec for durable work"
                 ),
                 inputSchema={
                     "type": "object",

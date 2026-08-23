@@ -32,6 +32,7 @@ def bridge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                         "structured-command",
                     ],
                     "project_count": len(container.projects.list()),
+                    "recommended_first_tool": "bridge_guide",
                 },
             )
         )
@@ -40,7 +41,7 @@ def bridge_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         RegisteredTool(
             definition=types.Tool(
                 name="bridge_info",
-                description="Describe Development Bridge and its capabilities",
+                description="Describe Development Bridge capabilities; start new coordinator chats with bridge_guide",
                 inputSchema={
                     "type": "object",
                     "properties": {},
