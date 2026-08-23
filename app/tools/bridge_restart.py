@@ -17,7 +17,7 @@ def bridge_restart_tools(container: ApplicationContainer) -> tuple[RegisteredToo
             types.Tool(
                 name="bridge_restart",
                 description=(
-                    "Schedule guarded idle-only self-restart after sudo bootstrap; the MCP client must reconnect and verify afterward"
+                    "Schedule guarded idle-only self-restart via direct systemd authorization; the MCP client must reconnect and verify afterward"
                 ),
                 inputSchema={
                     "type": "object",

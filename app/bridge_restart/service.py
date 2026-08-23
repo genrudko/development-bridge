@@ -10,8 +10,6 @@ from app.jobs import JobService
 logger = logging.getLogger(__name__)
 
 RESTART_COMMAND = (
-    "/usr/bin/sudo",
-    "-n",
     "/usr/bin/systemctl",
     "--no-block",
     "restart",

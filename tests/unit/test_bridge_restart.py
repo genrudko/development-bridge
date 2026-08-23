@@ -13,6 +13,12 @@ from tests.unit.test_commands import command_container
 
 @pytest.mark.asyncio
 async def test_idle_restart_schedules_delayed_fixed_command(tmp_path):
+    assert RESTART_COMMAND == (
+        "/usr/bin/systemctl",
+        "--no-block",
+        "restart",
+        "development-bridge.service",
+    )
     container, _ = command_container(tmp_path)
     container.jobs._store.initialize()
     calls = []
