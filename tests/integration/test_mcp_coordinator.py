@@ -39,6 +39,9 @@ async def test_resource_mount_routing_and_internal_continue():
                     mounted = await session.call_tool(
                         "coordinator_x_mount", {"channel_id": "chat-42"}
                     )
+                    assert mounted.meta["ui"]["resourceUri"] == COORDINATOR_UI_URI
+                    assert mounted.meta["ui/resourceUri"] == COORDINATOR_UI_URI
+                    assert mounted.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
                     assert mounted.structured_content == {
                         "channel_id": "chat-42",
                         "trigger_url": "https://bridge.example/mcp/x/coordinator/",
@@ -49,6 +52,10 @@ async def test_resource_mount_routing_and_internal_continue():
                     )
                     assert json.loads(continued.content[0].text)["data"]["state"] == "pending"
                     listed = await session.list_tools()
+                    mount_tool = next(tool for tool in listed.tools if tool.name == "coordinator_x_mount")
+                    assert mount_tool.meta["ui"]["resourceUri"] == COORDINATOR_UI_URI
+                    assert mount_tool.meta["ui/resourceUri"] == COORDINATOR_UI_URI
+                    assert mount_tool.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
                     continue_tool = next(
                         tool for tool in listed.tools if tool.name == "coordinator_continue"
                     )

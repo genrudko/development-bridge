@@ -9,6 +9,11 @@ from app.container import ApplicationContainer
 from app.tools.jobs import JOB_ID_SCHEMA
 
 COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v1.html"
+COORDINATOR_UI_META = {
+    "ui": {"resourceUri": COORDINATOR_UI_URI},
+    "ui/resourceUri": COORDINATOR_UI_URI,
+    "openai/outputTemplate": COORDINATOR_UI_URI,
+}
 
 
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
@@ -37,7 +42,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             "channel_id": channel_id,
             "trigger_url": trigger_url,
         }
-        result.meta = {"ui/resourceUri": COORDINATOR_UI_URI}
+        result.meta = dict(COORDINATOR_UI_META)
         return result
 
     async def continue_(ctx, params, request_context):
@@ -79,7 +84,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         data["channel_id"] = channel_id
         return to_mcp_result(success(request_context.request_id, data))
 
-    common_meta = {"ui/resourceUri": COORDINATOR_UI_URI}
+    common_meta = COORDINATOR_UI_META
     return (
         RegisteredTool(
             types.Tool(
