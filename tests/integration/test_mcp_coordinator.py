@@ -60,7 +60,10 @@ async def test_resource_mount_routing_and_internal_continue():
                         tool for tool in listed.tools if tool.name == "coordinator_continue"
                     )
                     assert continue_tool.input_schema["required"] == ["message"]
+            status = await client.get("/mcp/x/coordinator/status?channel_id=chat-42")
+            assert status.headers["access-control-allow-origin"] == "*"
             claim = await client.post("/mcp/x/coordinator/claim?channel_id=chat-42")
+            assert claim.headers["access-control-allow-origin"] == "*"
             assert claim.json()["message"] == "resume"
 
 

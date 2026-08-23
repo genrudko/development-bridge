@@ -191,16 +191,21 @@ def create_streamable_http_app(
                 headers={"Cache-Control": "private, no-store"},
             )
 
+    coordinator_ui_headers = {
+        "Cache-Control": "no-store",
+        "Access-Control-Allow-Origin": "*",
+    }
+
     async def coordinator_status(request: Request):
         try:
             return JSONResponse(
                 await container.coordinator.status(
                     request.query_params.get("channel_id", "coordinator")
                 ),
-                headers={"Cache-Control": "no-store"},
+                headers=coordinator_ui_headers,
             )
         except BridgeError as error:
-            return JSONResponse({"error": error.message}, status_code=400)
+            return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
 
     async def coordinator_claim(request: Request):
         try:
@@ -208,10 +213,10 @@ def create_streamable_http_app(
                 await container.coordinator.claim(
                     request.query_params.get("channel_id", "coordinator")
                 ),
-                headers={"Cache-Control": "no-store"},
+                headers=coordinator_ui_headers,
             )
         except BridgeError as error:
-            return JSONResponse({"error": error.message}, status_code=400)
+            return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
 
     async def coordinator_ack(request: Request):
         try:
@@ -220,10 +225,10 @@ def create_streamable_http_app(
                     request.query_params.get("channel_id", "coordinator"),
                     request.query_params.get("claim_id", ""),
                 ),
-                headers={"Cache-Control": "no-store"},
+                headers=coordinator_ui_headers,
             )
         except BridgeError as error:
-            return JSONResponse({"error": error.message}, status_code=400)
+            return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
 
     async def coordinator_trigger(request: Request):
         configured_token = settings.server.x_trigger_token
