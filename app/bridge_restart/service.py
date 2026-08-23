@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable
 
 from app.api.errors import BridgeError, ErrorCode
@@ -10,6 +11,12 @@ from app.jobs import JobService
 logger = logging.getLogger(__name__)
 
 RESTART_COMMAND = (
+    "/usr/bin/systemd-run",
+    "--user",
+    "--collect",
+    "--unit=development-bridge-self-restart",
+    "/usr/bin/sudo",
+    "-n",
     "/usr/bin/systemctl",
     "--no-block",
     "restart",
@@ -61,11 +68,16 @@ class BridgeRestartService:
 
     async def _restart_after_delay(self) -> None:
         await self._sleep(self._delay_seconds)
+        runtime_dir = f"/run/user/{os.getuid()}"
         await self._spawn(
             *RESTART_COMMAND,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            env={
+                "XDG_RUNTIME_DIR": runtime_dir,
+                "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+            },
         )
 
     def _restart_finished(self, task: asyncio.Task[None]) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 
 import pytest
@@ -14,6 +15,12 @@ from tests.unit.test_commands import command_container
 @pytest.mark.asyncio
 async def test_idle_restart_schedules_delayed_fixed_command(tmp_path):
     assert RESTART_COMMAND == (
+        "/usr/bin/systemd-run",
+        "--user",
+        "--collect",
+        "--unit=development-bridge-self-restart",
+        "/usr/bin/sudo",
+        "-n",
         "/usr/bin/systemctl",
         "--no-block",
         "restart",
@@ -47,10 +54,15 @@ async def test_idle_restart_schedules_delayed_fixed_command(tmp_path):
     delay_released.set()
     await next(iter(service._tasks))
     assert calls[1][0:2] == ("spawn", RESTART_COMMAND)
+    runtime_dir = f"/run/user/{os.getuid()}"
     assert calls[1][2] == {
         "stdin": asyncio.subprocess.DEVNULL,
         "stdout": asyncio.subprocess.DEVNULL,
         "stderr": asyncio.subprocess.DEVNULL,
+        "env": {
+            "XDG_RUNTIME_DIR": runtime_dir,
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
+        },
     }
 
 

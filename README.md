@@ -63,9 +63,9 @@ The Bridge exposes:
   database writers remain a documented check-then-start race.
 - `bridge_restart` schedules a fixed, delayed restart of
   `development-bridge.service` only when the global durable job store is idle.
-  The service keeps `NoNewPrivileges=true`, so production grants the service
-  user direct polkit authorization for `restart` of this one unit; the tool does
-  not invoke `sudo`.
+  The service keeps `NoNewPrivileges=true`; restart is delegated to a transient
+  per-user systemd unit, which invokes only the exact sudoers-authorized restart
+  command outside the service sandbox. No broad sudo or polkit grant is needed.
 
 ## Managed external repositories
 
