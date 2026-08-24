@@ -78,6 +78,7 @@ SUPPORTED_TOOLS = {
     "coordinator_route_context_get",
     "coordinator_route_context_update",
     "coordinator_continue",
+    "coordinator_ack",
     "coordinator_wake_on_jobs",
     "run_command",
     "telegram_supervisor_status",
@@ -89,7 +90,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 79
+    assert len(registry.definitions) == 80
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",

@@ -61,3 +61,73 @@ async def test_pending_wake_survives_service_restart(tmp_path):
     assert persisted["state"] == "claimed"
     assert (await third.ack("route-g1", claim["claim_id"]))["acknowledged"] is True
     assert CoordinatorService(path)._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_resilient_continuation_retries_until_model_ack():
+    service = CoordinatorService()
+    armed = await service.arm_resilient(
+        "resume",
+        channel_id="route-g2",
+        retry_delays_seconds=(0, 0),
+        escalation_delay_seconds=0,
+        escalation_message="escalate",
+    )
+    continuation_id = armed["continuation_id"]
+
+    first = await service.claim("route-g2")
+    assert first["delivery_attempt"] == 1
+    assert first["continuation_id"] == continuation_id
+    await service.ack("route-g2", first["claim_id"])
+
+    second = await service.claim("route-g2")
+    assert second["delivery_attempt"] == 2
+    await service.ack("route-g2", second["claim_id"])
+
+    acked = await service.model_ack(continuation_id)
+    assert acked["acknowledged"] is True
+    assert (await service.status("route-g2"))["state"] == "idle"
+    assert await service.escalations_due() == []
+
+
+@pytest.mark.asyncio
+async def test_resilient_continuation_escalates_after_three_unacked_deliveries():
+    service = CoordinatorService()
+    armed = await service.arm_resilient(
+        "resume",
+        channel_id="route-g2",
+        retry_delays_seconds=(0, 0),
+        escalation_delay_seconds=0,
+        escalation_message="telegram fallback",
+    )
+    for expected_attempt in (1, 2, 3):
+        claim = await service.claim("route-g2")
+        assert claim["delivery_attempt"] == expected_attempt
+        await service.ack("route-g2", claim["claim_id"])
+
+    due = await service.escalations_due()
+    assert len(due) == 1
+    assert due[0]["continuation_id"] == armed["continuation_id"]
+    assert due[0]["delivery_attempts"] == 3
+    assert due[0]["escalation_message"] == "telegram fallback"
+    assert (await service.claim("route-g2"))["claimed"] is False
+
+
+@pytest.mark.asyncio
+async def test_resilient_retry_state_survives_restart(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    first_service = CoordinatorService(path)
+    armed = await first_service.arm_resilient(
+        "resume",
+        channel_id="route-g2",
+        retry_delays_seconds=(0, 0),
+        escalation_delay_seconds=0,
+    )
+    first_claim = await first_service.claim("route-g2")
+    await first_service.ack("route-g2", first_claim["claim_id"])
+
+    second_service = CoordinatorService(path)
+    second_claim = await second_service.claim("route-g2")
+    assert second_claim["claimed"] is True
+    assert second_claim["delivery_attempt"] == 2
+    assert second_claim["continuation_id"] == armed["continuation_id"]

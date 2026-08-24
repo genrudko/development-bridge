@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -43,6 +44,7 @@ class TelegramSupervisorService:
         self._last_inbound_message_id = None
         self._last_inbound_at = None
         self._last_error = None
+        self._escalation_task: asyncio.Task | None = None
 
     @property
     def configured(self) -> bool:
@@ -81,8 +83,15 @@ class TelegramSupervisorService:
         self._client = client
         self._connected = True
         self._last_error = None
+        self._escalation_task = asyncio.create_task(self._escalation_loop())
 
     async def stop(self) -> None:
+        task = self._escalation_task
+        self._escalation_task = None
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         client = self._client
         self._client = None
         self._connected = False
@@ -186,13 +195,31 @@ class TelegramSupervisorService:
         self._last_error = None
         await self._notice("команда передана в ChatGPT.")
 
-    async def _notice(self, text: str) -> None:
+    async def _escalation_loop(self) -> None:
+        while True:
+            await self._drain_escalations_once()
+            await asyncio.sleep(5)
+
+    async def _drain_escalations_once(self) -> None:
+        for escalation in await self.coordinator.escalations_due():
+            text = escalation.get("escalation_message") or (
+                "⚠️ Coordinator continuation was not acknowledged after "
+                f"{escalation['delivery_attempts']} X delivery attempts.\n"
+                f"Channel: {escalation['channel_id']}\n"
+                "Please check ChatGPT / Browser Host."
+            )
+            if await self._notice(text):
+                await self.coordinator.resolve_escalation(escalation["continuation_id"])
+
+    async def _notice(self, text: str) -> bool:
         if self._client is None or self.chat_id is None:
-            return
+            return False
         try:
             async with self._lock:
                 await self._client.send_message(
                     self.chat_id, f"{self.BRIDGE_PREFIX} {text}"
                 )
+            return True
         except (RPCError, OSError, TimeoutError) as error:
             self._last_error = f"Telegram notice failed: {type(error).__name__}"
+            return False

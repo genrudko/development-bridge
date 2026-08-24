@@ -44,9 +44,17 @@ async function poll() {
     busy = true;
     const claim = await request("claim", { method: "POST" });
     if (!claim.claimed) return;
+    let deliveredMessage = String(claim.message);
+    if (typeof claim.continuation_id === "string" && claim.continuation_id.length) {
+      deliveredMessage =
+        `[Coordinator continuation | continuation_id=${claim.continuation_id} | ` +
+        `attempt=${claim.delivery_attempt}/${claim.max_delivery_attempts}]\n` +
+        `Before other work, call coordinator_ack with continuation_id=${claim.continuation_id} ` +
+        `to confirm that this model turn started.\n${deliveredMessage}`;
+    }
     await app.sendMessage({
       role: "user",
-      content: [{ type: "text", text: String(claim.message) }],
+      content: [{ type: "text", text: deliveredMessage }],
     });
     const ackUrl = new URL("ack", endpoint);
     ackUrl.searchParams.set("channel_id", channelId);

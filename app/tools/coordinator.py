@@ -97,6 +97,12 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         )
         return to_mcp_result(success(request_context.request_id, data))
 
+    async def ack_continuation(ctx, params, request_context):
+        data = await container.coordinator.model_ack(
+            (params.arguments or {})["continuation_id"]
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
     async def wake_on_jobs(ctx, params, request_context):
         arguments = params.arguments or {}
         channel_id = container.coordinator.validate_channel(
@@ -107,11 +113,20 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         async def wake(jobs, reason):
             job_ids = ",".join(job.job_id for job in jobs)
             suffix = f"; message={message}" if message else ""
-            await container.coordinator.arm(
+            job_states = ", ".join(f"{job.job_id}={job.status.value}" for job in jobs)
+            escalation = (
+                "⚠️ Coordinator continuation was not acknowledged after 3 X delivery attempts.\n"
+                f"Channel: {channel_id}\n"
+                f"Jobs: {job_states}\n"
+                f"Reason: {reason}\n"
+                "Please check ChatGPT / Browser Host and continue the work manually."
+            )
+            await container.coordinator.arm_resilient(
                 f"jobs={job_ids}; reason={reason}{suffix}",
                 channel_id=channel_id,
                 delay_seconds=0,
                 conflict="coalesce",
+                escalation_message=escalation[: container.coordinator.MAX_ESCALATION_MESSAGE_CHARS],
             )
 
         repository = container.projects.repositories.get(
@@ -231,12 +246,35 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         ),
         RegisteredTool(
             types.Tool(
+                name="coordinator_ack",
+                description=(
+                    "Acknowledge a resilient coordinator continuation after a fresh model turn "
+                    "starts; this cancels pending X retries and Telegram escalation."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "continuation_id": {
+                            "type": "string",
+                            "pattern": "^cont_[A-Za-z0-9_-]{5,75}$",
+                        }
+                    },
+                    "required": ["continuation_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            ack_continuation,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
                 name="coordinator_wake_on_jobs",
                 description=(
-                    "Event-driven one-shot X wake for durable jobs. Requires an active "
-                    "coordinator_x_mount for the same channel; end the model turn after "
-                    "registering, then read job_status/job_output in the fresh turn. "
-                    "Waiters are process-local and do not survive a Bridge restart."
+                    "Event-driven resilient X continuation for durable jobs. Requires an active "
+                    "coordinator_x_mount for the same channel. After jobs become terminal, delivery "
+                    "uses one durable continuation_id, up to 3 X attempts, model ACK cancellation, "
+                    "and Telegram escalation when configured. The pre-terminal job waiter remains "
+                    "process-local across a Bridge restart."
                 ),
                 inputSchema={
                     "type": "object",
