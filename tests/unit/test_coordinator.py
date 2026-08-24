@@ -40,3 +40,24 @@ async def test_delay_claim_ack_and_lease_retry_prevent_duplicate_claims():
     assert (await service.ack("stable", winner["claim_id"]))["acknowledged"] is False
     assert (await service.ack("stable", retry["claim_id"]))["acknowledged"] is True
     assert (await service.status("stable"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_pending_wake_survives_service_restart(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    first = CoordinatorService(path)
+    await first.arm("resume", channel_id="route-g1", delay_seconds=0)
+
+    second = CoordinatorService(path)
+    status = await second.status("route-g1")
+    assert status["state"] == "pending"
+    assert status["ready"] is True
+    claim = await second.claim("route-g1")
+    assert claim["claimed"] is True
+    assert claim["message"] == "resume"
+
+    third = CoordinatorService(path)
+    persisted = await third.status("route-g1")
+    assert persisted["state"] == "claimed"
+    assert (await third.ack("route-g1", claim["claim_id"]))["acknowledged"] is True
+    assert CoordinatorService(path)._pending == {}

@@ -43,8 +43,10 @@ class BridgeRestartService:
         self._create_task = create_task
         self._tasks: set[asyncio.Task[None]] = set()
 
-    async def schedule(self) -> dict[str, object]:
+    async def schedule(self, checkpoint: Callable[[], Awaitable[None]] | None = None) -> dict[str, object]:
         async def schedule_task() -> dict[str, object]:
+            if checkpoint is not None:
+                await checkpoint()
             pending_restart = self._restart_after_delay()
             try:
                 task = self._create_task(pending_restart)

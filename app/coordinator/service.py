@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from secrets import token_urlsafe
 
 from app.api.errors import BridgeError, ErrorCode
@@ -28,9 +31,35 @@ class CoordinatorService:
     MAX_DELAY_SECONDS = 300.0
     LEASE_SECONDS = 20.0
 
-    def __init__(self) -> None:
+    def __init__(self, state_path: Path | None = None) -> None:
+        self._state_path = state_path.expanduser() if state_path is not None else None
         self._pending: dict[str, PendingWake] = {}
         self._lock = asyncio.Lock()
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if self._state_path is None:
+            return
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        for channel_id, item in list((data.get("pending") or {}).items())[: self.MAX_CHANNELS]:
+            try:
+                channel = self.validate_channel(channel_id)
+                self.validate_message(item["message"])
+                self._pending[channel] = PendingWake(**item)
+            except (BridgeError, TypeError, KeyError):
+                continue
+
+    def _save_state(self) -> None:
+        if self._state_path is None:
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._state_path.with_suffix(".tmp")
+        data = {"version": 1, "pending": {key: asdict(value) for key, value in self._pending.items()}}
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, self._state_path)
 
     @staticmethod
     def validate_channel(channel_id: str) -> str:
@@ -69,7 +98,7 @@ class CoordinatorService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "delay_seconds is invalid")
         if conflict not in {"coalesce", "reject"}:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "conflict is invalid")
-        now = time.monotonic()
+        now = time.time()
         async with self._lock:
             existing = self._pending.get(channel_id)
             if existing is not None and self._lease_active(existing, now):
@@ -98,6 +127,7 @@ class CoordinatorService:
                 available_at=now + float(delay_seconds),
                 created_at=now,
             )
+            self._save_state()
             return {
                 "channel_id": channel_id,
                 "state": "pending",
@@ -107,7 +137,7 @@ class CoordinatorService:
 
     async def status(self, channel_id: str = DEFAULT_CHANNEL) -> dict:
         channel_id = self.validate_channel(channel_id)
-        now = time.monotonic()
+        now = time.time()
         async with self._lock:
             wake = self._pending.get(channel_id)
             if wake is None:
@@ -125,13 +155,14 @@ class CoordinatorService:
 
     async def claim(self, channel_id: str = DEFAULT_CHANNEL) -> dict:
         channel_id = self.validate_channel(channel_id)
-        now = time.monotonic()
+        now = time.time()
         async with self._lock:
             wake = self._pending.get(channel_id)
             if wake is None or now < wake.available_at or self._lease_active(wake, now):
                 return {"channel_id": channel_id, "claimed": False}
             wake.claim_id = token_urlsafe(18)
             wake.lease_expires_at = now + self.LEASE_SECONDS
+            self._save_state()
             return {
                 "channel_id": channel_id,
                 "claimed": True,
@@ -147,6 +178,7 @@ class CoordinatorService:
             if wake is None or wake.claim_id != claim_id:
                 return {"channel_id": channel_id, "acknowledged": False}
             del self._pending[channel_id]
+            self._save_state()
             return {"channel_id": channel_id, "acknowledged": True}
 
     @staticmethod

@@ -72,6 +72,9 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
     async def list_tools(ctx, params):
         return types.ListToolsResult(tools=list(registry.definitions))
 
+    async def initialized(ctx, params):
+        await ctx.session.send_tool_list_changed()
+
     async def list_resources(ctx, params):
         return types.ListResourcesResult(
             resources=[
@@ -138,6 +141,9 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
                 )
             )
 
+    bridge_server.add_notification_handler(
+        "notifications/initialized", types.NotificationParams, initialized
+    )
     bridge_server.add_request_handler(
         "tools/list", types.PaginatedRequestParams, list_tools
     )

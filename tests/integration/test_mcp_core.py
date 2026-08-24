@@ -125,3 +125,22 @@ async def test_full_streamable_http_lifecycle_with_two_repositories(tmp_path):
         "repository_status",
         "repository_status",
     ]
+
+
+@pytest.mark.asyncio
+async def test_initialized_notification_requests_tool_list_refresh(tmp_path):
+    first = create_git_repository(tmp_path, "first-notify", branch="main")
+    second = create_git_repository(tmp_path, "second-notify", branch="main")
+    container = build_container(bridge_settings(first, second))
+    server = create_server(container)
+    entry = server.get_notification_handler("notifications/initialized")
+    assert entry is not None
+    calls = []
+
+    class Session:
+        async def send_tool_list_changed(self):
+            calls.append("tools/list_changed")
+
+    from types import SimpleNamespace
+    await entry.handler(SimpleNamespace(session=Session()), types.NotificationParams())
+    assert calls == ["tools/list_changed"]

@@ -279,8 +279,8 @@ def build_container(
         configured.server.endpoint,
         configured.github.artifact_max_bytes,
     )
-    coordinator = CoordinatorService()
     route_registry = RouteRegistry(configured.coordinator.route_registry_path)
+    coordinator = CoordinatorService(route_registry.path.parent / "coordinator-wakes.json")
     supervisor_settings = configured.telegram_supervisor
     telegram_supervisor = None
     if supervisor_settings.enabled:

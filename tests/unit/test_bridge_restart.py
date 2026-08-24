@@ -135,3 +135,31 @@ async def test_detached_spawn_failure_is_logged(tmp_path, caplog):
     await asyncio.sleep(0)
 
     assert "Detached bridge restart process could not be spawned" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_restart_checkpoint_runs_before_restart_is_scheduled(tmp_path):
+    container, _ = command_container(tmp_path)
+    container.jobs._store.initialize()
+    events = []
+    release = asyncio.Event()
+
+    async def checkpoint():
+        events.append("checkpoint")
+
+    async def sleep(delay):
+        events.append("sleep")
+        await release.wait()
+
+    async def spawn(*args, **kwargs):
+        events.append("spawn")
+        return object()
+
+    service = BridgeRestartService(container.jobs, sleep=sleep, spawn=spawn)
+    result = await service.schedule(checkpoint=checkpoint)
+    await asyncio.sleep(0)
+    assert result["restart_scheduled"] is True
+    assert events == ["checkpoint", "sleep"]
+    release.set()
+    await next(iter(service._tasks))
+    assert events == ["checkpoint", "sleep", "spawn"]
