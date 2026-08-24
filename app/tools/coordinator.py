@@ -20,9 +20,13 @@ COORDINATOR_UI_META = {
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
     async def mount(ctx, params, request_context):
-        channel_id = container.coordinator.validate_channel(
-            (params.arguments or {}).get("channel_id", "coordinator")
-        )
+        requested_channel = (params.arguments or {}).get("channel_id", "coordinator")
+        if isinstance(requested_channel, str) and requested_channel.startswith("cont_"):
+            ack = await container.coordinator.model_ack(requested_channel)
+            data = dict(ack)
+            data["state"] = "acknowledged" if ack.get("acknowledged") else "not_found"
+            return to_mcp_result(success(request_context.request_id, data))
+        channel_id = container.coordinator.validate_channel(requested_channel)
         result = to_mcp_result(
             success(
                 request_context.request_id,
@@ -131,7 +135,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_x_mount",
-                description="Mount the coordinator X wake listener for this chat/channel before arming wakes",
+                description="Mount the coordinator X wake listener; cached clients may pass an exact cont_... ID as channel_id to ACK only that continuation",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -279,7 +283,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                             "default": "coordinator",
                         },
                         "message": {
-                            "type": "string", "minLength": 1, "maxLength": 200
+                            "type": "string", "minLength": 1, "maxLength": 200,
+                            "description": "Short user-facing continuation status in the current conversation language."
                         },
                         "policy": {
                             "type": "string",

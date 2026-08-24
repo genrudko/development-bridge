@@ -36,7 +36,10 @@ async def test_resource_mount_routing_and_internal_continue():
                     assert "app.sendMessage" in resource.contents[0].text
                     assert 'new URL("https://bridge.example/mcp/x/coordinator/"' in resource.contents[0].text
                     assert "if (!ackResponse.ok)" in resource.contents[0].text
+                    assert "### ⚡ Bridge · задача завершена" in resource.contents[0].text
+                    assert "<!-- development-bridge" in resource.contents[0].text
                     assert "call coordinator_ack" in resource.contents[0].text
+                    assert "coordinator_x_mount with channel_id=" in resource.contents[0].text
                     mounted = await session.call_tool(
                         "coordinator_x_mount", {"channel_id": "chat-42"}
                     )
@@ -47,6 +50,13 @@ async def test_resource_mount_routing_and_internal_continue():
                         "channel_id": "chat-42",
                         "trigger_url": "https://bridge.example/mcp/x/coordinator/",
                     }
+                    armed = await container.coordinator.arm_resilient(
+                        "compat", channel_id="chat-42", delay_seconds=0
+                    )
+                    compat = await session.call_tool(
+                        "coordinator_x_mount", {"channel_id": armed["continuation_id"]}
+                    )
+                    assert json.loads(compat.content[0].text)["data"]["acknowledged"] is True
                     continued = await session.call_tool(
                         "coordinator_continue",
                         {"channel_id": "chat-42", "message": "resume", "delay_seconds": 0},
