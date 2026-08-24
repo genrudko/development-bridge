@@ -75,17 +75,28 @@ async function poll() {
     const rawMessage = String(claim.message);
     let deliveredMessage = rawMessage;
     if (typeof claim.continuation_id === "string" && claim.continuation_id.length) {
+      const batchSeparator = "\n--- bridge-batch ---\n";
       const marker = "; message=";
-      const markerAt = rawMessage.indexOf(marker);
-      const humanMessage = (markerAt >= 0 ? rawMessage.slice(markerAt + marker.length) : rawMessage).trim();
+      const rawParts = rawMessage.split(batchSeparator);
+      const humanMessages = rawParts.map((part) => {
+        const markerAt = part.indexOf(marker);
+        return (markerAt >= 0 ? part.slice(markerAt + marker.length) : "").trim();
+      }).filter(Boolean);
+      const humanMessage = humanMessages.length > 1
+        ? humanMessages.map((item) => `- ${item}`).join("\n")
+        : (humanMessages[0] || "Фоновая задача завершена. Продолжаю автоматически.");
       const attempt = Number(claim.delivery_attempt) || 1;
       const maxAttempts = Number(claim.max_delivery_attempts) || 1;
       const retry = attempt > 1 ? `\n\n> ♻️ Повторная доставка · ${attempt}/${maxAttempts}` : "";
+      const batch = humanMessages.length > 1 ? `\n\n> 📦 Пакет завершений · ${humanMessages.length}` : "";
+      const payloadJson = JSON.stringify(rawParts).replaceAll("-->", "--\u003e");
       deliveredMessage =
-        `### ⚡ Bridge · задача завершена\n\n${humanMessage || "Фоновая задача завершена. Продолжаю автоматически."}${retry}\n\n` +
+        `### ⚡ Bridge · задача завершена\n\n${humanMessage}${batch}${retry}\n\n` +
         `<!-- development-bridge\n` +
         `continuation_id=${claim.continuation_id}\n` +
+        `payload_json=${payloadJson}\n` +
         `instruction=Before other work, call coordinator_ack with continuation_id=${claim.continuation_id}. ` +
+        `If its response contains batched_messages, process those terminal groups in this same turn. ` +
         `If coordinator_ack is unavailable, call coordinator_x_mount with channel_id=${claim.continuation_id} to acknowledge this exact continuation.\n` +
         `-->`;
     }

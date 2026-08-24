@@ -144,3 +144,72 @@ async def test_model_ack_during_transport_claim_prevents_retry():
     assert transport["acknowledged"] is True
     assert (await service.status("route-g2"))["state"] == "idle"
     assert (await service.claim("route-g2"))["claimed"] is False
+
+
+@pytest.mark.asyncio
+async def test_resilient_events_batch_before_first_delivery_and_deduplicate():
+    service = CoordinatorService()
+    first = await service.arm_resilient("A", channel_id="route-g2")
+    second = await service.arm_resilient("B", channel_id="route-g2")
+    duplicate = await service.arm_resilient("A", channel_id="route-g2")
+    assert second["continuation_id"] == first["continuation_id"]
+    assert second["batch_size"] == 2
+    assert duplicate["deduplicated"] is True
+    claim = await service.claim("route-g2")
+    assert claim["continuation_id"] == first["continuation_id"]
+    assert claim["message"].split(service.BATCH_SEPARATOR) == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_event_while_waiting_model_ack_is_consumed_by_same_turn():
+    service = CoordinatorService()
+    armed = await service.arm_resilient("A", channel_id="route-g2", retry_delays_seconds=(0, 0))
+    claim = await service.claim("route-g2")
+    await service.ack("route-g2", claim["claim_id"])
+    queued = await service.arm_resilient("B", channel_id="route-g2", retry_delays_seconds=(0, 0))
+    assert queued["continuation_id"] == armed["continuation_id"]
+    assert queued["queued_events"] == 1
+    acked = await service.model_ack(armed["continuation_id"] )
+    assert acked["batched_messages"] == ["B"]
+    assert (await service.status("route-g2"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_event_after_model_ack_becomes_one_followup_continuation():
+    service = CoordinatorService()
+    armed = await service.arm_resilient("A", channel_id="route-g2", retry_delays_seconds=(0, 0))
+    claim = await service.claim("route-g2")
+    acked = await service.model_ack(armed["continuation_id"] )
+    assert acked["batched_count"] == 0
+    queued = await service.arm_resilient("B", channel_id="route-g2", retry_delays_seconds=(0, 0))
+    assert queued["queued_events"] == 1
+    transport = await service.ack("route-g2", claim["claim_id"])
+    assert transport["followup_pending"] is True
+    assert transport["next_continuation_id"] != armed["continuation_id"]
+    followup = await service.claim("route-g2")
+    assert followup["message"] == "B"
+    assert followup["continuation_id"] == transport["next_continuation_id"]
+
+
+@pytest.mark.asyncio
+async def test_queued_batch_survives_restart_until_model_ack(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    first = CoordinatorService(path)
+    armed = await first.arm_resilient("A", channel_id="route-g2", retry_delays_seconds=(0, 0))
+    claim = await first.claim("route-g2")
+    await first.ack("route-g2", claim["claim_id"])
+    await first.arm_resilient("B", channel_id="route-g2", retry_delays_seconds=(0, 0))
+    second = CoordinatorService(path)
+    acked = await second.model_ack(armed["continuation_id"] )
+    assert acked["batched_messages"] == ["B"]
+    assert (await second.status("route-g2"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_eight_concurrent_events_keep_one_active_continuation():
+    service = CoordinatorService()
+    results = await asyncio.gather(*(service.arm_resilient(f"job-{index}", channel_id="route-g2") for index in range(8)))
+    assert len({item["continuation_id"] for item in results}) == 1
+    claim = await service.claim("route-g2")
+    assert claim["batch_size"] == 8
+    assert set(claim["message"].split(service.BATCH_SEPARATOR)) == {f"job-{index}" for index in range(8)}

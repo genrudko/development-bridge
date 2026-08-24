@@ -28,6 +28,8 @@ class PendingWake:
     escalation_delay_seconds: float = 0.0
     escalation_message: str | None = None
     escalation_at: float | None = None
+    queued_messages: list[str] = field(default_factory=list)
+    queued_escalation_messages: list[str] = field(default_factory=list)
 
 
 class CoordinatorService:
@@ -39,7 +41,10 @@ class CoordinatorService:
     DEFAULT_ESCALATION_DELAY_SECONDS = 60.0
     MAX_CHANNELS = 64
     MAX_MESSAGE_CHARS = 4000
+    MAX_BATCH_MESSAGE_CHARS = 32000
+    MAX_BATCH_EVENTS = 128
     MAX_ESCALATION_MESSAGE_CHARS = 3500
+    BATCH_SEPARATOR = "\n--- bridge-batch ---\n"
     MIN_DELAY_SECONDS = 0.0
     MAX_DELAY_SECONDS = 300.0
     LEASE_SECONDS = 20.0
@@ -60,11 +65,14 @@ class CoordinatorService:
         for channel_id, item in list((data.get("pending") or {}).items())[: self.MAX_CHANNELS]:
             try:
                 channel = self.validate_channel(channel_id)
-                self.validate_message(item["message"])
+                if not isinstance(item["message"], str) or not 1 <= len(item["message"]) <= self.MAX_BATCH_MESSAGE_CHARS:
+                    raise ValueError("persisted wake message is invalid")
                 payload = dict(item)
                 payload["retry_delays_seconds"] = [
                     float(value) for value in payload.get("retry_delays_seconds", [])
                 ]
+                payload["queued_messages"] = [str(value) for value in payload.get("queued_messages", [])]
+                payload["queued_escalation_messages"] = [str(value) for value in payload.get("queued_escalation_messages", [])]
                 self._pending[channel] = PendingWake(**payload)
             except (BridgeError, TypeError, ValueError, KeyError):
                 continue
@@ -118,6 +126,55 @@ class CoordinatorService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"{field_name} is invalid")
         return float(value)
 
+    @classmethod
+    def _batch_parts(cls, message: str) -> list[str]:
+        return message.split(cls.BATCH_SEPARATOR)
+
+    @classmethod
+    def _bounded_escalation(cls, parts: Sequence[str | None]) -> str | None:
+        values = [value.strip() for value in parts if value and value.strip()]
+        if not values:
+            return None
+        combined = "\n\n--- additional terminal group ---\n".join(values)
+        if len(combined) <= cls.MAX_ESCALATION_MESSAGE_CHARS:
+            return combined
+        suffix = "\n… additional terminal groups omitted; inspect Bridge state."
+        return combined[: cls.MAX_ESCALATION_MESSAGE_CHARS - len(suffix)] + suffix
+
+    def _coalesce_resilient_locked(self, channel_id: str, wake: PendingWake, message: str, escalation_message: str | None) -> dict:
+        current = self._batch_parts(wake.message)
+        if message in current or message in wake.queued_messages:
+            return {"channel_id": channel_id, "state": "pending", "coalesced": True, "deduplicated": True, "continuation_id": wake.continuation_id, "model_ack_required": True, "max_delivery_attempts": wake.max_delivery_attempts, "batch_size": len(current), "queued_events": len(wake.queued_messages)}
+        if len(current) + len(wake.queued_messages) >= self.MAX_BATCH_EVENTS:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "Coordinator batch capacity is full", retryable=True, details={"channel_id": channel_id})
+        combined = self.BATCH_SEPARATOR.join([*current, message])
+        merge_current = wake.delivery_attempts == 0 and wake.claim_id is None and not wake.model_acknowledged and len(combined) <= self.MAX_BATCH_MESSAGE_CHARS
+        if merge_current:
+            wake.message = combined
+            wake.escalation_message = self._bounded_escalation((wake.escalation_message, escalation_message))
+        else:
+            wake.queued_messages.append(message)
+            wake.queued_escalation_messages.append(escalation_message or "")
+        return {"channel_id": channel_id, "state": "pending", "coalesced": True, "deduplicated": False, "continuation_id": wake.continuation_id, "model_ack_required": True, "max_delivery_attempts": wake.max_delivery_attempts, "batch_size": len(self._batch_parts(wake.message)), "queued_events": len(wake.queued_messages)}
+
+    def _promote_queued_locked(self, channel_id: str, wake: PendingWake, now: float) -> str | None:
+        if not wake.queued_messages:
+            del self._pending[channel_id]
+            return None
+        active_messages: list[str] = []
+        active_escalations: list[str] = []
+        remaining_messages: list[str] = []
+        remaining_escalations: list[str] = []
+        for message, escalation in zip(wake.queued_messages, wake.queued_escalation_messages, strict=False):
+            candidate = self.BATCH_SEPARATOR.join([*active_messages, message])
+            if active_messages and len(candidate) > self.MAX_BATCH_MESSAGE_CHARS:
+                remaining_messages.append(message); remaining_escalations.append(escalation)
+            else:
+                active_messages.append(message); active_escalations.append(escalation)
+        continuation_id = f"cont_{token_urlsafe(18)}"
+        self._pending[channel_id] = PendingWake(message=self.BATCH_SEPARATOR.join(active_messages), available_at=now, created_at=now, continuation_id=continuation_id, model_ack_required=True, max_delivery_attempts=wake.max_delivery_attempts, retry_delays_seconds=list(wake.retry_delays_seconds), escalation_delay_seconds=wake.escalation_delay_seconds, escalation_message=self._bounded_escalation(active_escalations), queued_messages=remaining_messages, queued_escalation_messages=remaining_escalations)
+        return continuation_id
+
     async def arm(
         self,
         message: str,
@@ -166,6 +223,17 @@ class CoordinatorService:
         now = time.time()
         async with self._lock:
             existing = self._pending.get(channel_id)
+            if (
+                existing is not None
+                and conflict == "coalesce"
+                and model_ack_required
+                and existing.model_ack_required
+            ):
+                data = self._coalesce_resilient_locked(
+                    channel_id, existing, message, escalation_message
+                )
+                self._save_state()
+                return data
             if existing is not None and self._lease_active(existing, now):
                 raise BridgeError(
                     ErrorCode.POLICY_VIOLATION,
@@ -281,6 +349,8 @@ class CoordinatorService:
                         "continuation_id": wake.continuation_id,
                         "delivery_attempts": wake.delivery_attempts,
                         "max_delivery_attempts": wake.max_delivery_attempts,
+                        "batch_size": len(self._batch_parts(wake.message)),
+                        "queued_events": len(wake.queued_messages),
                     }
                 )
             return data
@@ -314,6 +384,8 @@ class CoordinatorService:
                         "delivery_attempt": wake.delivery_attempts + 1,
                         "max_delivery_attempts": wake.max_delivery_attempts,
                         "model_ack_required": True,
+                        "batch_size": len(self._batch_parts(wake.message)),
+                        "queued_events": len(wake.queued_messages),
                     }
                 )
             return data
@@ -328,11 +400,20 @@ class CoordinatorService:
                 return {"channel_id": channel_id, "acknowledged": False}
             if not wake.model_ack_required or wake.model_acknowledged:
                 continuation_id = wake.continuation_id
-                del self._pending[channel_id]
+                next_continuation_id = None
+                if wake.model_ack_required and wake.model_acknowledged:
+                    next_continuation_id = self._promote_queued_locked(channel_id, wake, now)
+                else:
+                    del self._pending[channel_id]
                 self._save_state()
                 data = {"channel_id": channel_id, "acknowledged": True}
                 if continuation_id is not None:
-                    data.update({"continuation_id": continuation_id, "model_acknowledged": True})
+                    data.update({
+                        "continuation_id": continuation_id,
+                        "model_acknowledged": True,
+                        "followup_pending": next_continuation_id is not None,
+                        "next_continuation_id": next_continuation_id,
+                    })
                 return data
 
             wake.delivery_attempts += 1
@@ -364,12 +445,16 @@ class CoordinatorService:
 
     async def model_ack(self, continuation_id: str) -> dict:
         continuation_id = self.validate_continuation_id(continuation_id)
+        now = time.time()
         async with self._lock:
             for channel_id, wake in list(self._pending.items()):
                 if wake.continuation_id != continuation_id:
                     continue
                 attempts = wake.delivery_attempts
-                if wake.claim_id is not None and self._lease_active(wake, time.time()):
+                batched_messages = list(wake.queued_messages)
+                wake.queued_messages.clear()
+                wake.queued_escalation_messages.clear()
+                if wake.claim_id is not None and self._lease_active(wake, now):
                     wake.model_acknowledged = True
                     self._save_state()
                 else:
@@ -380,6 +465,8 @@ class CoordinatorService:
                     "channel_id": channel_id,
                     "acknowledged": True,
                     "delivery_attempts": attempts,
+                    "batched_messages": batched_messages,
+                    "batched_count": len(batched_messages),
                 }
             return {"continuation_id": continuation_id, "acknowledged": False}
 
@@ -410,7 +497,10 @@ class CoordinatorService:
                         "channel_id": channel_id,
                         "delivery_attempts": wake.delivery_attempts,
                         "max_delivery_attempts": wake.max_delivery_attempts,
-                        "escalation_message": wake.escalation_message,
+                        "escalation_message": self._bounded_escalation(
+                            (wake.escalation_message, *wake.queued_escalation_messages)
+                        ),
+                        "queued_events": len(wake.queued_messages),
                     }
                 )
             return due

@@ -30,6 +30,7 @@ def test_bridge_guide_is_registry_derived_and_complete():
     assert data["tool_count"] == 80
     assert catalog == {tool.name for tool in registry.definitions}
     assert "queued status is normal" in data["durable_jobs"]["rule"]
+    assert any("batched_messages" in step for step in data["durable_jobs"]["preferred_event_flow"])
 
 
 def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():
@@ -45,6 +46,7 @@ def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():
     assert "3 X attempts" in tool.description
     assert "durable" in tool.description
     assert "restored across Bridge restart" in tool.description
+    assert "batches concurrent terminal" in tool.description
 
 
 def test_x_wake_payload_never_contains_job_output(tmp_path):
@@ -104,3 +106,4 @@ def test_coordinator_ack_schema_is_explicit_and_bounded():
     assert tool.input_schema["required"] == ["continuation_id"]
     assert tool.input_schema["properties"]["continuation_id"]["pattern"].startswith("^cont_")
     assert "Telegram escalation" in tool.description
+    assert "batched_messages" in tool.description

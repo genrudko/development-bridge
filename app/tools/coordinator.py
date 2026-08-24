@@ -238,7 +238,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 name="coordinator_ack",
                 description=(
                     "Acknowledge a resilient coordinator continuation after a fresh model turn "
-                    "starts; this cancels pending X retries and Telegram escalation."
+                    "starts; this cancels pending X retries and Telegram escalation. The response may "
+                    "include batched_messages that must be processed in the same model turn."
                 ),
                 inputSchema={
                     "type": "object",
@@ -261,8 +262,10 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 description=(
                     "Event-driven resilient X continuation for durable jobs. Requires an active "
                     "coordinator_x_mount for the same channel. After jobs become terminal, delivery "
-                    "uses one durable continuation_id, up to 3 X attempts, model ACK cancellation, "
-                    "and Telegram escalation when configured. The pre-terminal job waiter is durable "
+                    "keeps one active durable continuation_id per channel, batches concurrent terminal "
+                    "groups without overwriting them, deduplicates repeated events, uses up to 3 X "
+                    "attempts with model ACK cancellation, and Telegram escalation when configured. "
+                    "The pre-terminal job waiter is durable "
                     "and restored across Bridge restart."
                 ),
                 inputSchema={
