@@ -108,6 +108,16 @@ class JobStore:
             ).fetchone()
         return row is not None
 
+    def has_active_for_repository(self, project_id: str, repository_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT 1 FROM jobs
+                   WHERE project_id = ? AND repository_id = ?
+                     AND status IN (?, ?) LIMIT 1""",
+                (project_id, repository_id, JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+            ).fetchone()
+        return row is not None
+
     def create(
         self,
         *,

@@ -383,15 +383,6 @@ class CoordinatorService:
                 }
             return {"continuation_id": continuation_id, "acknowledged": False}
 
-    async def model_ack_channel(self, channel_id: str) -> dict:
-        channel_id = self.validate_channel(channel_id)
-        async with self._lock:
-            wake = self._pending.get(channel_id)
-            continuation_id = wake.continuation_id if wake is not None else None
-        if continuation_id is None:
-            return {"channel_id": channel_id, "acknowledged": False}
-        return await self.model_ack(continuation_id)
-
     async def escalations_due(self) -> list[dict]:
         now = time.time()
         async with self._lock:

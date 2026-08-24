@@ -57,7 +57,7 @@ class RepositoryCommandService:
                 repository, executable, arguments, timeout_seconds, output_limit_bytes
             )
 
-        return await self._jobs.run_when_globally_idle(execute)
+        return await self._jobs.run_when_repository_idle(repository, execute)
 
     @staticmethod
     async def _read_bounded(stream, limit: int) -> tuple[bytes, bool]:

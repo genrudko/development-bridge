@@ -6,7 +6,9 @@ import json
 import os
 import signal
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_urlsafe
@@ -44,6 +46,8 @@ class JobService:
         policy: CapabilityPolicy,
         audit: AuditSink,
         artifacts: ArtifactStorage | None = None,
+        *,
+        max_concurrency: int = 8,
     ) -> None:
         self._store = store
         self._tasks = tasks
@@ -51,12 +55,19 @@ class JobService:
         self._policy = policy
         self._audit = audit
         self._artifacts = artifacts
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        if not isinstance(max_concurrency, int) or isinstance(max_concurrency, bool) or not 1 <= max_concurrency <= 32:
+            raise ValueError("max_concurrency must be between 1 and 32")
+        self._max_concurrency = max_concurrency
+        self._pending: deque[str] = deque()
+        self._dispatch_event = asyncio.Event()
         self._worker: asyncio.Task | None = None
+        self._active_tasks: dict[str, asyncio.Task] = {}
+        self._active_repositories: set[tuple[str, str]] = set()
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._cancel_requested: set[str] = set()
         self._stopping = False
-        self._admission_lock = asyncio.Lock()
+        self._global_admission_lock = asyncio.Lock()
+        self._admission_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._terminal_lock = asyncio.Lock()
         self._terminal_waiters: dict[str, TerminalWaiter] = {}
 
@@ -177,10 +188,12 @@ class JobService:
         interrupted = self._store.initialize()
         for job in interrupted:
             await self._emit(job, "fail", AuditOutcome.ERROR, "interrupted_by_restart")
+        self._pending.clear()
         for job in self._store.queued():
-            self._queue.put_nowait(job.job_id)
+            self._pending.append(job.job_id)
         self._stopping = False
         self._worker = asyncio.create_task(self._run_worker())
+        self._dispatch_event.set()
 
     async def stop(self) -> None:
         if self._worker is None:
@@ -189,8 +202,11 @@ class JobService:
         for job_id in tuple(self._processes):
             self._cancel_requested.add(job_id)
             await self._terminate(self._processes[job_id])
-        self._queue.put_nowait("")
-        await self._queue.join()
+        self._dispatch_event.set()
+        active = tuple(self._active_tasks.values())
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
+        self._dispatch_event.set()
         await self._worker
         self._worker = None
 
@@ -214,7 +230,7 @@ class JobService:
                 "idempotency_key is outside the allowed length",
             )
         store = self._require_store()
-        async with self._admission_lock:
+        async with self._admission(repository):
             job, created = store.create(
                 project_id=repository.project_id,
                 repository_id=repository.id,
@@ -223,7 +239,7 @@ class JobService:
                 idempotency_key=idempotency_key,
             )
             if created:
-                self._queue.put_nowait(job.job_id)
+                self._enqueue(job.job_id)
         return job
 
     async def start_execution(
@@ -283,7 +299,7 @@ class JobService:
         }
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         store = self._require_store(execution=True)
-        async with self._admission_lock:
+        async with self._admission(repository):
             job, created = store.create_execution(
                 project_id=repository.project_id,
                 repository_id=repository.id,
@@ -293,8 +309,26 @@ class JobService:
                 payload_digest=hashlib.sha256(payload_json.encode()).hexdigest(),
             )
             if created:
-                self._queue.put_nowait(job.job_id)
+                self._enqueue(job.job_id)
         return job
+
+    @asynccontextmanager
+    async def _admission(self, repository: Repository):
+        async with self._global_admission_lock:
+            async with self._admission_lock_for(repository):
+                yield
+
+    def _admission_lock_for(self, repository: Repository) -> asyncio.Lock:
+        key = (repository.project_id, repository.id)
+        lock = self._admission_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._admission_locks[key] = lock
+        return lock
+
+    def _enqueue(self, job_id: str) -> None:
+        self._pending.append(job_id)
+        self._dispatch_event.set()
 
     async def run_when_globally_idle(
         self,
@@ -302,8 +336,8 @@ class JobService:
         *,
         operation_name: str = "run_command",
     ):
-        """Serialize synchronous execution against all durable job admissions."""
-        async with self._admission_lock:
+        """Serialize service-wide operations against durable job admission."""
+        async with self._global_admission_lock:
             if self._store is None:
                 raise BridgeError(
                     ErrorCode.JOB_EXECUTION_NOT_CONFIGURED,
@@ -313,6 +347,28 @@ class JobService:
                 raise BridgeError(
                     ErrorCode.JOB_BUSY,
                     f"{operation_name} is unavailable while a durable job is queued or running",
+                    retryable=True,
+                )
+            return await operation()
+
+    async def run_when_repository_idle(
+        self,
+        repository: Repository,
+        operation: Callable[[], Awaitable[object]],
+        *,
+        operation_name: str = "run_command",
+    ):
+        """Serialize synchronous execution only against this repository."""
+        async with self._admission_lock_for(repository):
+            if self._store is None:
+                raise BridgeError(
+                    ErrorCode.JOB_EXECUTION_NOT_CONFIGURED,
+                    f"{operation_name} requires a configured durable job store",
+                )
+            if self._store.has_active_for_repository(repository.project_id, repository.id):
+                raise BridgeError(
+                    ErrorCode.JOB_BUSY,
+                    f"{operation_name} is unavailable while this repository has a queued or running durable job",
                     retryable=True,
                 )
             return await operation()
@@ -410,28 +466,53 @@ class JobService:
             await asyncio.sleep(0.01)
         return store.get(repository.project_id, repository.id, job_id)
 
+    def _next_eligible_job(self) -> tuple[str, tuple[str, str]] | None:
+        store = self._require_store()
+        for _ in range(len(self._pending)):
+            job_id = self._pending.popleft()
+            job = store.get_by_id(job_id)
+            if job is None or job.status is not JobStatus.QUEUED:
+                continue
+            key = (job.project_id, job.repository_id)
+            if key in self._active_repositories:
+                self._pending.append(job_id)
+                continue
+            return job_id, key
+        return None
+
     async def _run_worker(self) -> None:
         while True:
-            job_id = await self._queue.get()
-            try:
-                if not self._stopping and job_id:
-                    try:
-                        await self._execute(job_id)
-                    except Exception:  # noqa: BLE001 - contain worker/task failures
-                        store = self._require_store()
-                        await self._fail_active(job_id, "internal_worker_error")
-                        failed = store.get_by_id(job_id)
-                        if failed is not None:
-                            await self._emit(
-                                failed,
-                                "fail",
-                                AuditOutcome.ERROR,
-                                "internal_worker_error",
-                            )
-            finally:
-                self._queue.task_done()
-            if self._stopping and self._queue.empty():
+            self._dispatch_event.clear()
+            while not self._stopping and len(self._active_tasks) < self._max_concurrency:
+                selected = self._next_eligible_job()
+                if selected is None:
+                    break
+                job_id, repository_key = selected
+                self._active_repositories.add(repository_key)
+                task = asyncio.create_task(self._run_scheduled_job(job_id, repository_key))
+                self._active_tasks[job_id] = task
+            if self._stopping and not self._active_tasks:
                 return
+            await self._dispatch_event.wait()
+
+    async def _run_scheduled_job(
+        self, job_id: str, repository_key: tuple[str, str]
+    ) -> None:
+        try:
+            try:
+                await self._execute(job_id)
+            except Exception:  # noqa: BLE001 - contain worker/task failures
+                store = self._require_store()
+                await self._fail_active(job_id, "internal_worker_error")
+                failed = store.get_by_id(job_id)
+                if failed is not None:
+                    await self._emit(
+                        failed, "fail", AuditOutcome.ERROR, "internal_worker_error"
+                    )
+        finally:
+            self._active_tasks.pop(job_id, None)
+            self._active_repositories.discard(repository_key)
+            self._dispatch_event.set()
 
     async def _execute(self, job_id: str) -> None:
         store = self._require_store()

@@ -91,6 +91,7 @@ class JobSettings(BaseModel):
     database_path: Path | None = None
     artifact_directory: Path | None = None
     artifact_export_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    max_concurrency: int = Field(default=8, ge=1, le=32)
 
 
 def _default_managed_repository_root() -> Path:

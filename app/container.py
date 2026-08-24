@@ -243,6 +243,7 @@ def build_container(
         ArtifactStorage(artifact_directory)
         if artifact_directory is not None
         else None,
+        max_concurrency=configured.jobs.max_concurrency,
     )
     job_artifact_exports = JobArtifactExportService(
         jobs,
