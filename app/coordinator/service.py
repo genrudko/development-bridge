@@ -28,6 +28,7 @@ class PendingWake:
     escalation_delay_seconds: float = 0.0
     escalation_message: str | None = None
     escalation_at: float | None = None
+    transport_delivered: bool = False
     queued_messages: list[str] = field(default_factory=list)
     queued_escalation_messages: list[str] = field(default_factory=list)
 
@@ -319,11 +320,19 @@ class CoordinatorService:
             wake = self._pending.get(channel_id)
             if wake is None:
                 return {"channel_id": channel_id, "state": "idle", "ready": False}
+            if wake.model_acknowledged and not self._lease_active(wake, now):
+                self._promote_queued_locked(channel_id, wake, now)
+                self._save_state()
+                wake = self._pending.get(channel_id)
+                if wake is None:
+                    return {"channel_id": channel_id, "state": "idle", "ready": False}
             claimed = self._lease_active(wake, now)
             exhausted = wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts
-            ready = not claimed and not exhausted and now >= wake.available_at
+            ready = not claimed and not exhausted and not wake.transport_delivered and now >= wake.available_at
             if claimed:
                 state = "claimed"
+            elif wake.transport_delivered:
+                state = ("escalation_due" if (wake.escalation_at or float("inf")) <= now else "waiting_model_ack")
             elif exhausted:
                 state = (
                     "escalation_due"
@@ -351,6 +360,8 @@ class CoordinatorService:
                         "max_delivery_attempts": wake.max_delivery_attempts,
                         "batch_size": len(self._batch_parts(wake.message)),
                         "queued_events": len(wake.queued_messages),
+                        "transport_delivered": wake.transport_delivered,
+                        "model_acknowledged": wake.model_acknowledged,
                     }
                 )
             return data
@@ -364,11 +375,20 @@ class CoordinatorService:
                 wake is None
                 or now < wake.available_at
                 or self._lease_active(wake, now)
+                or wake.transport_delivered
+                or wake.model_acknowledged
                 or (wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts)
             ):
                 return {"channel_id": channel_id, "claimed": False}
             wake.claim_id = token_urlsafe(18)
             wake.lease_expires_at = now + self.LEASE_SECONDS
+            if wake.model_ack_required:
+                wake.delivery_attempts += 1
+                if wake.delivery_attempts < wake.max_delivery_attempts:
+                    wake.available_at = wake.lease_expires_at + wake.retry_delays_seconds[wake.delivery_attempts - 1]
+                else:
+                    wake.available_at = wake.lease_expires_at
+                    wake.escalation_at = wake.lease_expires_at + wake.escalation_delay_seconds
             self._save_state()
             data = {
                 "channel_id": channel_id,
@@ -381,7 +401,7 @@ class CoordinatorService:
                 data.update(
                     {
                         "continuation_id": wake.continuation_id,
-                        "delivery_attempt": wake.delivery_attempts + 1,
+                        "delivery_attempt": wake.delivery_attempts,
                         "max_delivery_attempts": wake.max_delivery_attempts,
                         "model_ack_required": True,
                         "batch_size": len(self._batch_parts(wake.message)),
@@ -416,17 +436,11 @@ class CoordinatorService:
                     })
                 return data
 
-            wake.delivery_attempts += 1
             wake.claim_id = None
             wake.lease_expires_at = None
-            wake.escalation_at = None
-            next_retry_seconds = None
-            if wake.delivery_attempts < wake.max_delivery_attempts:
-                next_retry_seconds = wake.retry_delays_seconds[wake.delivery_attempts - 1]
-                wake.available_at = now + next_retry_seconds
-            else:
-                wake.available_at = now
-                wake.escalation_at = now + wake.escalation_delay_seconds
+            wake.transport_delivered = True
+            wake.available_at = now
+            wake.escalation_at = now + wake.escalation_delay_seconds
             self._save_state()
             return {
                 "channel_id": channel_id,
@@ -435,12 +449,9 @@ class CoordinatorService:
                 "delivery_attempts": wake.delivery_attempts,
                 "max_delivery_attempts": wake.max_delivery_attempts,
                 "model_ack_required": True,
-                "next_retry_seconds": next_retry_seconds,
-                "escalation_after_seconds": (
-                    wake.escalation_delay_seconds
-                    if wake.delivery_attempts >= wake.max_delivery_attempts
-                    else None
-                ),
+                "transport_delivered": True,
+                "next_retry_seconds": None,
+                "escalation_after_seconds": wake.escalation_delay_seconds,
             }
 
     async def model_ack(self, continuation_id: str) -> dict:
@@ -475,7 +486,7 @@ class CoordinatorService:
         job_ids = ",".join(job.job_id for job in jobs)
         suffix = f"; message={message}" if message else ""
         job_states = ", ".join(f"{job.job_id}={job.status.value}" for job in jobs)
-        escalation = ("⚠️ Coordinator continuation was not acknowledged after 3 X delivery attempts.\n" f"Channel: {channel_id}\n" f"Jobs: {job_states}\n" f"Reason: {reason}\n" "Please check ChatGPT / Browser Host and continue the work manually.")
+        escalation = ("⚠️ Coordinator continuation was not acknowledged after X delivery.\n" f"Channel: {channel_id}\n" f"Jobs: {job_states}\n" f"Reason: {reason}\n" "Please check ChatGPT / Browser Host and continue the work manually.")
         return await self.arm_resilient(f"jobs={job_ids}; reason={reason}{suffix}", channel_id=channel_id, delay_seconds=0, conflict="coalesce", escalation_message=escalation[: self.MAX_ESCALATION_MESSAGE_CHARS])
 
     async def escalations_due(self) -> list[dict]:
@@ -486,9 +497,9 @@ class CoordinatorService:
                 if (
                     wake.continuation_id is None
                     or wake.model_acknowledged
-                    or wake.delivery_attempts < wake.max_delivery_attempts
                     or wake.escalation_at is None
                     or wake.escalation_at > now
+                    or (not wake.transport_delivered and wake.delivery_attempts < wake.max_delivery_attempts)
                 ):
                     continue
                 due.append(

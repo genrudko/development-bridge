@@ -9,7 +9,7 @@ from app.coordinator.context import MAX_CONTEXT_CHARS, RouteContextStore, defaul
 from app.container import ApplicationContainer
 from app.tools.jobs import JOB_ID_SCHEMA
 
-COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v2.html"
+COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v3.html"
 COORDINATOR_UI_META = {
     "ui": {"resourceUri": COORDINATOR_UI_URI},
     "ui/resourceUri": COORDINATOR_UI_URI,
@@ -263,8 +263,9 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "Event-driven resilient X continuation for durable jobs. Requires an active "
                     "coordinator_x_mount for the same channel. After jobs become terminal, delivery "
                     "keeps one active durable continuation_id per channel, batches concurrent terminal "
-                    "groups without overwriting them, deduplicates repeated events, uses up to 3 X "
-                    "attempts with model ACK cancellation, and Telegram escalation when configured. "
+                    "groups without overwriting them, and deduplicates repeated events. Transport failures "
+                    "may retry X up to 3 attempts; after successful ui/message transport ACK the continuation "
+                    "is not redelivered, and Telegram escalation is reserved for missing model ACK. "
                     "The pre-terminal job waiter is durable "
                     "and restored across Bridge restart."
                 ),

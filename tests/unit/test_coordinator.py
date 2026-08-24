@@ -64,47 +64,37 @@ async def test_pending_wake_survives_service_restart(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_resilient_continuation_retries_until_model_ack():
+async def test_successful_transport_delivery_waits_for_model_ack_without_redelivery():
     service = CoordinatorService()
     armed = await service.arm_resilient(
-        "resume",
-        channel_id="route-g2",
-        retry_delays_seconds=(0, 0),
-        escalation_delay_seconds=0,
-        escalation_message="escalate",
+        "resume", channel_id="route-g2", retry_delays_seconds=(0, 0),
+        escalation_delay_seconds=60, escalation_message="escalate",
     )
-    continuation_id = armed["continuation_id"]
-
     first = await service.claim("route-g2")
     assert first["delivery_attempt"] == 1
-    assert first["continuation_id"] == continuation_id
-    await service.ack("route-g2", first["claim_id"])
-
-    second = await service.claim("route-g2")
-    assert second["delivery_attempt"] == 2
-    await service.ack("route-g2", second["claim_id"])
-
-    acked = await service.model_ack(continuation_id)
+    transport = await service.ack("route-g2", first["claim_id"])
+    assert transport["transport_delivered"] is True
+    assert (await service.claim("route-g2"))["claimed"] is False
+    status = await service.status("route-g2")
+    assert status["state"] == "waiting_model_ack"
+    assert status["transport_delivered"] is True
+    acked = await service.model_ack(armed["continuation_id"])
     assert acked["acknowledged"] is True
     assert (await service.status("route-g2"))["state"] == "idle"
-    assert await service.escalations_due() == []
 
 
 @pytest.mark.asyncio
-async def test_resilient_continuation_escalates_after_three_unacked_deliveries():
+async def test_transport_failures_retry_three_claims_then_escalate():
     service = CoordinatorService()
+    service.LEASE_SECONDS = 0
     armed = await service.arm_resilient(
-        "resume",
-        channel_id="route-g2",
-        retry_delays_seconds=(0, 0),
-        escalation_delay_seconds=0,
-        escalation_message="telegram fallback",
+        "resume", channel_id="route-g2", retry_delays_seconds=(0, 0),
+        escalation_delay_seconds=0, escalation_message="telegram fallback",
     )
     for expected_attempt in (1, 2, 3):
         claim = await service.claim("route-g2")
+        assert claim["claimed"] is True
         assert claim["delivery_attempt"] == expected_attempt
-        await service.ack("route-g2", claim["claim_id"])
-
     due = await service.escalations_due()
     assert len(due) == 1
     assert due[0]["continuation_id"] == armed["continuation_id"]
@@ -114,19 +104,17 @@ async def test_resilient_continuation_escalates_after_three_unacked_deliveries()
 
 
 @pytest.mark.asyncio
-async def test_resilient_retry_state_survives_restart(tmp_path):
+async def test_transport_retry_state_survives_restart(tmp_path):
     path = tmp_path / "coordinator-wakes.json"
     first_service = CoordinatorService(path)
+    first_service.LEASE_SECONDS = 0
     armed = await first_service.arm_resilient(
-        "resume",
-        channel_id="route-g2",
-        retry_delays_seconds=(0, 0),
-        escalation_delay_seconds=0,
+        "resume", channel_id="route-g2", retry_delays_seconds=(0, 0), escalation_delay_seconds=0
     )
     first_claim = await first_service.claim("route-g2")
-    await first_service.ack("route-g2", first_claim["claim_id"])
-
+    assert first_claim["delivery_attempt"] == 1
     second_service = CoordinatorService(path)
+    second_service.LEASE_SECONDS = 0
     second_claim = await second_service.claim("route-g2")
     assert second_claim["claimed"] is True
     assert second_claim["delivery_attempt"] == 2
@@ -144,6 +132,18 @@ async def test_model_ack_during_transport_claim_prevents_retry():
     assert transport["acknowledged"] is True
     assert (await service.status("route-g2"))["state"] == "idle"
     assert (await service.claim("route-g2"))["claimed"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_ack_cleans_up_after_lost_transport_ack_lease_expires():
+    service = CoordinatorService()
+    service.LEASE_SECONDS = 0.01
+    armed = await service.arm_resilient("resume", channel_id="route-g2", retry_delays_seconds=(0, 0))
+    await service.claim("route-g2")
+    acked = await service.model_ack(armed["continuation_id"])
+    assert acked["acknowledged"] is True
+    await asyncio.sleep(0.015)
+    assert (await service.status("route-g2"))["state"] == "idle"
 
 
 @pytest.mark.asyncio

@@ -41,11 +41,12 @@ async def test_resource_mount_routing_and_internal_continue():
                     assert 'new URL("https://bridge.example/mcp/x/coordinator/"' in resource.contents[0].text
                     assert "if (!ackResponse.ok)" in resource.contents[0].text
                     assert "### ⚡ Bridge · задача завершена" in resource.contents[0].text
-                    assert "<!-- development-bridge" in resource.contents[0].text
+                    assert "app.updateModelContext" in resource.contents[0].text
+                    assert "<!-- development-bridge" not in resource.contents[0].text
                     assert "payload_json=" in resource.contents[0].text
                     assert "batched_messages" in resource.contents[0].text
                     assert "call coordinator_ack" in resource.contents[0].text
-                    assert "coordinator_x_mount with channel_id=" in resource.contents[0].text
+                    assert "Bridge ref:" in resource.contents[0].text
                     mounted = await session.call_tool(
                         "coordinator_x_mount", {"channel_id": "chat-42"}
                     )

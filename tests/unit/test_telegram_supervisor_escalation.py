@@ -34,9 +34,9 @@ async def test_telegram_supervisor_resolves_due_escalation_after_notice(tmp_path
         escalation_delay_seconds=0,
         escalation_message="final fallback",
     )
-    for _ in range(3):
-        claim = await coordinator.claim("route-g2")
-        await coordinator.ack("route-g2", claim["claim_id"])
+    claim = await coordinator.claim("route-g2")
+    transport = await coordinator.ack("route-g2", claim["claim_id"])
+    assert transport["transport_delivered"] is True
 
     await supervisor._drain_escalations_once()
 

@@ -29,6 +29,8 @@ const stateEl = document.getElementById("state");
 const app = new App({ name: "Development Bridge Coordinator", version: "1.1.0" }, { autoResize: true });
 let channelId = "coordinator";
 let busy = false;
+let modelContextContinuation = null;
+let modelContextSupported = true;
 // Rendered by the server. In public deployments this is an absolute URL; the
 // relative value is only the local-development fallback.
 let endpoint = new URL(__COORDINATOR_ENDPOINT__, window.location.href);
@@ -63,11 +65,32 @@ async function request(name, init = {}) {
   return response.json();
 }
 
+async function setProtocolContext(text) {
+  if (!modelContextSupported) return false;
+  try {
+    await app.updateModelContext({ content: [{ type: "text", text }] });
+    return true;
+  } catch (error) {
+    modelContextSupported = false;
+    console.warn("Model context updates unavailable", error);
+    return false;
+  }
+}
+
+async function clearProtocolContext() {
+  if (!modelContextSupported || modelContextContinuation === null) return;
+  try { await app.updateModelContext({ content: [] }); } catch (_) {}
+  modelContextContinuation = null;
+}
+
 async function poll() {
   if (busy) return;
   try {
     const state = await request("status");
-    if (!state.ready) { render("ready", "Готов"); return; }
+    if (!state.ready) {
+      if (state.state === "idle" && modelContextContinuation !== null) await clearProtocolContext();
+      render("ready", "Готов"); return;
+    }
     render("working", "Продолжаю", "Передаю завершённую задачу в чат");
     busy = true;
     const claim = await request("claim", { method: "POST" });
@@ -89,16 +112,19 @@ async function poll() {
       const maxAttempts = Number(claim.max_delivery_attempts) || 1;
       const retry = attempt > 1 ? `\n\n> ♻️ Повторная доставка · ${attempt}/${maxAttempts}` : "";
       const batch = humanMessages.length > 1 ? `\n\n> 📦 Пакет завершений · ${humanMessages.length}` : "";
-      const payloadJson = JSON.stringify(rawParts).replaceAll("-->", "--\u003e");
-      deliveredMessage =
-        `### ⚡ Bridge · задача завершена\n\n${humanMessage}${batch}${retry}\n\n` +
-        `<!-- development-bridge\n` +
+      const payloadJson = JSON.stringify(rawParts);
+      const protocolContext =
+        `Development Bridge continuation protocol.\n` +
         `continuation_id=${claim.continuation_id}\n` +
         `payload_json=${payloadJson}\n` +
-        `instruction=Before other work, call coordinator_ack with continuation_id=${claim.continuation_id}. ` +
-        `If its response contains batched_messages, process those terminal groups in this same turn. ` +
-        `If coordinator_ack is unavailable, call coordinator_x_mount with channel_id=${claim.continuation_id} to acknowledge this exact continuation.\n` +
-        `-->`;
+        `Before other work, call coordinator_ack with continuation_id=${claim.continuation_id}. ` +
+        `If its response contains batched_messages, process those terminal groups in this same turn.`;
+      const contextInjected = await setProtocolContext(protocolContext);
+      if (contextInjected) modelContextContinuation = claim.continuation_id;
+      const fallback = contextInjected
+        ? ""
+        : `\n\n> Bridge ref: \`${claim.continuation_id}\` — acknowledge with coordinator_ack before other work.`;
+      deliveredMessage = `### ⚡ Bridge · задача завершена\n\n${humanMessage}${batch}${retry}${fallback}`;
     }
     await app.sendMessage({
       role: "user",
