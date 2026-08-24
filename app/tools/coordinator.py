@@ -9,7 +9,7 @@ from app.coordinator.context import MAX_CONTEXT_CHARS, RouteContextStore, defaul
 from app.container import ApplicationContainer
 from app.tools.jobs import JOB_ID_SCHEMA
 
-COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v1.html"
+COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v2.html"
 COORDINATOR_UI_META = {
     "ui": {"resourceUri": COORDINATOR_UI_URI},
     "ui/resourceUri": COORDINATOR_UI_URI,
