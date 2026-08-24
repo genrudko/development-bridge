@@ -21,6 +21,7 @@ class PendingWake:
     lease_expires_at: float | None = None
     continuation_id: str | None = None
     model_ack_required: bool = False
+    model_acknowledged: bool = False
     delivery_attempts: int = 0
     max_delivery_attempts: int = 1
     retry_delays_seconds: list[float] = field(default_factory=list)
@@ -325,10 +326,14 @@ class CoordinatorService:
             wake = self._pending.get(channel_id)
             if wake is None or wake.claim_id != claim_id:
                 return {"channel_id": channel_id, "acknowledged": False}
-            if not wake.model_ack_required:
+            if not wake.model_ack_required or wake.model_acknowledged:
+                continuation_id = wake.continuation_id
                 del self._pending[channel_id]
                 self._save_state()
-                return {"channel_id": channel_id, "acknowledged": True}
+                data = {"channel_id": channel_id, "acknowledged": True}
+                if continuation_id is not None:
+                    data.update({"continuation_id": continuation_id, "model_acknowledged": True})
+                return data
 
             wake.delivery_attempts += 1
             wake.claim_id = None
@@ -364,8 +369,12 @@ class CoordinatorService:
                 if wake.continuation_id != continuation_id:
                     continue
                 attempts = wake.delivery_attempts
-                del self._pending[channel_id]
-                self._save_state()
+                if wake.claim_id is not None and self._lease_active(wake, time.time()):
+                    wake.model_acknowledged = True
+                    self._save_state()
+                else:
+                    del self._pending[channel_id]
+                    self._save_state()
                 return {
                     "continuation_id": continuation_id,
                     "channel_id": channel_id,
@@ -374,6 +383,15 @@ class CoordinatorService:
                 }
             return {"continuation_id": continuation_id, "acknowledged": False}
 
+    async def model_ack_channel(self, channel_id: str) -> dict:
+        channel_id = self.validate_channel(channel_id)
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            continuation_id = wake.continuation_id if wake is not None else None
+        if continuation_id is None:
+            return {"channel_id": channel_id, "acknowledged": False}
+        return await self.model_ack(continuation_id)
+
     async def escalations_due(self) -> list[dict]:
         now = time.time()
         async with self._lock:
@@ -381,6 +399,7 @@ class CoordinatorService:
             for channel_id, wake in self._pending.items():
                 if (
                     wake.continuation_id is None
+                    or wake.model_acknowledged
                     or wake.delivery_attempts < wake.max_delivery_attempts
                     or wake.escalation_at is None
                     or wake.escalation_at > now

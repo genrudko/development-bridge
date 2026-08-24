@@ -49,8 +49,9 @@ async function poll() {
       deliveredMessage =
         `[Coordinator continuation | continuation_id=${claim.continuation_id} | ` +
         `attempt=${claim.delivery_attempt}/${claim.max_delivery_attempts}]\n` +
-        `Before other work, call coordinator_ack with continuation_id=${claim.continuation_id} ` +
-        `to confirm that this model turn started.\n${deliveredMessage}`;
+        `Before other work, acknowledge this model turn. Prefer coordinator_ack with ` +
+        `continuation_id=${claim.continuation_id}; if that tool is not exposed in this chat, ` +
+        `call coordinator_x_mount with channel_id=${channelId} (compatibility ACK).\n${deliveredMessage}`;
     }
     await app.sendMessage({
       role: "user",

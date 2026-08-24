@@ -23,11 +23,13 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         channel_id = container.coordinator.validate_channel(
             (params.arguments or {}).get("channel_id", "coordinator")
         )
+        compatibility_ack = await container.coordinator.model_ack_channel(channel_id)
         result = to_mcp_result(
             success(
                 request_context.request_id,
                 {
                     "channel_id": channel_id,
+                    "continuation_ack": compatibility_ack,
                     "state": "mounted",
                     "external_trigger_enabled": (
                         container.settings.server.x_trigger_token is not None

@@ -36,6 +36,7 @@ async def test_resource_mount_routing_and_internal_continue():
                     assert "app.sendMessage" in resource.contents[0].text
                     assert 'new URL("https://bridge.example/mcp/x/coordinator/"' in resource.contents[0].text
                     assert "if (!ackResponse.ok)" in resource.contents[0].text
+                    assert "compatibility ACK" in resource.contents[0].text
                     mounted = await session.call_tool(
                         "coordinator_x_mount", {"channel_id": "chat-42"}
                     )

@@ -131,3 +131,16 @@ async def test_resilient_retry_state_survives_restart(tmp_path):
     assert second_claim["claimed"] is True
     assert second_claim["delivery_attempt"] == 2
     assert second_claim["continuation_id"] == armed["continuation_id"]
+
+
+@pytest.mark.asyncio
+async def test_model_ack_during_transport_claim_prevents_retry():
+    service = CoordinatorService()
+    armed = await service.arm_resilient("resume", channel_id="route-g2", retry_delays_seconds=(0, 0), escalation_delay_seconds=0)
+    claim = await service.claim("route-g2")
+    acked = await service.model_ack_channel("route-g2")
+    assert acked["continuation_id"] == armed["continuation_id"]
+    transport = await service.ack("route-g2", claim["claim_id"])
+    assert transport["acknowledged"] is True
+    assert (await service.status("route-g2"))["state"] == "idle"
+    assert (await service.claim("route-g2"))["claimed"] is False
