@@ -69,6 +69,18 @@ class JobStore:
                     payload_digest TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id)
                 );
+                CREATE TABLE IF NOT EXISTS job_terminal_waiters (
+                    waiter_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    repository_id TEXT NOT NULL,
+                    job_ids_json TEXT NOT NULL,
+                    policy TEXT NOT NULL,
+                    handler_name TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS job_terminal_waiters_scope
+                ON job_terminal_waiters(project_id, repository_id, created_at);
                 """
             )
             interrupted = self._rows(
@@ -90,6 +102,19 @@ class JobStore:
                 ),
             )
             return interrupted
+
+    def save_terminal_waiter(self, *, waiter_id: str, project_id: str, repository_id: str, job_ids: tuple[str, ...], policy: str, handler_name: str, payload: dict[str, object]) -> None:
+        with self._connect() as connection:
+            connection.execute("INSERT INTO job_terminal_waiters (waiter_id, project_id, repository_id, job_ids_json, policy, handler_name, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (waiter_id, project_id, repository_id, json.dumps(list(job_ids), separators=(",", ":")), policy, handler_name, json.dumps(payload, sort_keys=True, separators=(",", ":")), _now()))
+
+    def delete_terminal_waiter(self, waiter_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM job_terminal_waiters WHERE waiter_id = ?", (waiter_id,))
+
+    def terminal_waiters(self) -> tuple[dict[str, object], ...]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM job_terminal_waiters ORDER BY created_at, waiter_id").fetchall()
+        return tuple({"waiter_id": row["waiter_id"], "project_id": row["project_id"], "repository_id": row["repository_id"], "job_ids": tuple(json.loads(row["job_ids_json"])), "policy": row["policy"], "handler_name": row["handler_name"], "payload": json.loads(row["payload_json"])} for row in rows)
 
     def queued(self) -> tuple[JobRecord, ...]:
         with self._connect() as connection:

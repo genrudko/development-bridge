@@ -383,6 +383,14 @@ class CoordinatorService:
                 }
             return {"continuation_id": continuation_id, "acknowledged": False}
 
+    async def arm_job_continuation(self, jobs, reason: str, *, channel_id: str, message: str | None = None) -> dict:
+        channel_id = self.validate_channel(channel_id)
+        job_ids = ",".join(job.job_id for job in jobs)
+        suffix = f"; message={message}" if message else ""
+        job_states = ", ".join(f"{job.job_id}={job.status.value}" for job in jobs)
+        escalation = ("⚠️ Coordinator continuation was not acknowledged after 3 X delivery attempts.\n" f"Channel: {channel_id}\n" f"Jobs: {job_states}\n" f"Reason: {reason}\n" "Please check ChatGPT / Browser Host and continue the work manually.")
+        return await self.arm_resilient(f"jobs={job_ids}; reason={reason}{suffix}", channel_id=channel_id, delay_seconds=0, conflict="coalesce", escalation_message=escalation[: self.MAX_ESCALATION_MESSAGE_CHARS])
+
     async def escalations_due(self) -> list[dict]:
         now = time.time()
         async with self._lock:

@@ -60,7 +60,7 @@ def guide_tools(registry: ToolRegistry) -> tuple[RegisteredTool, ...]:
             "operator_guidance": {
                 "run_command": "Use only for short direct commands; it is idle-gated per repository, so work in other repositories does not block it. Use repository_exec for durable work.",
                 "bridge_restart": "Guarded self-restart using a user-systemd trampoline plus narrow sudoers bootstrap; reconnect and verify afterward. It does not deploy production.",
-                "coordinator": "Mount coordinator_x_mount in the chat/channel before coordinator_continue or coordinator_wake_on_jobs. Resilient job continuations retry X delivery until coordinator_ack, then escalate to Telegram after 3 unacknowledged attempts; the pre-terminal job waiter remains process-local across Bridge restart.",
+                "coordinator": "Mount coordinator_x_mount in the chat/channel before coordinator_continue or coordinator_wake_on_jobs. Resilient job continuations retry X delivery until coordinator_ack, then escalate to Telegram after 3 unacknowledged attempts; the pre-terminal job waiter is durable and restored across Bridge restart.",
                 "chatgpt_share_read": "Reads cookie-free public ChatGPT shares in recent, search, or full mode; private/authenticated shares are unsupported.",
                 "git_safety": "Inspect repository status and revisions, keep changes repository/branch scoped, use change plans and git push plans, and do not overwrite unrelated work.",
                 "github": "Issue, pull-request, review, checks, Actions run/job/log/artifact, dispatch, rerun, and cancel operations are available when configured.",

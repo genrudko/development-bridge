@@ -282,6 +282,11 @@ def build_container(
     )
     route_registry = RouteRegistry(configured.coordinator.route_registry_path)
     coordinator = CoordinatorService(route_registry.path.parent / "coordinator-wakes.json")
+
+    async def resume_coordinator_waiter(payload, records, reason):
+        await coordinator.arm_job_continuation(records, reason, channel_id=str(payload["channel_id"]), message=(str(payload["message"]) if payload.get("message") is not None else None))
+
+    jobs.register_durable_terminal_handler("coordinator", resume_coordinator_waiter)
     supervisor_settings = configured.telegram_supervisor
     telegram_supervisor = None
     if supervisor_settings.enabled:

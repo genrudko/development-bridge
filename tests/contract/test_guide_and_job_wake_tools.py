@@ -43,7 +43,8 @@ def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():
     assert tool.input_schema["properties"]["job_ids"]["maxItems"] == 64
     assert "coordinator_x_mount" in tool.description
     assert "3 X attempts" in tool.description
-    assert "process-local" in tool.description
+    assert "durable" in tool.description
+    assert "restored across Bridge restart" in tool.description
 
 
 def test_x_wake_payload_never_contains_job_output(tmp_path):

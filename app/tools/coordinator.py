@@ -110,33 +110,18 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         )
         message = arguments.get("message")
 
-        async def wake(jobs, reason):
-            job_ids = ",".join(job.job_id for job in jobs)
-            suffix = f"; message={message}" if message else ""
-            job_states = ", ".join(f"{job.job_id}={job.status.value}" for job in jobs)
-            escalation = (
-                "⚠️ Coordinator continuation was not acknowledged after 3 X delivery attempts.\n"
-                f"Channel: {channel_id}\n"
-                f"Jobs: {job_states}\n"
-                f"Reason: {reason}\n"
-                "Please check ChatGPT / Browser Host and continue the work manually."
-            )
-            await container.coordinator.arm_resilient(
-                f"jobs={job_ids}; reason={reason}{suffix}",
-                channel_id=channel_id,
-                delay_seconds=0,
-                conflict="coalesce",
-                escalation_message=escalation[: container.coordinator.MAX_ESCALATION_MESSAGE_CHARS],
-            )
-
         repository = container.projects.repositories.get(
             arguments["project_id"], arguments["repository_id"]
         )
-        data = await container.jobs.wake_on_jobs(
+        payload = {"channel_id": channel_id}
+        if message is not None:
+            payload["message"] = message
+        data = await container.jobs.wake_on_jobs_durable(
             repository,
             tuple(arguments["job_ids"]),
             arguments.get("policy", "all_terminal"),
-            wake,
+            "coordinator",
+            payload,
         )
         data["channel_id"] = channel_id
         return to_mcp_result(success(request_context.request_id, data))
@@ -273,8 +258,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "Event-driven resilient X continuation for durable jobs. Requires an active "
                     "coordinator_x_mount for the same channel. After jobs become terminal, delivery "
                     "uses one durable continuation_id, up to 3 X attempts, model ACK cancellation, "
-                    "and Telegram escalation when configured. The pre-terminal job waiter remains "
-                    "process-local across a Bridge restart."
+                    "and Telegram escalation when configured. The pre-terminal job waiter is durable "
+                    "and restored across Bridge restart."
                 ),
                 inputSchema={
                     "type": "object",

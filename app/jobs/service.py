@@ -25,13 +25,16 @@ from .models import JobArtifact, JobRecord, JobStatus
 from .store import JobStore
 
 TerminalCallback = Callable[[tuple[JobRecord, ...], str], Awaitable[None]]
+DurableTerminalHandler = Callable[[dict[str, object], tuple[JobRecord, ...], str], Awaitable[None]]
 
 
 @dataclass(slots=True)
 class TerminalWaiter:
+    waiter_id: str
     job_ids: tuple[str, ...]
     policy: str
     callback: TerminalCallback
+    durable: bool = False
 
 
 class JobService:
@@ -70,6 +73,14 @@ class JobService:
         self._admission_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._terminal_lock = asyncio.Lock()
         self._terminal_waiters: dict[str, TerminalWaiter] = {}
+        self._durable_terminal_handlers: dict[str, DurableTerminalHandler] = {}
+
+    def register_durable_terminal_handler(self, name: str, handler: DurableTerminalHandler) -> None:
+        if not isinstance(name, str) or not 1 <= len(name) <= 64 or any(not (char.isalnum() or char in "-_") for char in name):
+            raise ValueError("durable terminal handler name is invalid")
+        if self._worker is not None:
+            raise RuntimeError("durable terminal handlers must be registered before start")
+        self._durable_terminal_handlers[name] = handler
 
     async def wake_on_jobs(
         self,
@@ -78,7 +89,64 @@ class JobService:
         policy: str,
         callback: TerminalCallback,
     ) -> dict:
-        """Register a race-free, one-shot callback for terminal job transitions."""
+        """Register a race-free, one-shot in-process callback."""
+        return await self._register_terminal_waiter(
+            repository, job_ids, policy, callback
+        )
+
+    async def wake_on_jobs_durable(
+        self,
+        repository: Repository,
+        job_ids: tuple[str, ...],
+        policy: str,
+        handler_name: str,
+        payload: dict[str, object],
+    ) -> dict:
+        """Register a terminal callback that is restored after Bridge restart."""
+        handler = self._durable_terminal_handlers.get(handler_name)
+        if handler is None:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "Durable terminal handler is not registered",
+                details={"handler_name": handler_name},
+            )
+        if not isinstance(payload, dict):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "durable waiter payload is invalid")
+        try:
+            encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "durable waiter payload is not JSON serializable",
+            ) from exc
+        if len(encoded.encode("utf-8")) > 16_384:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT, "durable waiter payload is too large"
+            )
+        payload_copy = json.loads(encoded)
+
+        async def callback(records: tuple[JobRecord, ...], reason: str) -> None:
+            await handler(payload_copy, records, reason)
+
+        return await self._register_terminal_waiter(
+            repository,
+            job_ids,
+            policy,
+            callback,
+            durable_handler=handler_name,
+            durable_payload=payload_copy,
+        )
+
+    async def _register_terminal_waiter(
+        self,
+        repository: Repository,
+        job_ids: tuple[str, ...],
+        policy: str,
+        callback: TerminalCallback,
+        *,
+        durable_handler: str | None = None,
+        durable_payload: dict[str, object] | None = None,
+    ) -> dict:
         self._require_execute(repository)
         store = self._require_store()
         if not 1 <= len(job_ids) <= 64 or len(set(job_ids)) != len(job_ids):
@@ -90,6 +158,7 @@ class JobService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "policy is invalid")
         waiter_id = token_urlsafe(18)
         fire: tuple[tuple[JobRecord, ...], str] | None = None
+        durable = durable_handler is not None
         async with self._terminal_lock:
             jobs = tuple(
                 store.get(repository.project_id, repository.id, job_id)
@@ -103,9 +172,22 @@ class JobService:
                         "Job wake waiter capacity is full",
                         retryable=True,
                     )
-                self._terminal_waiters[waiter_id] = TerminalWaiter(
-                    job_ids, policy, callback
+                waiter = TerminalWaiter(
+                    waiter_id, job_ids, policy, callback, durable=durable
                 )
+                if durable:
+                    assert durable_handler is not None
+                    assert durable_payload is not None
+                    store.save_terminal_waiter(
+                        waiter_id=waiter_id,
+                        project_id=repository.project_id,
+                        repository_id=repository.id,
+                        job_ids=job_ids,
+                        policy=policy,
+                        handler_name=durable_handler,
+                        payload=durable_payload,
+                    )
+                self._terminal_waiters[waiter_id] = waiter
             else:
                 fire = (jobs, reason)
         if fire is not None:
@@ -115,6 +197,7 @@ class JobService:
             "job_ids": list(job_ids),
             "policy": policy,
             "state": "fired" if fire is not None else "waiting",
+            "durable": durable,
         }
 
     async def _finish_job(
@@ -150,8 +233,8 @@ class JobService:
 
     def _collect_terminal_callbacks(
         self, store: JobStore
-    ) -> list[tuple[TerminalCallback, tuple[JobRecord, ...], str]]:
-        ready: list[tuple[TerminalCallback, tuple[JobRecord, ...], str]] = []
+    ) -> list[tuple[TerminalWaiter, tuple[JobRecord, ...], str]]:
+        ready: list[tuple[TerminalWaiter, tuple[JobRecord, ...], str]] = []
         for waiter_id, waiter in tuple(self._terminal_waiters.items()):
             jobs = tuple(store.get_by_id(job_id) for job_id in waiter.job_ids)
             if any(job is None for job in jobs):
@@ -160,16 +243,58 @@ class JobService:
             reason = self._waiter_reason(records, waiter.policy)
             if reason is not None:
                 del self._terminal_waiters[waiter_id]
-                ready.append((waiter.callback, records, reason))
+                ready.append((waiter, records, reason))
         return ready
 
-    @staticmethod
     async def _invoke_terminal_callbacks(
-        ready: list[tuple[TerminalCallback, tuple[JobRecord, ...], str]],
+        self,
+        ready: list[tuple[TerminalWaiter, tuple[JobRecord, ...], str]],
     ) -> None:
-        # Removal happens before invocation, so duplicate transitions cannot re-fire.
-        for callback, jobs, reason in ready:
-            await callback(jobs, reason)
+        for waiter, jobs, reason in ready:
+            try:
+                await waiter.callback(jobs, reason)
+            except Exception:
+                if waiter.durable:
+                    async with self._terminal_lock:
+                        self._terminal_waiters.setdefault(waiter.waiter_id, waiter)
+                raise
+            else:
+                if waiter.durable:
+                    self._require_store().delete_terminal_waiter(waiter.waiter_id)
+
+    async def _restore_durable_terminal_waiters(self) -> None:
+        store = self._require_store()
+        async with self._terminal_lock:
+            for item in store.terminal_waiters():
+                waiter_id = str(item["waiter_id"])
+                if waiter_id in self._terminal_waiters:
+                    continue
+                handler_name = str(item["handler_name"])
+                handler = self._durable_terminal_handlers.get(handler_name)
+                if handler is None:
+                    continue
+                payload = dict(item["payload"])
+                job_ids = tuple(str(value) for value in item["job_ids"])
+                policy = str(item["policy"])
+
+                async def callback(
+                    records: tuple[JobRecord, ...],
+                    reason: str,
+                    *,
+                    _handler: DurableTerminalHandler = handler,
+                    _payload: dict[str, object] = payload,
+                ) -> None:
+                    await _handler(_payload, records, reason)
+
+                self._terminal_waiters[waiter_id] = TerminalWaiter(
+                    waiter_id,
+                    job_ids,
+                    policy,
+                    callback,
+                    durable=True,
+                )
+            ready = self._collect_terminal_callbacks(store)
+        await self._invoke_terminal_callbacks(ready)
 
     @staticmethod
     def _waiter_reason(jobs: tuple[JobRecord, ...], policy: str) -> str | None:
@@ -188,6 +313,7 @@ class JobService:
         interrupted = self._store.initialize()
         for job in interrupted:
             await self._emit(job, "fail", AuditOutcome.ERROR, "interrupted_by_restart")
+        await self._restore_durable_terminal_waiters()
         self._pending.clear()
         for job in self._store.queued():
             self._pending.append(job.job_id)
