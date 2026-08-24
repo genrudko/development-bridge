@@ -266,7 +266,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "groups without overwriting them, and deduplicates repeated events. Transport failures "
                     "may retry X up to 3 attempts; after successful ui/message transport ACK the continuation "
                     "is not redelivered, and Telegram escalation is reserved for missing model ACK. "
-                    "The pre-terminal job waiter is durable "
+                    "Terminal groups are debounce-batched, successful Web turns are cooldown-gated, and "
+                    "Browser Host rate-limit backoff suppresses new X claims. The pre-terminal job waiter is durable "
                     "and restored across Bridge restart."
                 ),
                 inputSchema={

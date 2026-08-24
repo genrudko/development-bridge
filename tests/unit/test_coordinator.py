@@ -186,6 +186,12 @@ async def test_event_after_model_ack_becomes_one_followup_continuation():
     transport = await service.ack("route-g2", claim["claim_id"])
     assert transport["followup_pending"] is True
     assert transport["next_continuation_id"] != armed["continuation_id"]
+    throttled = await service.claim("route-g2")
+    assert throttled["claimed"] is False
+    assert (await service.status("route-g2"))["state"] == "web_cooldown"
+    service._global_cooldown_until = 0
+    service._cooldown_until["route-g2"] = 0
+    service._pending["route-g2"].available_at = 0
     followup = await service.claim("route-g2")
     assert followup["message"] == "B"
     assert followup["continuation_id"] == transport["next_continuation_id"]
@@ -213,3 +219,77 @@ async def test_eight_concurrent_events_keep_one_active_continuation():
     claim = await service.claim("route-g2")
     assert claim["batch_size"] == 8
     assert set(claim["message"].split(service.BATCH_SEPARATOR)) == {f"job-{index}" for index in range(8)}
+
+
+@pytest.mark.asyncio
+async def test_resilient_debounce_extends_quiet_window_but_is_bounded(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService()
+    service.MAX_BATCH_DEBOUNCE_WINDOW_SECONDS = 15.0
+    first = await service.arm_resilient("A", channel_id="route-g2", delay_seconds=5)
+    assert first["delay_seconds"] == 5
+    assert service._pending["route-g2"].available_at == 1005.0
+    clock[0] = 1004.0
+    await service.arm_resilient("B", channel_id="route-g2", delay_seconds=5)
+    assert service._pending["route-g2"].available_at == 1009.0
+    clock[0] = 1014.0
+    await service.arm_resilient("C", channel_id="route-g2", delay_seconds=5)
+    assert service._pending["route-g2"].available_at == 1015.0
+
+
+@pytest.mark.asyncio
+async def test_transport_ack_persists_web_turn_cooldown(tmp_path, monkeypatch):
+    clock = [2000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    path = tmp_path / "coordinator-wakes.json"
+    service = CoordinatorService(path)
+    service.MIN_WEB_TURN_INTERVAL_SECONDS = 20.0
+    armed = await service.arm_resilient("A", channel_id="route-g2", retry_delays_seconds=(0, 0))
+    claim = await service.claim("route-g2")
+    transport = await service.ack("route-g2", claim["claim_id"])
+    assert transport["web_turn_cooldown_seconds"] == 20.0
+    await service.model_ack(armed["continuation_id"])
+    followup = await service.arm_resilient("B", channel_id="route-g2", delay_seconds=0)
+    assert followup["delay_seconds"] == 0
+    assert service._pending["route-g2"].available_at == 2020.0
+    restored = CoordinatorService(path)
+    assert restored._cooldown_until["route-g2"] == 2020.0
+    assert restored._global_cooldown_until == 2020.0
+    assert (await restored.status("route-g2"))["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_external_web_backoff_suppresses_claim_until_expiry(tmp_path, monkeypatch):
+    clock = [3000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    path = tmp_path / "coordinator-wakes.json"
+    service = CoordinatorService(path)
+    await service.arm_resilient("A", channel_id="route-g2", delay_seconds=0)
+    (tmp_path / "web-backoff.json").write_text('{"until":3060}', encoding="utf-8")
+    status = await service.status("route-g2")
+    assert status["state"] == "web_backoff"
+    assert status["ready"] is False
+    assert status["web_backoff_seconds"] == 60.0
+    assert (await service.claim("route-g2"))["claimed"] is False
+    clock[0] = 3061.0
+    assert (await service.claim("route-g2"))["claimed"] is True
+
+
+@pytest.mark.asyncio
+async def test_web_turn_gate_serializes_channels_and_applies_global_cooldown(monkeypatch):
+    clock = [4000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService()
+    service.MIN_WEB_TURN_INTERVAL_SECONDS = 20.0
+    await service.arm_resilient("A", channel_id="route-a", delay_seconds=0, retry_delays_seconds=(0, 0))
+    await service.arm_resilient("B", channel_id="route-b", delay_seconds=0, retry_delays_seconds=(0, 0))
+    claim_a = await service.claim("route-a")
+    assert claim_a["claimed"] is True
+    assert (await service.claim("route-b"))["claimed"] is False
+    await service.ack("route-a", claim_a["claim_id"])
+    status_b = await service.status("route-b")
+    assert status_b["state"] == "web_cooldown"
+    assert status_b["web_turn_cooldown_seconds"] == 20.0
+    clock[0] = 4021.0
+    assert (await service.claim("route-b"))["claimed"] is True

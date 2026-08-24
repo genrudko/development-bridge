@@ -50,6 +50,10 @@ class Config:
     def lock_file(self) -> Path:
         return self.state_dir / "browser-host.lock"
 
+    @property
+    def web_backoff_file(self) -> Path:
+        return self.state_dir.parent / "web-backoff.json"
+
 
 def env(name: str, default: str) -> str:
     return os.environ.get(name, default).strip()
@@ -153,6 +157,8 @@ class BrowserHost:
         self.last_discovery = 0.0
         self.discovered_chats = 0
         self.route_generation = 0
+        self.rate_limit_count = 0
+        self.rate_limit_until = 0.0
 
     @property
     def cdp_base(self) -> str:
@@ -289,7 +295,7 @@ class BrowserHost:
             request_id = int(time.time() * 1000) % 1_000_000_000
             expression = (
                 "[...document.querySelectorAll('iframe')]"
-                ".filter(f=>f.title==='ui://development-bridge/coordinator-x-v1.html').length"
+                ".filter(f=>f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html')).length"
             )
             ws.send(json.dumps({
                 "id": request_id,
@@ -306,6 +312,36 @@ class BrowserHost:
                     )
         finally:
             ws.close()
+
+    def rate_limit_detected(self, page: dict) -> bool:
+        ws = websocket.create_connection(
+            page["webSocketDebuggerUrl"], timeout=4, suppress_origin=True
+        )
+        try:
+            request_id = int(time.time() * 1000) % 1_000_000_000
+            expression = r'''(()=>{const dialogs=[...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].filter(e=>{const r=e.getBoundingClientRect();const s=getComputedStyle(e);return r.width>180&&r.height>80&&s.visibility!=="hidden"&&s.display!=="none";});const needles=["слишком много запросов","вы отправляете запросы слишком часто","доступ к вашим диалогам временно ограничен","too many requests","sending requests too frequently","access to your conversations is temporarily restricted"];return dialogs.some(e=>{const t=(e.innerText||e.textContent||"").toLowerCase();return needles.some(n=>t.includes(n));});})()'''
+            ws.send(json.dumps({"id": request_id, "method": "Runtime.evaluate", "params": {"expression": expression, "returnByValue": True}}))
+            while True:
+                message = json.loads(ws.recv())
+                if message.get("id") == request_id:
+                    return bool(message.get("result", {}).get("result", {}).get("value", False))
+        finally:
+            ws.close()
+
+    def activate_web_backoff(self) -> float:
+        now = time.time()
+        if now >= self.rate_limit_until:
+            self.rate_limit_count += 1
+            delay = min(300.0, 120.0 * (2 ** min(self.rate_limit_count - 1, 2)))
+            self.rate_limit_until = now + delay
+            atomic_json(self.cfg.web_backoff_file, {
+                "version": 1,
+                "reason": "chatgpt_rate_limit",
+                "detected_at": utcnow(),
+                "until": self.rate_limit_until,
+                "attempt": self.rate_limit_count,
+            })
+        return max(0.0, self.rate_limit_until - now)
 
     def recover_listener(self, page: dict) -> bool:
         """Load older virtualized turns until the coordinator MCP App iframe mounts."""
@@ -338,7 +374,7 @@ class BrowserHost:
             while time.monotonic() < deadline and not self.stop:
                 state = evaluate(r"""(()=>{
                   const frames=[...document.querySelectorAll('iframe')]
-                    .filter(f=>f.title==='ui://development-bridge/coordinator-x-v1.html');
+                    .filter(f=>f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html'));
                   if(frames.length) return {frames:frames.length};
                   const roots=[...document.querySelectorAll('*')].filter(e=>{
                     const s=getComputedStyle(e);
@@ -365,7 +401,7 @@ class BrowserHost:
                 time.sleep(0.75)
                 observed = evaluate(r"""(()=>{
                   const frames=[...document.querySelectorAll('iframe')]
-                    .filter(f=>f.title==='ui://development-bridge/coordinator-x-v1.html');
+                    .filter(f=>f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html'));
                   const roots=[...document.querySelectorAll('*')].filter(e=>{
                     const s=getComputedStyle(e);
                     return e.tagName!=='NAV' && s.overflowY==='auto' &&
@@ -628,6 +664,26 @@ class BrowserHost:
                         title=title,
                     )
                     time.sleep(self.cfg.check_interval)
+                    continue
+
+                try:
+                    rate_limited = self.rate_limit_detected(page)
+                except Exception:
+                    rate_limited = False
+                if rate_limited:
+                    backoff_seconds = self.activate_web_backoff()
+                    self.write_state(
+                        status="rate_limited",
+                        cdp_ok=True,
+                        target_ok=True,
+                        polling_ok=poll_ok,
+                        polling_detail=poll_detail,
+                        current_url=current_url,
+                        title=title,
+                        web_backoff_seconds=round(backoff_seconds, 1),
+                        rate_limit_count=self.rate_limit_count,
+                    )
+                    time.sleep(max(self.cfg.check_interval, min(15.0, backoff_seconds)))
                     continue
 
                 iframe_count = self.coordinator_iframe_count(page)

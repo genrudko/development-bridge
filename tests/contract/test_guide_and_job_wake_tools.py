@@ -75,6 +75,7 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
         }
     )
     container = build_container(settings)
+    container.coordinator.JOB_WAKE_DEBOUNCE_SECONDS = 0
     container.jobs._store.initialize()
 
     async def scenario():

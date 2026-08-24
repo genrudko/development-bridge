@@ -66,6 +66,12 @@ Implemented baseline:
 
 Remaining discovery expansion is incremental: project-title enrichment plus deliberate `Show more`/project-expansion passes for chats that are not currently rendered.
 
+### ChatGPT Web request governor
+
+ChatGPT Web is treated as a low-frequency reasoning surface, not an event bus. Durable job completions are debounce-batched before X delivery, and a successful `ui/message` transport ACK starts a persisted global cooldown across logical routes before another wake may be claimed. Browser Host also detects visible ChatGPT rate-limit dialogs (`Too many requests` / localized equivalents), writes shared `web-backoff.json`, and Coordinator suppresses new X claims until that backoff expires. Repeated detected limits use bounded 120s -> 240s -> 300s backoff.
+
+Transport failures may still retry the same X delivery, but an already accepted `ui/message` is never deliberately redelivered just because model ACK is delayed.
+
 ### Browser chat discovery
 
 Use the already authenticated ordinary ChatGPT page as the discovery source. Read sidebar/project DOM and build a bounded registry with at least:

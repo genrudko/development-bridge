@@ -86,15 +86,15 @@ async def test_resource_mount_routing_and_internal_continue():
 
 
 @pytest.mark.asyncio
-async def test_external_trigger_is_unavailable_unset_and_token_protected():
-    unset = build_container(BridgeSettings())
+async def test_external_trigger_is_unavailable_unset_and_token_protected(tmp_path):
+    unset = build_container(BridgeSettings.model_validate({"coordinator": {"route_registry_path": tmp_path / "unset-routes.json"}}))
     unset_app = create_streamable_http_app(create_server(unset), unset.settings, unset)
     async with httpx2.AsyncClient(
         transport=httpx2.ASGITransport(app=unset_app), base_url="http://127.0.0.1"
     ) as client:
         assert (await client.post("/mcp/x/coordinator/trigger", json={"message": "x"})).status_code == 404
 
-    settings = load_settings(environ={"DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN": "secret"})
+    settings = load_settings(environ={"DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN": "secret", "DEVELOPMENT_BRIDGE_ROUTE_REGISTRY_PATH": str(tmp_path / "routes.json")})
     container = build_container(settings)
     app = create_streamable_http_app(create_server(container), settings, container)
     async with httpx2.AsyncClient(

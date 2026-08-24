@@ -67,3 +67,40 @@ def test_browser_host_reload_route_target_refreshes_same_conversation(tmp_path: 
     monkeypatch.setattr(module.time, "sleep", lambda _: None)
     host.reload_route_target()
     assert calls == [("page-1", host.target_url)]
+
+
+def test_browser_host_accepts_versioned_coordinator_iframes(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    seen = {}
+    class FakeWS:
+        def send(self, payload):
+            seen["request"] = __import__("json").loads(payload)
+        def recv(self):
+            rid = seen["request"]["id"]
+            return __import__("json").dumps({"id": rid, "result": {"result": {"value": 1}}})
+        def close(self):
+            pass
+    monkeypatch.setattr(module.websocket, "create_connection", lambda *a, **k: FakeWS(), raising=False)
+    assert host.coordinator_iframe_count({"webSocketDebuggerUrl": "ws://test"}) == 1
+    expression = seen["request"]["params"]["expression"]
+    assert "coordinator-x-v" in expression
+    assert "startsWith" in expression
+    assert "coordinator-x-v1.html'" not in expression
+
+
+def test_browser_host_rate_limit_backoff_is_bounded_and_persisted(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    clock = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    assert host.activate_web_backoff() == 120.0
+    data = __import__("json").loads(host.cfg.web_backoff_file.read_text())
+    assert data["until"] == 1120.0
+    assert data["attempt"] == 1
+    clock[0] = 1050.0
+    assert host.activate_web_backoff() == 70.0
+    assert host.rate_limit_count == 1
+    clock[0] = 1121.0
+    assert host.activate_web_backoff() == 240.0
+    assert host.rate_limit_count == 2

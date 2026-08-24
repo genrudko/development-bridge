@@ -40,6 +40,9 @@ class CoordinatorService:
     DEFAULT_DELAY_SECONDS = 12.0
     DEFAULT_MODEL_ACK_RETRY_DELAYS_SECONDS = (30.0, 60.0)
     DEFAULT_ESCALATION_DELAY_SECONDS = 60.0
+    JOB_WAKE_DEBOUNCE_SECONDS = 5.0
+    MAX_BATCH_DEBOUNCE_WINDOW_SECONDS = 15.0
+    MIN_WEB_TURN_INTERVAL_SECONDS = 30.0
     MAX_CHANNELS = 64
     MAX_MESSAGE_CHARS = 4000
     MAX_BATCH_MESSAGE_CHARS = 32000
@@ -53,6 +56,8 @@ class CoordinatorService:
     def __init__(self, state_path: Path | None = None) -> None:
         self._state_path = state_path.expanduser() if state_path is not None else None
         self._pending: dict[str, PendingWake] = {}
+        self._cooldown_until: dict[str, float] = {}
+        self._global_cooldown_until = 0.0
         self._lock = asyncio.Lock()
         self._load_state()
 
@@ -63,6 +68,20 @@ class CoordinatorService:
             data = json.loads(self._state_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return
+        try:
+            global_until = float(data.get("global_cooldown_until", 0.0))
+            if global_until > time.time():
+                self._global_cooldown_until = global_until
+        except (TypeError, ValueError):
+            pass
+        for channel_id, value in list((data.get("cooldown_until") or {}).items())[: self.MAX_CHANNELS]:
+            try:
+                channel = self.validate_channel(channel_id)
+                until = float(value)
+                if until > time.time():
+                    self._cooldown_until[channel] = until
+            except (BridgeError, TypeError, ValueError):
+                continue
         for channel_id, item in list((data.get("pending") or {}).items())[: self.MAX_CHANNELS]:
             try:
                 channel = self.validate_channel(channel_id)
@@ -83,7 +102,11 @@ class CoordinatorService:
             return
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._state_path.with_suffix(".tmp")
-        data = {"version": 1, "pending": {key: asdict(value) for key, value in self._pending.items()}}
+        now = time.time()
+        self._cooldown_until = {key: value for key, value in self._cooldown_until.items() if value > now}
+        if self._global_cooldown_until <= now:
+            self._global_cooldown_until = 0.0
+        data = {"version": 1, "pending": {key: asdict(value) for key, value in self._pending.items()}, "cooldown_until": self._cooldown_until, "global_cooldown_until": self._global_cooldown_until}
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, self._state_path)
 
@@ -127,6 +150,30 @@ class CoordinatorService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"{field_name} is invalid")
         return float(value)
 
+    def _web_turn_cooldown_until(self, channel_id: str) -> float:
+        return max(
+            self._global_cooldown_until,
+            self._cooldown_until.get(channel_id, 0.0),
+        )
+
+    def _other_claim_until(self, channel_id: str, now: float) -> float:
+        until = 0.0
+        for other_channel, wake in self._pending.items():
+            if other_channel != channel_id and self._lease_active(wake, now):
+                until = max(until, wake.lease_expires_at or 0.0)
+        return until
+
+    def _web_backoff_until(self, now: float) -> float:
+        if self._state_path is None:
+            return 0.0
+        path = self._state_path.parent / "web-backoff.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            until = float(payload.get("until", 0.0))
+        except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError):
+            return 0.0
+        return until if until > now else 0.0
+
     @classmethod
     def _batch_parts(cls, message: str) -> list[str]:
         return message.split(cls.BATCH_SEPARATOR)
@@ -142,7 +189,7 @@ class CoordinatorService:
         suffix = "\n… additional terminal groups omitted; inspect Bridge state."
         return combined[: cls.MAX_ESCALATION_MESSAGE_CHARS - len(suffix)] + suffix
 
-    def _coalesce_resilient_locked(self, channel_id: str, wake: PendingWake, message: str, escalation_message: str | None) -> dict:
+    def _coalesce_resilient_locked(self, channel_id: str, wake: PendingWake, message: str, escalation_message: str | None, debounce_seconds: float) -> dict:
         current = self._batch_parts(wake.message)
         if message in current or message in wake.queued_messages:
             return {"channel_id": channel_id, "state": "pending", "coalesced": True, "deduplicated": True, "continuation_id": wake.continuation_id, "model_ack_required": True, "max_delivery_attempts": wake.max_delivery_attempts, "batch_size": len(current), "queued_events": len(wake.queued_messages)}
@@ -153,6 +200,17 @@ class CoordinatorService:
         if merge_current:
             wake.message = combined
             wake.escalation_message = self._bounded_escalation((wake.escalation_message, escalation_message))
+            if debounce_seconds > 0:
+                now = time.time()
+                quiet_until = min(
+                    wake.created_at + self.MAX_BATCH_DEBOUNCE_WINDOW_SECONDS,
+                    now + debounce_seconds,
+                )
+                wake.available_at = max(
+                    wake.available_at,
+                    quiet_until,
+                    self._web_turn_cooldown_until(channel_id),
+                )
         else:
             wake.queued_messages.append(message)
             wake.queued_escalation_messages.append(escalation_message or "")
@@ -173,7 +231,7 @@ class CoordinatorService:
             else:
                 active_messages.append(message); active_escalations.append(escalation)
         continuation_id = f"cont_{token_urlsafe(18)}"
-        self._pending[channel_id] = PendingWake(message=self.BATCH_SEPARATOR.join(active_messages), available_at=now, created_at=now, continuation_id=continuation_id, model_ack_required=True, max_delivery_attempts=wake.max_delivery_attempts, retry_delays_seconds=list(wake.retry_delays_seconds), escalation_delay_seconds=wake.escalation_delay_seconds, escalation_message=self._bounded_escalation(active_escalations), queued_messages=remaining_messages, queued_escalation_messages=remaining_escalations)
+        self._pending[channel_id] = PendingWake(message=self.BATCH_SEPARATOR.join(active_messages), available_at=max(now + self.JOB_WAKE_DEBOUNCE_SECONDS, self._web_turn_cooldown_until(channel_id)), created_at=now, continuation_id=continuation_id, model_ack_required=True, max_delivery_attempts=wake.max_delivery_attempts, retry_delays_seconds=list(wake.retry_delays_seconds), escalation_delay_seconds=wake.escalation_delay_seconds, escalation_message=self._bounded_escalation(active_escalations), queued_messages=remaining_messages, queued_escalation_messages=remaining_escalations)
         return continuation_id
 
     async def arm(
@@ -231,7 +289,7 @@ class CoordinatorService:
                 and existing.model_ack_required
             ):
                 data = self._coalesce_resilient_locked(
-                    channel_id, existing, message, escalation_message
+                    channel_id, existing, message, escalation_message, delay_seconds
                 )
                 self._save_state()
                 return data
@@ -259,7 +317,7 @@ class CoordinatorService:
             continuation_id = f"cont_{token_urlsafe(18)}" if model_ack_required else None
             self._pending[channel_id] = PendingWake(
                 message=message,
-                available_at=now + delay_seconds,
+                available_at=max(now + delay_seconds, self._web_turn_cooldown_until(channel_id)),
                 created_at=now,
                 continuation_id=continuation_id,
                 model_ack_required=model_ack_required,
@@ -328,7 +386,12 @@ class CoordinatorService:
                     return {"channel_id": channel_id, "state": "idle", "ready": False}
             claimed = self._lease_active(wake, now)
             exhausted = wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts
-            ready = not claimed and not exhausted and not wake.transport_delivered and now >= wake.available_at
+            web_backoff_until = self._web_backoff_until(now)
+            web_cooldown_until = self._web_turn_cooldown_until(channel_id)
+            other_claim_until = self._other_claim_until(channel_id, now)
+            web_blocked = not wake.transport_delivered and web_backoff_until > now
+            cooldown_blocked = not wake.transport_delivered and max(web_cooldown_until, other_claim_until) > now
+            ready = not claimed and not exhausted and not wake.transport_delivered and not web_blocked and not cooldown_blocked and now >= wake.available_at
             if claimed:
                 state = "claimed"
             elif wake.transport_delivered:
@@ -339,6 +402,10 @@ class CoordinatorService:
                     if (wake.escalation_at or float("inf")) <= now
                     else "waiting_model_ack"
                 )
+            elif web_blocked:
+                state = "web_backoff"
+            elif cooldown_blocked:
+                state = "web_cooldown"
             elif wake.model_ack_required and wake.delivery_attempts > 0 and not ready:
                 state = "waiting_model_ack"
             else:
@@ -347,7 +414,9 @@ class CoordinatorService:
                 "channel_id": channel_id,
                 "state": state,
                 "ready": ready,
-                "retry_after_seconds": max(0.0, wake.available_at - now) if not exhausted else 0.0,
+                "retry_after_seconds": max(0.0, max(wake.available_at, web_backoff_until, web_cooldown_until, other_claim_until) - now) if not exhausted else 0.0,
+                "web_backoff_seconds": max(0.0, web_backoff_until - now),
+                "web_turn_cooldown_seconds": max(0.0, max(web_cooldown_until, other_claim_until) - now),
                 "lease_remaining_seconds": (
                     max(0.0, (wake.lease_expires_at or now) - now) if claimed else 0.0
                 ),
@@ -374,6 +443,9 @@ class CoordinatorService:
             if (
                 wake is None
                 or now < wake.available_at
+                or self._web_backoff_until(now) > now
+                or self._web_turn_cooldown_until(channel_id) > now
+                or self._other_claim_until(channel_id, now) > now
                 or self._lease_active(wake, now)
                 or wake.transport_delivered
                 or wake.model_acknowledged
@@ -418,6 +490,12 @@ class CoordinatorService:
             wake = self._pending.get(channel_id)
             if wake is None or wake.claim_id != claim_id:
                 return {"channel_id": channel_id, "acknowledged": False}
+            cooldown_until = now + self.MIN_WEB_TURN_INTERVAL_SECONDS
+            self._global_cooldown_until = max(self._global_cooldown_until, cooldown_until)
+            self._cooldown_until[channel_id] = max(
+                self._cooldown_until.get(channel_id, 0.0),
+                cooldown_until,
+            )
             if not wake.model_ack_required or wake.model_acknowledged:
                 continuation_id = wake.continuation_id
                 next_continuation_id = None
@@ -452,6 +530,7 @@ class CoordinatorService:
                 "transport_delivered": True,
                 "next_retry_seconds": None,
                 "escalation_after_seconds": wake.escalation_delay_seconds,
+                "web_turn_cooldown_seconds": self.MIN_WEB_TURN_INTERVAL_SECONDS,
             }
 
     async def model_ack(self, continuation_id: str) -> dict:
@@ -487,7 +566,7 @@ class CoordinatorService:
         suffix = f"; message={message}" if message else ""
         job_states = ", ".join(f"{job.job_id}={job.status.value}" for job in jobs)
         escalation = ("⚠️ Coordinator continuation was not acknowledged after X delivery.\n" f"Channel: {channel_id}\n" f"Jobs: {job_states}\n" f"Reason: {reason}\n" "Please check ChatGPT / Browser Host and continue the work manually.")
-        return await self.arm_resilient(f"jobs={job_ids}; reason={reason}{suffix}", channel_id=channel_id, delay_seconds=0, conflict="coalesce", escalation_message=escalation[: self.MAX_ESCALATION_MESSAGE_CHARS])
+        return await self.arm_resilient(f"jobs={job_ids}; reason={reason}{suffix}", channel_id=channel_id, delay_seconds=self.JOB_WAKE_DEBOUNCE_SECONDS, conflict="coalesce", escalation_message=escalation[: self.MAX_ESCALATION_MESSAGE_CHARS])
 
     async def escalations_due(self) -> list[dict]:
         now = time.time()
