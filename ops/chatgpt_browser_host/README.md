@@ -109,3 +109,15 @@ Planned Telegram UX:
 After logical routing exists, the browser should stop being permanently pinned to one chat. It should open the active conversation for the requested route, wait for the X listener heartbeat, deliver/ACK the event, and may idle-stop later.
 
 The browser is only a supported-host activator/navigation layer. Message text continues to move through Bridge + MCP App `ui/message`; no DOM textarea bot or reverse-engineered protected ChatGPT write API is part of this design.
+
+## Route Context continuity
+
+Logical routes also have a durable compact checkpoint in `route-contexts.json` next to the route registry. The checkpoint is independent of any one ChatGPT conversation and is intended to carry role, current goals, decisions/invariants, live repo/runtime coordinates, open work, and the next action across chat rollover.
+
+Coordinator tools:
+
+- `coordinator_route_context_get` returns the current checkpoint plus a bootstrap message for a logical route.
+- `coordinator_route_context_update` atomically replaces the checkpoint and supports `expected_revision` to prevent lost updates.
+- `coordinator_route_takeover` now returns the checkpoint/bootstrap payload together with the new generation X channel, so a replacement physical conversation can resume the logical route without treating the old transcript as the source of truth.
+
+Keep Route Context compact and authoritative. Prefer live repository/runtime evidence when it supersedes a stale checkpoint, then update the checkpoint after the milestone.

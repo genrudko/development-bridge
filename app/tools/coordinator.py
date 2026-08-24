@@ -5,6 +5,7 @@ from mcp import types
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
+from app.coordinator.context import MAX_CONTEXT_CHARS, RouteContextStore, default_route_context_path
 from app.container import ApplicationContainer
 from app.tools.jobs import JOB_ID_SCHEMA
 
@@ -17,6 +18,7 @@ COORDINATOR_UI_META = {
 
 
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
+    route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
     async def mount(ctx, params, request_context):
         channel_id = container.coordinator.validate_channel(
             (params.arguments or {}).get("channel_id", "coordinator")
@@ -51,13 +53,39 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             arguments["route_id"], arguments["url"], arguments.get("title"),
             make_default=arguments.get("make_default", True),
         )
-        result = to_mcp_result(success(request_context.request_id, route))
+        bootstrap = route_contexts.bootstrap(route)
+        result = to_mcp_result(success(request_context.request_id, bootstrap))
         trigger_path = container.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
         public_base = container.settings.server.public_base_url
         trigger_url = str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
-        result.structured_content = {"channel_id": route["channel_id"], "trigger_url": trigger_url}
+        result.structured_content = {
+            "channel_id": route["channel_id"],
+            "trigger_url": trigger_url,
+            "route_context": bootstrap["context"],
+            "bootstrap_message": bootstrap["bootstrap_message"],
+        }
         result.meta = dict(COORDINATOR_UI_META)
         return result
+
+    async def context_get(ctx, params, request_context):
+        arguments = params.arguments or {}
+        route_id = container.route_registry.validate_route_id(arguments["route_id"])
+        route = container.route_registry.resolve(route_id)
+        if route is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        return to_mcp_result(success(request_context.request_id, route_contexts.bootstrap(route)))
+
+    async def context_update(ctx, params, request_context):
+        arguments = params.arguments or {}
+        route_id = container.route_registry.validate_route_id(arguments["route_id"])
+        if container.route_registry.resolve(route_id) is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        data = route_contexts.update(
+            route_id, arguments["content"], expected_revision=arguments.get("expected_revision")
+        )
+        return to_mcp_result(success(request_context.request_id, data))
 
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -138,6 +166,38 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 _meta=common_meta,
             ),
             takeover,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_context_get",
+                description="Read the durable canonical Route Context and bootstrap message for a logical route",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"}},
+                    "required": ["route_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            context_get,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_context_update",
+                description="Replace the compact canonical Route Context checkpoint for a logical route",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
+                        "content": {"type": "string", "minLength": 1, "maxLength": MAX_CONTEXT_CHARS},
+                        "expected_revision": {"type": "integer", "minimum": 0},
+                    },
+                    "required": ["route_id", "content"],
+                    "additionalProperties": False,
+                },
+            ),
+            context_update,
             "coordinator-x",
         ),
         RegisteredTool(
