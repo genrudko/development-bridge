@@ -34,6 +34,10 @@ async def test_resource_mount_routing_and_internal_continue():
                     assert [str(item.uri) for item in resources.resources] == [COORDINATOR_UI_URI]
                     resource = await session.read_resource(COORDINATOR_UI_URI)
                     assert "app.sendMessage" in resource.contents[0].text
+                    assert "app.sendSizeChanged" in resource.contents[0].text
+                    assert "Bridge" in resource.contents[0].text
+                    assert "Готов" in resource.contents[0].text
+                    assert "Coordinator: ${channelId}" not in resource.contents[0].text
                     assert 'new URL("https://bridge.example/mcp/x/coordinator/"' in resource.contents[0].text
                     assert "if (!ackResponse.ok)" in resource.contents[0].text
                     assert "### ⚡ Bridge · задача завершена" in resource.contents[0].text
