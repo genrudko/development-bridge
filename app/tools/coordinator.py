@@ -45,6 +45,20 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         result.meta = dict(COORDINATOR_UI_META)
         return result
 
+    async def takeover(ctx, params, request_context):
+        arguments = params.arguments or {}
+        route = container.route_registry.takeover(
+            arguments["route_id"], arguments["url"], arguments.get("title"),
+            make_default=arguments.get("make_default", True),
+        )
+        result = to_mcp_result(success(request_context.request_id, route))
+        trigger_path = container.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
+        public_base = container.settings.server.public_base_url
+        trigger_url = str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
+        result.structured_content = {"channel_id": route["channel_id"], "trigger_url": trigger_url}
+        result.meta = dict(COORDINATOR_UI_META)
+        return result
+
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
         data = await container.coordinator.arm(
@@ -104,6 +118,26 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 _meta=common_meta,
             ),
             mount,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_takeover",
+                description="Make this ChatGPT conversation the next generation of a logical route and mount its X listener",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
+                        "url": {"type": "string", "minLength": 1, "maxLength": 500},
+                        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                        "make_default": {"type": "boolean", "default": True},
+                    },
+                    "required": ["route_id", "url"],
+                    "additionalProperties": False,
+                },
+                _meta=common_meta,
+            ),
+            takeover,
             "coordinator-x",
         ),
         RegisteredTool(

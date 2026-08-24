@@ -38,6 +38,9 @@ class Config:
     poll_grace: float
     listener_recovery_timeout: float
     state_dir: Path
+    route_registry: Path
+    chat_registry: Path
+    discovery_interval: float
 
     @property
     def state_file(self) -> Path:
@@ -106,6 +109,9 @@ def load_config() -> Config:
         poll_grace=float(env("BROWSER_HOST_POLL_GRACE", "45")),
         listener_recovery_timeout=float(env("BROWSER_HOST_LISTENER_RECOVERY_TIMEOUT", "120")),
         state_dir=state_dir,
+        route_registry=Path(env("BROWSER_HOST_ROUTE_REGISTRY", str(home / ".local/state/development-bridge/routes.json"))),
+        chat_registry=Path(env("BROWSER_HOST_CHAT_REGISTRY", str(home / ".local/state/development-bridge/chat-registry.json"))),
+        discovery_interval=float(env("BROWSER_HOST_DISCOVERY_INTERVAL", "60")),
     )
 
 
@@ -141,6 +147,12 @@ class BrowserHost:
         self.chrome: subprocess.Popen | None = None
         self.repair_count = 0
         self.listener_recovery_count = 0
+        self.route_id = cfg.route_id
+        self.target_url = cfg.target_url
+        self.channel_id = cfg.channel_id
+        self.last_discovery = 0.0
+        self.discovered_chats = 0
+        self.route_generation = 0
 
     @property
     def cdp_base(self) -> str:
@@ -149,13 +161,15 @@ class BrowserHost:
     def write_state(self, **extra) -> None:
         payload = {
             "updated_at": utcnow(),
-            "route_id": self.cfg.route_id,
-            "channel_id": self.cfg.channel_id,
-            "target_url": self.cfg.target_url,
+            "route_id": self.route_id,
+            "channel_id": self.channel_id,
+            "target_url": self.target_url,
+            "route_generation": self.route_generation,
             "xvfb_pid": self.xvfb.pid if self.xvfb and self.xvfb.poll() is None else None,
             "chrome_pid": self.chrome.pid if self.chrome and self.chrome.poll() is None else None,
             "repair_count": self.repair_count,
             "listener_recovery_count": self.listener_recovery_count,
+            "discovered_chats": self.discovered_chats,
         }
         payload.update(extra)
         atomic_json(self.cfg.state_file, payload)
@@ -211,7 +225,7 @@ class BrowserHost:
                 "--disable-dev-shm-usage",
                 "--disable-session-crashed-bubble",
                 "--window-size=1280,900",
-                self.cfg.target_url,
+                self.target_url,
             ],
             env=chrome_env,
             stdout=subprocess.DEVNULL,
@@ -380,20 +394,104 @@ class BrowserHost:
         finally:
             ws.close()
 
+    def refresh_route_target(self) -> bool:
+        try:
+            data = json.loads(self.cfg.route_registry.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            data = {"version": 1, "default_route": self.cfg.route_id, "requested_route": self.cfg.route_id, "routes": {}}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"route registry is unreadable: {exc}") from exc
+        if data.get("version") != 1 or not isinstance(data.get("routes"), dict):
+            raise RuntimeError("route registry format is invalid")
+        changed_file = False
+        if self.cfg.route_id not in data["routes"]:
+            parts = urlsplit(self.cfg.target_url)
+            path = parts.path
+            conversation_id = path.rsplit("/c/", 1)[1].split("/", 1)[0]
+            project_id = next((part for part in path.split("/") if part.startswith("g-p-")), None)
+            data["routes"][self.cfg.route_id] = {
+                "title": self.cfg.route_id,
+                "url": self.cfg.target_url,
+                "project_id": project_id,
+                "conversation_id": conversation_id,
+                "channel_id": self.cfg.channel_id,
+                "generation": 0,
+                "updated_at": utcnow(),
+            }
+            changed_file = True
+        requested = data.get("requested_route") or data.get("default_route") or self.cfg.route_id
+        if requested not in data["routes"]:
+            requested = self.cfg.route_id
+            data["requested_route"] = requested
+            changed_file = True
+        route = data["routes"][requested]
+        target = canonical_chat_url(route["url"])
+        channel = str(route["channel_id"])
+        generation = int(route.get("generation", 0))
+        changed = (requested, target, channel, generation) != (self.route_id, self.target_url, self.channel_id, self.route_generation)
+        self.route_id, self.target_url, self.channel_id, self.route_generation = requested, target, channel, generation
+        if not data.get("default_route"):
+            data["default_route"] = self.cfg.route_id
+            changed_file = True
+        if not data.get("requested_route"):
+            data["requested_route"] = requested
+            changed_file = True
+        if changed_file:
+            atomic_json(self.cfg.route_registry, data)
+        return changed
+
+    def discover_chats(self, page: dict) -> int:
+        ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=5, suppress_origin=True)
+        try:
+            expression = r'''(()=>{const buttons=[...document.querySelectorAll('button')].filter(b=>(b.innerText||'').trim()==='Show more'&&b.getBoundingClientRect().left<460);if(buttons.length)buttons[0].click();const out=[];for(const a of document.querySelectorAll('a[href*="/c/"]')){const href=a.getAttribute('href')||'';const m=href.match(/\/c\/([^/?#]+)/);if(!m)continue;const pm=href.match(/\/(g-p-[^/]+)\/c\//);const aria=(a.getAttribute('aria-label')||'').trim();let project_title=null;const tag=', chat in project ';const idx=aria.indexOf(tag);if(idx>=0)project_title=aria.slice(idx+tag.length).trim();out.push({conversation_id:m[1],project_id:pm?pm[1]:null,title:(a.innerText||a.textContent||'').trim().slice(0,200),project_title,href});}return out.slice(0,500);})()'''
+            request_id = int(time.time() * 1000) % 1_000_000_000
+            ws.send(json.dumps({"id": request_id, "method": "Runtime.evaluate", "params": {"expression": expression, "returnByValue": True}}))
+            while True:
+                message = json.loads(ws.recv())
+                if message.get("id") == request_id:
+                    rows = message.get("result", {}).get("result", {}).get("value", []) or []
+                    break
+        finally:
+            ws.close()
+        try:
+            registry = json.loads(self.cfg.chat_registry.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            registry = {"version": 1, "chats": {}}
+        chats = registry.setdefault("chats", {})
+        seen_at = utcnow()
+        for row in rows:
+            href = str(row.get("href") or "")
+            if href.startswith("/"):
+                url = "https://chatgpt.com" + href
+            else:
+                url = href
+            try:
+                url = canonical_chat_url(url)
+            except ValueError:
+                continue
+            cid = str(row.get("conversation_id") or "")
+            if not cid:
+                continue
+            chats[cid] = {"title": row.get("title") or cid, "project_title": row.get("project_title"), "project_id": row.get("project_id"), "conversation_id": cid, "url": url, "last_seen": seen_at}
+        registry["updated_at"] = seen_at
+        atomic_json(self.cfg.chat_registry, registry)
+        self.last_discovery = time.monotonic()
+        return len(rows)
+
     def enforce_target(self) -> tuple[bool, dict | None]:
         pages = self.pages()
         target = next(
-            (page for page in pages if is_target_url(page.get("url", ""), self.cfg.target_url)),
+            (page for page in pages if is_target_url(page.get("url", ""), self.target_url)),
             None,
         )
         if target is None:
             if not pages:
                 return False, None
-            self.navigate(pages[0], self.cfg.target_url)
+            self.navigate(pages[0], self.target_url)
             time.sleep(4)
             pages = self.pages()
             target = next(
-                (page for page in pages if is_target_url(page.get("url", ""), self.cfg.target_url)),
+                (page for page in pages if is_target_url(page.get("url", ""), self.target_url)),
                 None,
             )
             if target is None:
@@ -425,7 +523,7 @@ class BrowserHost:
             return None, f"journalctl failed: {exc}"
         if result.returncode != 0:
             return None, result.stderr.strip() or f"journalctl exit={result.returncode}"
-        needle = f"/mcp/x/coordinator/status?channel_id={self.cfg.channel_id}"
+        needle = f"/mcp/x/coordinator/status?channel_id={self.channel_id}"
         lines = [line for line in result.stdout.splitlines() if needle in line]
         if self.cfg.public_ip:
             lines = [line for line in lines if self.cfg.public_ip in line]
@@ -448,6 +546,7 @@ class BrowserHost:
 
         try:
             self.ensure_debug_port_free()
+            self.refresh_route_target()
             self.write_state(status="starting")
             self.start_xvfb()
             self.start_chrome()
@@ -461,6 +560,9 @@ class BrowserHost:
                 if self.chrome is None or self.chrome.poll() is not None:
                     raise RuntimeError("Chrome is not running")
 
+                route_changed = self.refresh_route_target()
+                if route_changed:
+                    poll_deadline = time.monotonic() + self.cfg.poll_grace
                 target_ok, page = self.enforce_target()
                 if self.repair_count != last_repair_count:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
@@ -538,9 +640,15 @@ class BrowserHost:
                     iframe_count = self.coordinator_iframe_count(page)
                     poll_ok, poll_detail = self.polling_ok()
 
+                if time.monotonic() - self.last_discovery >= self.cfg.discovery_interval:
+                    try:
+                        self.discovered_chats = self.discover_chats(page)
+                    except Exception:
+                        pass
+
                 if poll_ok is False and time.monotonic() >= poll_deadline:
                     raise RuntimeError(
-                        f"MCP X polling not observed for route={self.cfg.route_id}: {poll_detail}"
+                        f"MCP X polling not observed for route={self.route_id}: {poll_detail}"
                     )
 
                 self.write_state(

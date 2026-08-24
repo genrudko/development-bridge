@@ -55,7 +55,16 @@ set +a
 
 ## Milestone 2: chat discovery and logical routing
 
-This is the next routing layer and is explicitly part of the plan.
+Implemented baseline:
+
+- persistent logical route registry shared by Bridge and Browser Host;
+- generation-specific X channels on route takeover, so stale conversations cannot claim new-route events;
+- Telegram `/chats`, `/to <route>`, and one-shot `@<route> message`;
+- coordinator `coordinator_route_takeover` tool for moving a logical route to a replacement ChatGPT conversation;
+- Browser Host dynamically follows the route registry instead of requiring a service/env rewrite;
+- authenticated DOM discovery continuously records visible ChatGPT conversation links in `chat-registry.json`; `/chats` exposes a bounded recent view.
+
+Remaining discovery expansion is incremental: project-title enrichment plus deliberate `Show more`/project-expansion passes for chats that are not currently rendered.
 
 ### Browser chat discovery
 

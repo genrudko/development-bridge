@@ -8,7 +8,7 @@ from telethon import TelegramClient, events
 from telethon.errors import RPCError
 
 from app.api.errors import BridgeError, ErrorCode
-from app.coordinator import CoordinatorService
+from app.coordinator import CoordinatorService, RouteRegistry
 from app.knowledge.telegram import ensure_session_file
 
 
@@ -26,6 +26,7 @@ class TelegramSupervisorService:
         chat_id: int | None,
         channel_id: str,
         coordinator: CoordinatorService,
+        route_registry: RouteRegistry,
     ) -> None:
         self.enabled = enabled
         self.api_id = api_id
@@ -34,6 +35,7 @@ class TelegramSupervisorService:
         self.chat_id = chat_id
         self.channel_id = CoordinatorService.validate_channel(channel_id)
         self.coordinator = coordinator
+        self.route_registry = route_registry
         self._client = None
         self._lock = asyncio.Lock()
         self._connected = False
@@ -135,7 +137,8 @@ class TelegramSupervisorService:
             "last_inbound_message_id": self._last_inbound_message_id,
             "last_inbound_at": self._last_inbound_at,
             "last_error": self._last_error,
-            "coordinator": await self.coordinator.status(self.channel_id),
+            "routes": self.route_registry.list_routes(),
+            "coordinator": await self.coordinator.status((self.route_registry.resolve() or {}).get("channel_id", self.channel_id)),
         }
 
     async def _on_message(self, event) -> None:
@@ -146,11 +149,33 @@ class TelegramSupervisorService:
         self._last_inbound_message_id = message_id
         self._last_inbound_at = datetime.now(UTC).isoformat()
         try:
+            if text == "/chats":
+                routes = self.route_registry.list_routes()
+                if not routes:
+                    await self._notice(f"маршруты ещё не зарегистрированы; используется legacy channel {self.channel_id}.")
+                    return
+                lines = ["маршруты:"]
+                for route in routes:
+                    marker = "*" if route.get("default") else " "
+                    lines.append(f"{marker} {route['route_id']} -> {route.get('title') or route['conversation_id']} (g{route.get('generation', 0)})")
+                discovered = self.route_registry.list_discovered_chats(limit=10)
+                if discovered:
+                    lines.append("\nнедавно обнаруженные чаты:")
+                    for chat in discovered:
+                        lines.append(f"- {chat.get('title') or chat.get('conversation_id')} [{chat.get('conversation_id')}]")
+                await self._notice("\n".join(lines)); return
+            if text.startswith("/to "):
+                route = self.route_registry.select_default(text[4:].strip())
+                await self._notice(f"маршрут переключён на {route['route_id']} -> {route.get('title') or route['conversation_id']}."); return
+            route_id = None; body = text
+            if text.startswith("@") and " " in text:
+                candidate, body = text[1:].split(" ", 1); route_id = candidate.strip(); body = body.strip()
+            route = self.route_registry.resolve(route_id); target_channel = route["channel_id"] if route else self.channel_id; route_label = route["route_id"] if route else "legacy"
+            if route:
+                self.route_registry.request(route["route_id"])
             await self.coordinator.arm(
-                f"[Telegram supervisor | message_id={message_id}]\n{text}",
-                channel_id=self.channel_id,
-                delay_seconds=0,
-                conflict="reject",
+                f"[Telegram supervisor | route={route_label} | message_id={message_id}]\n{body}",
+                channel_id=target_channel, delay_seconds=0, conflict="reject",
             )
         except BridgeError as error:
             self._last_error = error.message

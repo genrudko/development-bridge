@@ -15,7 +15,7 @@ from app.chatgpt_share import (
     UrllibChatGPTShareTransport,
 )
 from app.commands import RepositoryCommandService
-from app.coordinator import CoordinatorService
+from app.coordinator import CoordinatorService, RouteRegistry
 from app.files import FileService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
@@ -78,6 +78,7 @@ class ApplicationContainer:
     knowledge_attachment_exports: KnowledgeAttachmentExportService | None
     chatgpt_share: ChatGPTShareService
     coordinator: CoordinatorService
+    route_registry: RouteRegistry
     commands: RepositoryCommandService
     bridge_restart: BridgeRestartService
 
@@ -279,6 +280,7 @@ def build_container(
         configured.github.artifact_max_bytes,
     )
     coordinator = CoordinatorService()
+    route_registry = RouteRegistry(configured.coordinator.route_registry_path)
     supervisor_settings = configured.telegram_supervisor
     telegram_supervisor = None
     if supervisor_settings.enabled:
@@ -290,6 +292,7 @@ def build_container(
             chat_id=supervisor_settings.chat_id,
             channel_id=supervisor_settings.channel_id,
             coordinator=coordinator,
+            route_registry=route_registry,
         )
     commands = RepositoryCommandService(jobs, policy)
     return ApplicationContainer(
@@ -324,6 +327,7 @@ def build_container(
             chatgpt_share_transport or UrllibChatGPTShareTransport()
         ),
         coordinator=coordinator,
+        route_registry=route_registry,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
     )

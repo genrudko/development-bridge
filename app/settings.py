@@ -129,6 +129,17 @@ class TelegramKnowledgeSettings(BaseModel):
     recent_window_size: int = Field(default=100, ge=0, le=500)
 
 
+def _default_route_registry_path() -> Path:
+    state_home = os.environ.get("XDG_STATE_HOME")
+    base = Path(state_home) if state_home else Path.home() / ".local" / "state"
+    return base / "development-bridge" / "routes.json"
+
+
+class CoordinatorRoutingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    route_registry_path: Path = Field(default_factory=_default_route_registry_path)
+
+
 class TelegramSupervisorSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     enabled: bool = False
@@ -221,6 +232,7 @@ class BridgeSettings(BaseModel):
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
     telegram_supervisor: TelegramSupervisorSettings = Field(default_factory=TelegramSupervisorSettings)
+    coordinator: CoordinatorRoutingSettings = Field(default_factory=CoordinatorRoutingSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     projects: tuple[ProjectSettings, ...] = ()
 
@@ -330,6 +342,14 @@ def load_settings(
         )
         environment_updates["knowledge"] = KnowledgeSettings.model_validate(
             {**settings.knowledge.model_dump(), "telegram": telegram}
+        )
+
+    coordinator_updates: dict[str, Any] = {}
+    if route_path := environment.get("DEVELOPMENT_BRIDGE_ROUTE_REGISTRY_PATH"):
+        coordinator_updates["route_registry_path"] = Path(route_path)
+    if coordinator_updates:
+        environment_updates["coordinator"] = CoordinatorRoutingSettings.model_validate(
+            {**settings.coordinator.model_dump(), **coordinator_updates}
         )
 
     supervisor_updates: dict[str, Any] = {}
