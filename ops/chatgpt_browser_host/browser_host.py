@@ -478,6 +478,17 @@ class BrowserHost:
         self.last_discovery = time.monotonic()
         return len(rows)
 
+    def reload_route_target(self) -> None:
+        pages = self.pages()
+        if not pages:
+            return
+        page = next(
+            (item for item in pages if is_target_url(item.get("url", ""), self.target_url)),
+            pages[0],
+        )
+        self.navigate(page, self.target_url)
+        time.sleep(4)
+
     def enforce_target(self) -> tuple[bool, dict | None]:
         pages = self.pages()
         target = next(
@@ -563,6 +574,7 @@ class BrowserHost:
                 route_changed = self.refresh_route_target()
                 if route_changed:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
+                    self.reload_route_target()
                 target_ok, page = self.enforce_target()
                 if self.repair_count != last_repair_count:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace

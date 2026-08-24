@@ -55,3 +55,15 @@ def test_browser_host_follows_requested_route_generation(tmp_path: Path):
     assert host.target_url.endswith("/c/conv-b")
     assert host.channel_id == "telegram-bridge-dev-g3"
     assert host.route_generation == 3
+
+
+def test_browser_host_reload_route_target_refreshes_same_conversation(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    page = {"id": "page-1", "url": host.target_url}
+    calls = []
+    host.pages = lambda: [page]
+    host.navigate = lambda selected, url: calls.append((selected["id"], url))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    host.reload_route_target()
+    assert calls == [("page-1", host.target_url)]
