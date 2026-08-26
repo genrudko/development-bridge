@@ -907,9 +907,20 @@ class BrowserHost:
                     return {"state": "waiting_source_turn"}
                 source_control = self.coordinator_app_control(source_page, "ping")
                 if not source_control.get("ok"):
-                    if self.rollover_age_seconds(rollover) > 120:
-                        raise RuntimeError("fresh rollover MCP App is not control-capable")
-                    return {"state": "waiting_source_control", "error": source_control.get("error")}
+                    iframe_count, iframe_error = self.safe_coordinator_iframe_count(source_page)
+                    poll_ok, poll_detail = self.polling_ok()
+                    legacy_source_verified = (
+                        iframe_count is not None
+                        and iframe_count > 0
+                        and poll_ok is True
+                    )
+                    if not legacy_source_verified:
+                        if self.rollover_age_seconds(rollover) > 120:
+                            raise RuntimeError("fresh rollover MCP App is not control-capable")
+                        return {
+                            "state": "waiting_source_control",
+                            "error": source_control.get("error") or iframe_error or poll_detail,
+                        }
                 candidate_page, candidate_url = self.branch_in_new_chat(source_page, source_url)
                 rollover = self.rollover_control("candidate", rollover, url=candidate_url)
                 state = "candidate"

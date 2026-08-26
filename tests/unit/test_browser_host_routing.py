@@ -264,6 +264,81 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
     assert host.rollover_count == 1
 
 
+def test_browser_host_rollover_allows_verified_legacy_source_without_control(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.route_generation = 5
+    source_url = host.target_url
+    candidate_url = "https://chatgpt.com/g/g-p-ad5x/c/conv-legacy-successor"
+    rollover = {
+        "token": "roll_legacy_token",
+        "state": "prepared",
+        "source_generation": 5,
+        "target_generation": 6,
+        "source_url": source_url,
+        "source_conversation_id": "conv-a",
+        "project_id": "g-p-ad5x",
+        "channel_id": "telegram-ad5x-g6",
+        "created_at": "2026-08-26T10:00:00+00:00",
+    }
+    source_page = {"id": "source", "url": source_url}
+    candidate_page = {"id": "candidate", "url": candidate_url}
+    host.pending_rollover = lambda: dict(rollover)
+    host.pages = lambda: [source_page]
+    host.safe_bridge_turn_state = lambda page: ({"generating": False}, None)
+    host.coordinator_app_control = lambda page, action, **payload: (
+        {"ok": False, "error": "control_context_missing"}
+        if page.get("id") == "source" and action == "ping"
+        else {"ok": True, "channel_id": payload.get("channel_id", "telegram-ad5x-g6")}
+    )
+    host.safe_coordinator_iframe_count = lambda page: (2, None)
+    host.polling_ok = lambda: (True, "matches=6 in last 15s")
+    host.branch_in_new_chat = lambda page, url: (candidate_page, candidate_url)
+    host.wait_for_control_channel = lambda page, channel_id, timeout=30: {"ok": True, "channel_id": channel_id}
+    host.wait_for_polling = lambda channel_id, timeout=35: (True, "matches=3")
+    host.wait_for_rollover_preflight = lambda page, token, timeout=75: {"ready": True, "iframe_count": 1}
+    calls = []
+    def control(action, current, **payload):
+        calls.append((action, payload))
+        if action == "candidate":
+            return {**current, "state": "candidate", "candidate_url": payload["url"], "candidate_conversation_id": "conv-legacy-successor"}
+        if action == "commit":
+            return {"route_id": "ad5x", "generation": 6, "channel_id": "telegram-ad5x-g6", "conversation_id": "conv-legacy-successor", "url": candidate_url}
+        raise AssertionError(action)
+    host.rollover_control = control
+    result = host.process_pending_rollover()
+    assert result["state"] == "committed"
+    assert [item[0] for item in calls] == ["candidate", "commit"]
+
+
+def test_browser_host_rollover_still_waits_when_legacy_source_polling_is_not_verified(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.route_generation = 5
+    rollover = {
+        "token": "roll_legacy_wait",
+        "state": "prepared",
+        "source_generation": 5,
+        "target_generation": 6,
+        "source_url": host.target_url,
+        "source_conversation_id": "conv-a",
+        "project_id": "g-p-ad5x",
+        "channel_id": "telegram-ad5x-g6",
+        "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    }
+    host.pending_rollover = lambda: dict(rollover)
+    host.pages = lambda: [{"id": "source", "url": host.target_url}]
+    host.safe_bridge_turn_state = lambda page: ({"generating": False}, None)
+    host.coordinator_app_control = lambda page, action, **payload: {"ok": False, "error": "control_context_missing"}
+    host.safe_coordinator_iframe_count = lambda page: (2, None)
+    host.polling_ok = lambda: (False, "matches=0 in last 15s")
+    branched = []
+    host.branch_in_new_chat = lambda *args: branched.append(args)
+    result = host.process_pending_rollover()
+    assert result["state"] == "waiting_source_control"
+    assert branched == []
+
+
 def test_browser_host_rollover_aborts_before_commit_on_successor_failure(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
