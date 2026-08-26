@@ -52,6 +52,7 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             timeout_seconds=arguments.get("timeout_seconds", 300),
             output_limit_bytes=arguments.get("output_limit_bytes", 262_144),
             artifacts=arguments.get("artifacts", []),
+            stdin=arguments.get("stdin"),
             idempotency_key=arguments.get("idempotency_key"),
         )
         return to_mcp_result(success(request_context.request_id, job.status_dict()))
@@ -172,6 +173,10 @@ def job_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 "artifacts": {
                     "type": "array", "maxItems": 32,
                     "items": ArtifactSettings.model_json_schema(), "default": [],
+                },
+                "stdin": {
+                    "type": "string", "maxLength": 1048576,
+                    "description": "Optional UTF-8 stdin payload; use with python - or shell -s for large scripts instead of argv.",
                 },
                 "idempotency_key": {
                     "type": "string", "minLength": 1, "maxLength": 128,

@@ -33,6 +33,7 @@ class TaskProfile:
     timeout_seconds: float
     output_limit_bytes: int
     artifacts: tuple[ArtifactDeclaration, ...] = ()
+    stdin_text: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {

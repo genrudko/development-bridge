@@ -56,3 +56,4 @@ def test_job_tools_are_registered_with_closed_repository_scoped_schemas():
         "repository_id",
         "executable",
     ]
+    assert tools["repository_exec"].input_schema["properties"]["stdin"]["maxLength"] == 1048576

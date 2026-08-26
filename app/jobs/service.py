@@ -378,6 +378,7 @@ class JobService:
         timeout_seconds: float = 300,
         output_limit_bytes: int = 262_144,
         artifacts: list[dict] | tuple[dict, ...] = (),
+        stdin: str | None = None,
         idempotency_key: str | None = None,
     ) -> JobRecord:
         self._require_execute(repository)
@@ -394,6 +395,8 @@ class JobService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "output_limit_bytes is invalid")
         if not isinstance(artifacts, (list, tuple)) or len(artifacts) > 32:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "artifacts are invalid")
+        if stdin is not None and (not isinstance(stdin, str) or len(stdin.encode("utf-8")) > 1_048_576):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "stdin is invalid")
         try:
             configured_artifacts = tuple(
                 ArtifactSettings.model_validate(item) for item in artifacts
@@ -412,6 +415,7 @@ class JobService:
             "arguments": list(arguments),
             "timeout_seconds": float(timeout_seconds),
             "output_limit_bytes": output_limit_bytes,
+            "stdin": stdin,
             "artifacts": [
                 {
                     "id": item.id,
@@ -681,6 +685,7 @@ class JobService:
                 cwd=repository.root,
                 env=self._task_environment(),
                 start_new_session=True,
+                stdin=(asyncio.subprocess.PIPE if profile.stdin_text is not None else None),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -700,6 +705,11 @@ class JobService:
         stderr_reader = asyncio.create_task(
             self._drain(job_id, "stderr", process.stderr, profile.output_limit_bytes)
         )
+        stdin_writer = (
+            asyncio.create_task(self._feed_stdin(process, profile.stdin_text))
+            if profile.stdin_text is not None
+            else None
+        )
         failure_reason = None
         try:
             await asyncio.wait_for(process.wait(), timeout=profile.timeout_seconds)
@@ -708,6 +718,8 @@ class JobService:
             await self._terminate(process)
         finally:
             await asyncio.gather(stdout_reader, stderr_reader)
+            if stdin_writer is not None:
+                await stdin_writer
             self._processes.pop(job_id, None)
 
         artifact_failure = None
@@ -767,6 +779,20 @@ class JobService:
             )
             final = store.get(job.project_id, job.repository_id, job_id)
             await self._emit(final, "finish", AuditOutcome.SUCCESS, started=started)
+
+    async def _feed_stdin(self, process: asyncio.subprocess.Process, text: str) -> None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(text.encode("utf-8"))
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            process.stdin.close()
+            try:
+                await process.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     async def _drain(self, job_id, stream_name, stream, limit) -> None:
         while chunk := await stream.read(64 * 1024):

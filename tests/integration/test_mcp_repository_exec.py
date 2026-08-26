@@ -83,6 +83,16 @@ async def test_repository_exec_uses_durable_job_lifecycle_and_literal_argv(tmp_p
                     exported = await session.call_tool("job_artifact_export", {**scope, "job_id": started["job_id"], "artifact_id": "result"})
                     assert len(exported.content) == 3
 
+                    large_stdin = "payload-" * 2048
+                    stdin_args = {**scope, "executable": sys.executable, "arguments": ["-c", "import hashlib,sys; data=sys.stdin.read(); print(len(data)); print(hashlib.sha256(data.encode()).hexdigest())"], "stdin": large_stdin, "idempotency_key": "stdin-large"}
+                    stdin_job = json.loads((await session.call_tool("repository_exec", stdin_args)).content[0].text)["data"]["job_id"]
+                    assert (await wait_for(session, scope, stdin_job))["status"] == "succeeded"
+                    stdin_output = json.loads((await session.call_tool("job_output", {**scope, "job_id": stdin_job})).content[0].text)["data"]["stdout"].splitlines()
+                    import hashlib
+                    assert stdin_output == [str(len(large_stdin)), hashlib.sha256(large_stdin.encode()).hexdigest()]
+                    stdin_conflict = json.loads((await session.call_tool("repository_exec", {**stdin_args, "stdin": large_stdin + "x"})).content[0].text)
+                    assert stdin_conflict["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
                     failed_job = json.loads((await session.call_tool("repository_exec", {**scope, "executable": sys.executable, "arguments": ["-c", "import sys; print('out'); print('err',file=sys.stderr); sys.exit(3)"]})).content[0].text)["data"]["job_id"]
                     failed = await wait_for(session, scope, failed_job)
                     assert failed["status"] == "failed" and failed["exit_code"] == 3

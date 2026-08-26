@@ -264,6 +264,7 @@ class JobStore:
                 )
                 for item in payload["artifacts"]
             ),
+            payload.get("stdin"),
         )
 
     def get(self, project_id: str, repository_id: str, job_id: str) -> JobRecord:
