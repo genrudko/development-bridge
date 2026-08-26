@@ -293,3 +293,50 @@ async def test_web_turn_gate_serializes_channels_and_applies_global_cooldown(mon
     assert status_b["web_turn_cooldown_seconds"] == 20.0
     clock[0] = 4021.0
     assert (await service.claim("route-b"))["claimed"] is True
+
+
+@pytest.mark.asyncio
+async def test_observed_model_turn_resolves_delivered_continuation():
+    service = CoordinatorService()
+    armed = await service.arm_resilient(
+        "resume", channel_id="route-g2", retry_delays_seconds=(0, 0)
+    )
+    claim = await service.claim("route-g2")
+    await service.ack("route-g2", claim["claim_id"])
+    status = await service.status("route-g2")
+    assert status["transport_delivered_at"] is not None
+    observed = await service.observe_model_turn("route-g2", armed["continuation_id"])
+    assert observed["observed"] is True
+    assert observed["delivery_attempts"] == 1
+    assert observed["followup_pending"] is False
+    assert (await service.status("route-g2"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_observed_model_turn_promotes_queued_event_to_followup():
+    service = CoordinatorService()
+    service.MIN_WEB_TURN_INTERVAL_SECONDS = 0
+    armed = await service.arm_resilient(
+        "A", channel_id="route-g2", retry_delays_seconds=(0, 0)
+    )
+    claim = await service.claim("route-g2")
+    await service.ack("route-g2", claim["claim_id"])
+    queued = await service.arm_resilient(
+        "B", channel_id="route-g2", retry_delays_seconds=(0, 0)
+    )
+    assert queued["queued_events"] == 1
+    observed = await service.observe_model_turn("route-g2", armed["continuation_id"])
+    assert observed["observed"] is True
+    assert observed["queued_events"] == 1
+    assert observed["followup_pending"] is True
+    assert observed["next_continuation_id"] != armed["continuation_id"]
+    service._pending["route-g2"].available_at = 0
+    followup = await service.claim("route-g2")
+    assert followup["message"] == "B"
+
+
+@pytest.mark.asyncio
+async def test_observed_model_turn_requires_matching_delivered_continuation():
+    service = CoordinatorService()
+    armed = await service.arm_resilient("A", channel_id="route-g2")
+    assert (await service.observe_model_turn("route-g2", armed["continuation_id"]))["observed"] is False

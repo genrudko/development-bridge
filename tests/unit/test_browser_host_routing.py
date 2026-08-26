@@ -24,6 +24,7 @@ def _config(module, tmp_path: Path):
         profile=str(tmp_path / "profile"), display=":99", debug_port=9222,
         target_url="https://chatgpt.com/g/g-p-ad5x/c/conv-a", route_id="ad5x",
         channel_id="telegram-supervisor", public_ip="", bridge_unit="bridge.service",
+        coordinator_local_url="http://127.0.0.1:8789/mcp/x/coordinator/",
         check_interval=5, startup_timeout=45, poll_window=15, poll_grace=45,
         listener_recovery_timeout=120, state_dir=tmp_path / "state",
         route_registry=tmp_path / "routes.json", chat_registry=tmp_path / "chat-registry.json",
@@ -122,3 +123,88 @@ def test_browser_host_rate_limit_backoff_is_bounded_and_persisted(tmp_path: Path
     clock[0] = 1121.0
     assert host.activate_web_backoff() == 240.0
     assert host.rate_limit_count == 2
+
+
+def test_browser_host_model_turn_observer_baselines_before_ack(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "generating": False}, None)
+    called = []
+    host.coordinator_local_status = lambda: called.append(True) or {}
+    assert host.sync_model_turn_observation({}) is None
+    assert host.last_bridge_turn_id == 26
+    assert host.bridge_turn_baselined is True
+    assert called == []
+
+
+def test_browser_host_observes_new_completed_bridge_turn(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.last_bridge_turn_id = 25
+    host.bridge_turn_baselined = True
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "generating": False}, None)
+    host.coordinator_local_status = lambda: {
+        "state": "waiting_model_ack",
+        "transport_delivered": True,
+        "continuation_id": "cont_abcdefghij",
+    }
+    calls = []
+    host.observe_model_turn_local = lambda continuation_id: calls.append(continuation_id) or {"observed": True}
+    observed = host.sync_model_turn_observation({})
+    assert observed == {"observed": True}
+    assert calls == ["cont_abcdefghij"]
+    assert host.last_bridge_turn_id == 26
+    assert host.model_turn_observation_count == 1
+
+
+def test_browser_host_does_not_observe_while_generating(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.last_bridge_turn_id = 25
+    host.bridge_turn_baselined = True
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "generating": True}, None)
+    called = []
+    host.coordinator_local_status = lambda: called.append(True) or {}
+    assert host.sync_model_turn_observation({}) is None
+    assert called == []
+    assert host.last_bridge_turn_id == 25
+
+
+def test_browser_host_zero_baseline_does_not_swallow_first_real_wake(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 0, "generating": False}, None)
+    assert host.sync_model_turn_observation({}) is None
+    assert host.bridge_turn_baselined is True
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 1, "generating": False}, None)
+    host.coordinator_local_status = lambda: {
+        "transport_delivered": True, "continuation_id": "cont_abcdefghij"
+    }
+    host.observe_model_turn_local = lambda continuation_id: {"observed": True}
+    assert host.sync_model_turn_observation({}) == {"observed": True}
+    assert host.last_bridge_turn_id == 1
+
+
+def test_browser_host_restores_matching_observer_baseline(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.refresh_route_target()
+    host.cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    host.cfg.state_file.write_text(
+        __import__("json").dumps({
+            "route_id": host.route_id,
+            "channel_id": host.channel_id,
+            "target_url": host.target_url,
+            "route_generation": host.route_generation,
+            "last_bridge_turn_id": 17,
+            "bridge_turn_baselined": True,
+            "model_turn_observation_count": 3,
+        }),
+        encoding="utf-8",
+    )
+    restored = module.BrowserHost(_config(module, tmp_path))
+    restored.refresh_route_target()
+    restored.restore_observer_state()
+    assert restored.last_bridge_turn_id == 17
+    assert restored.bridge_turn_baselined is True
+    assert restored.model_turn_observation_count == 3

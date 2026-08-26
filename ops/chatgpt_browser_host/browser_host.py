@@ -39,6 +39,7 @@ class Config:
     channel_id: str
     public_ip: str
     bridge_unit: str
+    coordinator_local_url: str
     check_interval: float
     startup_timeout: float
     poll_window: int
@@ -114,6 +115,10 @@ def load_config() -> Config:
         channel_id=env("BROWSER_HOST_CHANNEL_ID", "telegram-supervisor"),
         public_ip=env("BROWSER_HOST_PUBLIC_IP", ""),
         bridge_unit=env("BROWSER_HOST_BRIDGE_UNIT", "development-bridge.service"),
+        coordinator_local_url=env(
+            "BROWSER_HOST_COORDINATOR_LOCAL_URL",
+            "http://127.0.0.1:8789/mcp/x/coordinator/",
+        ).rstrip("/") + "/",
         check_interval=float(env("BROWSER_HOST_CHECK_INTERVAL", "5")),
         startup_timeout=float(env("BROWSER_HOST_STARTUP_TIMEOUT", "45")),
         poll_window=int(env("BROWSER_HOST_POLL_WINDOW", "15")),
@@ -166,6 +171,9 @@ class BrowserHost:
         self.route_generation = 0
         self.rate_limit_count = 0
         self.rate_limit_until = 0.0
+        self.last_bridge_turn_id = 0
+        self.bridge_turn_baselined = False
+        self.model_turn_observation_count = 0
 
     @property
     def cdp_base(self) -> str:
@@ -183,9 +191,30 @@ class BrowserHost:
             "repair_count": self.repair_count,
             "listener_recovery_count": self.listener_recovery_count,
             "discovered_chats": self.discovered_chats,
+            "last_bridge_turn_id": self.last_bridge_turn_id,
+            "bridge_turn_baselined": self.bridge_turn_baselined,
+            "model_turn_observation_count": self.model_turn_observation_count,
         }
         payload.update(extra)
         atomic_json(self.cfg.state_file, payload)
+
+    def restore_observer_state(self) -> None:
+        try:
+            state = json.loads(self.cfg.state_file.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        if (
+            state.get("route_id") != self.route_id
+            or state.get("channel_id") != self.channel_id
+            or state.get("target_url") != self.target_url
+            or int(state.get("route_generation", -1)) != self.route_generation
+        ):
+            return
+        self.last_bridge_turn_id = int(state.get("last_bridge_turn_id", 0) or 0)
+        self.bridge_turn_baselined = bool(state.get("bridge_turn_baselined", False))
+        self.model_turn_observation_count = int(
+            state.get("model_turn_observation_count", 0) or 0
+        )
 
     def ensure_debug_port_free(self) -> None:
         try:
@@ -355,6 +384,106 @@ class BrowserHost:
                 "attempt": self.rate_limit_count,
             })
         return max(0.0, self.rate_limit_until - now)
+
+    def bridge_turn_state(self, page: dict) -> dict:
+        ws = websocket.create_connection(
+            page["webSocketDebuggerUrl"], timeout=4, suppress_origin=True
+        )
+        try:
+            request_id = int(time.time() * 1000) % 1_000_000_000
+            expression = r'''(()=>{
+              const generating=[...document.querySelectorAll('button')].some(b=>{
+                const text=((b.getAttribute('aria-label')||'')+' '+(b.innerText||'')).toLowerCase();
+                return text.includes('stop generating')||text.includes('stop streaming')||text.includes('остановить');
+              });
+              let turnId=0;
+              for(const turn of document.querySelectorAll('[data-testid^="conversation-turn-"]')){
+                const match=(turn.getAttribute('data-testid')||'').match(/^conversation-turn-(\d+)$/);
+                if(!match) continue;
+                const tool=turn.querySelector('[data-message-author-role="tool"]');
+                const assistant=turn.querySelector('[data-message-author-role="assistant"]');
+                const toolText=(tool?.innerText||tool?.textContent||'').trim();
+                const assistantText=(assistant?.innerText||assistant?.textContent||'').trim();
+                if(toolText.startsWith('⚡ Bridge · задача завершена') && assistantText){
+                  turnId=Math.max(turnId, Number(match[1]));
+                }
+              }
+              return {turn_id:turnId,generating};
+            })()'''
+            ws.send(json.dumps({
+                "id": request_id,
+                "method": "Runtime.evaluate",
+                "params": {"expression": expression, "returnByValue": True},
+            }))
+            while True:
+                message = json.loads(ws.recv())
+                if message.get("id") == request_id:
+                    value = (
+                        message.get("result", {})
+                        .get("result", {})
+                        .get("value", {})
+                    ) or {}
+                    return {
+                        "turn_id": int(value.get("turn_id", 0) or 0),
+                        "generating": bool(value.get("generating", False)),
+                    }
+        finally:
+            ws.close()
+
+    def safe_bridge_turn_state(self, page: dict) -> tuple[dict | None, str | None]:
+        try:
+            return self.bridge_turn_state(page), None
+        except TRANSIENT_CDP_ERRORS as exc:
+            return None, str(exc)
+
+    def coordinator_local_status(self) -> dict:
+        response = requests.get(
+            self.cfg.coordinator_local_url + "status",
+            params={"channel_id": self.channel_id},
+            timeout=2,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    def observe_model_turn_local(self, continuation_id: str) -> dict:
+        response = requests.post(
+            self.cfg.coordinator_local_url + "observed",
+            params={
+                "channel_id": self.channel_id,
+                "continuation_id": continuation_id,
+            },
+            timeout=2,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    def sync_model_turn_observation(self, page: dict) -> dict | None:
+        state, error = self.safe_bridge_turn_state(page)
+        if state is None:
+            raise RuntimeError(f"transient model-turn probe failed: {error}")
+        latest = int(state.get("turn_id", 0) or 0)
+        if not self.bridge_turn_baselined:
+            self.last_bridge_turn_id = latest
+            self.bridge_turn_baselined = True
+            return None
+        if state.get("generating"):
+            return None
+        status = self.coordinator_local_status()
+        if (
+            status.get("transport_delivered") is True
+            and isinstance(status.get("continuation_id"), str)
+            and latest > self.last_bridge_turn_id
+        ):
+            observed = self.observe_model_turn_local(status["continuation_id"])
+            if observed.get("observed") is True:
+                self.model_turn_observation_count += 1
+                self.last_bridge_turn_id = latest
+                return observed
+        if latest > self.last_bridge_turn_id and not status.get("transport_delivered"):
+            self.last_bridge_turn_id = latest
+        return None
 
     def recover_listener(self, page: dict) -> bool:
         """Load older virtualized turns until the coordinator MCP App iframe mounts."""
@@ -607,6 +736,7 @@ class BrowserHost:
         try:
             self.ensure_debug_port_free()
             self.refresh_route_target()
+            self.restore_observer_state()
             self.write_state(status="starting")
             self.start_xvfb()
             self.start_chrome()
@@ -623,6 +753,8 @@ class BrowserHost:
                 route_changed = self.refresh_route_target()
                 if route_changed:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
+                    self.last_bridge_turn_id = 0
+                    self.bridge_turn_baselined = False
                     self.reload_route_target()
                 target_ok, page = self.enforce_target()
                 if self.repair_count != last_repair_count:
@@ -749,6 +881,13 @@ class BrowserHost:
                         time.sleep(self.cfg.check_interval)
                         continue
                     poll_ok, poll_detail = self.polling_ok()
+
+                try:
+                    self.sync_model_turn_observation(page)
+                except TRANSIENT_CDP_ERRORS:
+                    pass
+                except (RuntimeError, ValueError):
+                    pass
 
                 if time.monotonic() - self.last_discovery >= self.cfg.discovery_interval:
                     try:

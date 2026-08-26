@@ -83,6 +83,34 @@ async def test_resource_mount_routing_and_internal_continue():
             claim = await client.post("/mcp/x/coordinator/claim?channel_id=chat-42")
             assert claim.headers["access-control-allow-origin"] == "*"
             assert claim.json()["message"] == "resume"
+            assert (
+                await container.coordinator.ack("chat-42", claim.json()["claim_id"])
+            )["acknowledged"] is True
+            container.coordinator._global_cooldown_until = 0
+            container.coordinator._cooldown_until["chat-42"] = 0
+            resilient = await container.coordinator.arm_resilient(
+                "observed", channel_id="observed-42", delay_seconds=0
+            )
+            observed_claim = await client.post(
+                "/mcp/x/coordinator/claim?channel_id=observed-42"
+            )
+            transport = await client.post(
+                "/mcp/x/coordinator/ack",
+                params={
+                    "channel_id": "observed-42",
+                    "claim_id": observed_claim.json()["claim_id"],
+                },
+            )
+            assert transport.json()["transport_delivered"] is True
+            observed = await client.post(
+                "/mcp/x/coordinator/observed",
+                params={
+                    "channel_id": "observed-42",
+                    "continuation_id": resilient["continuation_id"],
+                },
+            )
+            assert observed.headers["access-control-allow-origin"] == "*"
+            assert observed.json()["observed"] is True
 
 
 @pytest.mark.asyncio

@@ -230,6 +230,18 @@ def create_streamable_http_app(
         except BridgeError as error:
             return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
 
+    async def coordinator_observed(request: Request):
+        try:
+            return JSONResponse(
+                await container.coordinator.observe_model_turn(
+                    request.query_params.get("channel_id", "coordinator"),
+                    request.query_params.get("continuation_id", ""),
+                ),
+                headers=coordinator_ui_headers,
+            )
+        except BridgeError as error:
+            return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
+
     async def coordinator_trigger(request: Request):
         configured_token = settings.server.x_trigger_token
         if configured_token is None:
@@ -345,6 +357,14 @@ def create_streamable_http_app(
             coordinator_ack,
             methods=["POST"],
             name="coordinator_x_ack",
+        )
+    )
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/observed",
+            coordinator_observed,
+            methods=["POST"],
+            name="coordinator_x_observed",
         )
     )
     custom_routes.append(

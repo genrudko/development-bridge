@@ -29,6 +29,7 @@ class PendingWake:
     escalation_message: str | None = None
     escalation_at: float | None = None
     transport_delivered: bool = False
+    transport_delivered_at: float | None = None
     queued_messages: list[str] = field(default_factory=list)
     queued_escalation_messages: list[str] = field(default_factory=list)
 
@@ -430,6 +431,7 @@ class CoordinatorService:
                         "batch_size": len(self._batch_parts(wake.message)),
                         "queued_events": len(wake.queued_messages),
                         "transport_delivered": wake.transport_delivered,
+                        "transport_delivered_at": wake.transport_delivered_at,
                         "model_acknowledged": wake.model_acknowledged,
                     }
                 )
@@ -517,6 +519,7 @@ class CoordinatorService:
             wake.claim_id = None
             wake.lease_expires_at = None
             wake.transport_delivered = True
+            wake.transport_delivered_at = now
             wake.available_at = now
             wake.escalation_at = now + wake.escalation_delay_seconds
             self._save_state()
@@ -531,6 +534,43 @@ class CoordinatorService:
                 "next_retry_seconds": None,
                 "escalation_after_seconds": wake.escalation_delay_seconds,
                 "web_turn_cooldown_seconds": self.MIN_WEB_TURN_INTERVAL_SECONDS,
+            }
+
+    async def observe_model_turn(self, channel_id: str, continuation_id: str) -> dict:
+        """Resolve a delivered continuation after Browser Host observes its model turn."""
+        channel_id = self.validate_channel(channel_id)
+        continuation_id = self.validate_continuation_id(continuation_id)
+        now = time.time()
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if (
+                wake is None
+                or wake.continuation_id != continuation_id
+                or not wake.transport_delivered
+                or wake.model_acknowledged
+            ):
+                return {
+                    "channel_id": channel_id,
+                    "continuation_id": continuation_id,
+                    "observed": False,
+                }
+            attempts = wake.delivery_attempts
+            queued_events = len(wake.queued_messages)
+            cooldown_until = now + self.MIN_WEB_TURN_INTERVAL_SECONDS
+            self._global_cooldown_until = max(self._global_cooldown_until, cooldown_until)
+            self._cooldown_until[channel_id] = max(
+                self._cooldown_until.get(channel_id, 0.0), cooldown_until
+            )
+            next_continuation_id = self._promote_queued_locked(channel_id, wake, now)
+            self._save_state()
+            return {
+                "channel_id": channel_id,
+                "continuation_id": continuation_id,
+                "observed": True,
+                "delivery_attempts": attempts,
+                "queued_events": queued_events,
+                "followup_pending": next_continuation_id is not None,
+                "next_continuation_id": next_continuation_id,
             }
 
     async def model_ack(self, continuation_id: str) -> dict:
