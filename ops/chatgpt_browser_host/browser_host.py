@@ -737,6 +737,12 @@ class BrowserHost:
 
         try:
             while time.monotonic() < deadline and not self.stop:
+                try:
+                    coordinator_status = self.coordinator_local_status()
+                except requests.RequestException:
+                    coordinator_status = {}
+                if coordinator_status.get("state") == "browser_preflight":
+                    return False
                 state = evaluate(r"""(()=>{
                   const frames=[...document.querySelectorAll('iframe')]
                     .filter(f=>f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html'));

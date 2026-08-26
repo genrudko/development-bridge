@@ -722,3 +722,19 @@ def test_browser_host_rejects_snapshot_without_current_message():
     })
     assert result["ok"] is False
     assert result["error"] == "conversation_current_node_missing"
+
+
+def test_browser_host_listener_recovery_yields_to_pending_preflight(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.coordinator_local_status = lambda: {"state": "browser_preflight"}
+    sent = []
+    class FakeWS:
+        def send(self, payload):
+            sent.append(payload)
+        def close(self):
+            pass
+    monkeypatch.setattr(module.websocket, "create_connection", lambda *a, **k: FakeWS(), raising=False)
+    result = host.recover_listener({"webSocketDebuggerUrl": "ws://fake"})
+    assert result is False
+    assert sent == []
