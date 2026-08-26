@@ -10,7 +10,7 @@ from app.container import ApplicationContainer
 from app.settings import ArtifactSettings
 from app.tools.jobs import JOB_ID_SCHEMA
 
-COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v3.html"
+COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v4.html"
 COORDINATOR_UI_META = {
     "ui": {"resourceUri": COORDINATOR_UI_URI},
     "ui/resourceUri": COORDINATOR_UI_URI,
