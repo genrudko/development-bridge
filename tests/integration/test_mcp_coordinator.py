@@ -10,14 +10,17 @@ from mcp.client.streamable_http import streamable_http_client
 from app.container import build_container
 from app.runtime import create_server
 from app.settings import BridgeSettings, load_settings
-from app.tools.coordinator import COORDINATOR_UI_URI
+from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
 from app.transport import create_streamable_http_app
 
 
 @pytest.mark.asyncio
-async def test_resource_mount_routing_and_internal_continue():
+async def test_resource_mount_routing_and_internal_continue(tmp_path):
     settings = BridgeSettings.model_validate(
-        {"server": {"public_base_url": "https://bridge.example"}}
+        {
+            "server": {"public_base_url": "https://bridge.example"},
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        }
     )
     container = build_container(settings)
     app = create_streamable_http_app(create_server(container), settings, container)
@@ -31,7 +34,7 @@ async def test_resource_mount_routing_and_internal_continue():
                 async with ClientSession(*streams) as session:
                     await session.initialize()
                     resources = await session.list_resources()
-                    assert [str(item.uri) for item in resources.resources] == [COORDINATOR_UI_URI]
+                    assert [str(item.uri) for item in resources.resources] == list(COORDINATOR_UI_URIS)
                     resource = await session.read_resource(COORDINATOR_UI_URI)
                     assert "app.sendMessage" in resource.contents[0].text
                     assert "app.sendSizeChanged" in resource.contents[0].text
@@ -52,6 +55,9 @@ async def test_resource_mount_routing_and_internal_continue():
                     assert "handledControlOperations" in resource.contents[0].text
                     assert "CONTROL_OPS_KEY" in resource.contents[0].text
                     assert "localStorage.setItem" in resource.contents[0].text
+                    legacy = await session.read_resource(COORDINATOR_UI_URIS[1])
+                    assert str(legacy.contents[0].uri) == COORDINATOR_UI_URIS[1]
+                    assert legacy.contents[0].text == resource.contents[0].text
                     mounted = await session.call_tool(
                         "coordinator_x_mount", {"channel_id": "chat-42"}
                     )

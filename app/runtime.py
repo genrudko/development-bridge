@@ -13,7 +13,7 @@ from app.api.errors import BridgeError, ErrorCode
 from app.api.results import failure, to_mcp_result
 from app.audit import AuditEvent, AuditOutcome
 from app.container import ApplicationContainer, build_container
-from app.tools.coordinator import COORDINATOR_UI_URI
+from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
 from app.tools.registry import build_tool_registry
 
 
@@ -79,22 +79,28 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
         return types.ListResourcesResult(
             resources=[
                 types.Resource(
-                    name="Development Bridge Coordinator",
-                    uri=COORDINATOR_UI_URI,
+                    name=(
+                        "Development Bridge Coordinator"
+                        if uri == COORDINATOR_UI_URI
+                        else "Development Bridge Coordinator (legacy)"
+                    ),
+                    uri=uri,
                     description="Mounted MCP App for delayed coordinator wake messages",
                     mimeType="text/html;profile=mcp-app",
                     _meta=widget_meta,
                 )
+                for uri in COORDINATOR_UI_URIS
             ]
         )
 
     async def read_resource(ctx, params):
-        if str(params.uri) != COORDINATOR_UI_URI:
+        requested_uri = str(params.uri)
+        if requested_uri not in COORDINATOR_UI_URIS:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Unknown resource")
         return types.ReadResourceResult(
             contents=[
                 types.TextResourceContents(
-                    uri=COORDINATOR_UI_URI,
+                    uri=requested_uri,
                     mimeType="text/html;profile=mcp-app",
                     text=ui_html,
                     _meta=widget_meta,
