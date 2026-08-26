@@ -17,6 +17,13 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 import websocket
 
+TRANSIENT_CDP_ERRORS = (
+    OSError,
+    TimeoutError,
+    requests.RequestException,
+    getattr(websocket, "WebSocketException", OSError),
+)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -312,6 +319,12 @@ class BrowserHost:
                     )
         finally:
             ws.close()
+
+    def safe_coordinator_iframe_count(self, page: dict) -> tuple[int | None, str | None]:
+        try:
+            return self.coordinator_iframe_count(page), None
+        except TRANSIENT_CDP_ERRORS as exc:
+            return None, str(exc)
 
     def rate_limit_detected(self, page: dict) -> bool:
         ws = websocket.create_connection(
@@ -686,7 +699,16 @@ class BrowserHost:
                     time.sleep(max(self.cfg.check_interval, min(15.0, backoff_seconds)))
                     continue
 
-                iframe_count = self.coordinator_iframe_count(page)
+                iframe_count, iframe_error = self.safe_coordinator_iframe_count(page)
+                if iframe_count is None:
+                    self.write_state(
+                        status="degraded", cdp_ok=True, target_ok=True,
+                        coordinator_iframes=0, polling_ok=poll_ok, polling_detail=poll_detail,
+                        current_url=current_url, title=title,
+                        error=f"transient coordinator iframe probe failed: {iframe_error}",
+                    )
+                    time.sleep(self.cfg.check_interval)
+                    continue
                 if iframe_count == 0:
                     self.write_state(
                         status="recovering_listener",
@@ -698,14 +720,34 @@ class BrowserHost:
                         current_url=current_url,
                         title=title,
                     )
-                    if not self.recover_listener(page):
+                    try:
+                        recovered = self.recover_listener(page)
+                    except TRANSIENT_CDP_ERRORS as exc:
+                        self.write_state(
+                            status="degraded", cdp_ok=True, target_ok=True,
+                            coordinator_iframes=0, polling_ok=poll_ok, polling_detail=poll_detail,
+                            current_url=current_url, title=title,
+                            error=f"transient coordinator listener recovery failed: {exc}",
+                        )
+                        time.sleep(self.cfg.check_interval)
+                        continue
+                    if not recovered:
                         raise RuntimeError(
                             "coordinator MCP App iframe could not be recovered "
                             "from virtualized chat history"
                         )
                     # The iframe has mounted; give its X polling a fresh grace window.
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
-                    iframe_count = self.coordinator_iframe_count(page)
+                    iframe_count, iframe_error = self.safe_coordinator_iframe_count(page)
+                    if iframe_count is None:
+                        self.write_state(
+                            status="degraded", cdp_ok=True, target_ok=True,
+                            coordinator_iframes=0, polling_ok=poll_ok, polling_detail=poll_detail,
+                            current_url=current_url, title=title,
+                            error=f"transient coordinator iframe probe failed: {iframe_error}",
+                        )
+                        time.sleep(self.cfg.check_interval)
+                        continue
                     poll_ok, poll_detail = self.polling_ok()
 
                 if time.monotonic() - self.last_discovery >= self.cfg.discovery_interval:

@@ -89,6 +89,24 @@ def test_browser_host_accepts_versioned_coordinator_iframes(tmp_path: Path, monk
     assert "coordinator-x-v1.html'" not in expression
 
 
+def test_browser_host_treats_iframe_probe_timeout_as_transient(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+
+    class TimeoutWS:
+        def send(self, payload):
+            pass
+        def recv(self):
+            raise TimeoutError("Connection timed out")
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module.websocket, "create_connection", lambda *a, **k: TimeoutWS(), raising=False)
+    count, error = host.safe_coordinator_iframe_count({"webSocketDebuggerUrl": "ws://test"})
+    assert count is None
+    assert error == "Connection timed out"
+
+
 def test_browser_host_rate_limit_backoff_is_bounded_and_persisted(tmp_path: Path, monkeypatch):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
