@@ -75,6 +75,7 @@ SUPPORTED_TOOLS = {
     "chatgpt_share_read",
     "coordinator_x_mount",
     "coordinator_route_takeover",
+    "coordinator_route_rollover_prepare",
     "coordinator_route_context_get",
     "coordinator_route_context_update",
     "coordinator_continue",
@@ -91,7 +92,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 81
+    assert len(registry.definitions) == 82
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",

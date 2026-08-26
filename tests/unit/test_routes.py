@@ -40,3 +40,68 @@ def test_route_registry_reads_browser_discovery(tmp_path: Path):
     )
     chats = registry.list_discovered_chats(limit=1)
     assert [item["conversation_id"] for item in chats] == ["c2"]
+
+
+def test_route_registry_rollover_is_fail_safe_until_commit(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    original = registry.bootstrap(
+        "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-a",
+        "telegram-ad5x-g5", "AD5X",
+    )
+    prepared = registry.prepare_rollover("ad5x")
+    assert prepared["state"] == "prepared"
+    assert prepared["target_generation"] == 1
+    assert prepared["channel_id"] == "telegram-ad5x-g1"
+    assert registry.prepare_rollover("ad5x")["token"] == prepared["token"]
+    assert registry.resolve("ad5x")["conversation_id"] == original["conversation_id"]
+
+    candidate = registry.record_rollover_candidate(
+        "ad5x", prepared["token"],
+        "https://chatgpt.com/g/g-p-project/c/conv-b?temporary=1",
+    )
+    assert candidate["state"] == "candidate"
+    assert candidate["candidate_conversation_id"] == "conv-b"
+    assert registry.resolve("ad5x")["conversation_id"] == "conv-a"
+
+    committed = registry.commit_rollover("ad5x", prepared["token"])
+    assert committed["conversation_id"] == "conv-b"
+    assert committed["generation"] == 1
+    assert committed["channel_id"] == "telegram-ad5x-g1"
+    assert registry.pending_rollover("ad5x") is None
+    snapshot = registry.snapshot()
+    assert snapshot["last_rollover"]["ad5x"]["bootstrap_sent"] is False
+    completed = registry.complete_rollover("ad5x", prepared["token"])
+    assert completed["state"] == "complete"
+    assert completed["bootstrap_sent"] is True
+
+
+def test_route_registry_rollover_rejects_wrong_project_and_can_abort(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-a",
+        "telegram-ad5x-g5",
+    )
+    prepared = registry.prepare_rollover("ad5x")
+    with pytest.raises(BridgeError):
+        registry.record_rollover_candidate(
+            "ad5x", prepared["token"],
+            "https://chatgpt.com/g/g-p-other/c/conv-b",
+        )
+    aborted = registry.abort_rollover("ad5x", prepared["token"], "verification failed")
+    assert aborted["aborted"] is True
+    assert registry.resolve("ad5x")["conversation_id"] == "conv-a"
+    assert registry.pending_rollover("ad5x") is None
+
+
+def test_manual_takeover_is_rejected_while_rollover_pending(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-a",
+        "telegram-ad5x-g5",
+    )
+    registry.prepare_rollover("ad5x")
+    with pytest.raises(BridgeError):
+        registry.takeover(
+            "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-b"
+        )
+    assert registry.resolve("ad5x")["conversation_id"] == "conv-a"

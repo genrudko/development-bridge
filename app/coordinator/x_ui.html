@@ -31,6 +31,22 @@ let channelId = "coordinator";
 let busy = false;
 let modelContextContinuation = null;
 let modelContextSupported = true;
+let appConnected = false;
+const CONTROL_OPS_KEY = "development-bridge/control-ops-v1";
+function loadHandledControlOperations() {
+  try {
+    const rows = JSON.parse(localStorage.getItem(CONTROL_OPS_KEY) || "[]");
+    return new Set(Array.isArray(rows) ? rows.filter(x => typeof x === "string").slice(-32) : []);
+  } catch (_) { return new Set(); }
+}
+const handledControlOperations = loadHandledControlOperations();
+function rememberControlOperation(operationId) {
+  handledControlOperations.add(operationId);
+  while (handledControlOperations.size > 32) {
+    handledControlOperations.delete(handledControlOperations.values().next().value);
+  }
+  try { localStorage.setItem(CONTROL_OPS_KEY, JSON.stringify([...handledControlOperations])); } catch (_) {}
+}
 // Rendered by the server. In public deployments this is an absolute URL; the
 // relative value is only the local-development fallback.
 let endpoint = new URL(__COORDINATOR_ENDPOINT__, window.location.href);
@@ -82,6 +98,71 @@ async function clearProtocolContext() {
   try { await app.updateModelContext({ content: [] }); } catch (_) {}
   modelContextContinuation = null;
 }
+
+function controlAck(event, payload) {
+  try {
+    event.source?.postMessage(
+      { type: "development-bridge/control-ack-v1", ...payload },
+      event.origin,
+    );
+  } catch (_) {}
+}
+
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (
+    event.origin !== "https://chatgpt.com" ||
+    event.source !== window.parent ||
+    !data ||
+    data.type !== "development-bridge/control-v1" ||
+    typeof data.nonce !== "string" ||
+    data.nonce.length < 8 || data.nonce.length > 128
+  ) return;
+  void (async () => {
+    const action = String(data.action || "");
+    if (action === "ping") {
+      controlAck(event, { nonce: data.nonce, action, ok: appConnected, channel_id: channelId });
+      return;
+    }
+    if (!appConnected) {
+      controlAck(event, { nonce: data.nonce, action, ok: false, error: "app_not_connected" });
+      return;
+    }
+    const requestedChannel = String(data.channel_id || "");
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(requestedChannel)) {
+      controlAck(event, { nonce: data.nonce, action, ok: false, error: "invalid_channel" });
+      return;
+    }
+    channelId = requestedChannel;
+    if (action === "bind") {
+      await clearProtocolContext();
+      controlAck(event, { nonce: data.nonce, action, ok: true, channel_id: channelId });
+      return;
+    }
+    if (action === "bootstrap") {
+      const operationId = String(data.operation_id || "");
+      const message = String(data.message || "").trim();
+      if (!operationId || operationId.length > 128 || !message || message.length > 4000) {
+        controlAck(event, { nonce: data.nonce, action, ok: false, error: "invalid_bootstrap" });
+        return;
+      }
+      if (handledControlOperations.has(operationId)) {
+        controlAck(event, { nonce: data.nonce, action, ok: true, duplicate: true, channel_id: channelId });
+        return;
+      }
+      const context = String(data.context || "").trim();
+      if (context && context.length <= 8000) await setProtocolContext(context);
+      await app.sendMessage({ role: "user", content: [{ type: "text", text: message }] });
+      rememberControlOperation(operationId);
+      controlAck(event, { nonce: data.nonce, action, ok: true, channel_id: channelId });
+      return;
+    }
+    controlAck(event, { nonce: data.nonce, action, ok: false, error: "unknown_action" });
+  })().catch((error) => {
+    console.error("Coordinator control error", error);
+    controlAck(event, { nonce: data.nonce, action: String(data.action || ""), ok: false, error: "control_failed" });
+  });
+});
 
 async function poll() {
   if (busy) return;
@@ -148,6 +229,7 @@ async function poll() {
 
 try {
   await app.connect();
+  appConnected = true;
   render("ready", "Готов");
   setInterval(poll, 1000);
 } catch (error) {

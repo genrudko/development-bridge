@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from secrets import token_urlsafe
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -140,11 +141,130 @@ class RouteRegistry:
             self._save(data)
         return {**data["routes"][route_id], "route_id": route_id}
 
+    def pending_rollover(self, route_id: str) -> dict | None:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        pending = (data.get("rollovers") or {}).get(route_id)
+        return {**pending, "route_id": route_id} if isinstance(pending, dict) else None
+
+    def prepare_rollover(self, route_id: str) -> dict:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        route = data["routes"].get(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        rollovers = data.setdefault("rollovers", {})
+        existing = rollovers.get(route_id)
+        if isinstance(existing, dict):
+            if int(existing.get("source_generation", -1)) == int(route.get("generation", 0)) and existing.get("state") in {"prepared", "candidate"}:
+                return {**existing, "route_id": route_id}
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, f"rollover already pending for route: {route_id}", retryable=True)
+        source_generation = int(route.get("generation", 0))
+        target_generation = source_generation + 1
+        pending = {
+            "token": f"roll_{token_urlsafe(18)}", "state": "prepared",
+            "source_generation": source_generation, "target_generation": target_generation,
+            "source_url": route["url"], "source_conversation_id": route["conversation_id"],
+            "project_id": route.get("project_id"), "channel_id": f"telegram-{route_id}-g{target_generation}",
+            "title": route.get("title") or route_id, "created_at": datetime.now(UTC).isoformat(),
+        }
+        rollovers[route_id] = pending
+        self._save(data)
+        return {**pending, "route_id": route_id}
+
+    def record_rollover_candidate(self, route_id: str, token: str, url: str) -> dict:
+        route_id = self.validate_route_id(route_id)
+        canonical = canonical_chat_url(url)
+        project_id, conversation_id = conversation_parts(canonical)
+        data = self._load()
+        route = data["routes"].get(route_id)
+        pending = (data.get("rollovers") or {}).get(route_id)
+        if route is None or not isinstance(pending, dict) or pending.get("token") != token:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "rollover token is invalid or stale")
+        if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during rollover")
+        if project_id != pending.get("project_id"):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "rollover candidate belongs to a different project")
+        if conversation_id == pending.get("source_conversation_id"):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "rollover candidate must be a new conversation")
+        pending.update({"state": "candidate", "candidate_url": canonical, "candidate_conversation_id": conversation_id, "candidate_seen_at": datetime.now(UTC).isoformat()})
+        self._save(data)
+        return {**pending, "route_id": route_id}
+
+    def commit_rollover(self, route_id: str, token: str) -> dict:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        route = data["routes"].get(route_id)
+        pending = (data.get("rollovers") or {}).get(route_id)
+        if route is None or not isinstance(pending, dict) or pending.get("token") != token:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "rollover token is invalid or stale")
+        if pending.get("state") != "candidate" or not pending.get("candidate_url"):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "rollover candidate is not ready")
+        if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during rollover")
+        committed = {
+            "title": pending.get("title") or route.get("title") or route_id, "url": pending["candidate_url"],
+            "project_id": pending.get("project_id"), "conversation_id": pending["candidate_conversation_id"],
+            "channel_id": pending["channel_id"], "generation": int(pending["target_generation"]),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        data["routes"][route_id] = committed
+        if not data.get("default_route"): data["default_route"] = route_id
+        data["requested_route"] = route_id
+        data["requested_at"] = datetime.now(UTC).isoformat()
+        data.setdefault("last_rollover", {})[route_id] = {
+            **pending,
+            "state": "committed",
+            "bootstrap_sent": False,
+            "committed_at": datetime.now(UTC).isoformat(),
+        }
+        del data["rollovers"][route_id]
+        self._save(data)
+        return {**committed, "route_id": route_id, "default": data.get("default_route") == route_id}
+
+    def complete_rollover(self, route_id: str, token: str) -> dict:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        last = (data.get("last_rollover") or {}).get(route_id)
+        route = data["routes"].get(route_id)
+        if (
+            not isinstance(last, dict)
+            or last.get("token") != token
+            or last.get("state") not in {"committed", "complete"}
+            or route is None
+            or int(route.get("generation", -1)) != int(last.get("target_generation", -2))
+        ):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "committed rollover token is invalid or stale")
+        last.update({
+            "state": "complete",
+            "bootstrap_sent": True,
+            "bootstrap_sent_at": datetime.now(UTC).isoformat(),
+        })
+        self._save(data)
+        return {**last, "route_id": route_id}
+
+    def abort_rollover(self, route_id: str, token: str, reason: str | None = None) -> dict:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        pending = (data.get("rollovers") or {}).get(route_id)
+        if not isinstance(pending, dict) or pending.get("token") != token:
+            return {"route_id": route_id, "aborted": False}
+        data.setdefault("last_rollover", {})[route_id] = {**pending, "state": "aborted", "reason": (reason or "unspecified")[:500], "aborted_at": datetime.now(UTC).isoformat()}
+        del data["rollovers"][route_id]
+        self._save(data)
+        return {"route_id": route_id, "aborted": True}
+
     def takeover(self, route_id: str, url: str, title: str | None = None, *, make_default: bool = True) -> dict:
         route_id = self.validate_route_id(route_id)
         canonical = canonical_chat_url(url)
         project_id, conversation_id = conversation_parts(canonical)
         data = self._load()
+        if isinstance((data.get("rollovers") or {}).get(route_id), dict):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"rollover already pending for route: {route_id}",
+                retryable=True,
+            )
         previous = data["routes"].get(route_id) or {}
         generation = int(previous.get("generation", 0)) + 1
         channel_id = f"telegram-{route_id}-g{generation}"

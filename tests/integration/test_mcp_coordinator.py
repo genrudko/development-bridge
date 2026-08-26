@@ -47,6 +47,11 @@ async def test_resource_mount_routing_and_internal_continue():
                     assert "batched_messages" in resource.contents[0].text
                     assert "call coordinator_ack" in resource.contents[0].text
                     assert "Bridge ref:" in resource.contents[0].text
+                    assert "development-bridge/control-v1" in resource.contents[0].text
+                    assert "development-bridge/control-ack-v1" in resource.contents[0].text
+                    assert "handledControlOperations" in resource.contents[0].text
+                    assert "CONTROL_OPS_KEY" in resource.contents[0].text
+                    assert "localStorage.setItem" in resource.contents[0].text
                     mounted = await session.call_tool(
                         "coordinator_x_mount", {"channel_id": "chat-42"}
                     )
@@ -142,3 +147,38 @@ async def test_external_trigger_is_unavailable_unset_and_token_protected(tmp_pat
         )
         assert armed.status_code == 202
         assert (await client.post("/mcp/x/coordinator/claim?channel_id=external")).json()["message"] == "wake"
+
+
+@pytest.mark.asyncio
+async def test_rollover_control_keeps_active_route_until_commit(tmp_path):
+    settings = BridgeSettings.model_validate(
+        {"coordinator": {"route_registry_path": tmp_path / "routes.json"}}
+    )
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-a",
+        "telegram-ad5x-g5",
+    )
+    prepared = container.route_registry.prepare_rollover("ad5x")
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client:
+            candidate = await client.post(
+                "/mcp/x/coordinator/rollover/candidate",
+                json={
+                    "route_id": "ad5x", "token": prepared["token"],
+                    "url": "https://chatgpt.com/g/g-p-project/c/conv-b",
+                },
+            )
+            assert candidate.status_code == 200
+            assert candidate.json()["state"] == "candidate"
+            assert container.route_registry.resolve("ad5x")["conversation_id"] == "conv-a"
+            committed = await client.post(
+                "/mcp/x/coordinator/rollover/commit",
+                json={"route_id": "ad5x", "token": prepared["token"]},
+            )
+            assert committed.status_code == 200
+            assert committed.json()["conversation_id"] == "conv-b"
+            assert container.route_registry.resolve("ad5x")["conversation_id"] == "conv-b"

@@ -72,6 +72,30 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         result.meta = dict(COORDINATOR_UI_META)
         return result
 
+    async def rollover_prepare(ctx, params, request_context):
+        arguments = params.arguments or {}
+        route_id = container.route_registry.validate_route_id(arguments["route_id"])
+        route = container.route_registry.resolve(route_id)
+        if route is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        coordinator_status = await container.coordinator.status(route["channel_id"])
+        if coordinator_status.get("state") != "idle":
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"route coordinator is not idle: {coordinator_status.get('state')}",
+                retryable=True,
+            )
+        pending = container.route_registry.prepare_rollover(route_id)
+        result = to_mcp_result(success(request_context.request_id, {"route": route, "rollover": pending, "state": "prepared"}))
+        trigger_path = container.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
+        public_base = container.settings.server.public_base_url
+        trigger_url = str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
+        result.structured_content = {"channel_id": route["channel_id"], "trigger_url": trigger_url, "rollover": pending}
+        result.meta = dict(COORDINATOR_UI_META)
+        return result
+
     async def context_get(ctx, params, request_context):
         arguments = params.arguments or {}
         route_id = container.route_registry.validate_route_id(arguments["route_id"])
@@ -197,6 +221,24 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 _meta=common_meta,
             ),
             takeover,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_rollover_prepare",
+                description=(
+                    "Prepare fail-safe automatic physical-chat rollover without changing the active route; "
+                    "Browser Host creates and verifies the successor before committing it."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {"route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"}},
+                    "required": ["route_id"],
+                    "additionalProperties": False,
+                },
+                _meta=common_meta,
+            ),
+            rollover_prepare,
             "coordinator-x",
         ),
         RegisteredTool(

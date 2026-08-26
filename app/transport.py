@@ -242,6 +242,47 @@ def create_streamable_http_app(
         except BridgeError as error:
             return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
 
+    async def coordinator_rollover_control(request: Request):
+        try:
+            if int(request.headers.get("content-length", "0") or 0) > 8192:
+                raise ValueError
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise TypeError
+            route_id = body["route_id"]
+            token = body["token"]
+            action = request.path_params.get("action", "")
+            if action == "candidate":
+                result = container.route_registry.record_rollover_candidate(
+                    route_id, token, body["url"]
+                )
+            elif action == "commit":
+                result = container.route_registry.commit_rollover(route_id, token)
+            elif action == "complete":
+                result = container.route_registry.complete_rollover(route_id, token)
+            elif action == "abort":
+                result = container.route_registry.abort_rollover(
+                    route_id, token, body.get("reason")
+                )
+            else:
+                return JSONResponse(
+                    {"error": "Unknown rollover action"},
+                    status_code=404,
+                    headers=coordinator_ui_headers,
+                )
+            return JSONResponse(result, headers=coordinator_ui_headers)
+        except BridgeError as error:
+            status = 409 if error.code is ErrorCode.POLICY_VIOLATION else 400
+            return JSONResponse(
+                {"error": error.message}, status_code=status, headers=coordinator_ui_headers
+            )
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse(
+                {"error": "Invalid rollover request"},
+                status_code=400,
+                headers=coordinator_ui_headers,
+            )
+
     async def coordinator_trigger(request: Request):
         configured_token = settings.server.x_trigger_token
         if configured_token is None:
@@ -365,6 +406,14 @@ def create_streamable_http_app(
             coordinator_observed,
             methods=["POST"],
             name="coordinator_x_observed",
+        )
+    )
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/rollover/{action}",
+            coordinator_rollover_control,
+            methods=["POST"],
+            name="coordinator_x_rollover_control",
         )
     )
     custom_routes.append(
