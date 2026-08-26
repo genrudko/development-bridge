@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import json
 import os
@@ -465,6 +466,96 @@ class BrowserHost:
         payload = response.json()
         return payload if isinstance(payload, dict) else {}
 
+    def refresh_conversation_snapshot(self, page: dict, timeout: float = 30) -> dict:
+        conversation_id = self.target_url.split("/c/", 1)[1].split("/", 1)[0]
+        expected_path = f"/backend-api/conversations/{conversation_id}"
+        ws = websocket.create_connection(
+            page["webSocketDebuggerUrl"], timeout=max(8.0, timeout), suppress_origin=True
+        )
+        try:
+            request_base = int(time.time() * 1_000_000) % 900_000_000
+            commands = (
+                (request_base + 1, "Network.enable", {}),
+                (request_base + 2, "Network.setCacheDisabled", {"cacheDisabled": True}),
+                (request_base + 3, "Page.navigate", {"url": self.target_url}),
+            )
+            for request_id, method, params in commands:
+                ws.send(json.dumps({"id": request_id, "method": method, "params": params}))
+
+            deadline = time.monotonic() + timeout
+            conversation_request_id = None
+            loaded = False
+            while time.monotonic() < deadline:
+                event = json.loads(ws.recv())
+                method = event.get("method")
+                params = event.get("params", {})
+                if method == "Network.responseReceived":
+                    response = params.get("response", {})
+                    response_url = str(response.get("url") or "")
+                    if (
+                        urlsplit(response_url).path == expected_path
+                        and int(response.get("status", 0) or 0) == 200
+                    ):
+                        conversation_request_id = params.get("requestId")
+                elif (
+                    conversation_request_id
+                    and method == "Network.loadingFinished"
+                    and params.get("requestId") == conversation_request_id
+                ):
+                    loaded = True
+                    break
+            if not conversation_request_id or not loaded:
+                return {"ok": False, "error": "conversation_snapshot_not_loaded"}
+
+            body_request_id = request_base + 4
+            ws.send(json.dumps({
+                "id": body_request_id,
+                "method": "Network.getResponseBody",
+                "params": {"requestId": conversation_request_id},
+            }))
+            body_result = None
+            body_deadline = time.monotonic() + min(10.0, timeout)
+            while time.monotonic() < body_deadline:
+                event = json.loads(ws.recv())
+                if event.get("id") == body_request_id:
+                    body_result = event.get("result", {})
+                    break
+            if not isinstance(body_result, dict) or not body_result.get("body"):
+                return {"ok": False, "error": "conversation_snapshot_body_missing"}
+            raw_body = str(body_result["body"])
+            if body_result.get("base64Encoded"):
+                raw_body = base64.b64decode(raw_body).decode("utf-8")
+            return self.parse_conversation_snapshot(json.loads(raw_body))
+        finally:
+            ws.close()
+
+    @staticmethod
+    def parse_conversation_snapshot(payload: object) -> dict:
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "conversation_snapshot_invalid"}
+        current_node = payload.get("current_node")
+        messages = payload.get("messages")
+        if not isinstance(current_node, str) or not isinstance(messages, list):
+            return {"ok": False, "error": "conversation_snapshot_invalid"}
+        current_message = next(
+            (item for item in messages if isinstance(item, dict) and item.get("id") == current_node),
+            None,
+        )
+        if current_message is None:
+            return {
+                "ok": False,
+                "error": "conversation_current_node_missing",
+                "current_node": current_node,
+            }
+        author = current_message.get("author")
+        return {
+            "ok": True,
+            "current_node": current_node,
+            "current_role": author.get("role") if isinstance(author, dict) else None,
+            "current_status": current_message.get("status"),
+            "message_count": len(messages),
+        }
+
     def conversation_leaf_state(self, page: dict) -> dict:
         expression = r'''(()=>{
           const generating=[...document.querySelectorAll('button')].some(b=>{
@@ -476,12 +567,14 @@ class BrowserHost:
           const assistant=last?.querySelector('[data-message-author-role="assistant"]')||null;
           const user=last?.querySelector('[data-message-author-role="user"]')||null;
           const tool=last?.querySelector('[data-message-author-role="tool"]')||null;
+          const message=last?.querySelector('[data-message-id]')||null;
           const assistantText=(assistant?.innerText||assistant?.textContent||'').trim();
           return {
             document_ready:document.readyState,
             generating,
             turn_count:turns.length,
             last_key:last?.getAttribute('data-turn-id')||last?.getAttribute('data-turn-id-container')||last?.getAttribute('data-testid')||null,
+            last_message_id:message?.getAttribute('data-message-id')||null,
             has_user:!!user,
             has_tool:!!tool,
             has_assistant:!!assistant,
@@ -492,7 +585,9 @@ class BrowserHost:
         value = self.runtime_evaluate(page, expression)
         return value if isinstance(value, dict) else {}
 
-    def wait_for_settled_conversation(self, page: dict, timeout: float = 30) -> dict:
+    def wait_for_settled_conversation(
+        self, page: dict, timeout: float = 30, *, expected_message_id: str | None = None
+    ) -> dict:
         deadline = time.monotonic() + timeout
         last: dict = {}
         while time.monotonic() < deadline:
@@ -500,19 +595,49 @@ class BrowserHost:
                 last = self.conversation_leaf_state(page)
             except TRANSIENT_CDP_ERRORS as exc:
                 last = {"settled": False, "error": str(exc)}
-            if last.get("settled") is True:
+            current = (
+                expected_message_id is None
+                or last.get("last_message_id") == expected_message_id
+            )
+            last["current"] = current
+            if last.get("settled") is True and current:
                 return last
             time.sleep(0.75)
         return last
 
     def prepare_browser_preflight(self, page: dict, continuation_id: str) -> dict:
-        self.navigate(page, self.target_url)
-        leaf = self.wait_for_settled_conversation(page, timeout=30)
+        snapshot = self.refresh_conversation_snapshot(page, timeout=30)
+        if not snapshot.get("ok"):
+            return {
+                "authorized": False,
+                "error": snapshot.get("error") or "conversation_snapshot_failed",
+                "snapshot": snapshot,
+            }
+        if (
+            snapshot.get("current_role") != "assistant"
+            or snapshot.get("current_status") != "finished_successfully"
+        ):
+            return {
+                "authorized": False,
+                "error": "conversation_server_leaf_not_finished",
+                "snapshot": snapshot,
+            }
+        leaf = self.wait_for_settled_conversation(
+            page, timeout=30, expected_message_id=str(snapshot["current_node"])
+        )
         if leaf.get("settled") is not True:
             return {
                 "authorized": False,
                 "error": "conversation_leaf_not_settled",
                 "leaf": leaf,
+                "snapshot": snapshot,
+            }
+        if leaf.get("current") is not True:
+            return {
+                "authorized": False,
+                "error": "conversation_leaf_not_current",
+                "leaf": leaf,
+                "snapshot": snapshot,
             }
 
         iframe_count, iframe_error = self.safe_coordinator_iframe_count(page)
@@ -1538,6 +1663,53 @@ class BrowserHost:
                         rate_limit_count=self.rate_limit_count,
                     )
                     time.sleep(max(self.cfg.check_interval, min(15.0, backoff_seconds)))
+                    continue
+
+                # A pending X turn must get first chance to refresh the canonical chat.
+                # Do this before generic iframe recovery: a heavy/stale transcript can make
+                # the old page unresponsive, while prepare_browser_preflight() starts with a
+                # canonical Page.navigate and then performs its own listener recovery.
+                try:
+                    early_status = self.coordinator_local_status()
+                    early_continuation_id = early_status.get("continuation_id")
+                    if (
+                        early_status.get("state") == "browser_preflight"
+                        and isinstance(early_continuation_id, str)
+                        and early_continuation_id
+                    ):
+                        self.write_state(
+                            status="preparing_web_turn", cdp_ok=True, target_ok=True,
+                            coordinator_iframes=0, polling_ok=poll_ok,
+                            polling_detail=poll_detail, current_url=current_url, title=title,
+                            continuation_id=early_continuation_id,
+                        )
+                        prepared = self.prepare_browser_preflight(page, early_continuation_id)
+                        self.write_state(
+                            status="starting" if prepared.get("authorized") else "preparing_web_turn",
+                            cdp_ok=True, target_ok=True, coordinator_iframes=0,
+                            polling_ok=poll_ok, polling_detail=poll_detail,
+                            current_url=current_url, title=title,
+                            continuation_id=early_continuation_id, web_turn_preflight=prepared,
+                        )
+                        time.sleep(self.cfg.check_interval)
+                        continue
+                except TRANSIENT_CDP_ERRORS as exc:
+                    self.write_state(
+                        status="preparing_web_turn", cdp_ok=True, target_ok=True,
+                        coordinator_iframes=0, polling_ok=poll_ok,
+                        polling_detail=poll_detail, current_url=current_url, title=title,
+                        error=f"transient early browser preflight failure: {exc}",
+                    )
+                    time.sleep(self.cfg.check_interval)
+                    continue
+                except (RuntimeError, ValueError, requests.RequestException) as exc:
+                    self.write_state(
+                        status="preparing_web_turn", cdp_ok=True, target_ok=True,
+                        coordinator_iframes=0, polling_ok=poll_ok,
+                        polling_detail=poll_detail, current_url=current_url, title=title,
+                        error=f"early browser preflight failure: {exc}",
+                    )
+                    time.sleep(self.cfg.check_interval)
                     continue
 
                 iframe_count, iframe_error = self.safe_coordinator_iframe_count(page)
