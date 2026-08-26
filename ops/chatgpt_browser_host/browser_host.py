@@ -560,6 +560,32 @@ class BrowserHost:
                 "current_node": current_node,
             }
         author = current_message.get("author")
+        latest_user_index = None
+        latest_user_id = None
+        for index, item in enumerate(messages):
+            if not isinstance(item, dict):
+                continue
+            item_author = item.get("author")
+            if isinstance(item_author, dict) and item_author.get("role") == "user":
+                latest_user_index = index
+                latest_user_id = item.get("id")
+
+        latest_final_id = None
+        if latest_user_index is not None:
+            for item in messages[latest_user_index + 1:]:
+                if not isinstance(item, dict):
+                    continue
+                item_author = item.get("author")
+                if not isinstance(item_author, dict) or item_author.get("role") != "assistant":
+                    continue
+                if (
+                    item.get("status") == "finished_successfully"
+                    and item.get("end_turn") is True
+                    and item.get("recipient") == "all"
+                    and item.get("channel") == "final"
+                ):
+                    latest_final_id = item.get("id")
+
         return {
             "ok": True,
             "current_node": current_node,
@@ -568,6 +594,9 @@ class BrowserHost:
             "current_end_turn": current_message.get("end_turn"),
             "current_recipient": current_message.get("recipient"),
             "current_channel": current_message.get("channel"),
+            "latest_user_id": latest_user_id,
+            "latest_final_id": latest_final_id,
+            "latest_turn_complete": bool(latest_user_id and latest_final_id),
             "message_count": len(messages),
         }
 
@@ -632,21 +661,15 @@ class BrowserHost:
                     "error": snapshot.get("error") or "conversation_snapshot_failed",
                     "snapshot": snapshot,
                 }
-            if not (
-                snapshot.get("current_role") == "assistant"
-                and snapshot.get("current_status") == "finished_successfully"
-                and snapshot.get("current_end_turn") is True
-                and snapshot.get("current_recipient") == "all"
-                and snapshot.get("current_channel") == "final"
-            ):
+            if snapshot.get("latest_turn_complete") is not True:
                 return {
                     "authorized": False,
-                    "error": "conversation_server_leaf_not_final",
+                    "error": "conversation_latest_turn_not_final",
                     "snapshot": snapshot,
                 }
 
             leaf = self.wait_for_settled_conversation(
-                fresh_page, timeout=30, expected_message_id=str(snapshot["current_node"])
+                fresh_page, timeout=30, expected_message_id=str(snapshot["latest_final_id"])
             )
             if leaf.get("settled") is not True:
                 return {

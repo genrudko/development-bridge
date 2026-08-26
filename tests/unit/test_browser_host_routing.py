@@ -610,12 +610,15 @@ def test_browser_host_supervisor_keeps_chrome_alive_during_listener_recovery():
 def _final_snapshot(message_id: str = "message-current") -> dict:
     return {
         "ok": True,
-        "current_node": message_id,
-        "current_role": "assistant",
+        "current_node": "message-internal",
+        "current_role": "tool",
         "current_status": "finished_successfully",
-        "current_end_turn": True,
+        "current_end_turn": None,
         "current_recipient": "all",
-        "current_channel": "final",
+        "current_channel": "commentary",
+        "latest_user_id": "message-user",
+        "latest_final_id": message_id,
+        "latest_turn_complete": True,
     }
 
 
@@ -699,7 +702,7 @@ def test_browser_host_preflight_refuses_stale_dom_leaf(tmp_path: Path):
     result = host.prepare_browser_preflight(page, "cont_abcdefghij")
     assert result["authorized"] is False
     assert result["error"] == "conversation_leaf_not_current"
-    assert result["snapshot"]["current_node"] == "message-server-current"
+    assert result["snapshot"]["latest_final_id"] == "message-server-current"
     assert closed == ["page-fresh"]
     assert authorized == []
 
@@ -714,13 +717,14 @@ def test_browser_host_preflight_refuses_nonfinal_server_leaf(tmp_path: Path):
         "ok": True, "current_node": "message-tool-call",
         "current_role": "assistant", "current_status": "finished_successfully",
         "current_end_turn": False, "current_recipient": "api_tool.call_tool",
-        "current_channel": None,
+        "current_channel": None, "latest_user_id": "message-user",
+        "latest_final_id": None, "latest_turn_complete": False,
     }
     closed = []
     host.close_page = lambda page_id: closed.append(page_id)
     result = host.prepare_browser_preflight(page, "cont_abcdefghij")
     assert result["authorized"] is False
-    assert result["error"] == "conversation_server_leaf_not_final"
+    assert result["error"] == "conversation_latest_turn_not_final"
     assert closed == ["page-fresh"]
 
 
@@ -730,6 +734,7 @@ def test_browser_host_parses_current_server_message_from_compact_conversation():
         "current_node": "message-b",
         "messages": [
             {"id": "message-a", "author": {"role": "user"}, "status": "finished_successfully"},
+            {"id": "message-tool", "author": {"role": "tool"}, "status": "finished_successfully"},
             {
                 "id": "message-b", "author": {"role": "assistant"},
                 "status": "finished_successfully", "end_turn": True,
@@ -745,7 +750,10 @@ def test_browser_host_parses_current_server_message_from_compact_conversation():
         "current_end_turn": True,
         "current_recipient": "all",
         "current_channel": "final",
-        "message_count": 2,
+        "latest_user_id": "message-a",
+        "latest_final_id": "message-b",
+        "latest_turn_complete": True,
+        "message_count": 3,
     }
 
 
@@ -773,3 +781,19 @@ def test_browser_host_listener_recovery_yields_to_pending_preflight(tmp_path: Pa
     result = host.recover_listener({"webSocketDebuggerUrl": "ws://fake"})
     assert result is False
     assert sent == []
+
+
+def test_browser_host_snapshot_completion_uses_final_after_latest_user_not_current_node():
+    module = _module()
+    result = module.BrowserHost.parse_conversation_snapshot({
+        "current_node": "message-tool",
+        "messages": [
+            {"id": "message-user", "author": {"role": "user"}, "status": "finished_successfully"},
+            {"id": "message-final", "author": {"role": "assistant"}, "status": "finished_successfully", "end_turn": True, "recipient": "all", "channel": "final"},
+            {"id": "message-tool", "author": {"role": "tool"}, "status": "finished_successfully", "recipient": "all", "channel": "commentary"},
+        ],
+    })
+    assert result["current_role"] == "tool"
+    assert result["latest_user_id"] == "message-user"
+    assert result["latest_final_id"] == "message-final"
+    assert result["latest_turn_complete"] is True
