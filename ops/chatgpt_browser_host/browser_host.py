@@ -686,7 +686,18 @@ class BrowserHost:
             time.sleep(0.5)
         raise RuntimeError("ChatGPT branch did not produce a new conversation URL")
 
+    def coordinator_app_targets(self) -> list[dict]:
+        response = requests.get(f"{self.cdp_base}/json/list", timeout=2)
+        response.raise_for_status()
+        return [
+            item for item in response.json()
+            if item.get("type") == "iframe"
+            and "web-sandbox.oaiusercontent.com" in item.get("url", "")
+            and item.get("webSocketDebuggerUrl")
+        ]
+
     def coordinator_app_control(self, page: dict, action: str, **payload) -> dict:
+        del page  # The inner MCP App is an OOPIF target; parent-page postMessage hits the sandbox shell.
         nonce = token_urlsafe(12)
         message = {
             "type": "development-bridge/control-v1",
@@ -695,33 +706,75 @@ class BrowserHost:
             **payload,
         }
         encoded = json.dumps(message, ensure_ascii=False)
-        expression = f'''(async()=>{{
-          const payload={encoded};
-          const frames=[...document.querySelectorAll('iframe')].filter(f=>
-            f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html')
-          );
-          if(!frames.length)return {{ok:false,error:'iframe_missing',frame_count:0}};
-          return await new Promise(resolve=>{{
-            let settled=false;
-            const sources=new Set(frames.map(f=>f.contentWindow));
-            const finish=value=>{{
-              if(settled)return; settled=true; clearTimeout(timer);
-              window.removeEventListener('message',handler); resolve(value);
-            }};
-            const handler=event=>{{
-              const data=event.data;
-              if(!sources.has(event.source)||!data||data.type!=='development-bridge/control-ack-v1'||data.nonce!==payload.nonce)return;
-              finish({{...data,frame_count:frames.length}});
-            }};
-            window.addEventListener('message',handler);
-            for(const frame of frames){{
-              try{{frame.contentWindow.postMessage(payload,new URL(frame.src).origin);}}catch(_){{}}
-            }}
-            const timer=setTimeout(()=>finish({{ok:false,error:'control_timeout',frame_count:frames.length}}),4000);
-          }});
-        }})()'''
-        result = self.runtime_evaluate(page, expression, await_promise=True, timeout=6)
-        return result if isinstance(result, dict) else {"ok": False, "error": "invalid_control_ack"}
+        for target in self.coordinator_app_targets():
+            ws = websocket.create_connection(
+                target["webSocketDebuggerUrl"], timeout=5, suppress_origin=True
+            )
+            try:
+                enable_id = int(time.time() * 1_000_000) % 1_000_000_000
+                ws.send(json.dumps({"id": enable_id, "method": "Runtime.enable"}))
+                contexts: list[int] = []
+                while True:
+                    event = json.loads(ws.recv())
+                    if event.get("method") == "Runtime.executionContextCreated":
+                        context = event.get("params", {}).get("context", {})
+                        context_id = context.get("id")
+                        if isinstance(context_id, int):
+                            contexts.append(context_id)
+                    if event.get("id") == enable_id:
+                        break
+                for context_id in contexts:
+                    probe_id = (enable_id + context_id + 1) % 1_000_000_000
+                    probe = (
+                        "document.title==='Development Bridge Coordinator'"
+                        "&&typeof window.__developmentBridgeControlV1==='function'"
+                    )
+                    ws.send(json.dumps({
+                        "id": probe_id,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "contextId": context_id,
+                            "expression": probe,
+                            "returnByValue": True,
+                        },
+                    }))
+                    while True:
+                        event = json.loads(ws.recv())
+                        if event.get("id") == probe_id:
+                            capable = bool(
+                                event.get("result", {}).get("result", {}).get("value", False)
+                            )
+                            break
+                    if not capable:
+                        continue
+                    call_id = (probe_id + 1000) % 1_000_000_000
+                    expression = (
+                        f"window.__developmentBridgeControlV1({encoded})"
+                    )
+                    ws.send(json.dumps({
+                        "id": call_id,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "contextId": context_id,
+                            "expression": expression,
+                            "returnByValue": True,
+                            "awaitPromise": True,
+                        },
+                    }))
+                    while True:
+                        event = json.loads(ws.recv())
+                        if event.get("id") != call_id:
+                            continue
+                        result = event.get("result", {})
+                        if result.get("exceptionDetails"):
+                            raise RuntimeError("MCP App control evaluation failed")
+                        value = result.get("result", {}).get("value")
+                        if isinstance(value, dict):
+                            return value
+                        break
+            finally:
+                ws.close()
+        return {"ok": False, "error": "control_context_missing"}
 
     def ensure_control_channel(self, page: dict, channel_id: str) -> dict:
         ping = self.coordinator_app_control(page, "ping")
@@ -919,6 +972,11 @@ class BrowserHost:
             committed = self.rollover_control("commit", rollover)
             self.rollover_count += 1
             return {"state": "committed", "route": committed, "polling_detail": poll_detail}
+        except TRANSIENT_CDP_ERRORS as exc:
+            if self.rollover_age_seconds(rollover) <= 180:
+                return {"state": "waiting_transient", "error": str(exc)}
+            self.abort_pending_rollover(rollover, f"transient rollover failure exceeded TTL: {exc}")
+            return {"state": "aborted", "error": str(exc)}
         except Exception as exc:
             self.abort_pending_rollover(rollover, str(exc))
             return {"state": "aborted", "error": str(exc)}

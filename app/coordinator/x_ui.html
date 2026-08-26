@@ -99,14 +99,50 @@ async function clearProtocolContext() {
   modelContextContinuation = null;
 }
 
-function controlAck(event, payload) {
-  try {
-    event.source?.postMessage(
-      { type: "development-bridge/control-ack-v1", ...payload },
-      event.origin,
-    );
-  } catch (_) {}
+async function handleControl(data) {
+  if (
+    !data ||
+    data.type !== "development-bridge/control-v1" ||
+    typeof data.nonce !== "string" ||
+    data.nonce.length < 8 || data.nonce.length > 128
+  ) return { nonce: String(data?.nonce || ""), ok: false, error: "invalid_control" };
+  const action = String(data.action || "");
+  if (action === "ping") {
+    return { nonce: data.nonce, action, ok: appConnected, channel_id: channelId };
+  }
+  if (!appConnected) {
+    return { nonce: data.nonce, action, ok: false, error: "app_not_connected" };
+  }
+  const requestedChannel = String(data.channel_id || "");
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(requestedChannel)) {
+    return { nonce: data.nonce, action, ok: false, error: "invalid_channel" };
+  }
+  channelId = requestedChannel;
+  if (action === "bind") {
+    await clearProtocolContext();
+    return { nonce: data.nonce, action, ok: true, channel_id: channelId };
+  }
+  if (action === "bootstrap") {
+    const operationId = String(data.operation_id || "");
+    const message = String(data.message || "").trim();
+    if (!operationId || operationId.length > 128 || !message || message.length > 4000) {
+      return { nonce: data.nonce, action, ok: false, error: "invalid_bootstrap" };
+    }
+    if (handledControlOperations.has(operationId)) {
+      return { nonce: data.nonce, action, ok: true, duplicate: true, channel_id: channelId };
+    }
+    const context = String(data.context || "").trim();
+    if (context && context.length <= 8000) await setProtocolContext(context);
+    await app.sendMessage({ role: "user", content: [{ type: "text", text: message }] });
+    rememberControlOperation(operationId);
+    return { nonce: data.nonce, action, ok: true, channel_id: channelId };
+  }
+  return { nonce: data.nonce, action, ok: false, error: "unknown_action" };
 }
+
+// Browser Host owns a localhost-only CDP endpoint and uses this deliberately narrow
+// function to control the inner MCP App execution context through the sandbox shell.
+window.__developmentBridgeControlV1 = async (data) => handleControl(data);
 
 window.addEventListener("message", (event) => {
   const data = event.data;
@@ -114,53 +150,17 @@ window.addEventListener("message", (event) => {
     event.origin !== "https://chatgpt.com" ||
     event.source !== window.parent ||
     !data ||
-    data.type !== "development-bridge/control-v1" ||
-    typeof data.nonce !== "string" ||
-    data.nonce.length < 8 || data.nonce.length > 128
+    data.type !== "development-bridge/control-v1"
   ) return;
-  void (async () => {
-    const action = String(data.action || "");
-    if (action === "ping") {
-      controlAck(event, { nonce: data.nonce, action, ok: appConnected, channel_id: channelId });
-      return;
-    }
-    if (!appConnected) {
-      controlAck(event, { nonce: data.nonce, action, ok: false, error: "app_not_connected" });
-      return;
-    }
-    const requestedChannel = String(data.channel_id || "");
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(requestedChannel)) {
-      controlAck(event, { nonce: data.nonce, action, ok: false, error: "invalid_channel" });
-      return;
-    }
-    channelId = requestedChannel;
-    if (action === "bind") {
-      await clearProtocolContext();
-      controlAck(event, { nonce: data.nonce, action, ok: true, channel_id: channelId });
-      return;
-    }
-    if (action === "bootstrap") {
-      const operationId = String(data.operation_id || "");
-      const message = String(data.message || "").trim();
-      if (!operationId || operationId.length > 128 || !message || message.length > 4000) {
-        controlAck(event, { nonce: data.nonce, action, ok: false, error: "invalid_bootstrap" });
-        return;
-      }
-      if (handledControlOperations.has(operationId)) {
-        controlAck(event, { nonce: data.nonce, action, ok: true, duplicate: true, channel_id: channelId });
-        return;
-      }
-      const context = String(data.context || "").trim();
-      if (context && context.length <= 8000) await setProtocolContext(context);
-      await app.sendMessage({ role: "user", content: [{ type: "text", text: message }] });
-      rememberControlOperation(operationId);
-      controlAck(event, { nonce: data.nonce, action, ok: true, channel_id: channelId });
-      return;
-    }
-    controlAck(event, { nonce: data.nonce, action, ok: false, error: "unknown_action" });
-  })().catch((error) => {
+  void handleControl(data).then((payload) => {
+    try {
+      event.source?.postMessage(
+        { type: "development-bridge/control-ack-v1", ...payload },
+        event.origin,
+      );
+    } catch (_) {}
+  }).catch((error) => {
     console.error("Coordinator control error", error);
-    controlAck(event, { nonce: data.nonce, action: String(data.action || ""), ok: false, error: "control_failed" });
   });
 });
 

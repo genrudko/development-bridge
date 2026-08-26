@@ -267,6 +267,7 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
 def test_browser_host_rollover_aborts_before_commit_on_successor_failure(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
+    module.TRANSIENT_CDP_ERRORS = (OSError, TimeoutError)
     host.route_generation = 5
     rollover = {
         "token": "roll_test_token",
@@ -365,3 +366,68 @@ def test_browser_host_preflight_requires_native_iframe_in_ready_turn(tmp_path: P
     assert "ROLLOVER_READY roll_test" in expressions[0]
     assert "coordinator-x-v" in expressions[0]
     assert "data-message-author-role" in expressions[0]
+
+
+
+def test_browser_host_controls_inner_mcp_app_execution_context(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.coordinator_app_targets = lambda: [{"webSocketDebuggerUrl": "ws://inner"}]
+    sent = []
+    queue = []
+    class FakeWS:
+        def send(self, raw):
+            request = __import__("json").loads(raw)
+            sent.append(request)
+            rid = request["id"]
+            method = request["method"]
+            if method == "Runtime.enable":
+                queue.extend([
+                    {"method": "Runtime.executionContextCreated", "params": {"context": {"id": 3}}},
+                    {"method": "Runtime.executionContextCreated", "params": {"context": {"id": 1}}},
+                    {"id": rid, "result": {}},
+                ])
+            elif "__developmentBridgeControlV1==='function'" in request["params"]["expression"]:
+                capable = request["params"]["contextId"] == 3
+                queue.append({"id": rid, "result": {"result": {"value": capable}}})
+            elif "window.__developmentBridgeControlV1(" in request["params"]["expression"]:
+                queue.append({"id": rid, "result": {"result": {"value": {
+                    "ok": True, "channel_id": "telegram-ad5x-g5"
+                }}}})
+            else:
+                raise AssertionError(request)
+        def recv(self):
+            return __import__("json").dumps(queue.pop(0))
+        def close(self):
+            pass
+    monkeypatch.setattr(module.websocket, "create_connection", lambda *a, **k: FakeWS(), raising=False)
+    result = host.coordinator_app_control({}, "ping")
+    assert result == {"ok": True, "channel_id": "telegram-ad5x-g5"}
+    call = next(item for item in sent if "window.__developmentBridgeControlV1(" in item.get("params", {}).get("expression", ""))
+    assert call["params"]["contextId"] == 3
+    assert call["params"]["awaitPromise"] is True
+
+
+def test_browser_host_rollover_retries_transient_cdp_failure(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.route_generation = 5
+    rollover = {
+        "token": "roll_transient",
+        "state": "candidate",
+        "source_generation": 5,
+        "target_generation": 6,
+        "source_url": host.target_url,
+        "candidate_url": "https://chatgpt.com/g/g-p-ad5x/c/conv-b",
+        "channel_id": "telegram-ad5x-g6",
+        "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    }
+    host.pending_rollover = lambda: dict(rollover)
+    host.pages = lambda: [{"id": "candidate", "url": rollover["candidate_url"]}]
+    host.wait_for_control_channel = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("Connection timed out"))
+    aborted = []
+    host.abort_pending_rollover = lambda current, reason: aborted.append(reason) or {"aborted": True}
+    result = host.process_pending_rollover()
+    assert result["state"] == "waiting_transient"
+    assert "timed out" in result["error"]
+    assert aborted == []
