@@ -431,3 +431,11 @@ def test_browser_host_rollover_retries_transient_cdp_failure(tmp_path: Path):
     assert result["state"] == "waiting_transient"
     assert "timed out" in result["error"]
     assert aborted == []
+
+
+def test_browser_host_supervisor_keeps_chrome_alive_during_listener_recovery():
+    source = (Path(__file__).parents[2] / "ops/chatgpt_browser_host/browser_host.py").read_text()
+    assert "listener history recovery exhausted; reloading current chat in-process" in source
+    assert "MCP X polling not observed for route={self.route_id}; reloading current chat" in source
+    assert "raise RuntimeError(\n                            \"coordinator MCP App iframe could not be recovered" not in source
+    assert "raise RuntimeError(\n                        f\"MCP X polling not observed for route=" not in source

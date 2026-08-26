@@ -1314,10 +1314,20 @@ class BrowserHost:
                         time.sleep(self.cfg.check_interval)
                         continue
                     if not recovered:
-                        raise RuntimeError(
-                            "coordinator MCP App iframe could not be recovered "
-                            "from virtualized chat history"
+                        # Keep the authenticated Chrome alive. A fresh tool card may have arrived in
+                        # another client while this page was open; reload the same physical chat and
+                        # retry instead of entering a Chrome/systemd restart loop.
+                        self.listener_recovery_count += 1
+                        self.reload_route_target()
+                        poll_deadline = time.monotonic() + self.cfg.poll_grace
+                        self.write_state(
+                            status="recovering_listener", cdp_ok=True, target_ok=True,
+                            coordinator_iframes=0, polling_ok=False, polling_detail=poll_detail,
+                            current_url=current_url, title=title,
+                            note="listener history recovery exhausted; reloading current chat in-process",
                         )
+                        time.sleep(self.cfg.check_interval)
+                        continue
                     # The iframe has mounted; give its X polling a fresh grace window.
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
                     iframe_count, iframe_error = self.safe_coordinator_iframe_count(page)
@@ -1361,9 +1371,19 @@ class BrowserHost:
                         pass
 
                 if poll_ok is False and time.monotonic() >= poll_deadline:
-                    raise RuntimeError(
-                        f"MCP X polling not observed for route={self.route_id}: {poll_detail}"
+                    # Missing X polling is a listener-recovery condition, not a reason to destroy
+                    # the authenticated browser process. Reload the same chat and keep retrying.
+                    self.listener_recovery_count += 1
+                    self.reload_route_target()
+                    poll_deadline = time.monotonic() + self.cfg.poll_grace
+                    self.write_state(
+                        status="degraded", cdp_ok=True, target_ok=True,
+                        coordinator_iframes=iframe_count, polling_ok=False,
+                        polling_detail=poll_detail, current_url=current_url, title=title,
+                        error=f"MCP X polling not observed for route={self.route_id}; reloading current chat",
                     )
+                    time.sleep(self.cfg.check_interval)
+                    continue
 
                 self.write_state(
                     status="healthy" if poll_ok is True and iframe_count > 0 else "starting",
