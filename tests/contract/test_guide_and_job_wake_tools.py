@@ -96,6 +96,12 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
             }),
             SimpleNamespace(request_id="wake-request"),
         )
+        status = await container.coordinator.status()
+        assert status["state"] == "browser_preflight"
+        authorized = await container.coordinator.authorize_browser_preflight(
+            "coordinator", status["continuation_id"]
+        )
+        assert authorized["authorized"] is True
         return await container.coordinator.claim()
 
     claim = asyncio.run(scenario())

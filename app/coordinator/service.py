@@ -30,6 +30,7 @@ class PendingWake:
     escalation_at: float | None = None
     transport_delivered: bool = False
     transport_delivered_at: float | None = None
+    browser_preflight_authorized_at: float | None = None
     queued_messages: list[str] = field(default_factory=list)
     queued_escalation_messages: list[str] = field(default_factory=list)
 
@@ -53,9 +54,16 @@ class CoordinatorService:
     MIN_DELAY_SECONDS = 0.0
     MAX_DELAY_SECONDS = 300.0
     LEASE_SECONDS = 20.0
+    BROWSER_PREFLIGHT_TTL_SECONDS = 15.0
 
-    def __init__(self, state_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        state_path: Path | None = None,
+        *,
+        browser_preflight_required: bool = False,
+    ) -> None:
         self._state_path = state_path.expanduser() if state_path is not None else None
+        self._browser_preflight_required = bool(browser_preflight_required)
         self._pending: dict[str, PendingWake] = {}
         self._cooldown_until: dict[str, float] = {}
         self._global_cooldown_until = 0.0
@@ -164,6 +172,15 @@ class CoordinatorService:
                 until = max(until, wake.lease_expires_at or 0.0)
         return until
 
+    def _browser_preflight_authorized(self, wake: PendingWake, now: float) -> bool:
+        if not self._browser_preflight_required or not wake.model_ack_required:
+            return True
+        authorized_at = wake.browser_preflight_authorized_at
+        return (
+            authorized_at is not None
+            and authorized_at + self.BROWSER_PREFLIGHT_TTL_SECONDS > now
+        )
+
     def _web_backoff_until(self, now: float) -> float:
         if self._state_path is None:
             return 0.0
@@ -200,6 +217,7 @@ class CoordinatorService:
         merge_current = wake.delivery_attempts == 0 and wake.claim_id is None and not wake.model_acknowledged and len(combined) <= self.MAX_BATCH_MESSAGE_CHARS
         if merge_current:
             wake.message = combined
+            wake.browser_preflight_authorized_at = None
             wake.escalation_message = self._bounded_escalation((wake.escalation_message, escalation_message))
             if debounce_seconds > 0:
                 now = time.time()
@@ -392,7 +410,25 @@ class CoordinatorService:
             other_claim_until = self._other_claim_until(channel_id, now)
             web_blocked = not wake.transport_delivered and web_backoff_until > now
             cooldown_blocked = not wake.transport_delivered and max(web_cooldown_until, other_claim_until) > now
-            ready = not claimed and not exhausted and not wake.transport_delivered and not web_blocked and not cooldown_blocked and now >= wake.available_at
+            browser_preflight_authorized = self._browser_preflight_authorized(wake, now)
+            browser_preflight_blocked = (
+                not wake.transport_delivered
+                and not claimed
+                and not exhausted
+                and not web_blocked
+                and not cooldown_blocked
+                and now >= wake.available_at
+                and not browser_preflight_authorized
+            )
+            ready = (
+                not claimed
+                and not exhausted
+                and not wake.transport_delivered
+                and not web_blocked
+                and not cooldown_blocked
+                and not browser_preflight_blocked
+                and now >= wake.available_at
+            )
             if claimed:
                 state = "claimed"
             elif wake.transport_delivered:
@@ -407,6 +443,8 @@ class CoordinatorService:
                 state = "web_backoff"
             elif cooldown_blocked:
                 state = "web_cooldown"
+            elif browser_preflight_blocked:
+                state = "browser_preflight"
             elif wake.model_ack_required and wake.delivery_attempts > 0 and not ready:
                 state = "waiting_model_ack"
             else:
@@ -433,6 +471,9 @@ class CoordinatorService:
                         "transport_delivered": wake.transport_delivered,
                         "transport_delivered_at": wake.transport_delivered_at,
                         "model_acknowledged": wake.model_acknowledged,
+                        "browser_preflight_required": self._browser_preflight_required,
+                        "browser_preflight_authorized": browser_preflight_authorized,
+                        "browser_preflight_ttl_seconds": self.BROWSER_PREFLIGHT_TTL_SECONDS,
                     }
                 )
             return data
@@ -451,11 +492,13 @@ class CoordinatorService:
                 or self._lease_active(wake, now)
                 or wake.transport_delivered
                 or wake.model_acknowledged
+                or not self._browser_preflight_authorized(wake, now)
                 or (wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts)
             ):
                 return {"channel_id": channel_id, "claimed": False}
             wake.claim_id = token_urlsafe(18)
             wake.lease_expires_at = now + self.LEASE_SECONDS
+            wake.browser_preflight_authorized_at = None
             if wake.model_ack_required:
                 wake.delivery_attempts += 1
                 if wake.delivery_attempts < wake.max_delivery_attempts:
@@ -483,6 +526,37 @@ class CoordinatorService:
                     }
                 )
             return data
+
+    async def authorize_browser_preflight(
+        self, channel_id: str, continuation_id: str
+    ) -> dict:
+        "Authorize one fresh Browser Host delivery attempt for a resilient continuation."
+        channel_id = self.validate_channel(channel_id)
+        continuation_id = self.validate_continuation_id(continuation_id)
+        now = time.time()
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if (
+                wake is None
+                or wake.continuation_id != continuation_id
+                or not wake.model_ack_required
+                or wake.transport_delivered
+                or wake.model_acknowledged
+                or self._lease_active(wake, now)
+            ):
+                return {
+                    "channel_id": channel_id,
+                    "continuation_id": continuation_id,
+                    "authorized": False,
+                }
+            wake.browser_preflight_authorized_at = now
+            self._save_state()
+            return {
+                "channel_id": channel_id,
+                "continuation_id": continuation_id,
+                "authorized": True,
+                "expires_after_seconds": self.BROWSER_PREFLIGHT_TTL_SECONDS,
+            }
 
     async def ack(self, channel_id: str, claim_id: str) -> dict:
         "Acknowledge one iframe transport delivery attempt."

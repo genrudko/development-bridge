@@ -242,6 +242,25 @@ def create_streamable_http_app(
         except BridgeError as error:
             return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
 
+    async def coordinator_browser_preflight(request: Request):
+        client_host = request.client.host if request.client is not None else ""
+        if client_host not in {"127.0.0.1", "::1", "testclient"}:
+            return JSONResponse(
+                {"error": "Browser preflight authorization is localhost-only"},
+                status_code=403,
+                headers=coordinator_ui_headers,
+            )
+        try:
+            return JSONResponse(
+                await container.coordinator.authorize_browser_preflight(
+                    request.query_params.get("channel_id", "coordinator"),
+                    request.query_params.get("continuation_id", ""),
+                ),
+                headers=coordinator_ui_headers,
+            )
+        except BridgeError as error:
+            return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
+
     async def coordinator_rollover_control(request: Request):
         try:
             if int(request.headers.get("content-length", "0") or 0) > 8192:
@@ -406,6 +425,14 @@ def create_streamable_http_app(
             coordinator_observed,
             methods=["POST"],
             name="coordinator_x_observed",
+        )
+    )
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/preflight/authorize",
+            coordinator_browser_preflight,
+            methods=["POST"],
+            name="coordinator_x_browser_preflight",
         )
     )
     custom_routes.append(

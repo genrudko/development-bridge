@@ -340,3 +340,45 @@ async def test_observed_model_turn_requires_matching_delivered_continuation():
     service = CoordinatorService()
     armed = await service.arm_resilient("A", channel_id="route-g2")
     assert (await service.observe_model_turn("route-g2", armed["continuation_id"]))["observed"] is False
+
+
+@pytest.mark.asyncio
+async def test_browser_preflight_gate_blocks_resilient_claim_until_authorized():
+    service = CoordinatorService(browser_preflight_required=True)
+    armed = await service.arm_resilient(
+        "resume", channel_id="route-g9", delay_seconds=0, retry_delays_seconds=(0, 0)
+    )
+    status = await service.status("route-g9")
+    assert status["state"] == "browser_preflight"
+    assert status["ready"] is False
+    assert status["browser_preflight_required"] is True
+    assert status["browser_preflight_authorized"] is False
+    assert (await service.claim("route-g9"))["claimed"] is False
+    authorized = await service.authorize_browser_preflight(
+        "route-g9", armed["continuation_id"]
+    )
+    assert authorized["authorized"] is True
+    assert (await service.status("route-g9"))["ready"] is True
+    claim = await service.claim("route-g9")
+    assert claim["claimed"] is True
+    assert (await service.status("route-g9"))["state"] == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_browser_preflight_authorization_is_one_shot_and_expires(monkeypatch):
+    clock = [5000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(browser_preflight_required=True)
+    service.LEASE_SECONDS = 0
+    service.BROWSER_PREFLIGHT_TTL_SECONDS = 10
+    armed = await service.arm_resilient(
+        "resume", channel_id="route-g9", delay_seconds=0, retry_delays_seconds=(0, 0)
+    )
+    await service.authorize_browser_preflight("route-g9", armed["continuation_id"] )
+    clock[0] = 5011.0
+    assert (await service.claim("route-g9"))["claimed"] is False
+    assert (await service.status("route-g9"))["state"] == "browser_preflight"
+    await service.authorize_browser_preflight("route-g9", armed["continuation_id"] )
+    claim = await service.claim("route-g9")
+    assert claim["claimed"] is True
+    assert service._pending["route-g9"].browser_preflight_authorized_at is None

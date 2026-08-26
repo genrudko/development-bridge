@@ -605,3 +605,44 @@ def test_browser_host_supervisor_keeps_chrome_alive_during_listener_recovery():
     assert "MCP X polling not observed for route={self.route_id}; reloading current chat" in source
     assert "raise RuntimeError(\n                            \"coordinator MCP App iframe could not be recovered" not in source
     assert "raise RuntimeError(\n                        f\"MCP X polling not observed for route=" not in source
+
+
+def test_browser_host_preflight_refreshes_settled_chat_before_authorizing(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    page = {"id": "page-1", "url": host.target_url}
+    calls = []
+    host.navigate = lambda selected, url: calls.append(("navigate", selected["id"], url))
+    host.wait_for_settled_conversation = lambda selected, timeout=30: {
+        "settled": True, "last_key": "leaf-ready", "assistant_chars": 42
+    }
+    host.safe_coordinator_iframe_count = lambda selected: (0, None)
+    host.recover_listener = lambda selected: calls.append(("recover", selected["id"])) or True
+    host.wait_for_polling = lambda channel_id, timeout=20: (True, "matches=4")
+    host.authorize_browser_preflight_local = lambda continuation_id: calls.append(
+        ("authorize", continuation_id)
+    ) or {"authorized": True, "continuation_id": continuation_id}
+    result = host.prepare_browser_preflight(page, "cont_abcdefghij")
+    assert result["authorized"] is True
+    assert result["leaf"]["last_key"] == "leaf-ready"
+    assert calls == [
+        ("navigate", "page-1", host.target_url),
+        ("recover", "page-1"),
+        ("authorize", "cont_abcdefghij"),
+    ]
+
+
+def test_browser_host_preflight_refuses_unsettled_leaf(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    page = {"id": "page-1", "url": host.target_url}
+    host.navigate = lambda selected, url: None
+    host.wait_for_settled_conversation = lambda selected, timeout=30: {
+        "settled": False, "has_user": True, "has_assistant": False
+    }
+    authorized = []
+    host.authorize_browser_preflight_local = lambda continuation_id: authorized.append(continuation_id)
+    result = host.prepare_browser_preflight(page, "cont_abcdefghij")
+    assert result["authorized"] is False
+    assert result["error"] == "conversation_leaf_not_settled"
+    assert authorized == []

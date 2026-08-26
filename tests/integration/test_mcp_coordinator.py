@@ -103,6 +103,22 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
             resilient = await container.coordinator.arm_resilient(
                 "observed", channel_id="observed-42", delay_seconds=0
             )
+            preflight_status = await client.get(
+                "/mcp/x/coordinator/status?channel_id=observed-42"
+            )
+            assert preflight_status.json()["state"] == "browser_preflight"
+            assert (
+                await client.post("/mcp/x/coordinator/claim?channel_id=observed-42")
+            ).json()["claimed"] is False
+            authorized = await client.post(
+                "/mcp/x/coordinator/preflight/authorize",
+                params={
+                    "channel_id": "observed-42",
+                    "continuation_id": resilient["continuation_id"],
+                },
+            )
+            assert authorized.status_code == 200
+            assert authorized.json()["authorized"] is True
             observed_claim = await client.post(
                 "/mcp/x/coordinator/claim?channel_id=observed-42"
             )

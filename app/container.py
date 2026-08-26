@@ -281,7 +281,10 @@ def build_container(
         configured.github.artifact_max_bytes,
     )
     route_registry = RouteRegistry(configured.coordinator.route_registry_path)
-    coordinator = CoordinatorService(route_registry.path.parent / "coordinator-wakes.json")
+    coordinator = CoordinatorService(
+        route_registry.path.parent / "coordinator-wakes.json",
+        browser_preflight_required=True,
+    )
 
     async def resume_coordinator_waiter(payload, records, reason):
         await coordinator.arm_job_continuation(records, reason, channel_id=str(payload["channel_id"]), message=(str(payload["message"]) if payload.get("message") is not None else None))

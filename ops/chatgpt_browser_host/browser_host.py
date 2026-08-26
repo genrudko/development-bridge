@@ -452,6 +452,106 @@ class BrowserHost:
         payload = response.json()
         return payload if isinstance(payload, dict) else {}
 
+    def authorize_browser_preflight_local(self, continuation_id: str) -> dict:
+        response = requests.post(
+            self.cfg.coordinator_local_url + "preflight/authorize",
+            params={
+                "channel_id": self.channel_id,
+                "continuation_id": continuation_id,
+            },
+            timeout=2,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    def conversation_leaf_state(self, page: dict) -> dict:
+        expression = r'''(()=>{
+          const generating=[...document.querySelectorAll('button')].some(b=>{
+            const text=((b.getAttribute('aria-label')||'')+' '+(b.innerText||'')).toLowerCase();
+            return text.includes('stop generating')||text.includes('stop streaming')||text.includes('остановить');
+          });
+          const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')];
+          const last=turns.at(-1)||null;
+          const assistant=last?.querySelector('[data-message-author-role="assistant"]')||null;
+          const user=last?.querySelector('[data-message-author-role="user"]')||null;
+          const tool=last?.querySelector('[data-message-author-role="tool"]')||null;
+          const assistantText=(assistant?.innerText||assistant?.textContent||'').trim();
+          return {
+            document_ready:document.readyState,
+            generating,
+            turn_count:turns.length,
+            last_key:last?.getAttribute('data-turn-id')||last?.getAttribute('data-turn-id-container')||last?.getAttribute('data-testid')||null,
+            has_user:!!user,
+            has_tool:!!tool,
+            has_assistant:!!assistant,
+            assistant_chars:assistantText.length,
+            settled:document.readyState==='complete'&&!generating&&!!assistant&&assistantText.length>0
+          };
+        })()'''
+        value = self.runtime_evaluate(page, expression)
+        return value if isinstance(value, dict) else {}
+
+    def wait_for_settled_conversation(self, page: dict, timeout: float = 30) -> dict:
+        deadline = time.monotonic() + timeout
+        last: dict = {}
+        while time.monotonic() < deadline:
+            try:
+                last = self.conversation_leaf_state(page)
+            except TRANSIENT_CDP_ERRORS as exc:
+                last = {"settled": False, "error": str(exc)}
+            if last.get("settled") is True:
+                return last
+            time.sleep(0.75)
+        return last
+
+    def prepare_browser_preflight(self, page: dict, continuation_id: str) -> dict:
+        self.navigate(page, self.target_url)
+        leaf = self.wait_for_settled_conversation(page, timeout=30)
+        if leaf.get("settled") is not True:
+            return {
+                "authorized": False,
+                "error": "conversation_leaf_not_settled",
+                "leaf": leaf,
+            }
+
+        iframe_count, iframe_error = self.safe_coordinator_iframe_count(page)
+        if iframe_count is None:
+            return {
+                "authorized": False,
+                "error": iframe_error or "coordinator_iframe_probe_failed",
+                "leaf": leaf,
+            }
+        if iframe_count == 0:
+            try:
+                recovered = self.recover_listener(page)
+            except TRANSIENT_CDP_ERRORS as exc:
+                return {
+                    "authorized": False,
+                    "error": f"listener_recovery_failed: {exc}",
+                    "leaf": leaf,
+                }
+            if not recovered:
+                return {
+                    "authorized": False,
+                    "error": "coordinator_iframe_not_recovered",
+                    "leaf": leaf,
+                }
+
+        poll_ok, poll_detail = self.wait_for_polling(self.channel_id, timeout=20)
+        if not poll_ok:
+            return {
+                "authorized": False,
+                "error": f"coordinator_polling_not_observed: {poll_detail}",
+                "leaf": leaf,
+            }
+        authorized = self.authorize_browser_preflight_local(continuation_id)
+        return {
+            **authorized,
+            "leaf": leaf,
+            "polling_detail": poll_detail,
+        }
+
     def sync_model_turn_observation(self, page: dict) -> dict | None:
         state, error = self.safe_bridge_turn_state(page)
         if state is None:
@@ -1500,6 +1600,59 @@ class BrowserHost:
                         time.sleep(self.cfg.check_interval)
                         continue
                     poll_ok, poll_detail = self.polling_ok()
+
+                try:
+                    coordinator_status = self.coordinator_local_status()
+                    continuation_id = coordinator_status.get("continuation_id")
+                    if (
+                        coordinator_status.get("state") == "browser_preflight"
+                        and isinstance(continuation_id, str)
+                        and continuation_id
+                    ):
+                        self.write_state(
+                            status="preparing_web_turn",
+                            cdp_ok=True,
+                            target_ok=True,
+                            coordinator_iframes=iframe_count,
+                            polling_ok=poll_ok,
+                            polling_detail=poll_detail,
+                            current_url=current_url,
+                            title=title,
+                            continuation_id=continuation_id,
+                        )
+                        prepared = self.prepare_browser_preflight(page, continuation_id)
+                        self.write_state(
+                            status="starting" if prepared.get("authorized") else "preparing_web_turn",
+                            cdp_ok=True,
+                            target_ok=True,
+                            coordinator_iframes=iframe_count,
+                            polling_ok=poll_ok,
+                            polling_detail=poll_detail,
+                            current_url=current_url,
+                            title=title,
+                            continuation_id=continuation_id,
+                            web_turn_preflight=prepared,
+                        )
+                        time.sleep(self.cfg.check_interval)
+                        continue
+                except TRANSIENT_CDP_ERRORS as exc:
+                    self.write_state(
+                        status="preparing_web_turn", cdp_ok=True, target_ok=True,
+                        coordinator_iframes=iframe_count, polling_ok=poll_ok,
+                        polling_detail=poll_detail, current_url=current_url, title=title,
+                        error=f"transient browser preflight failure: {exc}",
+                    )
+                    time.sleep(self.cfg.check_interval)
+                    continue
+                except (RuntimeError, ValueError, requests.RequestException) as exc:
+                    self.write_state(
+                        status="preparing_web_turn", cdp_ok=True, target_ok=True,
+                        coordinator_iframes=iframe_count, polling_ok=poll_ok,
+                        polling_detail=poll_detail, current_url=current_url, title=title,
+                        error=f"browser preflight failure: {exc}",
+                    )
+                    time.sleep(self.cfg.check_interval)
+                    continue
 
                 try:
                     active_rollover = self.active_rollover_record()
