@@ -607,21 +607,35 @@ def test_browser_host_supervisor_keeps_chrome_alive_during_listener_recovery():
     assert "raise RuntimeError(\n                        f\"MCP X polling not observed for route=" not in source
 
 
-def test_browser_host_preflight_refreshes_settled_chat_before_authorizing(tmp_path: Path):
+def _final_snapshot(message_id: str = "message-current") -> dict:
+    return {
+        "ok": True,
+        "current_node": message_id,
+        "current_role": "assistant",
+        "current_status": "finished_successfully",
+        "current_end_turn": True,
+        "current_recipient": "all",
+        "current_channel": "final",
+    }
+
+
+def test_browser_host_preflight_uses_fresh_current_chat_before_authorizing(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    page = {"id": "page-1", "url": host.target_url}
+    page = {"id": "page-stale", "url": host.target_url}
+    fresh = {"id": "page-fresh", "url": "about:blank"}
     calls = []
-    host.refresh_conversation_snapshot = lambda selected, timeout=30: {
-        "ok": True, "current_node": "message-current",
-        "current_role": "assistant", "current_status": "finished_successfully",
-    }
+    host.create_blank_page = lambda: fresh
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: (
+        calls.append(("snapshot", selected["id"])) or _final_snapshot()
+    )
     host.wait_for_settled_conversation = lambda selected, timeout=30, expected_message_id=None: {
         "settled": True, "current": expected_message_id == "message-current",
         "last_key": "leaf-ready", "last_message_id": "message-current", "assistant_chars": 42
     }
     host.safe_coordinator_iframe_count = lambda selected: (0, None)
     host.recover_listener = lambda selected: calls.append(("recover", selected["id"])) or True
+    host.close_page = lambda page_id: calls.append(("close", page_id))
     host.wait_for_polling = lambda channel_id, timeout=20: (True, "matches=4")
     host.authorize_browser_preflight_local = lambda continuation_id: calls.append(
         ("authorize", continuation_id)
@@ -629,28 +643,33 @@ def test_browser_host_preflight_refreshes_settled_chat_before_authorizing(tmp_pa
     result = host.prepare_browser_preflight(page, "cont_abcdefghij")
     assert result["authorized"] is True
     assert result["leaf"]["last_key"] == "leaf-ready"
+    assert result["fresh_page_id"] == "page-fresh"
     assert calls == [
-        ("recover", "page-1"),
+        ("snapshot", "page-fresh"),
+        ("recover", "page-fresh"),
+        ("close", "page-stale"),
         ("authorize", "cont_abcdefghij"),
     ]
 
 
-def test_browser_host_preflight_refuses_unsettled_leaf(tmp_path: Path):
+def test_browser_host_preflight_refuses_unsettled_leaf_and_closes_fresh_page(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    page = {"id": "page-1", "url": host.target_url}
-    host.refresh_conversation_snapshot = lambda selected, timeout=30: {
-        "ok": True, "current_node": "message-current",
-        "current_role": "assistant", "current_status": "finished_successfully",
-    }
+    page = {"id": "page-stale", "url": host.target_url}
+    fresh = {"id": "page-fresh", "url": "about:blank"}
+    host.create_blank_page = lambda: fresh
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: _final_snapshot()
     host.wait_for_settled_conversation = lambda selected, timeout=30, expected_message_id=None: {
         "settled": False, "current": False, "has_user": True, "has_assistant": False
     }
+    closed = []
+    host.close_page = lambda page_id: closed.append(page_id)
     authorized = []
     host.authorize_browser_preflight_local = lambda continuation_id: authorized.append(continuation_id)
     result = host.prepare_browser_preflight(page, "cont_abcdefghij")
     assert result["authorized"] is False
     assert result["error"] == "conversation_leaf_not_settled"
+    assert closed == ["page-fresh"]
     assert authorized == []
 
 
@@ -666,34 +685,43 @@ def test_browser_host_prioritizes_browser_preflight_before_generic_iframe_recove
 def test_browser_host_preflight_refuses_stale_dom_leaf(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    page = {"id": "page-1", "url": host.target_url}
+    page = {"id": "page-stale", "url": host.target_url}
+    fresh = {"id": "page-fresh", "url": "about:blank"}
+    host.create_blank_page = lambda: fresh
     authorized = []
-    host.refresh_conversation_snapshot = lambda selected, timeout=30: {
-        "ok": True, "current_node": "message-server-current",
-        "current_role": "assistant", "current_status": "finished_successfully",
-    }
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: _final_snapshot("message-server-current")
     host.wait_for_settled_conversation = lambda selected, timeout=30, expected_message_id=None: {
         "settled": True, "current": False, "last_message_id": "message-stale",
     }
+    closed = []
+    host.close_page = lambda page_id: closed.append(page_id)
     host.authorize_browser_preflight_local = lambda continuation_id: authorized.append(continuation_id)
     result = host.prepare_browser_preflight(page, "cont_abcdefghij")
     assert result["authorized"] is False
     assert result["error"] == "conversation_leaf_not_current"
     assert result["snapshot"]["current_node"] == "message-server-current"
+    assert closed == ["page-fresh"]
     assert authorized == []
 
 
-def test_browser_host_preflight_refuses_unfinished_server_leaf(tmp_path: Path):
+def test_browser_host_preflight_refuses_nonfinal_server_leaf(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    page = {"id": "page-1", "url": host.target_url}
+    page = {"id": "page-stale", "url": host.target_url}
+    fresh = {"id": "page-fresh", "url": "about:blank"}
+    host.create_blank_page = lambda: fresh
     host.refresh_conversation_snapshot = lambda selected, timeout=30: {
-        "ok": True, "current_node": "message-user",
-        "current_role": "user", "current_status": "finished_successfully",
+        "ok": True, "current_node": "message-tool-call",
+        "current_role": "assistant", "current_status": "finished_successfully",
+        "current_end_turn": False, "current_recipient": "api_tool.call_tool",
+        "current_channel": None,
     }
+    closed = []
+    host.close_page = lambda page_id: closed.append(page_id)
     result = host.prepare_browser_preflight(page, "cont_abcdefghij")
     assert result["authorized"] is False
-    assert result["error"] == "conversation_server_leaf_not_finished"
+    assert result["error"] == "conversation_server_leaf_not_final"
+    assert closed == ["page-fresh"]
 
 
 def test_browser_host_parses_current_server_message_from_compact_conversation():
@@ -702,7 +730,11 @@ def test_browser_host_parses_current_server_message_from_compact_conversation():
         "current_node": "message-b",
         "messages": [
             {"id": "message-a", "author": {"role": "user"}, "status": "finished_successfully"},
-            {"id": "message-b", "author": {"role": "assistant"}, "status": "finished_successfully"},
+            {
+                "id": "message-b", "author": {"role": "assistant"},
+                "status": "finished_successfully", "end_turn": True,
+                "recipient": "all", "channel": "final",
+            },
         ],
     })
     assert result == {
@@ -710,6 +742,9 @@ def test_browser_host_parses_current_server_message_from_compact_conversation():
         "current_node": "message-b",
         "current_role": "assistant",
         "current_status": "finished_successfully",
+        "current_end_turn": True,
+        "current_recipient": "all",
+        "current_channel": "final",
         "message_count": 2,
     }
 

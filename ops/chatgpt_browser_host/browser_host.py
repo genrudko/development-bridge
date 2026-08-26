@@ -287,6 +287,18 @@ class BrowserHost:
             if item.get("type") == "page" and item.get("url", "").startswith("https://chatgpt.com")
         ]
 
+    def create_blank_page(self) -> dict:
+        response = requests.put(f"{self.cdp_base}/json/new?about:blank", timeout=2)
+        response.raise_for_status()
+        page = response.json()
+        if (
+            not isinstance(page, dict)
+            or not page.get("id")
+            or not page.get("webSocketDebuggerUrl")
+        ):
+            raise RuntimeError("Chrome did not create a debuggable page")
+        return page
+
     def navigate(self, page: dict, url: str) -> None:
         ws = websocket.create_connection(
             page["webSocketDebuggerUrl"],
@@ -553,6 +565,9 @@ class BrowserHost:
             "current_node": current_node,
             "current_role": author.get("role") if isinstance(author, dict) else None,
             "current_status": current_message.get("status"),
+            "current_end_turn": current_message.get("end_turn"),
+            "current_recipient": current_message.get("recipient"),
+            "current_channel": current_message.get("channel"),
             "message_count": len(messages),
         }
 
@@ -606,76 +621,103 @@ class BrowserHost:
         return last
 
     def prepare_browser_preflight(self, page: dict, continuation_id: str) -> dict:
-        snapshot = self.refresh_conversation_snapshot(page, timeout=30)
-        if not snapshot.get("ok"):
-            return {
-                "authorized": False,
-                "error": snapshot.get("error") or "conversation_snapshot_failed",
-                "snapshot": snapshot,
-            }
-        if (
-            snapshot.get("current_role") != "assistant"
-            or snapshot.get("current_status") != "finished_successfully"
-        ):
-            return {
-                "authorized": False,
-                "error": "conversation_server_leaf_not_finished",
-                "snapshot": snapshot,
-            }
-        leaf = self.wait_for_settled_conversation(
-            page, timeout=30, expected_message_id=str(snapshot["current_node"])
-        )
-        if leaf.get("settled") is not True:
-            return {
-                "authorized": False,
-                "error": "conversation_leaf_not_settled",
-                "leaf": leaf,
-                "snapshot": snapshot,
-            }
-        if leaf.get("current") is not True:
-            return {
-                "authorized": False,
-                "error": "conversation_leaf_not_current",
-                "leaf": leaf,
-                "snapshot": snapshot,
-            }
-
-        iframe_count, iframe_error = self.safe_coordinator_iframe_count(page)
-        if iframe_count is None:
-            return {
-                "authorized": False,
-                "error": iframe_error or "coordinator_iframe_probe_failed",
-                "leaf": leaf,
-            }
-        if iframe_count == 0:
-            try:
-                recovered = self.recover_listener(page)
-            except TRANSIENT_CDP_ERRORS as exc:
+        fresh_page: dict | None = None
+        keep_fresh_page = False
+        try:
+            fresh_page = self.create_blank_page()
+            snapshot = self.refresh_conversation_snapshot(fresh_page, timeout=30)
+            if not snapshot.get("ok"):
                 return {
                     "authorized": False,
-                    "error": f"listener_recovery_failed: {exc}",
-                    "leaf": leaf,
+                    "error": snapshot.get("error") or "conversation_snapshot_failed",
+                    "snapshot": snapshot,
                 }
-            if not recovered:
+            if not (
+                snapshot.get("current_role") == "assistant"
+                and snapshot.get("current_status") == "finished_successfully"
+                and snapshot.get("current_end_turn") is True
+                and snapshot.get("current_recipient") == "all"
+                and snapshot.get("current_channel") == "final"
+            ):
                 return {
                     "authorized": False,
-                    "error": "coordinator_iframe_not_recovered",
-                    "leaf": leaf,
+                    "error": "conversation_server_leaf_not_final",
+                    "snapshot": snapshot,
                 }
 
-        poll_ok, poll_detail = self.wait_for_polling(self.channel_id, timeout=20)
-        if not poll_ok:
+            leaf = self.wait_for_settled_conversation(
+                fresh_page, timeout=30, expected_message_id=str(snapshot["current_node"])
+            )
+            if leaf.get("settled") is not True:
+                return {
+                    "authorized": False,
+                    "error": "conversation_leaf_not_settled",
+                    "leaf": leaf,
+                    "snapshot": snapshot,
+                }
+            if leaf.get("current") is not True:
+                return {
+                    "authorized": False,
+                    "error": "conversation_leaf_not_current",
+                    "leaf": leaf,
+                    "snapshot": snapshot,
+                }
+
+            iframe_count, iframe_error = self.safe_coordinator_iframe_count(fresh_page)
+            if iframe_count is None:
+                return {
+                    "authorized": False,
+                    "error": iframe_error or "coordinator_iframe_probe_failed",
+                    "leaf": leaf,
+                    "snapshot": snapshot,
+                }
+            if iframe_count == 0:
+                try:
+                    recovered = self.recover_listener(fresh_page)
+                except TRANSIENT_CDP_ERRORS as exc:
+                    return {
+                        "authorized": False,
+                        "error": f"listener_recovery_failed: {exc}",
+                        "leaf": leaf,
+                        "snapshot": snapshot,
+                    }
+                if not recovered:
+                    return {
+                        "authorized": False,
+                        "error": "coordinator_iframe_not_recovered",
+                        "leaf": leaf,
+                        "snapshot": snapshot,
+                    }
+
+            old_page_id = str(page.get("id") or "")
+            fresh_page_id = str(fresh_page.get("id") or "")
+            if old_page_id and fresh_page_id and old_page_id != fresh_page_id:
+                self.close_page(old_page_id)
+            keep_fresh_page = True
+
+            poll_ok, poll_detail = self.wait_for_polling(self.channel_id, timeout=20)
+            if not poll_ok:
+                return {
+                    "authorized": False,
+                    "error": f"coordinator_polling_not_observed: {poll_detail}",
+                    "leaf": leaf,
+                    "snapshot": snapshot,
+                    "fresh_page_id": fresh_page_id,
+                }
+            authorized = self.authorize_browser_preflight_local(continuation_id)
             return {
-                "authorized": False,
-                "error": f"coordinator_polling_not_observed: {poll_detail}",
+                **authorized,
                 "leaf": leaf,
+                "snapshot": snapshot,
+                "polling_detail": poll_detail,
+                "fresh_page_id": fresh_page_id,
             }
-        authorized = self.authorize_browser_preflight_local(continuation_id)
-        return {
-            **authorized,
-            "leaf": leaf,
-            "polling_detail": poll_detail,
-        }
+        finally:
+            if fresh_page is not None and not keep_fresh_page:
+                fresh_page_id = str(fresh_page.get("id") or "")
+                old_page_id = str(page.get("id") or "")
+                if fresh_page_id and fresh_page_id != old_page_id:
+                    self.close_page(fresh_page_id)
 
     def sync_model_turn_observation(self, page: dict) -> dict | None:
         state, error = self.safe_bridge_turn_state(page)
