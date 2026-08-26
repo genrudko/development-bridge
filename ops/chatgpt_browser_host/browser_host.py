@@ -172,6 +172,7 @@ class BrowserHost:
         self.rate_limit_count = 0
         self.rate_limit_until = 0.0
         self.last_bridge_turn_id = 0
+        self.last_bridge_turn_key: str | None = None
         self.bridge_turn_baselined = False
         self.model_turn_observation_count = 0
 
@@ -192,29 +193,12 @@ class BrowserHost:
             "listener_recovery_count": self.listener_recovery_count,
             "discovered_chats": self.discovered_chats,
             "last_bridge_turn_id": self.last_bridge_turn_id,
+            "last_bridge_turn_key": self.last_bridge_turn_key,
             "bridge_turn_baselined": self.bridge_turn_baselined,
             "model_turn_observation_count": self.model_turn_observation_count,
         }
         payload.update(extra)
         atomic_json(self.cfg.state_file, payload)
-
-    def restore_observer_state(self) -> None:
-        try:
-            state = json.loads(self.cfg.state_file.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return
-        if (
-            state.get("route_id") != self.route_id
-            or state.get("channel_id") != self.channel_id
-            or state.get("target_url") != self.target_url
-            or int(state.get("route_generation", -1)) != self.route_generation
-        ):
-            return
-        self.last_bridge_turn_id = int(state.get("last_bridge_turn_id", 0) or 0)
-        self.bridge_turn_baselined = bool(state.get("bridge_turn_baselined", False))
-        self.model_turn_observation_count = int(
-            state.get("model_turn_observation_count", 0) or 0
-        )
 
     def ensure_debug_port_free(self) -> None:
         try:
@@ -397,6 +381,7 @@ class BrowserHost:
                 return text.includes('stop generating')||text.includes('stop streaming')||text.includes('остановить');
               });
               let turnId=0;
+              let turnKey=null;
               for(const turn of document.querySelectorAll('[data-testid^="conversation-turn-"]')){
                 const match=(turn.getAttribute('data-testid')||'').match(/^conversation-turn-(\d+)$/);
                 if(!match) continue;
@@ -405,10 +390,11 @@ class BrowserHost:
                 const toolText=(tool?.innerText||tool?.textContent||'').trim();
                 const assistantText=(assistant?.innerText||assistant?.textContent||'').trim();
                 if(toolText.startsWith('⚡ Bridge · задача завершена') && assistantText){
-                  turnId=Math.max(turnId, Number(match[1]));
+                  turnId=Number(match[1]);
+                  turnKey=turn.getAttribute('data-turn-id')||turn.getAttribute('data-turn-id-container')||match[0];
                 }
               }
-              return {turn_id:turnId,generating};
+              return {turn_id:turnId,turn_key:turnKey,generating};
             })()'''
             ws.send(json.dumps({
                 "id": request_id,
@@ -423,8 +409,10 @@ class BrowserHost:
                         .get("result", {})
                         .get("value", {})
                     ) or {}
+                    turn_key = value.get("turn_key")
                     return {
                         "turn_id": int(value.get("turn_id", 0) or 0),
+                        "turn_key": str(turn_key) if turn_key else None,
                         "generating": bool(value.get("generating", False)),
                     }
         finally:
@@ -464,8 +452,10 @@ class BrowserHost:
         if state is None:
             raise RuntimeError(f"transient model-turn probe failed: {error}")
         latest = int(state.get("turn_id", 0) or 0)
+        latest_key = state.get("turn_key")
         if not self.bridge_turn_baselined:
             self.last_bridge_turn_id = latest
+            self.last_bridge_turn_key = latest_key
             self.bridge_turn_baselined = True
             return None
         if state.get("generating"):
@@ -474,15 +464,18 @@ class BrowserHost:
         if (
             status.get("transport_delivered") is True
             and isinstance(status.get("continuation_id"), str)
-            and latest > self.last_bridge_turn_id
+            and latest_key is not None
+            and latest_key != self.last_bridge_turn_key
         ):
             observed = self.observe_model_turn_local(status["continuation_id"])
             if observed.get("observed") is True:
                 self.model_turn_observation_count += 1
                 self.last_bridge_turn_id = latest
+                self.last_bridge_turn_key = latest_key
                 return observed
-        if latest > self.last_bridge_turn_id and not status.get("transport_delivered"):
+        if latest_key != self.last_bridge_turn_key and not status.get("transport_delivered"):
             self.last_bridge_turn_id = latest
+            self.last_bridge_turn_key = latest_key
         return None
 
     def recover_listener(self, page: dict) -> bool:
@@ -736,7 +729,6 @@ class BrowserHost:
         try:
             self.ensure_debug_port_free()
             self.refresh_route_target()
-            self.restore_observer_state()
             self.write_state(status="starting")
             self.start_xvfb()
             self.start_chrome()
@@ -754,6 +746,7 @@ class BrowserHost:
                 if route_changed:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
                     self.last_bridge_turn_id = 0
+                    self.last_bridge_turn_key = None
                     self.bridge_turn_baselined = False
                     self.reload_route_target()
                 target_ok, page = self.enforce_target()

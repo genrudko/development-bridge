@@ -128,7 +128,7 @@ def test_browser_host_rate_limit_backoff_is_bounded_and_persisted(tmp_path: Path
 def test_browser_host_model_turn_observer_baselines_before_ack(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "generating": False}, None)
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "turn_key": "turn-26", "generating": False}, None)
     called = []
     host.coordinator_local_status = lambda: called.append(True) or {}
     assert host.sync_model_turn_observation({}) is None
@@ -141,8 +141,9 @@ def test_browser_host_observes_new_completed_bridge_turn(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
     host.last_bridge_turn_id = 25
+    host.last_bridge_turn_key = "turn-25"
     host.bridge_turn_baselined = True
-    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "generating": False}, None)
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "turn_key": "turn-26", "generating": False}, None)
     host.coordinator_local_status = lambda: {
         "state": "waiting_model_ack",
         "transport_delivered": True,
@@ -161,8 +162,9 @@ def test_browser_host_does_not_observe_while_generating(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
     host.last_bridge_turn_id = 25
+    host.last_bridge_turn_key = "turn-25"
     host.bridge_turn_baselined = True
-    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "generating": True}, None)
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 26, "turn_key": "turn-26", "generating": True}, None)
     called = []
     host.coordinator_local_status = lambda: called.append(True) or {}
     assert host.sync_model_turn_observation({}) is None
@@ -173,10 +175,10 @@ def test_browser_host_does_not_observe_while_generating(tmp_path: Path):
 def test_browser_host_zero_baseline_does_not_swallow_first_real_wake(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    host.safe_bridge_turn_state = lambda page: ({"turn_id": 0, "generating": False}, None)
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 0, "turn_key": None, "generating": False}, None)
     assert host.sync_model_turn_observation({}) is None
     assert host.bridge_turn_baselined is True
-    host.safe_bridge_turn_state = lambda page: ({"turn_id": 1, "generating": False}, None)
+    host.safe_bridge_turn_state = lambda page: ({"turn_id": 1, "turn_key": "turn-1", "generating": False}, None)
     host.coordinator_local_status = lambda: {
         "transport_delivered": True, "continuation_id": "cont_abcdefghij"
     }
@@ -185,26 +187,19 @@ def test_browser_host_zero_baseline_does_not_swallow_first_real_wake(tmp_path: P
     assert host.last_bridge_turn_id == 1
 
 
-def test_browser_host_restores_matching_observer_baseline(tmp_path: Path):
+def test_browser_host_observer_uses_turn_key_not_numeric_order(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    host.refresh_route_target()
-    host.cfg.state_dir.mkdir(parents=True, exist_ok=True)
-    host.cfg.state_file.write_text(
-        __import__("json").dumps({
-            "route_id": host.route_id,
-            "channel_id": host.channel_id,
-            "target_url": host.target_url,
-            "route_generation": host.route_generation,
-            "last_bridge_turn_id": 17,
-            "bridge_turn_baselined": True,
-            "model_turn_observation_count": 3,
-        }),
-        encoding="utf-8",
+    host.last_bridge_turn_id = 28
+    host.last_bridge_turn_key = "stable-old-uuid"
+    host.bridge_turn_baselined = True
+    host.safe_bridge_turn_state = lambda page: (
+        {"turn_id": 12, "turn_key": "stable-new-uuid", "generating": False}, None
     )
-    restored = module.BrowserHost(_config(module, tmp_path))
-    restored.refresh_route_target()
-    restored.restore_observer_state()
-    assert restored.last_bridge_turn_id == 17
-    assert restored.bridge_turn_baselined is True
-    assert restored.model_turn_observation_count == 3
+    host.coordinator_local_status = lambda: {
+        "transport_delivered": True, "continuation_id": "cont_abcdefghij"
+    }
+    host.observe_model_turn_local = lambda continuation_id: {"observed": True}
+    assert host.sync_model_turn_observation({}) == {"observed": True}
+    assert host.last_bridge_turn_id == 12
+    assert host.last_bridge_turn_key == "stable-new-uuid"
