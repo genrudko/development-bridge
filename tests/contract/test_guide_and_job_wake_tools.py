@@ -102,6 +102,9 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
             "coordinator", status["continuation_id"]
         )
         assert authorized["authorized"] is True
+        # Preflight authorization publishes the wake through a scheduled transition.
+        # Yield once so claim observes the newly authorized continuation deterministically.
+        await asyncio.sleep(0)
         return await container.coordinator.claim()
 
     claim = asyncio.run(scenario())
