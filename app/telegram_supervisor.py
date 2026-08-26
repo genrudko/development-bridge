@@ -25,6 +25,7 @@ class TelegramSupervisorService:
         api_hash: str | None,
         session_path: Path | None,
         chat_id: int | None,
+        topic_id: int | None,
         channel_id: str,
         coordinator: CoordinatorService,
         route_registry: RouteRegistry,
@@ -34,6 +35,7 @@ class TelegramSupervisorService:
         self.api_hash = api_hash
         self.session_path = session_path
         self.chat_id = chat_id
+        self.topic_id = topic_id
         self.channel_id = CoordinatorService.validate_channel(channel_id)
         self.coordinator = coordinator
         self.route_registry = route_registry
@@ -126,7 +128,9 @@ class TelegramSupervisorService:
         client = self._require_client()
         async with self._lock:
             message = await client.send_message(
-                self.chat_id, f"{self.CHATGPT_PREFIX} {text}"
+                self.chat_id,
+                f"{self.CHATGPT_PREFIX} {text}",
+                reply_to=self.topic_id,
             )
         return {
             "chat_id": self.chat_id,
@@ -142,6 +146,7 @@ class TelegramSupervisorService:
             "connected": self._connected,
             "chat_id": self.chat_id,
             "chat_title": self._chat_title,
+            "topic_id": self.topic_id,
             "channel_id": self.channel_id,
             "last_inbound_message_id": self._last_inbound_message_id,
             "last_inbound_at": self._last_inbound_at,
@@ -150,7 +155,22 @@ class TelegramSupervisorService:
             "coordinator": await self.coordinator.status((self.route_registry.resolve() or {}).get("channel_id", self.channel_id)),
         }
 
+    @staticmethod
+    def _message_topic_id(message) -> int | None:
+        reply_to = getattr(message, "reply_to", None)
+        if reply_to is None or not getattr(reply_to, "forum_topic", False):
+            return None
+        topic_id = getattr(reply_to, "reply_to_top_id", None) or getattr(
+            reply_to, "reply_to_msg_id", None
+        )
+        return int(topic_id) if topic_id is not None else None
+
     async def _on_message(self, event) -> None:
+        if (
+            self.topic_id is not None
+            and self._message_topic_id(event.message) != self.topic_id
+        ):
+            return
         text = str(getattr(event, "raw_text", "") or "").strip()
         if not text or text.startswith((self.BRIDGE_PREFIX, self.CHATGPT_PREFIX)):
             return
@@ -217,7 +237,9 @@ class TelegramSupervisorService:
         try:
             async with self._lock:
                 await self._client.send_message(
-                    self.chat_id, f"{self.BRIDGE_PREFIX} {text}"
+                    self.chat_id,
+                    f"{self.BRIDGE_PREFIX} {text}",
+                    reply_to=self.topic_id,
                 )
             return True
         except (RPCError, OSError, TimeoutError) as error:

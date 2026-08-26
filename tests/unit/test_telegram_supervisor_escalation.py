@@ -16,6 +16,7 @@ async def test_telegram_supervisor_resolves_due_escalation_after_notice(tmp_path
         api_hash=None,
         session_path=None,
         chat_id=None,
+        topic_id=None,
         channel_id="telegram-supervisor",
         coordinator=coordinator,
         route_registry=registry,

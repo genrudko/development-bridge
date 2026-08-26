@@ -296,6 +296,7 @@ def build_container(
             api_hash=(telegram.api_hash.get_secret_value() if telegram.api_hash is not None else None),
             session_path=telegram_session_path,
             chat_id=supervisor_settings.chat_id,
+            topic_id=supervisor_settings.topic_id,
             channel_id=supervisor_settings.channel_id,
             coordinator=coordinator,
             route_registry=route_registry,

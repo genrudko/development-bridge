@@ -145,6 +145,7 @@ class TelegramSupervisorSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     enabled: bool = False
     chat_id: int | None = None
+    topic_id: int | None = Field(default=None, gt=0)
     channel_id: str = Field(default="telegram-supervisor", min_length=1, max_length=64)
 
 
@@ -361,6 +362,8 @@ def load_settings(
         supervisor_updates["enabled"] = normalized in {"1", "true", "yes", "on"}
     if chat_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_CHAT_ID"):
         supervisor_updates["chat_id"] = int(chat_id)
+    if topic_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_TOPIC_ID"):
+        supervisor_updates["topic_id"] = int(topic_id)
     if channel_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_CHANNEL_ID"):
         supervisor_updates["channel_id"] = channel_id
     if supervisor_updates:
