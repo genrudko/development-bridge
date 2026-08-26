@@ -641,7 +641,147 @@ class BrowserHost:
         path = urlsplit(canonical_chat_url(url)).path
         return next((part for part in path.split("/") if part.startswith("g-p-")), None)
 
+    def dispatch_mouse_click(self, page: dict, x: float, y: float) -> None:
+        ws = websocket.create_connection(
+            page["webSocketDebuggerUrl"], timeout=5, suppress_origin=True
+        )
+        try:
+            request_id = int(time.time() * 1_000_000) % 1_000_000_000
+            for event_type, buttons in (
+                ("mouseMoved", 0),
+                ("mousePressed", 1),
+                ("mouseReleased", 0),
+            ):
+                request_id += 1
+                ws.send(json.dumps({
+                    "id": request_id,
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {
+                        "type": event_type,
+                        "x": x,
+                        "y": y,
+                        "button": "left",
+                        "buttons": buttons,
+                        "clickCount": 1,
+                        "pointerType": "mouse",
+                    },
+                }))
+                while True:
+                    message = json.loads(ws.recv())
+                    if message.get("id") != request_id:
+                        continue
+                    if message.get("error"):
+                        raise RuntimeError("ChatGPT branch mouse input failed")
+                    break
+        finally:
+            ws.close()
+
+    def materialize_branch_popup(
+        self, page: dict, branch_url: str, source_url: str, *, timeout: float = 30
+    ) -> tuple[dict, str]:
+        """Materialize ChatGPT's transient /branch route into a stable server conversation."""
+        source = canonical_chat_url(source_url)
+        candidate_prefix = source.rsplit("/c/", 1)[0]
+        ws = websocket.create_connection(
+            page["webSocketDebuggerUrl"], timeout=max(5, timeout), suppress_origin=True
+        )
+        request_id = int(time.time() * 1_000_000) % 1_000_000_000
+
+        def send(method: str, params: dict | None = None) -> int:
+            nonlocal request_id
+            request_id += 1
+            ws.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+            return request_id
+
+        body = ""
+        try:
+            enable_id = send("Network.enable")
+            while True:
+                message = json.loads(ws.recv())
+                if message.get("id") == enable_id:
+                    if message.get("error"):
+                        raise RuntimeError("cannot enable CDP network observation for ChatGPT branch")
+                    break
+
+            navigate_id = send("Page.navigate", {"url": branch_url})
+            branch_request_id: str | None = None
+            branch_status: int | None = None
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                message = json.loads(ws.recv())
+                if message.get("id") == navigate_id and message.get("error"):
+                    raise RuntimeError("cannot navigate ChatGPT branch hand-off route")
+                method = message.get("method")
+                params = message.get("params", {})
+                if method == "Network.requestWillBeSent":
+                    request = params.get("request", {})
+                    path = urlsplit(str(request.get("url") or "")).path
+                    if path.endswith("/conversation/new_branch"):
+                        branch_request_id = str(params.get("requestId") or "") or None
+                elif (
+                    method == "Network.responseReceived"
+                    and branch_request_id is not None
+                    and str(params.get("requestId")) == branch_request_id
+                ):
+                    branch_status = int(params.get("response", {}).get("status", 0) or 0)
+                elif (
+                    method == "Network.loadingFailed"
+                    and branch_request_id is not None
+                    and str(params.get("requestId")) == branch_request_id
+                ):
+                    detail = params.get("errorText") or "unknown network error"
+                    raise RuntimeError(f"ChatGPT new_branch request failed: {detail}")
+                elif (
+                    method == "Network.loadingFinished"
+                    and branch_request_id is not None
+                    and str(params.get("requestId")) == branch_request_id
+                ):
+                    break
+            else:
+                raise RuntimeError("ChatGPT branch hand-off did not finish")
+
+            if branch_request_id is None:
+                raise RuntimeError("ChatGPT branch hand-off did not call new_branch")
+            if branch_status != 200:
+                raise RuntimeError(f"ChatGPT new_branch returned HTTP {branch_status or 'unknown'}")
+
+            body_id = send("Network.getResponseBody", {"requestId": branch_request_id})
+            while True:
+                message = json.loads(ws.recv())
+                if message.get("id") != body_id:
+                    continue
+                if message.get("error"):
+                    raise RuntimeError("cannot read ChatGPT new_branch response")
+                body = message.get("result", {}).get("body", "")
+                break
+        finally:
+            ws.close()
+
+        try:
+            payload = json.loads(body)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("ChatGPT new_branch response is not valid JSON") from exc
+        conversation = payload.get("conversation") if isinstance(payload, dict) else None
+        conversation_id = (
+            conversation.get("conversation_id") if isinstance(conversation, dict) else None
+        )
+        if (
+            not isinstance(conversation_id, str)
+            or not conversation_id
+            or "/" in conversation_id
+            or "?" in conversation_id
+            or "#" in conversation_id
+        ):
+            raise RuntimeError("ChatGPT new_branch response did not include a stable conversation_id")
+
+        candidate_url = canonical_chat_url(f"{candidate_prefix}/c/{conversation_id}")
+        self.navigate(page, candidate_url)
+        candidate_page = dict(page)
+        candidate_page["url"] = candidate_url
+        return candidate_page, candidate_url
+
     def branch_in_new_chat(self, page: dict, source_url: str) -> tuple[dict, str]:
+        before_page_ids = {item.get("id") for item in self.pages()}
         open_menu = r'''(()=>{
           const visibleBranch=[...document.querySelectorAll('[role="menuitem"]')].find(e=>{
             const r=e.getBoundingClientRect(); return r.width>0&&r.height>0&&(e.innerText||e.textContent||'').trim()==='Branch in new chat';
@@ -652,39 +792,46 @@ class BrowserHost:
           if(!turn)return {ok:false,error:'turn_missing'};
           const button=[...turn.querySelectorAll('button')].find(b=>(b.getAttribute('aria-label')||'')==='More actions');
           if(!button)return {ok:false,error:'more_actions_missing'};
+          button.scrollIntoView({block:'center'});
           button.click(); return {ok:true,menu_open:false};
         })()'''
         opened = self.runtime_evaluate(page, open_menu)
         if not isinstance(opened, dict) or not opened.get("ok"):
             raise RuntimeError(f"cannot open ChatGPT turn menu: {(opened or {}).get('error', 'unknown')}")
         time.sleep(0.35)
-        click_branch = r'''(()=>{
+        branch_box = self.runtime_evaluate(page, r'''(()=>{
           const item=[...document.querySelectorAll('[role="menuitem"]')].find(e=>{
             const r=e.getBoundingClientRect();
             return r.width>0&&r.height>0&&(e.innerText||e.textContent||'').trim()==='Branch in new chat';
           });
           if(!item)return {ok:false,error:'branch_action_missing'};
-          item.click(); return {ok:true};
-        })()'''
-        clicked = self.runtime_evaluate(page, click_branch)
-        if not isinstance(clicked, dict) or not clicked.get("ok"):
-            raise RuntimeError(f"cannot branch ChatGPT conversation: {(clicked or {}).get('error', 'unknown')}")
-        source = canonical_chat_url(source_url)
-        source_project = self.project_id_from_url(source)
-        deadline = time.monotonic() + 30
+          const r=item.getBoundingClientRect();
+          return {ok:true,x:r.left+r.width/2,y:r.top+r.height/2};
+        })()''')
+        if not isinstance(branch_box, dict) or not branch_box.get("ok"):
+            raise RuntimeError(
+                f"cannot branch ChatGPT conversation: {(branch_box or {}).get('error', 'unknown')}"
+            )
+        self.dispatch_mouse_click(page, float(branch_box["x"]), float(branch_box["y"]))
+
+        deadline = time.monotonic() + 5
+        branch_page = None
+        branch_url = None
         while time.monotonic() < deadline:
             for candidate in self.pages():
-                try:
-                    url = canonical_chat_url(candidate.get("url", ""))
-                except ValueError:
+                if candidate.get("id") in before_page_ids:
                     continue
-                if url == source:
-                    continue
-                if self.project_id_from_url(url) != source_project:
-                    continue
-                return candidate, url
-            time.sleep(0.5)
-        raise RuntimeError("ChatGPT branch did not produce a new conversation URL")
+                parts = urlsplit(str(candidate.get("url") or ""))
+                if parts.scheme == "https" and parts.netloc == "chatgpt.com" and parts.path.startswith("/branch/"):
+                    branch_page = candidate
+                    branch_url = urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+                    break
+            if branch_page is not None:
+                break
+            time.sleep(0.1)
+        if branch_page is None or branch_url is None:
+            raise RuntimeError("ChatGPT Branch in new chat did not open its hand-off page")
+        return self.materialize_branch_popup(branch_page, branch_url, source_url)
 
     def coordinator_app_targets(self) -> list[dict]:
         response = requests.get(f"{self.cdp_base}/json/list", timeout=2)

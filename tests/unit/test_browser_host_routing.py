@@ -408,23 +408,95 @@ def test_browser_host_completes_durable_rollover_bootstrap(tmp_path: Path):
 def test_browser_host_branch_uses_supported_turn_action(tmp_path: Path, monkeypatch):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    expressions = []
-    def evaluate(page, expression, **kwargs):
-        expressions.append(expression)
-        return {"ok": True}
-    host.runtime_evaluate = evaluate
-    candidate = {
-        "id": "candidate",
-        "url": "https://chatgpt.com/g/g-p-ad5x/c/conv-b",
+    source = {"id": "source", "url": host.target_url}
+    popup = {
+        "id": "popup",
+        "url": "https://chatgpt.com/branch/conv-a/msg-1",
+        "webSocketDebuggerUrl": "ws://popup",
     }
-    host.pages = lambda: [candidate]
+    expressions = []
+    values = iter([
+        {"ok": True},
+        {"ok": True, "x": 640.0, "y": 320.0},
+    ])
+    host.runtime_evaluate = lambda page, expression, **kwargs: expressions.append(expression) or next(values)
+    pages = iter([[source], [source, popup]])
+    host.pages = lambda: next(pages)
+    clicks = []
+    host.dispatch_mouse_click = lambda page, x, y: clicks.append((page["id"], x, y))
+    host.materialize_branch_popup = lambda page, branch_url, source_url: (
+        {"id": "popup", "url": "https://chatgpt.com/g/g-p-ad5x/c/conv-b"},
+        "https://chatgpt.com/g/g-p-ad5x/c/conv-b",
+    )
     monkeypatch.setattr(module.time, "sleep", lambda _: None)
-    page, url = host.branch_in_new_chat({"id": "source"}, host.target_url)
-    assert page == candidate
+    page, url = host.branch_in_new_chat(source, host.target_url)
+    assert page["id"] == "popup"
     assert url.endswith("/c/conv-b")
+    assert clicks == [("source", 640.0, 320.0)]
     assert "More actions" in expressions[0]
-    assert "Branch in new chat" in expressions[0]
+    assert "scrollIntoView" in expressions[0]
     assert "Branch in new chat" in expressions[1]
+
+
+def test_browser_host_materializes_branch_response_to_stable_project_url(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    page = {
+        "id": "popup",
+        "url": "https://chatgpt.com/branch/conv-a/msg-1",
+        "webSocketDebuggerUrl": "ws://popup",
+    }
+    queue = []
+    sent = []
+
+    class FakeWS:
+        def send(self, raw):
+            request = __import__("json").loads(raw)
+            sent.append(request)
+            rid = request["id"]
+            method = request["method"]
+            if method == "Network.enable":
+                queue.append({"id": rid, "result": {}})
+            elif method == "Page.navigate":
+                queue.extend([
+                    {"method": "Network.requestWillBeSent", "params": {
+                        "requestId": "branch-request",
+                        "request": {"url": "https://chatgpt.com/backend-api/conversation/new_branch"},
+                    }},
+                    {"id": rid, "result": {"frameId": "frame"}},
+                    {"method": "Network.responseReceived", "params": {
+                        "requestId": "branch-request", "response": {"status": 200},
+                    }},
+                    {"method": "Network.loadingFinished", "params": {
+                        "requestId": "branch-request",
+                    }},
+                ])
+            elif method == "Network.getResponseBody":
+                queue.append({"id": rid, "result": {"body": __import__("json").dumps({
+                    "conversation": {"conversation_id": "conv-b"}
+                })}})
+            else:
+                raise AssertionError(request)
+
+        def recv(self):
+            return __import__("json").dumps(queue.pop(0))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module.websocket, "create_connection", lambda *a, **k: FakeWS(), raising=False)
+    navigated = []
+    host.navigate = lambda selected, url: navigated.append((selected["id"], url))
+    candidate, url = host.materialize_branch_popup(
+        page,
+        "https://chatgpt.com/branch/conv-a/msg-1",
+        host.target_url,
+        timeout=1,
+    )
+    assert url == "https://chatgpt.com/g/g-p-ad5x/c/conv-b"
+    assert candidate["url"] == url
+    assert navigated == [("popup", url)]
+    assert any(item["method"] == "Network.getResponseBody" for item in sent)
 
 
 
