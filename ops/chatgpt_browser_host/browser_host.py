@@ -833,18 +833,19 @@ class BrowserHost:
             raise RuntimeError("ChatGPT Branch in new chat did not open its hand-off page")
         return self.materialize_branch_popup(branch_page, branch_url, source_url)
 
-    def coordinator_app_targets(self) -> list[dict]:
+    def coordinator_app_targets(self, page: dict | None = None) -> list[dict]:
         response = requests.get(f"{self.cdp_base}/json/list", timeout=2)
         response.raise_for_status()
+        page_id = str(page.get("id")) if isinstance(page, dict) and page.get("id") else None
         return [
             item for item in response.json()
             if item.get("type") == "iframe"
             and "web-sandbox.oaiusercontent.com" in item.get("url", "")
             and item.get("webSocketDebuggerUrl")
+            and (page_id is None or str(item.get("parentId") or "") == page_id)
         ]
 
     def coordinator_app_control(self, page: dict, action: str, **payload) -> dict:
-        del page  # The inner MCP App is an OOPIF target; parent-page postMessage hits the sandbox shell.
         nonce = token_urlsafe(12)
         message = {
             "type": "development-bridge/control-v1",
@@ -853,7 +854,7 @@ class BrowserHost:
             **payload,
         }
         encoded = json.dumps(message, ensure_ascii=False)
-        for target in self.coordinator_app_targets():
+        for target in self.coordinator_app_targets(page):
             ws = websocket.create_connection(
                 target["webSocketDebuggerUrl"], timeout=5, suppress_origin=True
             )

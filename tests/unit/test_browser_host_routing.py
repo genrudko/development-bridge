@@ -516,10 +516,29 @@ def test_browser_host_preflight_requires_native_iframe_in_ready_turn(tmp_path: P
 
 
 
+def test_browser_host_scopes_coordinator_oopifs_to_top_level_page(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return [
+                {"id": "a", "type": "iframe", "parentId": "source", "url": "https://one.web-sandbox.oaiusercontent.com/", "webSocketDebuggerUrl": "ws://a"},
+                {"id": "b", "type": "iframe", "parentId": "candidate", "url": "https://two.web-sandbox.oaiusercontent.com/", "webSocketDebuggerUrl": "ws://b"},
+                {"id": "c", "type": "iframe", "parentId": "candidate", "url": "https://example.com/", "webSocketDebuggerUrl": "ws://c"},
+            ]
+
+    monkeypatch.setattr(module.requests, "get", lambda *a, **k: FakeResponse(), raising=False)
+    assert [item["id"] for item in host.coordinator_app_targets({"id": "candidate"})] == ["b"]
+    assert [item["id"] for item in host.coordinator_app_targets({"id": "source"})] == ["a"]
+
+
 def test_browser_host_controls_inner_mcp_app_execution_context(tmp_path: Path, monkeypatch):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    host.coordinator_app_targets = lambda: [{"webSocketDebuggerUrl": "ws://inner"}]
+    host.coordinator_app_targets = lambda page=None: [{"webSocketDebuggerUrl": "ws://inner"}]
     sent = []
     queue = []
     class FakeWS:
