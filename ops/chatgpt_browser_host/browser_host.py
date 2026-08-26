@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import signal
+from secrets import token_urlsafe
 import subprocess
 import sys
 import time
@@ -175,6 +176,8 @@ class BrowserHost:
         self.last_bridge_turn_key: str | None = None
         self.bridge_turn_baselined = False
         self.model_turn_observation_count = 0
+        self.rollover_count = 0
+        self.rollover_abort_count = 0
 
     @property
     def cdp_base(self) -> str:
@@ -196,6 +199,8 @@ class BrowserHost:
             "last_bridge_turn_key": self.last_bridge_turn_key,
             "bridge_turn_baselined": self.bridge_turn_baselined,
             "model_turn_observation_count": self.model_turn_observation_count,
+            "rollover_count": self.rollover_count,
+            "rollover_abort_count": self.rollover_abort_count,
         }
         payload.update(extra)
         atomic_json(self.cfg.state_file, payload)
@@ -565,6 +570,390 @@ class BrowserHost:
         finally:
             ws.close()
 
+    def route_registry_snapshot(self) -> dict:
+        try:
+            data = json.loads(self.cfg.route_registry.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"route registry is unreadable: {exc}") from exc
+        if data.get("version") != 1 or not isinstance(data.get("routes"), dict):
+            raise RuntimeError("route registry format is invalid")
+        return data
+
+    def pending_rollover(self) -> dict | None:
+        data = self.route_registry_snapshot()
+        pending = (data.get("rollovers") or {}).get(self.route_id)
+        return dict(pending) if isinstance(pending, dict) else None
+
+    def active_rollover_record(self) -> dict | None:
+        data = self.route_registry_snapshot()
+        last = (data.get("last_rollover") or {}).get(self.route_id)
+        if not isinstance(last, dict):
+            return None
+        if int(last.get("target_generation", -1)) != self.route_generation:
+            return None
+        if last.get("candidate_url") != self.target_url:
+            return None
+        return dict(last)
+
+    def rollover_control(self, action: str, rollover: dict, **payload) -> dict:
+        body = {"route_id": self.route_id, "token": rollover["token"], **payload}
+        response = requests.post(
+            self.cfg.coordinator_local_url + f"rollover/{action}",
+            json=body,
+            timeout=5,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("invalid rollover control response")
+        return data
+
+    def runtime_evaluate(
+        self, page: dict, expression: str, *, await_promise: bool = False, timeout: float = 5
+    ):
+        ws = websocket.create_connection(
+            page["webSocketDebuggerUrl"], timeout=timeout, suppress_origin=True
+        )
+        try:
+            request_id = int(time.time() * 1_000_000) % 1_000_000_000
+            ws.send(json.dumps({
+                "id": request_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": expression,
+                    "returnByValue": True,
+                    "awaitPromise": await_promise,
+                },
+            }))
+            while True:
+                message = json.loads(ws.recv())
+                if message.get("id") != request_id:
+                    continue
+                result = message.get("result", {})
+                if result.get("exceptionDetails"):
+                    raise RuntimeError("ChatGPT page evaluation failed")
+                return result.get("result", {}).get("value")
+        finally:
+            ws.close()
+
+    @staticmethod
+    def project_id_from_url(url: str) -> str | None:
+        path = urlsplit(canonical_chat_url(url)).path
+        return next((part for part in path.split("/") if part.startswith("g-p-")), None)
+
+    def branch_in_new_chat(self, page: dict, source_url: str) -> tuple[dict, str]:
+        open_menu = r'''(()=>{
+          const visibleBranch=[...document.querySelectorAll('[role="menuitem"]')].find(e=>{
+            const r=e.getBoundingClientRect(); return r.width>0&&r.height>0&&(e.innerText||e.textContent||'').trim()==='Branch in new chat';
+          });
+          if(visibleBranch)return {ok:true,menu_open:true};
+          const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')];
+          const turn=[...turns].reverse().find(t=>t.querySelector('[data-message-author-role="assistant"]'))||turns.at(-1);
+          if(!turn)return {ok:false,error:'turn_missing'};
+          const button=[...turn.querySelectorAll('button')].find(b=>(b.getAttribute('aria-label')||'')==='More actions');
+          if(!button)return {ok:false,error:'more_actions_missing'};
+          button.click(); return {ok:true,menu_open:false};
+        })()'''
+        opened = self.runtime_evaluate(page, open_menu)
+        if not isinstance(opened, dict) or not opened.get("ok"):
+            raise RuntimeError(f"cannot open ChatGPT turn menu: {(opened or {}).get('error', 'unknown')}")
+        time.sleep(0.35)
+        click_branch = r'''(()=>{
+          const item=[...document.querySelectorAll('[role="menuitem"]')].find(e=>{
+            const r=e.getBoundingClientRect();
+            return r.width>0&&r.height>0&&(e.innerText||e.textContent||'').trim()==='Branch in new chat';
+          });
+          if(!item)return {ok:false,error:'branch_action_missing'};
+          item.click(); return {ok:true};
+        })()'''
+        clicked = self.runtime_evaluate(page, click_branch)
+        if not isinstance(clicked, dict) or not clicked.get("ok"):
+            raise RuntimeError(f"cannot branch ChatGPT conversation: {(clicked or {}).get('error', 'unknown')}")
+        source = canonical_chat_url(source_url)
+        source_project = self.project_id_from_url(source)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            for candidate in self.pages():
+                try:
+                    url = canonical_chat_url(candidate.get("url", ""))
+                except ValueError:
+                    continue
+                if url == source:
+                    continue
+                if self.project_id_from_url(url) != source_project:
+                    continue
+                return candidate, url
+            time.sleep(0.5)
+        raise RuntimeError("ChatGPT branch did not produce a new conversation URL")
+
+    def coordinator_app_control(self, page: dict, action: str, **payload) -> dict:
+        nonce = token_urlsafe(12)
+        message = {
+            "type": "development-bridge/control-v1",
+            "nonce": nonce,
+            "action": action,
+            **payload,
+        }
+        encoded = json.dumps(message, ensure_ascii=False)
+        expression = f'''(async()=>{{
+          const payload={encoded};
+          const frames=[...document.querySelectorAll('iframe')].filter(f=>
+            f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html')
+          );
+          if(!frames.length)return {{ok:false,error:'iframe_missing',frame_count:0}};
+          return await new Promise(resolve=>{{
+            let settled=false;
+            const sources=new Set(frames.map(f=>f.contentWindow));
+            const finish=value=>{{
+              if(settled)return; settled=true; clearTimeout(timer);
+              window.removeEventListener('message',handler); resolve(value);
+            }};
+            const handler=event=>{{
+              const data=event.data;
+              if(!sources.has(event.source)||!data||data.type!=='development-bridge/control-ack-v1'||data.nonce!==payload.nonce)return;
+              finish({{...data,frame_count:frames.length}});
+            }};
+            window.addEventListener('message',handler);
+            for(const frame of frames){{
+              try{{frame.contentWindow.postMessage(payload,new URL(frame.src).origin);}}catch(_){{}}
+            }}
+            const timer=setTimeout(()=>finish({{ok:false,error:'control_timeout',frame_count:frames.length}}),4000);
+          }});
+        }})()'''
+        result = self.runtime_evaluate(page, expression, await_promise=True, timeout=6)
+        return result if isinstance(result, dict) else {"ok": False, "error": "invalid_control_ack"}
+
+    def ensure_control_channel(self, page: dict, channel_id: str) -> dict:
+        ping = self.coordinator_app_control(page, "ping")
+        if not ping.get("ok"):
+            return ping
+        if ping.get("channel_id") == channel_id:
+            return ping
+        return self.coordinator_app_control(page, "bind", channel_id=channel_id)
+
+    def wait_for_control_channel(self, page: dict, channel_id: str, timeout: float = 30) -> dict:
+        deadline = time.monotonic() + timeout
+        last = {"ok": False, "error": "control_timeout"}
+        while time.monotonic() < deadline:
+            try:
+                last = self.ensure_control_channel(page, channel_id)
+            except TRANSIENT_CDP_ERRORS as exc:
+                last = {"ok": False, "error": str(exc)}
+            if last.get("ok") and last.get("channel_id") == channel_id:
+                return last
+            time.sleep(1)
+        return last
+
+    def wait_for_polling(self, channel_id: str, timeout: float = 35) -> tuple[bool, str]:
+        deadline = time.monotonic() + timeout
+        detail = "not checked"
+        while time.monotonic() < deadline:
+            ok, detail = self.polling_ok(channel_id)
+            if ok is True:
+                return True, detail
+            time.sleep(1)
+        return False, detail
+
+    def wait_for_rollover_preflight(self, page: dict, token: str, timeout: float = 75) -> dict:
+        marker = f"ROLLOVER_READY {token}"
+        encoded_marker = json.dumps(marker, ensure_ascii=False)
+        expression = f'''(()=>{{
+          const marker={encoded_marker};
+          const generating=[...document.querySelectorAll('button')].some(b=>{{
+            const text=((b.getAttribute('aria-label')||'')+' '+(b.innerText||'')).toLowerCase();
+            return text.includes('stop generating')||text.includes('stop streaming')||text.includes('остановить');
+          }});
+          let matched=false, iframeCount=0;
+          for(const turn of document.querySelectorAll('[data-testid^="conversation-turn-"]')){{
+            const text=(turn.innerText||turn.textContent||'');
+            if(!text.includes(marker))continue;
+            const assistant=(turn.querySelector('[data-message-author-role="assistant"]')?.innerText||'').trim();
+            const frames=[...turn.querySelectorAll('iframe')].filter(f=>
+              f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html')
+            );
+            iframeCount=Math.max(iframeCount,frames.length);
+            if(assistant&&frames.length)matched=true;
+          }}
+          return {{ready:matched&&!generating,generating,iframe_count:iframeCount}};
+        }})()'''
+        deadline = time.monotonic() + timeout
+        last = {"ready": False, "iframe_count": 0}
+        while time.monotonic() < deadline:
+            value = self.runtime_evaluate(page, expression)
+            if isinstance(value, dict):
+                last = value
+                if value.get("ready") is True:
+                    return value
+            time.sleep(1)
+        return last
+
+    def restore_source_after_rollover(self, source_url: str) -> None:
+        try:
+            pages = self.pages()
+            if not pages:
+                return
+            source = next((p for p in pages if is_target_url(p.get("url", ""), source_url)), None)
+            if source is None:
+                self.navigate(pages[0], source_url)
+                time.sleep(4)
+                pages = self.pages()
+                source = next((p for p in pages if is_target_url(p.get("url", ""), source_url)), None)
+            if source is not None:
+                for item in pages:
+                    if item["id"] != source["id"]:
+                        self.close_page(item["id"])
+        except Exception:
+            pass
+
+    def rollover_age_seconds(self, rollover: dict) -> float:
+        try:
+            created = datetime.fromisoformat(str(rollover["created_at"]))
+            return max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+        except Exception:
+            return 0.0
+
+    def abort_pending_rollover(self, rollover: dict, reason: str) -> dict:
+        self.rollover_abort_count += 1
+        try:
+            result = self.rollover_control("abort", rollover, reason=reason[:500])
+        finally:
+            self.restore_source_after_rollover(rollover["source_url"])
+        return result
+
+    def process_pending_rollover(self) -> dict | None:
+        rollover = self.pending_rollover()
+        if rollover is None:
+            return None
+        if int(rollover.get("source_generation", -1)) != self.route_generation:
+            return self.abort_pending_rollover(rollover, "active route generation changed")
+        source_url = canonical_chat_url(rollover["source_url"])
+        target_channel = str(rollover["channel_id"])
+        state = str(rollover.get("state") or "")
+        try:
+            candidate_page = None
+            if state == "prepared":
+                pages = self.pages()
+                source_page = next(
+                    (item for item in pages if is_target_url(item.get("url", ""), source_url)), None
+                )
+                if source_page is None:
+                    if not pages:
+                        return {"state": "waiting_source_page"}
+                    self.navigate(pages[0], source_url)
+                    time.sleep(4)
+                    pages = self.pages()
+                    source_page = next(
+                        (item for item in pages if is_target_url(item.get("url", ""), source_url)), None
+                    )
+                if source_page is None:
+                    raise RuntimeError("source conversation is unavailable")
+                turn_state, error = self.safe_bridge_turn_state(source_page)
+                if turn_state is None:
+                    return {"state": "waiting_source_turn", "error": error}
+                if turn_state.get("generating"):
+                    return {"state": "waiting_source_turn"}
+                source_control = self.coordinator_app_control(source_page, "ping")
+                if not source_control.get("ok"):
+                    if self.rollover_age_seconds(rollover) > 120:
+                        raise RuntimeError("fresh rollover MCP App is not control-capable")
+                    return {"state": "waiting_source_control", "error": source_control.get("error")}
+                candidate_page, candidate_url = self.branch_in_new_chat(source_page, source_url)
+                rollover = self.rollover_control("candidate", rollover, url=candidate_url)
+                state = "candidate"
+
+            if state != "candidate":
+                raise RuntimeError(f"unsupported rollover state: {state}")
+            candidate_url = canonical_chat_url(rollover["candidate_url"])
+            if candidate_page is None:
+                pages = self.pages()
+                candidate_page = next(
+                    (item for item in pages if is_target_url(item.get("url", ""), candidate_url)), None
+                )
+                if candidate_page is None:
+                    if not pages:
+                        return {"state": "waiting_candidate_page"}
+                    self.navigate(pages[0], candidate_url)
+                    time.sleep(4)
+                    pages = self.pages()
+                    candidate_page = next(
+                        (item for item in pages if is_target_url(item.get("url", ""), candidate_url)), None
+                    )
+            if candidate_page is None:
+                raise RuntimeError("successor conversation is unavailable")
+
+            control = self.wait_for_control_channel(candidate_page, target_channel, timeout=30)
+            if not control.get("ok") or control.get("channel_id") != target_channel:
+                raise RuntimeError(f"successor MCP App control failed: {control.get('error', 'unknown')}")
+            poll_ok, poll_detail = self.wait_for_polling(target_channel, timeout=35)
+            if not poll_ok:
+                raise RuntimeError(f"successor X polling was not observed: {poll_detail}")
+
+            preflight_operation = f"{rollover['token']}-preflight"
+            preflight_message = (
+                f"Development Bridge automatic rollover preflight. Do not continue project work. "
+                f"Call coordinator_x_mount with channel_id={target_channel}. After that tool succeeds, "
+                f"reply exactly: ROLLOVER_READY {rollover['token']}"
+            )
+            preflight_send = self.coordinator_app_control(
+                candidate_page,
+                "bootstrap",
+                channel_id=target_channel,
+                operation_id=preflight_operation,
+                message=preflight_message,
+            )
+            if not preflight_send.get("ok"):
+                raise RuntimeError(
+                    f"successor preflight delivery failed: {preflight_send.get('error', 'unknown')}"
+                )
+            preflight = self.wait_for_rollover_preflight(
+                candidate_page, rollover["token"], timeout=75
+            )
+            if not preflight.get("ready"):
+                raise RuntimeError(
+                    "successor did not create a native coordinator mount during preflight"
+                )
+            poll_ok, poll_detail = self.wait_for_polling(target_channel, timeout=20)
+            if not poll_ok:
+                raise RuntimeError(f"native successor X polling was not observed: {poll_detail}")
+
+            committed = self.rollover_control("commit", rollover)
+            self.rollover_count += 1
+            return {"state": "committed", "route": committed, "polling_detail": poll_detail}
+        except Exception as exc:
+            self.abort_pending_rollover(rollover, str(exc))
+            return {"state": "aborted", "error": str(exc)}
+
+    def ensure_active_rollover_binding(self, page: dict) -> dict | None:
+        record = self.active_rollover_record()
+        if record is None:
+            return None
+        return self.ensure_control_channel(page, self.channel_id)
+
+    def complete_rollover_bootstrap(self, page: dict) -> dict | None:
+        record = self.active_rollover_record()
+        if record is None or record.get("bootstrap_sent") is True or record.get("state") == "complete":
+            return None
+        control = self.wait_for_control_channel(page, self.channel_id, timeout=15)
+        if not control.get("ok") or control.get("channel_id") != self.channel_id:
+            return {"state": "bootstrap_waiting", "error": control.get("error")}
+        message = (
+            f"Automatic physical-chat rollover completed for logical route {self.route_id} "
+            f"generation {self.route_generation}. Before other work, call "
+            f"coordinator_route_context_get with route_id={self.route_id} and use its canonical "
+            "Route Context as the authoritative checkpoint. Then continue NEXT ORDER OF WORK."
+        )
+        bootstrap = self.coordinator_app_control(
+            page,
+            "bootstrap",
+            channel_id=self.channel_id,
+            operation_id=record["token"],
+            message=message,
+        )
+        if not bootstrap.get("ok"):
+            return {"state": "bootstrap_waiting", "error": bootstrap.get("error")}
+        completed = self.rollover_control("complete", record)
+        return {"state": "complete", "rollover": completed, "duplicate": bootstrap.get("duplicate", False)}
+
     def refresh_route_target(self) -> bool:
         try:
             data = json.loads(self.cfg.route_registry.read_text(encoding="utf-8"))
@@ -685,7 +1074,7 @@ class BrowserHost:
                 self.close_page(page["id"])
         return True, target
 
-    def polling_ok(self) -> tuple[bool | None, str]:
+    def polling_ok(self, channel_id: str | None = None) -> tuple[bool | None, str]:
         command = [
             "journalctl",
             "-u", self.cfg.bridge_unit,
@@ -705,7 +1094,8 @@ class BrowserHost:
             return None, f"journalctl failed: {exc}"
         if result.returncode != 0:
             return None, result.stderr.strip() or f"journalctl exit={result.returncode}"
-        needle = f"/mcp/x/coordinator/status?channel_id={self.channel_id}"
+        selected_channel = channel_id or self.channel_id
+        needle = f"/mcp/x/coordinator/status?channel_id={selected_channel}"
         lines = [line for line in result.stdout.splitlines() if needle in line]
         if self.cfg.public_ip:
             lines = [line for line in lines if self.cfg.public_ip in line]
@@ -748,7 +1138,16 @@ class BrowserHost:
                     self.last_bridge_turn_id = 0
                     self.last_bridge_turn_key = None
                     self.bridge_turn_baselined = False
-                    self.reload_route_target()
+                    pages = self.pages()
+                    if not any(is_target_url(item.get("url", ""), self.target_url) for item in pages):
+                        self.reload_route_target()
+
+                rollover_result = self.process_pending_rollover()
+                if rollover_result is not None:
+                    self.write_state(status="rollover", rollover=rollover_result)
+                    time.sleep(self.cfg.check_interval)
+                    continue
+
                 target_ok, page = self.enforce_target()
                 if self.repair_count != last_repair_count:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
@@ -874,6 +1273,21 @@ class BrowserHost:
                         time.sleep(self.cfg.check_interval)
                         continue
                     poll_ok, poll_detail = self.polling_ok()
+
+                try:
+                    active_rollover = self.active_rollover_record()
+                    if active_rollover is not None:
+                        binding = self.ensure_active_rollover_binding(page)
+                        if binding is not None and binding.get("ok"):
+                            poll_deadline = time.monotonic() + self.cfg.poll_grace
+                            poll_ok, poll_detail = self.polling_ok()
+                        bootstrap_result = self.complete_rollover_bootstrap(page)
+                        if bootstrap_result is not None:
+                            poll_ok, poll_detail = self.polling_ok()
+                except TRANSIENT_CDP_ERRORS:
+                    pass
+                except (RuntimeError, ValueError, requests.RequestException):
+                    pass
 
                 try:
                     self.sync_model_turn_observation(page)

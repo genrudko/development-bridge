@@ -203,3 +203,165 @@ def test_browser_host_observer_uses_turn_key_not_numeric_order(tmp_path: Path):
     assert host.sync_model_turn_observation({}) == {"observed": True}
     assert host.last_bridge_turn_id == 12
     assert host.last_bridge_turn_key == "stable-new-uuid"
+
+
+
+def test_browser_host_rollover_commits_only_after_successor_verification(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.route_generation = 5
+    host.channel_id = "telegram-ad5x-g5"
+    source_url = host.target_url
+    candidate_url = "https://chatgpt.com/g/g-p-ad5x/c/conv-b"
+    rollover = {
+        "token": "roll_test_token",
+        "state": "prepared",
+        "source_generation": 5,
+        "target_generation": 6,
+        "source_url": source_url,
+        "source_conversation_id": "conv-a",
+        "project_id": "g-p-ad5x",
+        "channel_id": "telegram-ad5x-g6",
+        "created_at": "2026-08-26T10:00:00+00:00",
+    }
+    source_page = {"id": "source", "url": source_url}
+    candidate_page = {"id": "candidate", "url": candidate_url}
+    host.pending_rollover = lambda: dict(rollover)
+    host.pages = lambda: [source_page]
+    host.safe_bridge_turn_state = lambda page: ({"generating": False}, None)
+    host.coordinator_app_control = lambda page, action, **payload: {
+        "ok": True, "channel_id": "telegram-ad5x-g5"
+    }
+    host.branch_in_new_chat = lambda page, url: (candidate_page, candidate_url)
+    host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
+        "ok": True, "channel_id": channel_id
+    }
+    host.wait_for_polling = lambda channel_id, timeout=35: (True, "matches=3")
+    host.wait_for_rollover_preflight = lambda page, token, timeout=75: {
+        "ready": True, "iframe_count": 1
+    }
+    calls = []
+    def control(action, current, **payload):
+        calls.append((action, payload))
+        if action == "candidate":
+            return {
+                **current,
+                "state": "candidate",
+                "candidate_url": payload["url"],
+                "candidate_conversation_id": "conv-b",
+            }
+        if action == "commit":
+            return {
+                "route_id": "ad5x", "generation": 6,
+                "channel_id": "telegram-ad5x-g6", "conversation_id": "conv-b",
+                "url": candidate_url,
+            }
+        raise AssertionError(action)
+    host.rollover_control = control
+    result = host.process_pending_rollover()
+    assert result["state"] == "committed"
+    assert [item[0] for item in calls] == ["candidate", "commit"]
+    assert host.rollover_count == 1
+
+
+def test_browser_host_rollover_aborts_before_commit_on_successor_failure(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.route_generation = 5
+    rollover = {
+        "token": "roll_test_token",
+        "state": "candidate",
+        "source_generation": 5,
+        "target_generation": 6,
+        "source_url": host.target_url,
+        "candidate_url": "https://chatgpt.com/g/g-p-ad5x/c/conv-b",
+        "channel_id": "telegram-ad5x-g6",
+    }
+    candidate_page = {"id": "candidate", "url": rollover["candidate_url"]}
+    host.pending_rollover = lambda: dict(rollover)
+    host.pages = lambda: [candidate_page]
+    host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
+        "ok": False, "error": "template_missing"
+    }
+    restored = []
+    host.restore_source_after_rollover = lambda url: restored.append(url)
+    calls = []
+    host.rollover_control = lambda action, current, **payload: calls.append((action, payload)) or {
+        "aborted": True
+    }
+    result = host.process_pending_rollover()
+    assert result["state"] == "aborted"
+    assert [item[0] for item in calls] == ["abort"]
+    assert restored == [host.target_url]
+    assert host.rollover_abort_count == 1
+
+
+def test_browser_host_completes_durable_rollover_bootstrap(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.route_generation = 6
+    host.channel_id = "telegram-ad5x-g6"
+    record = {
+        "token": "roll_durable_token",
+        "state": "committed",
+        "bootstrap_sent": False,
+        "target_generation": 6,
+        "candidate_url": host.target_url,
+    }
+    host.active_rollover_record = lambda: dict(record)
+    host.wait_for_control_channel = lambda page, channel_id, timeout=15: {
+        "ok": True, "channel_id": channel_id
+    }
+    sent = []
+    def app_control(page, action, **payload):
+        sent.append((action, payload))
+        return {"ok": True, "channel_id": payload.get("channel_id")}
+    host.coordinator_app_control = app_control
+    completed = []
+    host.rollover_control = lambda action, current, **payload: completed.append(action) or {
+        **current, "state": "complete", "bootstrap_sent": True
+    }
+    result = host.complete_rollover_bootstrap({"id": "candidate"})
+    assert result["state"] == "complete"
+    assert sent[0][0] == "bootstrap"
+    assert sent[0][1]["operation_id"] == "roll_durable_token"
+    assert "coordinator_route_context_get" in sent[0][1]["message"]
+    assert completed == ["complete"]
+
+
+def test_browser_host_branch_uses_supported_turn_action(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    expressions = []
+    def evaluate(page, expression, **kwargs):
+        expressions.append(expression)
+        return {"ok": True}
+    host.runtime_evaluate = evaluate
+    candidate = {
+        "id": "candidate",
+        "url": "https://chatgpt.com/g/g-p-ad5x/c/conv-b",
+    }
+    host.pages = lambda: [candidate]
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    page, url = host.branch_in_new_chat({"id": "source"}, host.target_url)
+    assert page == candidate
+    assert url.endswith("/c/conv-b")
+    assert "More actions" in expressions[0]
+    assert "Branch in new chat" in expressions[0]
+    assert "Branch in new chat" in expressions[1]
+
+
+
+def test_browser_host_preflight_requires_native_iframe_in_ready_turn(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    expressions = []
+    host.runtime_evaluate = lambda page, expression, **kwargs: expressions.append(expression) or {
+        "ready": True, "generating": False, "iframe_count": 1
+    }
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    result = host.wait_for_rollover_preflight({}, "roll_test", timeout=1)
+    assert result["ready"] is True
+    assert "ROLLOVER_READY roll_test" in expressions[0]
+    assert "coordinator-x-v" in expressions[0]
+    assert "data-message-author-role" in expressions[0]

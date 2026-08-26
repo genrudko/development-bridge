@@ -99,7 +99,25 @@ A route record should carry an active generation/lease so an old open conversati
 
 ### Chat rollover / takeover
 
-When a ChatGPT conversation reaches its practical end, register the new conversation as the next generation of the same logical route. Pending events belong to the logical route, not to the old physical conversation, so rollover does not require Telegram reconfiguration.
+Automatic physical-chat rollover is fail-safe and generation-scoped. `coordinator_route_rollover_prepare` reserves the next generation without modifying the active route. Browser Host then uses ChatGPT's supported **Branch in new chat** turn action, verifies that the candidate remains in the same project, binds the candidate's coordinator MCP App to the reserved generation channel, and requires real X polling before any route mutation.
+
+Before commit, the successor also performs a native-listener preflight: the successor model must call `coordinator_x_mount` for the reserved channel and Browser Host must observe a new coordinator iframe in that preflight turn. This avoids making the new route depend only on MCP App cards copied from the source branch, which ChatGPT may fail to rehydrate.
+
+Only after candidate URL/ID, control binding, native mount, and X polling all pass does Bridge atomically commit the new route generation. A durable post-commit bootstrap is operation-id deduplicated by the MCP App and resumes from `coordinator_route_context_get`. Failures before commit abort the pending rollover and restore the old physical conversation; the old route remains canonical throughout verification. Manual takeover is rejected while an automatic rollover is pending.
+
+The intended state machine is:
+
+```text
+active gN
+  -> prepare gN+1 (active unchanged)
+  -> branch candidate
+  -> verify exact URL/project
+  -> bind candidate MCP App to gN+1
+  -> verify X polling
+  -> native successor coordinator_x_mount preflight
+  -> commit route gN+1
+  -> durable successor bootstrap / complete
+```
 
 ### Address switching
 
