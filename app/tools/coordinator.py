@@ -7,6 +7,7 @@ from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
 from app.coordinator.context import MAX_CONTEXT_CHARS, RouteContextStore, default_route_context_path
 from app.container import ApplicationContainer
+from app.settings import ArtifactSettings
 from app.tools.jobs import JOB_ID_SCHEMA
 
 COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v3.html"
@@ -129,6 +130,32 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         )
         data["channel_id"] = channel_id
         return to_mcp_result(success(request_context.request_id, data))
+
+    async def exec_and_wake(ctx, params, request_context):
+        arguments = params.arguments or {}
+        channel_id = container.coordinator.validate_channel(arguments.get("channel_id", "coordinator"))
+        repository = container.projects.repositories.get(arguments["project_id"], arguments["repository_id"])
+        job = await container.jobs.start_execution(
+            repository, arguments["executable"], arguments.get("arguments", []), request_context.request_id,
+            timeout_seconds=arguments.get("timeout_seconds", 300),
+            output_limit_bytes=arguments.get("output_limit_bytes", 262_144),
+            artifacts=arguments.get("artifacts", []), stdin=arguments.get("stdin"),
+            idempotency_key=arguments.get("idempotency_key"),
+        )
+        payload = {"channel_id": channel_id}
+        if arguments.get("message") is not None:
+            payload["message"] = arguments["message"]
+        try:
+            waiter = await container.jobs.wake_on_jobs_durable(
+                repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
+            )
+        except Exception:
+            try:
+                await container.jobs.cancel(repository, job.job_id)
+            except Exception:
+                pass
+            raise
+        return to_mcp_result(success(request_context.request_id, {**job.status_dict(), **waiter, "channel_id": channel_id}))
 
     common_meta = COORDINATOR_UI_META
     return (
@@ -302,6 +329,32 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 },
             ),
             wake_on_jobs,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_exec_and_wake",
+                description="Queue one durable repository execution and arm its coordinator waiter in the same request; cancels the new job if waiter registration fails.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "project_id": IDENTIFIER_SCHEMA, "repository_id": IDENTIFIER_SCHEMA,
+                        "executable": {"type": "string", "minLength": 1, "maxLength": 4096},
+                        "arguments": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 4096}, "default": []},
+                        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600, "default": 300},
+                        "output_limit_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144},
+                        "artifacts": {"type": "array", "maxItems": 32, "items": ArtifactSettings.model_json_schema(), "default": []},
+                        "stdin": {"type": "string", "maxLength": 1048576},
+                        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
+                        "channel_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$", "default": "coordinator"},
+                        "message": {"type": "string", "minLength": 1, "maxLength": 200},
+                        "policy": {"type": "string", "enum": ["all_terminal", "failure_or_all_terminal"], "default": "all_terminal"},
+                    },
+                    "required": ["project_id", "repository_id", "executable"],
+                    "additionalProperties": False,
+                },
+            ),
+            exec_and_wake,
             "coordinator-x",
         ),
     )
