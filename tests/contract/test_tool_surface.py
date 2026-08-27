@@ -85,6 +85,9 @@ SUPPORTED_TOOLS = {
     "run_command",
     "telegram_supervisor_status",
     "telegram_send",
+    "fusion_node_status",
+    "fusion_tools",
+    "fusion_call",
 }
 
 
@@ -92,7 +95,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 82
+    assert len(registry.definitions) == 85
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",
@@ -100,6 +103,7 @@ def test_registered_tool_surface_is_exact():
         "chatgpt-share",
         "coordinator-x",
         "telegram-supervisor",
+        "fusion-desktop",
     }
 
 

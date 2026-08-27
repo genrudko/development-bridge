@@ -9,6 +9,11 @@ server:
   allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
 jobs:
   database_path: /absolute/path/to/development-bridge-jobs.sqlite3
+# desktop_nodes:
+#   offline_after_seconds: 45
+#   claim_timeout_seconds: 25
+#   call_timeout_seconds: 60
+#   max_pending_commands: 32
 # GitHub host workflows are optional. The token is supplied only through
 # DEVELOPMENT_BRIDGE_GITHUB_TOKEN, never in this file.
 # github:

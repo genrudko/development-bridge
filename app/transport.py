@@ -42,6 +42,49 @@ def create_streamable_http_app(
     settings: BridgeSettings,
     container: ApplicationContainer,
 ) -> Starlette:
+    desktop = container.desktop_nodes
+
+    def desktop_authorized(request: Request) -> bool:
+        configured = settings.desktop_nodes.token
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+        return configured is not None and hmac.compare_digest(supplied, configured.get_secret_value())
+
+    async def desktop_route(request: Request):
+        if settings.desktop_nodes.token is None:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        if not desktop_authorized(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        node_id, action = request.path_params["node_id"], request.path_params["action"]
+        try:
+            if action == "claim":
+                command = await desktop.claim(node_id, float(request.query_params.get("wait", settings.desktop_nodes.claim_timeout_seconds)))
+                return JSONResponse({"command": command})
+            limit = settings.desktop_nodes.max_result_bytes if action == "result" else settings.desktop_nodes.max_request_bytes
+            if int(request.headers.get("content-length", "0") or 0) > limit:
+                raise OverflowError
+            raw = await request.body()
+            if len(raw) > limit:
+                raise OverflowError
+            import json
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise ValueError
+            if action == "register":
+                return JSONResponse(await desktop.register(node_id, body.get("tools", []), bool(body.get("fusion_available", False))))
+            if action == "heartbeat":
+                return JSONResponse(await desktop.heartbeat(node_id, body.get("tools"), body.get("fusion_available")))
+            if action == "result":
+                await desktop.submit_result(node_id, body["command_id"], body["result"])
+                return JSONResponse({"accepted": True})
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        except OverflowError:
+            return JSONResponse({"error": "Request too large"}, status_code=413)
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse({"error": "Invalid request"}, status_code=400)
+        except BridgeError as error:
+            status = 404 if error.code is ErrorCode.DESKTOP_NODE_NOT_FOUND else 400 if error.code is ErrorCode.INVALID_ARGUMENT else 409
+            return JSONResponse({"error": error.message, "code": error.code.value}, status_code=status)
     async def artifact_download(request: Request):
         context = new_request_context()
         started = time.perf_counter()
@@ -356,6 +399,7 @@ def create_streamable_http_app(
     token_verifier = None
     auth_provider = None
     custom_routes = []
+    custom_routes.append(Route(settings.server.endpoint.rstrip("/") + "/desktop-nodes/{node_id}/{action}", desktop_route, methods=["POST"], name="desktop_node_agent"))
     if container.oauth is not None:
         assert settings.oauth.issuer_url is not None
         assert settings.oauth.resource_url is not None

@@ -12,6 +12,7 @@ from .chatgpt_share import chatgpt_share_tools
 from .commands import command_tools
 from .coordinator import coordinator_tools
 from .files import file_tools
+from .fusion import fusion_tools
 from .git_read import git_read_tools
 from .git_workspace import git_workspace_tools
 from .git_write import git_write_tools
@@ -36,6 +37,7 @@ def build_tool_registry(
         + bridge_restart_tools(container)
         + project_tools(container)
         + file_tools(container)
+        + fusion_tools(container)
         + git_read_tools(container)
         + git_write_tools(container)
         + git_workspace_tools(container)

@@ -16,6 +16,7 @@ from app.chatgpt_share import (
 )
 from app.commands import RepositoryCommandService
 from app.coordinator import CoordinatorService, RouteRegistry
+from app.desktop_nodes import DesktopNodeService
 from app.files import FileService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
@@ -81,6 +82,7 @@ class ApplicationContainer:
     route_registry: RouteRegistry
     commands: RepositoryCommandService
     bridge_restart: BridgeRestartService
+    desktop_nodes: DesktopNodeService
 
 
 def build_container(
@@ -340,4 +342,5 @@ def build_container(
         route_registry=route_registry,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
+        desktop_nodes=DesktopNodeService(configured.desktop_nodes),
     )

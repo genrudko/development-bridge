@@ -194,6 +194,18 @@ class OAuthSettings(BaseModel):
         return self
 
 
+class DesktopNodeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    token: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    offline_after_seconds: float = Field(default=45, gt=1, le=300)
+    claim_timeout_seconds: float = Field(default=25, gt=0, le=60)
+    call_timeout_seconds: float = Field(default=60, gt=0, le=300)
+    max_pending_commands: int = Field(default=32, ge=1, le=256)
+    max_request_bytes: int = Field(default=262_144, ge=4096, le=2_097_152)
+    max_arguments_bytes: int = Field(default=131_072, ge=1024, le=1_048_576)
+    max_result_bytes: int = Field(default=1_048_576, ge=4096, le=8_388_608)
+
+
 class RepositorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(pattern=IDENTIFIER_PATTERN)
@@ -236,6 +248,7 @@ class BridgeSettings(BaseModel):
     telegram_supervisor: TelegramSupervisorSettings = Field(default_factory=TelegramSupervisorSettings)
     coordinator: CoordinatorRoutingSettings = Field(default_factory=CoordinatorRoutingSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
+    desktop_nodes: DesktopNodeSettings = Field(default_factory=DesktopNodeSettings)
     projects: tuple[ProjectSettings, ...] = ()
 
     @model_validator(mode="after")
@@ -307,6 +320,8 @@ def load_settings(
             raise ValueError(
                 "X trigger token must be supplied through the deployment environment"
             )
+        if isinstance(raw.get("desktop_nodes"), dict) and "token" in raw["desktop_nodes"]:
+            raise ValueError("Desktop node token must be supplied through the deployment environment")
         settings = BridgeSettings.model_validate(raw)
 
     server_updates: dict[str, Any] = {}
@@ -379,6 +394,10 @@ def load_settings(
     if github_token := environment.get("DEVELOPMENT_BRIDGE_GITHUB_TOKEN"):
         environment_updates["github"] = GitHubSettings.model_validate(
             {**settings.github.model_dump(), "token": github_token}
+        )
+    if desktop_token := environment.get("DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN"):
+        environment_updates["desktop_nodes"] = DesktopNodeSettings.model_validate(
+            {**settings.desktop_nodes.model_dump(), "token": desktop_token}
         )
 
     if environment_updates:

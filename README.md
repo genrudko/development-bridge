@@ -23,6 +23,9 @@ The Bridge exposes:
 
 - Core: `bridge_info`, `project_list`, `project_describe`, `repository_status`,
   and `repository_clone`;
+- Fusion desktop relay: `fusion_node_status`, `fusion_tools`, and `fusion_call`
+  use an authenticated outbound Windows agent; see
+  [the Milestone 1 runbook](docs/FUSION_DESKTOP_POC.md);
 - Files: `file_list`, `file_read`, and `file_search`;
 - Git read: `git_log`, `git_show`, `git_diff`, and `git_refs`;
 - Git workspace: `git_fetch`, `git_branch_create`, `git_branch_switch`, and
