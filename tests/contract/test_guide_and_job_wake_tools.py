@@ -31,6 +31,13 @@ def test_bridge_guide_is_registry_derived_and_complete():
     assert catalog == {tool.name for tool in registry.definitions}
     assert "queued status is normal" in data["durable_jobs"]["rule"]
     assert any("batched_messages" in step for step in data["durable_jobs"]["preferred_event_flow"])
+    economy = data["economy_mode"]
+    assert "scarce resource" in economy["objective"]
+    assert any("Do not poll durable jobs" in rule for rule in economy["rules"])
+    assert any("ChatGPT Web/Browser Host" in rule for rule in economy["rules"])
+    assert any("Do not repeat discovery" in rule for rule in economy["rules"])
+    assert "check -> change -> targeted tests" in economy["rules"][0]
+    assert "inspect exact state" in economy["executor_job_shape"]
 
 
 def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():

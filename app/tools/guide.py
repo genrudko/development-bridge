@@ -45,7 +45,8 @@ def guide_tools(registry: ToolRegistry) -> tuple[RegisteredTool, ...]:
                 "rule": "repository_exec is asynchronous; an initial queued status is normal and is never evidence that the worker is broken.",
                 "lifecycle": [
                     "repository_exec",
-                    "job_status until status is succeeded, failed, or cancelled",
+                    "prefer coordinator_wake_on_jobs instead of repeated job_status polling",
+                    "after wake (or one sparse checkpoint), read terminal job_status",
                     "job_output once terminal",
                 ],
                 "preferred_event_flow": [
@@ -57,6 +58,21 @@ def guide_tools(registry: ToolRegistry) -> tuple[RegisteredTool, ...]:
                     "process any batched_messages returned by coordinator_ack in the same model turn",
                     "read terminal job_status and job_output once per terminal group",
                 ],
+            },
+            "economy_mode": {
+                "objective": "Treat every model/tool round-trip as a scarce resource: minimize tool calls, chat growth, and live ChatGPT Web traffic without reducing verification quality.",
+                "rules": [
+                    "Plan before calling tools. Prefer one bounded execution that performs check -> change -> targeted tests -> concise status over a conversational sequence of shell commands.",
+                    "For work lasting more than a few seconds, prefer coordinator_exec_and_wake or repository_exec. Put long scripts/data in stdin instead of splitting them across calls.",
+                    "Do not poll durable jobs at short intervals. Prefer coordinator_wake_on_jobs; after a wake, read terminal job_status and job_output once per terminal group. If wake is unavailable, use sparse bounded checkpoints only.",
+                    "Batch related read-only probes into one bounded command or search. Search/list first, then read only files or ranges that are actually relevant. Do not re-read unchanged files, status, schemas, or logs.",
+                    "Keep output bounded: use grep/tail/sed, explicit limits, diff --stat/diff --check, and targeted tests. Never dump full logs or large generated files into chat unless the result itself requires them.",
+                    "Reuse known tool schemas and repository state. Do not repeat discovery/list_resources/bridge_guide or capability checks within the same chat unless runtime state actually changed.",
+                    "Report only meaningful checkpoints: blocker, decision, test result, commit/deploy result, or final outcome. Do not narrate every tool call or paste raw stdout that does not change the decision.",
+                    "Treat ChatGPT Web/Browser Host interactions as especially expensive. Do design, code review, and tests offline first; run one deliberate live acceptance when possible. Respect rate-limit/backoff state and never retry live UI actions during backoff.",
+                    "When delegating work, give the executor one bounded outcome, exact scope, invariants, tests, and stop conditions so it can finish autonomously without asking the coordinator to dispatch each substep.",
+                ],
+                "executor_job_shape": "One job should normally be: inspect exact state -> make the smallest scoped change -> run targeted verification -> emit a short structured result. Split jobs only for true dependency boundaries, destructive-risk gates, or materially independent repositories.",
             },
             "operator_guidance": {
                 "run_command": "Use only for short direct commands; it is idle-gated per repository, so work in other repositories does not block it. Use repository_exec for durable work.",
