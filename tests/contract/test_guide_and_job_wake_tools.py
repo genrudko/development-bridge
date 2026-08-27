@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.container import build_container
@@ -38,6 +39,15 @@ def test_bridge_guide_is_registry_derived_and_complete():
     assert any("Do not repeat discovery" in rule for rule in economy["rules"])
     assert "check -> change -> targeted tests" in economy["rules"][0]
     assert "inspect exact state" in economy["executor_job_shape"]
+    delegation = data["executor_delegation"]
+    assert "mandatory" in delegation["rule"]
+    assert "AGENTS.md" in delegation["rule"]
+    assert "ECONOMY MODE" in delegation["prompt_suffix"]
+    assert "do not poll durable jobs frequently" in delegation["prompt_suffix"]
+    agent_rules = (Path(__file__).parents[2] / "AGENTS.md").read_text(encoding="utf-8")
+    assert "## Economy Mode" in agent_rules
+    assert "one bounded work cycle" in agent_rules
+    assert "Never retry live UI actions during rate-limit/backoff" in agent_rules
 
 
 def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():

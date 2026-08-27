@@ -74,6 +74,10 @@ def guide_tools(registry: ToolRegistry) -> tuple[RegisteredTool, ...]:
                 ],
                 "executor_job_shape": "One job should normally be: inspect exact state -> make the smallest scoped change -> run targeted verification -> emit a short structured result. Split jobs only for true dependency boundaries, destructive-risk gates, or materially independent repositories.",
             },
+            "executor_delegation": {
+                "rule": "Economy Mode is mandatory for delegated LLM executors. Codex/repository-native executors should inherit the repository AGENTS.md automatically; if an executor does not load repository instructions, include the compact policy below in its initial prompt without spending an extra tool call to fetch it.",
+                "prompt_suffix": "ECONOMY MODE: Treat tool/model round-trips and coordinator context as scarce. Work toward one bounded outcome: inspect exact state -> smallest scoped change -> targeted verification -> concise result. Batch related probes; do not re-read unchanged state; keep logs bounded; do not poll durable jobs frequently; report only blockers/decisions/tests/final status. Do all design/testing offline before any live ChatGPT Web action, and never retry live UI during rate-limit/backoff. Stop and report if a destructive-risk gate, missing invariant, or materially new scope appears.",
+            },
             "operator_guidance": {
                 "run_command": "Use only for short direct commands; it is idle-gated per repository, so work in other repositories does not block it. Use repository_exec for durable work.",
                 "bridge_restart": "Guarded self-restart using a user-systemd trampoline plus narrow sudoers bootstrap; reconnect and verify afterward. It does not deploy production.",
