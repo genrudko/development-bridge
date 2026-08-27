@@ -957,36 +957,47 @@ class BrowserHost:
             raise ValueError("ChatGPT conversation URL has an invalid conversation id")
         return conversation_id
 
-    def validate_candidate_conversation(self, page: dict, candidate_url: str) -> dict:
-        # A rollover candidate is valid only when ChatGPT can read a persisted
-        # conversation with the same id and a non-empty message mapping.
-        conversation_id = self.conversation_id_from_url(candidate_url)
-        encoded_id = json.dumps(conversation_id)
-        expression = f'''(async()=>{{
-          const id={encoded_id};
-          try{{
-            const response=await fetch('/backend-api/conversation/'+encodeURIComponent(id),{{
-              credentials:'include', cache:'no-store'
-            }});
-            if(!response.ok)return {{ok:false,status:response.status,conversation_id:id,mapping_count:null}};
-            const payload=await response.json();
-            const returnedId=payload?.conversation_id||payload?.id||null;
-            const mapping=(payload?.mapping&&typeof payload.mapping==='object')?payload.mapping:null;
-            const mappingCount=mapping?Object.keys(mapping).length:0;
-            return {{
-              ok:returnedId===id&&mappingCount>0,
-              status:response.status,
-              conversation_id:returnedId,
-              mapping_count:mappingCount
-            }};
-          }}catch(error){{
-            return {{ok:false,status:null,conversation_id:id,mapping_count:null,error:String(error)}};
-          }}
+    def validate_candidate_conversation(
+        self, page: dict, candidate_url: str, *, timeout: float = 30
+    ) -> dict:
+        # Project conversations are loaded by ChatGPT with client-specific request
+        # headers, so a hand-written backend fetch is not a valid persistence test.
+        # Validate what the user can actually open instead: exact stable chat URL +
+        # hydrated visible composer. Branch ghosts observed in production redirect to
+        # /project and fail this gate before successor control or route commit.
+        target = canonical_chat_url(candidate_url)
+        encoded_target = json.dumps(target)
+        expression = f'''(()=>{{
+          const target={encoded_target};
+          const current=(location.origin+location.pathname).replace(/[/]$/,'');
+          const composer=document.querySelector('#prompt-textarea');
+          const rect=composer?.getBoundingClientRect();
+          const composerVisible=!!composer&&!!rect&&rect.width>0&&rect.height>0;
+          const text=(document.body?.innerText||'').toLowerCase();
+          const errorVisible=/something went wrong|unable to load|error loading|не удалось загрузить|ошибка загрузки/.test(text);
+          return {{
+            ok:current===target&&document.readyState==='complete'&&composerVisible&&!errorVisible,
+            current_url:current,
+            ready_state:document.readyState,
+            composer_visible:composerVisible,
+            error_visible:errorVisible,
+            title:document.title||''
+          }};
         }})()'''
-        result = self.runtime_evaluate(page, expression, await_promise=True, timeout=12)
-        if not isinstance(result, dict):
-            raise RuntimeError("candidate conversation validation returned an invalid result")
-        return result
+        deadline = time.monotonic() + timeout
+        last = {"ok": False, "current_url": None, "composer_visible": False}
+        while time.monotonic() < deadline:
+            result = self.runtime_evaluate(page, expression)
+            if not isinstance(result, dict):
+                raise RuntimeError("candidate conversation validation returned an invalid result")
+            last = result
+            if result.get("ok") is True:
+                return result
+            current = str(result.get("current_url") or "")
+            if current and current != target and "/project" in current:
+                return result
+            time.sleep(1)
+        return last
 
     def dispatch_mouse_click(self, page: dict, x: float, y: float) -> None:
         ws = websocket.create_connection(
@@ -1448,19 +1459,21 @@ class BrowserHost:
             if candidate_page is None:
                 raise RuntimeError("successor conversation is unavailable")
 
-            candidate_validation = self.validate_candidate_conversation(candidate_page, candidate_url)
+            candidate_validation = self.validate_candidate_conversation(
+                candidate_page, candidate_url, timeout=30
+            )
             if not candidate_validation.get("ok"):
-                status = candidate_validation.get("status")
-                detail = (
-                    f"HTTP {status}" if status is not None
-                    else candidate_validation.get("error", "unknown error")
-                )
-                if status not in {401, 403, 404} and self.rollover_age_seconds(rollover) <= 180:
+                current = str(candidate_validation.get("current_url") or "")
+                if current and current != candidate_url:
+                    raise RuntimeError(
+                        f"successor conversation did not remain on its stable URL: {current}"
+                    )
+                if self.rollover_age_seconds(rollover) <= 180:
                     return {
                         "state": "waiting_candidate_validation",
-                        "error": f"successor conversation is not yet readable: {detail}",
+                        "error": "successor conversation has not hydrated a visible composer",
                     }
-                raise RuntimeError(f"successor conversation is not readable: {detail}")
+                raise RuntimeError("successor conversation did not hydrate a visible composer")
 
             control = self.wait_for_control_channel(candidate_page, target_channel, timeout=30)
             if not control.get("ok") or control.get("channel_id") != target_channel:
@@ -1497,16 +1510,11 @@ class BrowserHost:
             if not poll_ok:
                 raise RuntimeError(f"native successor X polling was not observed: {poll_detail}")
 
-            final_validation = self.validate_candidate_conversation(candidate_page, candidate_url)
+            final_validation = self.validate_candidate_conversation(
+                candidate_page, candidate_url, timeout=8
+            )
             if not final_validation.get("ok"):
-                status = final_validation.get("status")
-                detail = (
-                    f"HTTP {status}" if status is not None
-                    else final_validation.get("error", "unknown error")
-                )
-                raise RuntimeError(
-                    f"successor conversation failed final readability gate: {detail}"
-                )
+                raise RuntimeError("successor conversation failed final UI hydration gate")
 
             committed = self.rollover_control("commit", rollover)
             self.rollover_count += 1

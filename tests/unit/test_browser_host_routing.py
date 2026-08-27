@@ -241,7 +241,7 @@ def test_browser_host_rollover_aborts_ghost_candidate_before_control(tmp_path: P
     candidate_page = {"id": "candidate", "url": rollover["candidate_url"]}
     host.pending_rollover = lambda: dict(rollover)
     host.pages = lambda: [candidate_page]
-    host.validate_candidate_conversation = lambda page, url: {"ok": False, "status": 404, "conversation_id": "ghost-b", "mapping_count": None}
+    host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": False, "current_url": "https://chatgpt.com/g/g-p-ad5x/project", "composer_visible": False}
     control_calls = []
     host.wait_for_control_channel = lambda *a, **k: control_calls.append((a, k))
     host.restore_source_after_rollover = lambda url: None
@@ -249,7 +249,7 @@ def test_browser_host_rollover_aborts_ghost_candidate_before_control(tmp_path: P
     host.rollover_control = lambda action, current, **payload: actions.append(action) or {"aborted": True}
     result = host.process_pending_rollover()
     assert result["state"] == "aborted"
-    assert "HTTP 404" in result["error"]
+    assert "stable URL" in result["error"]
     assert control_calls == []
     assert actions == ["abort"]
 
@@ -281,7 +281,7 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
         "ok": True, "channel_id": "telegram-ad5x-g5"
     }
     host.branch_in_new_chat = lambda page, url: (candidate_page, candidate_url)
-    host.validate_candidate_conversation = lambda page, url: {"ok": True, "status": 200, "conversation_id": url.rsplit('/c/',1)[1], "mapping_count": 3}
+    host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": True, "current_url": url, "composer_visible": True}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
         "ok": True, "channel_id": channel_id
     }
@@ -343,7 +343,7 @@ def test_browser_host_rollover_allows_verified_legacy_source_without_control(tmp
     host.safe_coordinator_iframe_count = lambda page: (2, None)
     host.polling_ok = lambda: (True, "matches=6 in last 15s")
     host.branch_in_new_chat = lambda page, url: (candidate_page, candidate_url)
-    host.validate_candidate_conversation = lambda page, url: {"ok": True, "status": 200, "conversation_id": url.rsplit('/c/',1)[1], "mapping_count": 3}
+    host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": True, "current_url": url, "composer_visible": True}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {"ok": True, "channel_id": channel_id}
     host.wait_for_polling = lambda channel_id, timeout=35: (True, "matches=3")
     host.wait_for_rollover_preflight = lambda page, token, timeout=75: {"ready": True, "iframe_count": 1}
@@ -406,7 +406,7 @@ def test_browser_host_rollover_aborts_before_commit_on_successor_failure(tmp_pat
     candidate_page = {"id": "candidate", "url": rollover["candidate_url"]}
     host.pending_rollover = lambda: dict(rollover)
     host.pages = lambda: [candidate_page]
-    host.validate_candidate_conversation = lambda page, url: {"ok": True, "status": 200, "conversation_id": url.rsplit('/c/',1)[1], "mapping_count": 3}
+    host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": True, "current_url": url, "composer_visible": True}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
         "ok": False, "error": "template_missing"
     }
@@ -456,23 +456,43 @@ def test_browser_host_completes_durable_rollover_bootstrap(tmp_path: Path):
     assert completed == ["complete"]
 
 
-def test_browser_host_candidate_validator_requires_matching_persisted_mapping(tmp_path: Path):
+def test_browser_host_candidate_validator_requires_stable_hydrated_chat(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
     seen = {}
     def evaluate(page, expression, **kwargs):
-        seen.update(kwargs)
         seen["expression"] = expression
-        return {"ok": True, "status": 200, "conversation_id": "conv-b", "mapping_count": 4}
+        return {
+            "ok": True,
+            "current_url": "https://chatgpt.com/g/g-p-ad5x/c/conv-b",
+            "ready_state": "complete",
+            "composer_visible": True,
+            "error_visible": False,
+        }
     host.runtime_evaluate = evaluate
     result = host.validate_candidate_conversation(
-        {"id": "candidate"}, "https://chatgpt.com/g/g-p-ad5x/c/conv-b"
+        {"id": "candidate"}, "https://chatgpt.com/g/g-p-ad5x/c/conv-b", timeout=1
     )
     assert result["ok"] is True
-    assert seen["await_promise"] is True
-    assert seen["timeout"] == 12
-    assert "/backend-api/conversation/" in seen["expression"]
-    assert "mappingCount>0" in seen["expression"]
+    assert "#prompt-textarea" in seen["expression"]
+    assert "current===target" in seen["expression"]
+
+
+def test_browser_host_candidate_validator_rejects_project_redirect(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.runtime_evaluate = lambda *a, **k: {
+        "ok": False,
+        "current_url": "https://chatgpt.com/g/g-p-ad5x/project",
+        "ready_state": "complete",
+        "composer_visible": False,
+        "error_visible": False,
+    }
+    result = host.validate_candidate_conversation(
+        {"id": "candidate"}, "https://chatgpt.com/g/g-p-ad5x/c/ghost-b", timeout=1
+    )
+    assert result["ok"] is False
+    assert result["current_url"].endswith("/project")
 
 
 def test_browser_host_branch_uses_supported_turn_action(tmp_path: Path, monkeypatch):
@@ -660,7 +680,7 @@ def test_browser_host_rollover_retries_transient_cdp_failure(tmp_path: Path):
     }
     host.pending_rollover = lambda: dict(rollover)
     host.pages = lambda: [{"id": "candidate", "url": rollover["candidate_url"]}]
-    host.validate_candidate_conversation = lambda page, url: {"ok": True, "status": 200, "conversation_id": url.rsplit('/c/',1)[1], "mapping_count": 3}
+    host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": True, "current_url": url, "composer_visible": True}
     host.wait_for_control_channel = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("Connection timed out"))
     aborted = []
     host.abort_pending_rollover = lambda current, reason: aborted.append(reason) or {"aborted": True}
