@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx2
 import pytest
 
@@ -36,3 +38,51 @@ async def test_agent_routes_are_hidden_without_token():
     transport = httpx2.ASGITransport(app=app_with())
     async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
         assert (await client.post("/mcp/desktop-nodes/desk/register", json={})).status_code == 404
+        assert (await client.post("/mcp/desktop-nodes/desk/operator/status", json={})).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_operator_routes_allow_localhost_and_deny_remote_clients():
+    app = app_with("secret")
+    headers = {"Authorization": "Bearer secret"}
+    local_transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=local_transport, base_url="http://127.0.0.1") as client:
+        await client.post("/mcp/desktop-nodes/desk/register", headers=headers, json={"fusion_available": True, "tools": [{"name": "ping"}]})
+        status = await client.post("/mcp/desktop-nodes/desk/operator/status", headers=headers)
+        assert status.status_code == 200
+        assert status.json()["node_id"] == "desk"
+        tools = await client.post("/mcp/desktop-nodes/desk/operator/tools", headers=headers)
+        assert tools.status_code == 200
+        assert tools.json()["tools"] == [{"name": "ping"}]
+
+    remote_transport = httpx2.ASGITransport(app=app, client=("192.0.2.10", 1234))
+    async with httpx2.AsyncClient(transport=remote_transport, base_url="http://bridge") as client:
+        denied = await client.post("/mcp/desktop-nodes/desk/operator/status", headers=headers)
+        assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_operator_call_roundtrip_with_fake_agent():
+    app = app_with("secret")
+    headers = {"Authorization": "Bearer secret"}
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        await client.post("/mcp/desktop-nodes/desk/register", headers=headers, json={"fusion_available": True, "tools": [{"name": "ping"}]})
+        operator_call = asyncio.create_task(client.post(
+            "/mcp/desktop-nodes/desk/operator/call",
+            headers=headers,
+            json={"tool_name": "ping", "arguments": {"value": 7}},
+        ))
+        claimed = await client.post("/mcp/desktop-nodes/desk/claim?wait=1", headers=headers)
+        command = claimed.json()["command"]
+        assert command["tool_name"] == "ping"
+        assert command["arguments"] == {"value": 7}
+        submitted = await client.post(
+            "/mcp/desktop-nodes/desk/result",
+            headers=headers,
+            json={"command_id": command["command_id"], "result": {"ok": True}},
+        )
+        assert submitted.status_code == 200
+        response = await operator_call
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
