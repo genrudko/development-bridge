@@ -1527,27 +1527,10 @@ class BrowserHost:
                     )
                 if source_page is None:
                     raise RuntimeError("source conversation is unavailable")
-                turn_state, error = self.safe_bridge_turn_state(source_page)
-                if turn_state is None:
-                    return {"state": "waiting_source_turn", "error": error}
-                if turn_state.get("generating"):
-                    return {"state": "waiting_source_turn"}
-                source_control = self.coordinator_app_control(source_page, "ping")
-                if not source_control.get("ok"):
-                    iframe_count, iframe_error = self.safe_coordinator_iframe_count(source_page)
-                    poll_ok, poll_detail = self.polling_ok()
-                    legacy_source_verified = (
-                        iframe_count is not None
-                        and iframe_count > 0
-                        and poll_ok is True
-                    )
-                    if not legacy_source_verified:
-                        if self.rollover_age_seconds(rollover) > 120:
-                            raise RuntimeError("fresh rollover MCP App is not control-capable")
-                        return {
-                            "state": "waiting_source_control",
-                            "error": source_control.get("error") or iframe_error or poll_detail,
-                        }
+                # Fresh project successors do not inherit or mutate the source
+                # transcript, so source MCP-App control/polling is not a prerequisite.
+                # This is intentional: rollover must still work when the old long chat
+                # can no longer hydrate its historical coordinator card.
                 candidate_page, candidate_url = self.create_project_successor(
                     source_url, target_channel, rollover["token"]
                 )

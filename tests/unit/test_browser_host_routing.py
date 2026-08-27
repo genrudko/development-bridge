@@ -313,80 +313,78 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
     assert host.rollover_count == 1
 
 
-def test_browser_host_rollover_allows_verified_legacy_source_without_control(tmp_path: Path):
+def test_browser_host_rollover_creates_fresh_successor_without_source_control(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
     host.route_generation = 5
     source_url = host.target_url
-    candidate_url = "https://chatgpt.com/g/g-p-ad5x/c/conv-legacy-successor"
+    candidate_url = "https://chatgpt.com/g/g-p-ad5x/c/conv-fresh-successor"
     rollover = {
-        "token": "roll_legacy_token",
-        "state": "prepared",
-        "source_generation": 5,
-        "target_generation": 6,
-        "source_url": source_url,
-        "source_conversation_id": "conv-a",
-        "project_id": "g-p-ad5x",
-        "channel_id": "telegram-ad5x-g6",
-        "created_at": "2026-08-26T10:00:00+00:00",
+        "token": "roll_fresh_token", "state": "prepared", "source_generation": 5,
+        "target_generation": 6, "source_url": source_url,
+        "source_conversation_id": "conv-a", "project_id": "g-p-ad5x",
+        "channel_id": "telegram-ad5x-g6", "created_at": "2026-08-26T10:00:00+00:00",
     }
     source_page = {"id": "source", "url": source_url}
     candidate_page = {"id": "candidate", "url": candidate_url}
     host.pending_rollover = lambda: dict(rollover)
     host.pages = lambda: [source_page]
-    host.safe_bridge_turn_state = lambda page: ({"generating": False}, None)
+    source_control_calls = []
     host.coordinator_app_control = lambda page, action, **payload: (
-        {"ok": False, "error": "control_context_missing"}
-        if page.get("id") == "source" and action == "ping"
-        else {"ok": True, "channel_id": payload.get("channel_id", "telegram-ad5x-g6")}
+        source_control_calls.append((page.get("id"), action)) or
+        {"ok": True, "channel_id": payload.get("channel_id", "telegram-ad5x-g6")}
     )
-    host.safe_coordinator_iframe_count = lambda page: (2, None)
-    host.polling_ok = lambda: (True, "matches=6 in last 15s")
-    host.create_project_successor = lambda url, channel, token: (candidate_page, candidate_url)
-    host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": True, "current_url": url, "composer_visible": True}
-    host.wait_for_control_channel = lambda page, channel_id, timeout=30: {"ok": True, "channel_id": channel_id}
+    created = []
+    host.create_project_successor = lambda url, channel, token: (
+        created.append((url, channel, token)) or (candidate_page, candidate_url)
+    )
+    host.validate_candidate_conversation = lambda page, url, timeout=30: {
+        "ok": True, "current_url": url, "composer_visible": True
+    }
+    host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
+        "ok": True, "channel_id": channel_id
+    }
     host.wait_for_polling = lambda channel_id, timeout=35: (True, "matches=3")
-    host.wait_for_rollover_preflight = lambda page, token, timeout=75: {"ready": True, "iframe_count": 1}
-    calls = []
-    def control(action, current, **payload):
-        calls.append((action, payload))
-        if action == "candidate":
-            return {**current, "state": "candidate", "candidate_url": payload["url"], "candidate_conversation_id": "conv-legacy-successor"}
-        if action == "commit":
-            return {"route_id": "ad5x", "generation": 6, "channel_id": "telegram-ad5x-g6", "conversation_id": "conv-legacy-successor", "url": candidate_url}
+    host.wait_for_rollover_preflight = lambda page, token, timeout=75: {
+        "ready": True, "iframe_count": 1
+    }
+    calls=[]
+    def control(action,current,**payload):
+        calls.append(action)
+        if action=="candidate": return {**current,"state":"candidate","candidate_url":payload["url"],"candidate_conversation_id":"conv-fresh-successor"}
+        if action=="commit": return {"route_id":"ad5x","generation":6,"channel_id":"telegram-ad5x-g6","conversation_id":"conv-fresh-successor","url":candidate_url}
         raise AssertionError(action)
-    host.rollover_control = control
-    result = host.process_pending_rollover()
-    assert result["state"] == "committed"
-    assert [item[0] for item in calls] == ["candidate", "commit"]
+    host.rollover_control=control
+    result=host.process_pending_rollover()
+    assert result["state"]=="committed"
+    assert created == [(source_url, "telegram-ad5x-g6", "roll_fresh_token")]
+    assert all(page_id != "source" for page_id, _ in source_control_calls)
+    assert calls == ["candidate", "commit"]
 
 
-def test_browser_host_rollover_still_waits_when_legacy_source_polling_is_not_verified(tmp_path: Path):
+def test_browser_host_rollover_does_not_probe_stale_source_listener(tmp_path: Path):
     module = _module()
+    module.TRANSIENT_CDP_ERRORS = (OSError, TimeoutError)
     host = module.BrowserHost(_config(module, tmp_path))
     host.route_generation = 5
     rollover = {
-        "token": "roll_legacy_wait",
-        "state": "prepared",
-        "source_generation": 5,
-        "target_generation": 6,
-        "source_url": host.target_url,
-        "source_conversation_id": "conv-a",
-        "project_id": "g-p-ad5x",
+        "token": "roll_no_source_probe", "state": "prepared", "source_generation": 5,
+        "target_generation": 6, "source_url": host.target_url,
+        "source_conversation_id": "conv-a", "project_id": "g-p-ad5x",
         "channel_id": "telegram-ad5x-g6",
         "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
     }
-    host.pending_rollover = lambda: dict(rollover)
-    host.pages = lambda: [{"id": "source", "url": host.target_url}]
-    host.safe_bridge_turn_state = lambda page: ({"generating": False}, None)
-    host.coordinator_app_control = lambda page, action, **payload: {"ok": False, "error": "control_context_missing"}
-    host.safe_coordinator_iframe_count = lambda page: (2, None)
-    host.polling_ok = lambda: (False, "matches=0 in last 15s")
-    created = []
-    host.create_project_successor = lambda *args: created.append(args)
-    result = host.process_pending_rollover()
-    assert result["state"] == "waiting_source_control"
-    assert created == []
+    host.pending_rollover=lambda:dict(rollover)
+    host.pages=lambda:[{"id":"source","url":host.target_url}]
+    host.safe_bridge_turn_state=lambda *a,**k: (_ for _ in ()).throw(AssertionError("source turn probe must not run"))
+    host.safe_coordinator_iframe_count=lambda *a,**k: (_ for _ in ()).throw(AssertionError("source iframe probe must not run"))
+    host.polling_ok=lambda *a,**k: (_ for _ in ()).throw(AssertionError("source polling probe must not run"))
+    host.create_project_successor=lambda *a,**k: (_ for _ in ()).throw(RuntimeError("fresh successor stopped for test"))
+    host.restore_source_after_rollover=lambda url: None
+    host.rollover_control=lambda action,current,**payload:{"aborted":True}
+    result=host.process_pending_rollover()
+    assert result["state"]=="aborted"
+    assert "fresh successor stopped for test" in result["error"]
 
 
 def test_browser_host_rollover_aborts_before_commit_on_successor_failure(tmp_path: Path):
