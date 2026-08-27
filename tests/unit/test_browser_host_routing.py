@@ -28,7 +28,7 @@ def _config(module, tmp_path: Path):
         check_interval=5, startup_timeout=45, poll_window=15, poll_grace=45,
         listener_recovery_timeout=120, state_dir=tmp_path / "state",
         route_registry=tmp_path / "routes.json", chat_registry=tmp_path / "chat-registry.json",
-        discovery_interval=60,
+        discovery_interval=60, rollover_branch_enabled=True,
     )
 
 
@@ -206,6 +206,54 @@ def test_browser_host_observer_uses_turn_key_not_numeric_order(tmp_path: Path):
 
 
 
+def test_browser_host_rollover_is_safety_locked_by_default(tmp_path: Path):
+    module = _module()
+    import dataclasses
+    cfg = dataclasses.replace(_config(module, tmp_path), rollover_branch_enabled=False)
+    host = module.BrowserHost(cfg)
+    host.route_generation = 5
+    rollover = {
+        "token": "roll_locked", "state": "prepared", "source_generation": 5,
+        "target_generation": 6, "source_url": host.target_url,
+        "channel_id": "telegram-ad5x-g6",
+        "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    }
+    host.pending_rollover = lambda: dict(rollover)
+    branched = []
+    host.branch_in_new_chat = lambda *args: branched.append(args)
+    result = host.process_pending_rollover()
+    assert result["state"] == "safety_locked"
+    assert branched == []
+
+
+def test_browser_host_rollover_aborts_ghost_candidate_before_control(tmp_path: Path):
+    module = _module()
+    module.TRANSIENT_CDP_ERRORS = (OSError, TimeoutError)
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.route_generation = 5
+    rollover = {
+        "token": "roll_ghost", "state": "candidate", "source_generation": 5,
+        "target_generation": 6, "source_url": host.target_url,
+        "candidate_url": "https://chatgpt.com/g/g-p-ad5x/c/ghost-b",
+        "channel_id": "telegram-ad5x-g6",
+        "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+    }
+    candidate_page = {"id": "candidate", "url": rollover["candidate_url"]}
+    host.pending_rollover = lambda: dict(rollover)
+    host.pages = lambda: [candidate_page]
+    host.validate_candidate_conversation = lambda page, url: {"ok": False, "status": 404, "conversation_id": "ghost-b", "mapping_count": None}
+    control_calls = []
+    host.wait_for_control_channel = lambda *a, **k: control_calls.append((a, k))
+    host.restore_source_after_rollover = lambda url: None
+    actions = []
+    host.rollover_control = lambda action, current, **payload: actions.append(action) or {"aborted": True}
+    result = host.process_pending_rollover()
+    assert result["state"] == "aborted"
+    assert "HTTP 404" in result["error"]
+    assert control_calls == []
+    assert actions == ["abort"]
+
+
 def test_browser_host_rollover_commits_only_after_successor_verification(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
@@ -233,6 +281,7 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
         "ok": True, "channel_id": "telegram-ad5x-g5"
     }
     host.branch_in_new_chat = lambda page, url: (candidate_page, candidate_url)
+    host.validate_candidate_conversation = lambda page, url: {"ok": True, "status": 200, "conversation_id": url.rsplit('/c/',1)[1], "mapping_count": 3}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
         "ok": True, "channel_id": channel_id
     }
@@ -294,6 +343,7 @@ def test_browser_host_rollover_allows_verified_legacy_source_without_control(tmp
     host.safe_coordinator_iframe_count = lambda page: (2, None)
     host.polling_ok = lambda: (True, "matches=6 in last 15s")
     host.branch_in_new_chat = lambda page, url: (candidate_page, candidate_url)
+    host.validate_candidate_conversation = lambda page, url: {"ok": True, "status": 200, "conversation_id": url.rsplit('/c/',1)[1], "mapping_count": 3}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {"ok": True, "channel_id": channel_id}
     host.wait_for_polling = lambda channel_id, timeout=35: (True, "matches=3")
     host.wait_for_rollover_preflight = lambda page, token, timeout=75: {"ready": True, "iframe_count": 1}
@@ -356,6 +406,7 @@ def test_browser_host_rollover_aborts_before_commit_on_successor_failure(tmp_pat
     candidate_page = {"id": "candidate", "url": rollover["candidate_url"]}
     host.pending_rollover = lambda: dict(rollover)
     host.pages = lambda: [candidate_page]
+    host.validate_candidate_conversation = lambda page, url: {"ok": True, "status": 200, "conversation_id": url.rsplit('/c/',1)[1], "mapping_count": 3}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
         "ok": False, "error": "template_missing"
     }
@@ -403,6 +454,25 @@ def test_browser_host_completes_durable_rollover_bootstrap(tmp_path: Path):
     assert sent[0][1]["operation_id"] == "roll_durable_token"
     assert "coordinator_route_context_get" in sent[0][1]["message"]
     assert completed == ["complete"]
+
+
+def test_browser_host_candidate_validator_requires_matching_persisted_mapping(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    seen = {}
+    def evaluate(page, expression, **kwargs):
+        seen.update(kwargs)
+        seen["expression"] = expression
+        return {"ok": True, "status": 200, "conversation_id": "conv-b", "mapping_count": 4}
+    host.runtime_evaluate = evaluate
+    result = host.validate_candidate_conversation(
+        {"id": "candidate"}, "https://chatgpt.com/g/g-p-ad5x/c/conv-b"
+    )
+    assert result["ok"] is True
+    assert seen["await_promise"] is True
+    assert seen["timeout"] == 12
+    assert "/backend-api/conversation/" in seen["expression"]
+    assert "mappingCount>0" in seen["expression"]
 
 
 def test_browser_host_branch_uses_supported_turn_action(tmp_path: Path, monkeypatch):
@@ -590,6 +660,7 @@ def test_browser_host_rollover_retries_transient_cdp_failure(tmp_path: Path):
     }
     host.pending_rollover = lambda: dict(rollover)
     host.pages = lambda: [{"id": "candidate", "url": rollover["candidate_url"]}]
+    host.validate_candidate_conversation = lambda page, url: {"ok": True, "status": 200, "conversation_id": url.rsplit('/c/',1)[1], "mapping_count": 3}
     host.wait_for_control_channel = lambda *a, **k: (_ for _ in ()).throw(TimeoutError("Connection timed out"))
     aborted = []
     host.abort_pending_rollover = lambda current, reason: aborted.append(reason) or {"aborted": True}

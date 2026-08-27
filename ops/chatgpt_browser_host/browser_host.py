@@ -51,6 +51,7 @@ class Config:
     route_registry: Path
     chat_registry: Path
     discovery_interval: float
+    rollover_branch_enabled: bool = False
 
     @property
     def state_file(self) -> Path:
@@ -67,6 +68,15 @@ class Config:
 
 def env(name: str, default: str) -> str:
     return os.environ.get(name, default).strip()
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = env(name, "1" if default else "0").lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
 
 
 def canonical_chat_url(value: str) -> str:
@@ -130,6 +140,7 @@ def load_config() -> Config:
         route_registry=Path(env("BROWSER_HOST_ROUTE_REGISTRY", str(home / ".local/state/development-bridge/routes.json"))),
         chat_registry=Path(env("BROWSER_HOST_CHAT_REGISTRY", str(home / ".local/state/development-bridge/chat-registry.json"))),
         discovery_interval=float(env("BROWSER_HOST_DISCOVERY_INTERVAL", "60")),
+        rollover_branch_enabled=env_bool("BROWSER_HOST_ROLLOVER_BRANCH_ENABLED", False),
     )
 
 
@@ -202,6 +213,7 @@ class BrowserHost:
             "model_turn_observation_count": self.model_turn_observation_count,
             "rollover_count": self.rollover_count,
             "rollover_abort_count": self.rollover_abort_count,
+            "rollover_branch_enabled": self.cfg.rollover_branch_enabled,
         }
         payload.update(extra)
         atomic_json(self.cfg.state_file, payload)
@@ -937,6 +949,45 @@ class BrowserHost:
         path = urlsplit(canonical_chat_url(url)).path
         return next((part for part in path.split("/") if part.startswith("g-p-")), None)
 
+    @staticmethod
+    def conversation_id_from_url(url: str) -> str:
+        path = urlsplit(canonical_chat_url(url)).path
+        conversation_id = path.rsplit("/c/", 1)[1]
+        if not conversation_id or "/" in conversation_id:
+            raise ValueError("ChatGPT conversation URL has an invalid conversation id")
+        return conversation_id
+
+    def validate_candidate_conversation(self, page: dict, candidate_url: str) -> dict:
+        # A rollover candidate is valid only when ChatGPT can read a persisted
+        # conversation with the same id and a non-empty message mapping.
+        conversation_id = self.conversation_id_from_url(candidate_url)
+        encoded_id = json.dumps(conversation_id)
+        expression = f'''(async()=>{{
+          const id={encoded_id};
+          try{{
+            const response=await fetch('/backend-api/conversation/'+encodeURIComponent(id),{{
+              credentials:'include', cache:'no-store'
+            }});
+            if(!response.ok)return {{ok:false,status:response.status,conversation_id:id,mapping_count:null}};
+            const payload=await response.json();
+            const returnedId=payload?.conversation_id||payload?.id||null;
+            const mapping=(payload?.mapping&&typeof payload.mapping==='object')?payload.mapping:null;
+            const mappingCount=mapping?Object.keys(mapping).length:0;
+            return {{
+              ok:returnedId===id&&mappingCount>0,
+              status:response.status,
+              conversation_id:returnedId,
+              mapping_count:mappingCount
+            }};
+          }}catch(error){{
+            return {{ok:false,status:null,conversation_id:id,mapping_count:null,error:String(error)}};
+          }}
+        }})()'''
+        result = self.runtime_evaluate(page, expression, await_promise=True, timeout=12)
+        if not isinstance(result, dict):
+            raise RuntimeError("candidate conversation validation returned an invalid result")
+        return result
+
     def dispatch_mouse_click(self, page: dict, x: float, y: float) -> None:
         ws = websocket.create_connection(
             page["webSocketDebuggerUrl"], timeout=5, suppress_origin=True
@@ -1329,6 +1380,14 @@ class BrowserHost:
         try:
             candidate_page = None
             if state == "prepared":
+                if not self.cfg.rollover_branch_enabled:
+                    return {
+                        "state": "safety_locked",
+                        "error": (
+                            "automatic physical-chat branch creation is disabled; "
+                            "set BROWSER_HOST_ROLLOVER_BRANCH_ENABLED=1 only for deliberate acceptance"
+                        ),
+                    }
                 pages = self.pages()
                 source_page = next(
                     (item for item in pages if is_target_url(item.get("url", ""), source_url)), None
@@ -1389,6 +1448,20 @@ class BrowserHost:
             if candidate_page is None:
                 raise RuntimeError("successor conversation is unavailable")
 
+            candidate_validation = self.validate_candidate_conversation(candidate_page, candidate_url)
+            if not candidate_validation.get("ok"):
+                status = candidate_validation.get("status")
+                detail = (
+                    f"HTTP {status}" if status is not None
+                    else candidate_validation.get("error", "unknown error")
+                )
+                if status not in {401, 403, 404} and self.rollover_age_seconds(rollover) <= 180:
+                    return {
+                        "state": "waiting_candidate_validation",
+                        "error": f"successor conversation is not yet readable: {detail}",
+                    }
+                raise RuntimeError(f"successor conversation is not readable: {detail}")
+
             control = self.wait_for_control_channel(candidate_page, target_channel, timeout=30)
             if not control.get("ok") or control.get("channel_id") != target_channel:
                 raise RuntimeError(f"successor MCP App control failed: {control.get('error', 'unknown')}")
@@ -1423,6 +1496,17 @@ class BrowserHost:
             poll_ok, poll_detail = self.wait_for_polling(target_channel, timeout=20)
             if not poll_ok:
                 raise RuntimeError(f"native successor X polling was not observed: {poll_detail}")
+
+            final_validation = self.validate_candidate_conversation(candidate_page, candidate_url)
+            if not final_validation.get("ok"):
+                status = final_validation.get("status")
+                detail = (
+                    f"HTTP {status}" if status is not None
+                    else final_validation.get("error", "unknown error")
+                )
+                raise RuntimeError(
+                    f"successor conversation failed final readability gate: {detail}"
+                )
 
             committed = self.rollover_control("commit", rollover)
             self.rollover_count += 1
