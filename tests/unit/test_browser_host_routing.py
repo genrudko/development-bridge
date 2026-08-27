@@ -219,11 +219,11 @@ def test_browser_host_rollover_is_safety_locked_by_default(tmp_path: Path):
         "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
     }
     host.pending_rollover = lambda: dict(rollover)
-    branched = []
-    host.branch_in_new_chat = lambda *args: branched.append(args)
+    created = []
+    host.create_project_successor = lambda *args: created.append(args)
     result = host.process_pending_rollover()
     assert result["state"] == "safety_locked"
-    assert branched == []
+    assert created == []
 
 
 def test_browser_host_rollover_aborts_ghost_candidate_before_control(tmp_path: Path):
@@ -280,7 +280,7 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
     host.coordinator_app_control = lambda page, action, **payload: {
         "ok": True, "channel_id": "telegram-ad5x-g5"
     }
-    host.branch_in_new_chat = lambda page, url: (candidate_page, candidate_url)
+    host.create_project_successor = lambda url, channel, token: (candidate_page, candidate_url)
     host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": True, "current_url": url, "composer_visible": True}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
         "ok": True, "channel_id": channel_id
@@ -342,7 +342,7 @@ def test_browser_host_rollover_allows_verified_legacy_source_without_control(tmp
     )
     host.safe_coordinator_iframe_count = lambda page: (2, None)
     host.polling_ok = lambda: (True, "matches=6 in last 15s")
-    host.branch_in_new_chat = lambda page, url: (candidate_page, candidate_url)
+    host.create_project_successor = lambda url, channel, token: (candidate_page, candidate_url)
     host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": True, "current_url": url, "composer_visible": True}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {"ok": True, "channel_id": channel_id}
     host.wait_for_polling = lambda channel_id, timeout=35: (True, "matches=3")
@@ -382,11 +382,11 @@ def test_browser_host_rollover_still_waits_when_legacy_source_polling_is_not_ver
     host.coordinator_app_control = lambda page, action, **payload: {"ok": False, "error": "control_context_missing"}
     host.safe_coordinator_iframe_count = lambda page: (2, None)
     host.polling_ok = lambda: (False, "matches=0 in last 15s")
-    branched = []
-    host.branch_in_new_chat = lambda *args: branched.append(args)
+    created = []
+    host.create_project_successor = lambda *args: created.append(args)
     result = host.process_pending_rollover()
     assert result["state"] == "waiting_source_control"
-    assert branched == []
+    assert created == []
 
 
 def test_browser_host_rollover_aborts_before_commit_on_successor_failure(tmp_path: Path):
@@ -493,6 +493,38 @@ def test_browser_host_candidate_validator_rejects_project_redirect(tmp_path: Pat
     )
     assert result["ok"] is False
     assert result["current_url"].endswith("/project")
+
+
+def test_browser_host_creates_successor_from_project_home(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    page = {"id": "fresh", "url": "about:blank", "webSocketDebuggerUrl": "ws://fresh"}
+    candidate_url = "https://chatgpt.com/g/g-p-ad5x/c/conv-fresh"
+    host.create_blank_page = lambda: dict(page)
+    navigated = []
+    host.navigate = lambda selected, url: navigated.append(url)
+    submitted = []
+    host.submit_native_prompt = lambda selected, message: submitted.append(message)
+    states = iter([
+        {"url": "https://chatgpt.com/g/g-p-ad5x/project", "ready": "complete", "composer": True},
+        {"url": candidate_url, "generating": True},
+    ])
+    host.runtime_evaluate = lambda *a, **k: next(states)
+    host.validate_candidate_conversation = lambda selected, url, timeout=30: {
+        "ok": True, "current_url": url, "composer_visible": True
+    }
+    host.wait_for_rollover_preflight = lambda selected, token, timeout=75: {
+        "ready": True, "iframe_count": 1
+    }
+    selected, url = host.create_project_successor(
+        host.target_url, "telegram-ad5x-g6", "roll_fresh", timeout=5
+    )
+    assert navigated == ["https://chatgpt.com/g/g-p-ad5x/project"]
+    assert "coordinator_x_mount" in submitted[0]
+    assert "telegram-ad5x-g6" in submitted[0]
+    assert "ROLLOVER_READY roll_fresh" in submitted[0]
+    assert url == candidate_url
+    assert selected["url"] == candidate_url
 
 
 def test_browser_host_branch_uses_supported_turn_action(tmp_path: Path, monkeypatch):

@@ -1034,6 +1034,119 @@ class BrowserHost:
         finally:
             ws.close()
 
+    def submit_native_prompt(self, page: dict, message: str) -> None:
+        ready = self.runtime_evaluate(page, r'''(()=>{
+          const e=document.querySelector('#prompt-textarea');
+          if(!e)return {ok:false,error:'composer_missing'};
+          const r=e.getBoundingClientRect();
+          if(!(r.width>0&&r.height>0))return {ok:false,error:'composer_hidden'};
+          e.focus(); e.click(); return {ok:true};
+        })()''')
+        if not isinstance(ready, dict) or not ready.get("ok"):
+            raise RuntimeError(f"ChatGPT project composer is unavailable: {(ready or {}).get('error', 'unknown')}")
+        ws = websocket.create_connection(
+            page["webSocketDebuggerUrl"], timeout=8, suppress_origin=True
+        )
+        request_id = int(time.time() * 1_000_000) % 1_000_000_000
+        try:
+            def send(method: str, params: dict) -> None:
+                nonlocal request_id
+                request_id += 1
+                current = request_id
+                ws.send(json.dumps({"id": current, "method": method, "params": params}))
+                while True:
+                    reply = json.loads(ws.recv())
+                    if reply.get("id") != current:
+                        continue
+                    if reply.get("error"):
+                        raise RuntimeError(f"ChatGPT native input failed: {method}")
+                    return
+            send("Input.insertText", {"text": message})
+            inserted = self.runtime_evaluate(page, r'''(()=>{
+              const e=document.querySelector('#prompt-textarea');
+              return (e?.innerText||e?.textContent||'').trim().length>0;
+            })()''')
+            if inserted is not True:
+                raise RuntimeError("ChatGPT project prompt insertion was not observed")
+            key = {
+                "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13,
+            }
+            send("Input.dispatchKeyEvent", {"type": "rawKeyDown", **key})
+            send("Input.dispatchKeyEvent", {"type": "keyUp", **key})
+        finally:
+            ws.close()
+
+    def create_project_successor(
+        self, source_url: str, target_channel: str, token: str, *, timeout: float = 120
+    ) -> tuple[dict, str]:
+        source = canonical_chat_url(source_url)
+        project_prefix = source.rsplit("/c/", 1)[0]
+        project_home = project_prefix + "/project"
+        page = self.create_blank_page()
+        try:
+            self.navigate(page, project_home)
+            deadline = time.monotonic() + min(timeout, 45)
+            composer_ready = False
+            while time.monotonic() < deadline:
+                state = self.runtime_evaluate(page, r'''(()=>{
+                  const e=document.querySelector('#prompt-textarea');
+                  const r=e?.getBoundingClientRect();
+                  return {
+                    url:location.origin+location.pathname,
+                    ready:document.readyState,
+                    composer:!!e&&!!r&&r.width>0&&r.height>0,
+                  };
+                })()''')
+                if isinstance(state, dict) and state.get("composer"):
+                    composer_ready = True
+                    break
+                time.sleep(1)
+            if not composer_ready:
+                raise RuntimeError("ChatGPT project home did not hydrate a fresh-chat composer")
+
+            preflight_message = (
+                "Development Bridge fresh-chat rollover preflight. Do not continue project work. "
+                f"Call coordinator_x_mount with channel_id={target_channel}. After that tool succeeds, "
+                f"reply exactly: ROLLOVER_READY {token}. Do not do other work."
+            )
+            self.submit_native_prompt(page, preflight_message)
+
+            candidate_url = None
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                state = self.runtime_evaluate(page, r'''(()=>({
+                  url:location.origin+location.pathname,
+                  generating:[...document.querySelectorAll('button')].some(b=>{
+                    const t=((b.getAttribute('aria-label')||'')+' '+(b.innerText||'')).toLowerCase();
+                    return t.includes('stop generating')||t.includes('stop answering')||t.includes('остановить');
+                  })
+                }))()''')
+                current = str((state or {}).get("url") or "") if isinstance(state, dict) else ""
+                if "/c/" in current and current.startswith(project_prefix + "/c/"):
+                    try:
+                        candidate_url = canonical_chat_url(current)
+                    except ValueError:
+                        candidate_url = None
+                    if candidate_url:
+                        page = {**page, "url": candidate_url}
+                        break
+                time.sleep(1)
+            if candidate_url is None:
+                raise RuntimeError("ChatGPT fresh project chat did not produce a stable conversation URL")
+
+            validation = self.validate_candidate_conversation(page, candidate_url, timeout=30)
+            if not validation.get("ok"):
+                current = validation.get("current_url") or "unknown"
+                raise RuntimeError(f"fresh successor failed UI hydration: {current}")
+            preflight = self.wait_for_rollover_preflight(page, token, timeout=max(5, min(75, timeout)))
+            if not preflight.get("ready"):
+                raise RuntimeError("fresh successor did not complete native rollover preflight")
+            return page, candidate_url
+        except Exception:
+            self.close_page(page["id"])
+            raise
+
     def materialize_branch_popup(
         self, page: dict, branch_url: str, source_url: str, *, timeout: float = 30
     ) -> tuple[dict, str]:
@@ -1395,7 +1508,7 @@ class BrowserHost:
                     return {
                         "state": "safety_locked",
                         "error": (
-                            "automatic physical-chat branch creation is disabled; "
+                            "automatic physical-chat successor creation is disabled; "
                             "set BROWSER_HOST_ROLLOVER_BRANCH_ENABLED=1 only for deliberate acceptance"
                         ),
                     }
@@ -1435,7 +1548,9 @@ class BrowserHost:
                             "state": "waiting_source_control",
                             "error": source_control.get("error") or iframe_error or poll_detail,
                         }
-                candidate_page, candidate_url = self.branch_in_new_chat(source_page, source_url)
+                candidate_page, candidate_url = self.create_project_successor(
+                    source_url, target_channel, rollover["token"]
+                )
                 rollover = self.rollover_control("candidate", rollover, url=candidate_url)
                 state = "candidate"
 
@@ -1482,26 +1597,30 @@ class BrowserHost:
             if not poll_ok:
                 raise RuntimeError(f"successor X polling was not observed: {poll_detail}")
 
-            preflight_operation = f"{rollover['token']}-preflight"
-            preflight_message = (
-                f"Development Bridge automatic rollover preflight. Do not continue project work. "
-                f"Call coordinator_x_mount with channel_id={target_channel}. After that tool succeeds, "
-                f"reply exactly: ROLLOVER_READY {rollover['token']}"
-            )
-            preflight_send = self.coordinator_app_control(
-                candidate_page,
-                "bootstrap",
-                channel_id=target_channel,
-                operation_id=preflight_operation,
-                message=preflight_message,
-            )
-            if not preflight_send.get("ok"):
-                raise RuntimeError(
-                    f"successor preflight delivery failed: {preflight_send.get('error', 'unknown')}"
-                )
             preflight = self.wait_for_rollover_preflight(
-                candidate_page, rollover["token"], timeout=75
+                candidate_page, rollover["token"], timeout=2
             )
+            if not preflight.get("ready"):
+                preflight_operation = f"{rollover['token']}-preflight"
+                preflight_message = (
+                    f"Development Bridge automatic rollover preflight. Do not continue project work. "
+                    f"Call coordinator_x_mount with channel_id={target_channel}. After that tool succeeds, "
+                    f"reply exactly: ROLLOVER_READY {rollover['token']}"
+                )
+                preflight_send = self.coordinator_app_control(
+                    candidate_page,
+                    "bootstrap",
+                    channel_id=target_channel,
+                    operation_id=preflight_operation,
+                    message=preflight_message,
+                )
+                if not preflight_send.get("ok"):
+                    raise RuntimeError(
+                        f"successor preflight delivery failed: {preflight_send.get('error', 'unknown')}"
+                    )
+                preflight = self.wait_for_rollover_preflight(
+                    candidate_page, rollover["token"], timeout=75
+                )
             if not preflight.get("ready"):
                 raise RuntimeError(
                     "successor did not create a native coordinator mount during preflight"
