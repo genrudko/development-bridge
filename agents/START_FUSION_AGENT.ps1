@@ -7,7 +7,7 @@ $Python = Join-Path $Venv "Scripts\python.exe"
 $Agent = Join-Path $Root "windows_fusion_agent.py"
 
 Write-Host ""
-Write-Host "=== ChatGPT -> Development Bridge -> Fusion MCP relay v2 ==="
+Write-Host "=== ChatGPT -> Development Bridge -> Fusion MCP relay v4 fallback ==="
 Write-Host ""
 
 try {
@@ -38,11 +38,7 @@ if ($NeedMcp) {
     if ($LASTEXITCODE -ne 0) { throw "Could not install mcp==2.0.0" }
 }
 
-$tcp = Test-NetConnection -ComputerName 127.0.0.1 -Port 27182 -WarningAction SilentlyContinue
-if (-not $tcp.TcpTestSucceeded) {
-    Write-Warning "Fusion MCP is not listening on 127.0.0.1:27182 yet."
-    Write-Host "That is OK: the relay will keep retrying. Start Fusion and enable Preferences -> General -> API -> Fusion MCP Server."
-}
+Write-Host "Fusion preflight skipped; the relay itself will wait/reconnect without blocking."
 
 $Token = $env:DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN
 if ([string]::IsNullOrWhiteSpace($Token)) {
