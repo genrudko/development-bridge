@@ -10,6 +10,7 @@ def test_gui_bootstrap_is_consoleless_and_gui_uses_dpapi():
     bootstrap=(ROOT / "agents" / "START_FUSION_GUI.ps1").read_text(encoding="utf-8-sig")
     gui=(ROOT / "agents" / "fusion_relay_gui.pyw").read_text(encoding="utf-8")
     assert "pythonw.exe" in bootstrap
+    assert "2>$null" in bootstrap
     assert "CryptProtectData" in gui and "CryptUnprotectData" in gui
     assert "DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN" in gui
     assert "Test-NetConnection" not in gui

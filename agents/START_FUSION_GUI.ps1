@@ -16,7 +16,7 @@ try {
     }
     $NeedMcp = $true
     try {
-        $Installed = & $Python -c "import importlib.metadata; print(importlib.metadata.version('mcp'))"
+        $Installed = & $Python -c "import importlib.metadata; print(importlib.metadata.version('mcp'))" 2>$null
         if ($LASTEXITCODE -eq 0 -and $Installed.Trim() -eq "2.0.0") { $NeedMcp = $false }
     } catch {}
     if ($NeedMcp) {
