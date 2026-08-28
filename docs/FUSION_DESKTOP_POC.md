@@ -29,15 +29,18 @@ and the Fusion MCP tools fail closed as not configured.
 2. Copy this repository (or at minimum the agent module plus matching
    dependencies) to Windows, create a Python 3.12 virtual environment, and run
    `py -3.12 -m pip install "mcp==2.0.0"`.
-3. In PowerShell, configure and start the outbound agent:
+3. Prefer the bundled PowerShell launcher. It creates/reuses a local venv,
+   installs `mcp==2.0.0` only when needed, hides token input, logs to
+   `%LOCALAPPDATA%\DevelopmentBridgeFusion\relay.log`, and keeps retrying if
+   Fusion is not running yet:
 
 ```powershell
-$env:DEVELOPMENT_BRIDGE_URL = "https://bridge.example"
-$env:DEVELOPMENT_BRIDGE_NODE_ID = "fusion-workstation"
-$env:DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN = "<same-random-token>"
-# Optional: $env:FUSION_MCP_URL = "http://127.0.0.1:27182/mcp"
-py -3.12 agents\windows_fusion_agent.py
+.\agents\START_FUSION_AGENT.ps1
 ```
+
+   Direct Python invocation remains available for development/automation by
+   setting `DEVELOPMENT_BRIDGE_URL`, `DEVELOPMENT_BRIDGE_NODE_ID`,
+   `DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN`, and optionally `FUSION_MCP_URL`.
 
 4. From the Development Bridge MCP client, call
    `fusion_node_status`, then `fusion_tools`, then `fusion_call` using exactly
