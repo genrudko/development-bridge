@@ -132,6 +132,11 @@ def build_container(
         if configured.knowledge.attachment_directory is not None
         else None
     )
+    desktop_journal_path = (
+        configured.desktop_nodes.journal_path.expanduser().resolve()
+        if configured.desktop_nodes.journal_path is not None
+        else None
+    )
     managed_repository_root = configured.managed_repositories.root.expanduser().resolve()
     github_artifact_directory = configured.github.artifact_directory.expanduser().resolve()
     for state_path, label in (
@@ -141,6 +146,7 @@ def build_container(
         (knowledge_database_path, "Knowledge database"),
         (telegram_session_path, "Telegram session"),
         (knowledge_attachment_directory, "Knowledge attachment directory"),
+        (desktop_journal_path, "Desktop operation journal"),
         (managed_repository_root, "Managed repository root"),
         (github_artifact_directory, "GitHub artifact directory"),
     ):

@@ -204,6 +204,9 @@ class DesktopNodeSettings(BaseModel):
     max_request_bytes: int = Field(default=262_144, ge=4096, le=2_097_152)
     max_arguments_bytes: int = Field(default=131_072, ge=1024, le=1_048_576)
     max_result_bytes: int = Field(default=1_048_576, ge=4096, le=8_388_608)
+    journal_path: Path | None = None
+    journal_history_limit: int = Field(default=200, ge=20, le=5000)
+    journal_max_bytes: int = Field(default=5_242_880, ge=65_536, le=67_108_864)
 
 
 class RepositorySettings(BaseModel):
@@ -395,9 +398,14 @@ def load_settings(
         environment_updates["github"] = GitHubSettings.model_validate(
             {**settings.github.model_dump(), "token": github_token}
         )
+    desktop_updates: dict[str, Any] = {}
     if desktop_token := environment.get("DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN"):
+        desktop_updates["token"] = desktop_token
+    if desktop_journal := environment.get("DEVELOPMENT_BRIDGE_DESKTOP_NODE_JOURNAL_PATH"):
+        desktop_updates["journal_path"] = Path(desktop_journal)
+    if desktop_updates:
         environment_updates["desktop_nodes"] = DesktopNodeSettings.model_validate(
-            {**settings.desktop_nodes.model_dump(), "token": desktop_token}
+            {**settings.desktop_nodes.model_dump(), **desktop_updates}
         )
 
     if environment_updates:

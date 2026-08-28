@@ -15,8 +15,9 @@ DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN=<random-token>
 Optional YAML keys under `desktop_nodes` are
 `offline_after_seconds` (45), `claim_timeout_seconds` (25),
 `call_timeout_seconds` (300), `max_pending_commands` (32),
-`max_request_bytes` (262144), `max_arguments_bytes` (131072), and
-`max_result_bytes` (1048576). Without the token, agent HTTP routes return 404
+`max_request_bytes` (262144), `max_arguments_bytes` (131072),
+`max_result_bytes` (1048576), optional `journal_path`, `journal_history_limit`
+(200), and `journal_max_bytes` (5242880). Without the token, agent HTTP routes return 404
 and the Fusion MCP tools fail closed as not configured.
 
 ## Windows 10/11 with Python 3.12
@@ -51,3 +52,59 @@ tearing down an otherwise healthy Fusion session. Calls still only invoke
 dynamically discovered Fusion tools; there is no arbitrary command or target-URL
 facility. Do not blindly retry a mutating CAD command after an uncertain timeout:
 inspect the model first because Fusion may have completed the operation locally.
+## Reliability rules for CAD mutations
+
+Treat CAD writes as non-idempotent unless the script explicitly proves otherwise.
+A timeout or lost response is an uncertain outcome: Fusion may already have applied
+the feature locally, so inspect the timeline/BRep (and preferably a screenshot)
+before deciding what to do next. Never transparently replay a mutating command.
+
+Prefer small deterministic mutations that normally finish well below the transport
+timeout. Split repeated geometry into bounded batches (roughly 5-10 complex
+profiles/features per call is a practical starting point), give generated sketches
+and features stable names, and verify the model after each batch. Reads and
+screenshots can remain direct. Saving the Fusion document remains an explicit
+user action; relay recovery must not silently save or overwrite a design.
+
+## Durable CAD operation journal and checkpoints
+
+Configure `desktop_nodes.journal_path` outside every registered repository, for
+example `/home/eodadmin/.local/state/development-bridge/fusion-operations.jsonl`.
+Each `fusion_call` then records a bounded durable operation snapshot with the
+command/tool identity, SHA-256 of arguments/result, mutation flag, timestamps, and
+state (`queued`, `claimed`, `succeeded`, `failed`, `timed_out`, `cancelled`,
+`orphaned`, `interrupted`, `uncertain`, `late_succeeded`, or `late_failed`). `fusion_node_status` exposes the
+last/recent operations and unresolved `uncertain_operations`.
+
+For important CAD work, supply `journal` metadata on `fusion_call`:
+
+```json
+{
+  "operation_id": "op-ajour-long-01",
+  "summary": "Cut long-wall ajour batch 1",
+  "mutation": true,
+  "parent_operation_id": "op-ajour-precheck-01",
+  "checkpoint": {
+    "expected_features": ["Ajour_Reference_Full_Long_Walls"],
+    "verification": "BRep loops + screenshot after mutation"
+  }
+}
+```
+
+The `checkpoint` object is deliberately generic and bounded: the coordinator can
+record stable feature names, before/after state summaries, expected BRep facts, and
+screenshot verification intent without persisting large image/base64 payloads. Use
+linked read/screenshot calls with `parent_operation_id` for actual verification.
+
+A claimed mutating command whose caller times out becomes `uncertain`, and the
+timeout is non-retryable. If its result arrives later, even after a Bridge restart,
+the durable command/operation mapping reconciles it to `late_succeeded` or
+`late_failed`. On Bridge startup, a persisted `claimed` mutation is proactively
+recovered as `uncertain`; an unclaimed queued command becomes `orphaned`. This
+resolves ambiguous restarts without replaying the CAD mutation.
+
+After Fusion has produced a result, the Windows agent retries delivery across
+transient network/Bridge outages with capped exponential backoff. It blocks new
+claims while preserving that completed result in memory; only delivery is retried,
+never the CAD command itself. If the agent/process is lost entirely, the durable
+server journal intentionally remains `uncertain` and requires model inspection.

@@ -40,22 +40,41 @@ async def keepalive(bridge: BridgeClient, tools: list[dict[str, Any]], interval_
             print(f"Bridge heartbeat failed ({type(exc).__name__})", flush=True)
 
 
-async def submit_result_safely(bridge: BridgeClient, command_id: str, result: dict[str, Any]) -> bool:
-    """Retry transient delivery, but never replay a stale CAD command."""
-    for attempt in range(3):
+async def submit_result_safely(
+    bridge: BridgeClient,
+    command_id: str,
+    result: dict[str, Any],
+    tools: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Persistently deliver one completed result; never replay the CAD command."""
+    attempt = 0
+    while True:
         try:
             await bridge.post("result", {"command_id": command_id, "result": result})
             return True
         except urllib.error.HTTPError as exc:
-            if exc.code in {400, 404, 409}:
+            if exc.code in {400, 409}:
                 print(f"Bridge no longer accepts command {command_id}; result discarded safely", flush=True)
                 return False
-            raise
-        except (urllib.error.URLError, TimeoutError):
-            if attempt == 2:
+            if exc.code == 404 and tools is not None:
+                try:
+                    await bridge.post("register", {"fusion_available": True, "tools": tools})
+                except Exception as register_exc:
+                    print(f"Bridge re-registration during result delivery failed ({type(register_exc).__name__})", flush=True)
+            elif exc.code not in {408, 425, 429} and exc.code < 500:
                 raise
-            await asyncio.sleep(2 ** attempt)
-    return False
+            delay = min(2 ** min(attempt, 5), 30)
+            print(f"Bridge result delivery HTTP {exc.code}; retrying in {delay}s", flush=True)
+            attempt += 1
+            await asyncio.sleep(delay)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            delay = min(2 ** min(attempt, 5), 30)
+            print(
+                f"Bridge result delivery failed ({type(exc).__name__}); retrying in {delay}s",
+                flush=True,
+            )
+            attempt += 1
+            await asyncio.sleep(delay)
 
 
 async def run(bridge: BridgeClient, fusion_url: str, reconnect_seconds: float, heartbeat_seconds: float, fusion_call_timeout_seconds: float) -> None:
@@ -75,6 +94,8 @@ async def run(bridge: BridgeClient, fusion_url: str, reconnect_seconds: float, h
                         command = (await bridge.post("claim", query="?wait=25")).get("command")
                         if command is None:
                             continue
+                        operation_id = command.get("operation_id", command["command_id"])
+                        print(f"Fusion operation {operation_id}: {command['tool_name']} started", flush=True)
                         reconnect_after_result = False
                         if command["tool_name"] not in names:
                             result = {"content": [{"type": "text", "text": "Tool is no longer discovered"}], "isError": True}
@@ -84,7 +105,11 @@ async def run(bridge: BridgeClient, fusion_url: str, reconnect_seconds: float, h
                             except Exception as exc:
                                 result = {"content": [{"type": "text", "text": f"Fusion tool call failed: {type(exc).__name__}"}], "isError": True}
                                 reconnect_after_result = True
-                        await submit_result_safely(bridge, command["command_id"], result)
+                        delivered = await submit_result_safely(bridge, command["command_id"], result, tools)
+                        print(
+                            f"Fusion operation {operation_id}: result {'delivered' if delivered else 'stale'}",
+                            flush=True,
+                        )
                         if reconnect_after_result:
                             raise RuntimeError("Fusion MCP call failed; reconnecting session")
                 finally:
