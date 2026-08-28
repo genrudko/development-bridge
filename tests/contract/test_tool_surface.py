@@ -38,6 +38,10 @@ SUPPORTED_TOOLS = {
     "repository_exec",
     "github_repository_status",
     "github_commit_checks",
+    "github_release_list",
+    "github_release_get",
+    "github_release_plan",
+    "github_release_apply",
     "github_issue_list",
     "github_issue_get",
     "github_issue_comments",
@@ -95,7 +99,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 85
+    assert len(registry.definitions) == 89
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",

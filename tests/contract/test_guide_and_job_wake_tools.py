@@ -28,7 +28,7 @@ def test_bridge_guide_is_registry_derived_and_complete():
         for tools in data["tools_by_category"].values()
         for item in tools
     }
-    assert data["tool_count"] == 85
+    assert data["tool_count"] == 89
     assert catalog == {tool.name for tool in registry.definitions}
     assert "queued status is normal" in data["durable_jobs"]["rule"]
     assert any("batched_messages" in step for step in data["durable_jobs"]["preferred_event_flow"])

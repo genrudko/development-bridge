@@ -153,6 +153,26 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         a = params.arguments
         return result(rc, await container.github.actions_cancel(repository(a), a["run_id"]))
 
+    async def release_list(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.release_list(repository(a), a.get("limit", 50)))
+
+    async def release_get(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.release_get(repository(a), a["tag_name"]))
+
+    async def release_plan(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.release_plan(
+            repository(a), tag_name=a["tag_name"], target_sha=a["target_sha"],
+            name=a["name"], body=a.get("body", ""), draft=a.get("draft", False),
+            prerelease=a.get("prerelease", False), make_latest=a.get("make_latest", "true")
+        ))
+
+    async def release_apply(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.release_apply(repository(a), a["plan_id"]))
+
     scope = {"project_id": IDENTIFIER_SCHEMA, "repository_id": IDENTIFIER_SCHEMA}
     issue_number = {"issue_number": NUMBER}
     pull_number = {"pull_number": NUMBER}
@@ -189,6 +209,10 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         ("github_actions_dispatch", "Dispatch a GitHub Actions workflow", {"workflow": NAME, "ref": NAME, "inputs": {"type": "object", "maxProperties": 100, "additionalProperties": {"type": "string", "maxLength": 4096}}}, ["workflow", "ref"], actions_dispatch),
         ("github_actions_rerun", "Rerun all or failed GitHub Actions jobs", {"run_id": NUMBER, "failed_only": {"type": "boolean", "default": False}}, ["run_id"], actions_rerun),
         ("github_actions_cancel", "Cancel a GitHub Actions run", {"run_id": NUMBER}, ["run_id"], actions_cancel),
+        ("github_release_list", "List bounded GitHub releases", {**limit}, [], release_list),
+        ("github_release_get", "Get one GitHub release by tag", {"tag_name": NAME}, ["tag_name"], release_get),
+        ("github_release_plan", "Plan a fail-closed GitHub release at an exact commit SHA", {"tag_name": NAME, "target_sha": SHA, "name": NAME, "body": TEXT, "draft": {"type": "boolean", "default": False}, "prerelease": {"type": "boolean", "default": False}, "make_latest": {"type": "string", "enum": ["true", "false", "legacy"], "default": "true"}}, ["tag_name", "target_sha", "name"], release_plan),
+        ("github_release_apply", "Apply an unchanged GitHub release plan without moving existing tags", {"plan_id": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}}, ["plan_id"], release_apply),
     )
     return tuple(
         RegisteredTool(types.Tool(name=name, description=description, inputSchema={"type": "object", "properties": {**scope, **properties}, "required": ["project_id", "repository_id", *required], "additionalProperties": False}), handler, "github-host")
