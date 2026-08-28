@@ -13,3 +13,5 @@ def test_gui_bootstrap_is_consoleless_and_gui_uses_dpapi():
     assert "CryptProtectData" in gui and "CryptUnprotectData" in gui
     assert "DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN" in gui
     assert "Test-NetConnection" not in gui
+    assert "Bridge heartbeat" in gui
+    assert "Fusion MCP watchdog" in gui

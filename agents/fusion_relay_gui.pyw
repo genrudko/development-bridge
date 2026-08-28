@@ -4,6 +4,7 @@ import base64
 import ctypes
 import os
 import queue
+import re
 import socket
 import subprocess
 import sys
@@ -99,6 +100,8 @@ class FusionBridgeGUI(tk.Tk):
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event = threading.Event()
         self.connected = False
+        self.heartbeat_ok: bool | None = None
+        self.heartbeat_failures = 0
         self._build()
         self._update_token_state()
         threading.Thread(target=self._status_worker, daemon=True).start()
@@ -116,8 +119,9 @@ class FusionBridgeGUI(tk.Tk):
         self.fusion_label = ttk.Label(status, text="Fusion MCP: проверка…")
         self.bridge_label = ttk.Label(status, text="Bridge: проверка…")
         self.relay_label = ttk.Label(status, text="Relay: остановлен")
-        self.connection_label = ttk.Label(status, text="Связка: не подключена")
-        for widget in (self.fusion_label, self.bridge_label, self.relay_label, self.connection_label):
+        self.connection_label = ttk.Label(status, text="MCP session: не подключена")
+        self.heartbeat_label = ttk.Label(status, text="Bridge heartbeat: ожидание…")
+        for widget in (self.fusion_label, self.bridge_label, self.relay_label, self.connection_label, self.heartbeat_label):
             widget.pack(anchor="w", pady=2)
 
         token_frame = ttk.LabelFrame(outer, text="Desktop-node token", padding=10)
@@ -173,9 +177,13 @@ class FusionBridgeGUI(tk.Tk):
                     self._append_log(str(value))
                 elif kind == "connected":
                     self.connected = bool(value)
+                    if self.connected and self.heartbeat_ok is None:
+                        self.heartbeat_ok = True
                 elif kind == "stopped":
                     self.proc = None
                     self.connected = False
+                    self.heartbeat_ok = None
+                    self.heartbeat_failures = 0
                     self.start_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
                 self._refresh_relay_labels()
@@ -187,7 +195,15 @@ class FusionBridgeGUI(tk.Tk):
     def _refresh_relay_labels(self) -> None:
         running = self.proc is not None and self.proc.poll() is None
         self._set_text(self.relay_label, "Relay", running, "работает" if running else "остановлен")
-        self._set_text(self.connection_label, "Связка", running and self.connected, "Fusion подключён к Bridge" if running and self.connected else "ожидание подключения")
+        self._set_text(self.connection_label, "MCP session", running and self.connected, "Fusion зарегистрирован в Bridge" if running and self.connected else "ожидание регистрации")
+        if not running:
+            self._set_text(self.heartbeat_label, "Bridge heartbeat", False, "relay остановлен")
+        elif self.heartbeat_ok is False:
+            self._set_text(self.heartbeat_label, "Bridge heartbeat", False, f"сбои подряд: {self.heartbeat_failures}")
+        elif self.heartbeat_ok is True:
+            self._set_text(self.heartbeat_label, "Bridge heartbeat", True, "OK")
+        else:
+            self.heartbeat_label.configure(text="Bridge heartbeat: ожидание…")
 
     def _append_log(self, line: str) -> None:
         self.log.configure(state="normal")
@@ -257,9 +273,18 @@ class FusionBridgeGUI(tk.Tk):
                 logfile.write(line)
                 logfile.flush()
                 if "Connected: Fusion MCP tools discovered:" in line:
+                    self.heartbeat_ok = True
+                    self.heartbeat_failures = 0
                     self.events.put(("connected", True))
-                elif "Fusion/Bridge unavailable" in line:
+                elif "Fusion MCP watchdog: port unavailable" in line or "Fusion/Bridge unavailable" in line:
                     self.events.put(("connected", False))
+                if "Bridge heartbeat degraded:" in line:
+                    match = re.search(r"failures=(\d+)", line)
+                    self.heartbeat_failures = int(match.group(1)) if match else max(1, self.heartbeat_failures + 1)
+                    self.heartbeat_ok = False
+                elif "Bridge heartbeat recovered" in line:
+                    self.heartbeat_failures = 0
+                    self.heartbeat_ok = True
                 self.events.put(("log", line))
         proc.wait()
         self.events.put(("stopped", proc.returncode))

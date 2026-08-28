@@ -1,50 +1,176 @@
 """Outbound Windows agent relaying Autodesk Fusion Desktop MCP to Bridge."""
 from __future__ import annotations
-import argparse, asyncio, json, os, urllib.error, urllib.request
+
+import argparse
+import asyncio
+import http.client
+import io
+import json
+import os
+import threading
+import urllib.error
+import urllib.parse
 from contextlib import AsyncExitStack, suppress
 from typing import Any
+
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 DEFAULT_FUSION_URL = "http://127.0.0.1:27182/mcp"
 
+
+class _PersistentHTTPSChannel:
+    """One serialized persistent HTTPS connection for one traffic class."""
+
+    def __init__(self, base_url: str, token: str, timeout_seconds: float = 35.0) -> None:
+        parsed = urllib.parse.urlsplit(base_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("Development Bridge URL must be HTTPS")
+        self.host = parsed.hostname
+        self.port = parsed.port or 443
+        self.base_path = parsed.path.rstrip("/")
+        self.timeout_seconds = timeout_seconds
+        self.headers = {
+            "Authorization": "Bearer " + token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Connection": "keep-alive",
+        }
+        self._connection: http.client.HTTPSConnection | None = None
+        self._lock = threading.Lock()
+
+    def _conn(self) -> http.client.HTTPSConnection:
+        if self._connection is None:
+            self._connection = http.client.HTTPSConnection(self.host, self.port, timeout=self.timeout_seconds)
+        return self._connection
+
+    def close(self) -> None:
+        if self._connection is not None:
+            with suppress(Exception):
+                self._connection.close()
+        self._connection = None
+
+    def post(self, suffix: str, body: dict[str, Any] | None) -> dict[str, Any]:
+        payload = json.dumps(body or {}, separators=(",", ":")).encode("utf-8")
+        path = self.base_path + suffix
+        with self._lock:
+            connection = self._conn()
+            try:
+                connection.request("POST", path, body=payload, headers=self.headers)
+                response = connection.getresponse()
+                raw = response.read()
+            except (OSError, TimeoutError, http.client.HTTPException) as exc:
+                self.close()
+                raise urllib.error.URLError(str(exc)) from exc
+            if response.status >= 400:
+                raise urllib.error.HTTPError(
+                    f"https://{self.host}:{self.port}{path}",
+                    response.status,
+                    response.reason,
+                    response.headers,
+                    io.BytesIO(raw),
+                )
+            try:
+                return json.loads(raw or b"{}")
+            except ValueError as exc:
+                self.close()
+                raise urllib.error.URLError("Bridge returned invalid JSON") from exc
+
+
 class BridgeClient:
+    """Independent persistent channels prevent claim/result traffic from starving heartbeat."""
+
     def __init__(self, base_url: str, node_id: str, token: str) -> None:
-        self.url, self.token = base_url.rstrip("/") + "/mcp/desktop-nodes/" + node_id, token
-    def _post(self, action: str, body: dict[str, Any] | None, query: str) -> dict[str, Any]:
-        request = urllib.request.Request(self.url + "/" + action + query, data=json.dumps(body or {}).encode(), headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(request, timeout=35) as response:
-            return json.loads(response.read())
+        url = base_url.rstrip("/") + "/mcp/desktop-nodes/" + node_id
+        self._claim = _PersistentHTTPSChannel(url, token)
+        self._heartbeat = _PersistentHTTPSChannel(url, token)
+        self._control = _PersistentHTTPSChannel(url, token)
+
     async def post(self, action: str, body: dict[str, Any] | None = None, query: str = "") -> dict[str, Any]:
-        return await asyncio.to_thread(self._post, action, body, query)
+        channel = self._claim if action == "claim" else self._heartbeat if action == "heartbeat" else self._control
+        return await asyncio.to_thread(channel.post, "/" + action + query, body)
+
+    async def close(self) -> None:
+        await asyncio.gather(
+            asyncio.to_thread(self._claim.close),
+            asyncio.to_thread(self._heartbeat.close),
+            asyncio.to_thread(self._control.close),
+        )
 
 def result_json(result: Any) -> dict[str, Any]:
     return result.model_dump(mode="json", exclude_none=True) if hasattr(result, "model_dump") else {"content": [{"type": "text", "text": str(result)}], "isError": True}
 
-async def keepalive(bridge: BridgeClient, tools: list[dict[str, Any]], interval_seconds: float) -> None:
-    """Keep Bridge liveness independent from potentially long Fusion calls."""
+
+async def fusion_endpoint_available(fusion_url: str, timeout_seconds: float = 0.75) -> bool:
+    parsed = urllib.parse.urlsplit(fusion_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout_seconds)
+    except (OSError, TimeoutError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    with suppress(Exception):
+        await writer.wait_closed()
+    return True
+
+
+async def keepalive(
+    bridge: Any,
+    tools: list[dict[str, Any]],
+    interval_seconds: float,
+    fusion_url: str | None = None,
+    reconnect_event: asyncio.Event | None = None,
+) -> None:
+    """Keep Bridge liveness and local Fusion-port health independent from CAD calls."""
+    failures = 0
+    last_fusion_available = True
     while True:
-        await asyncio.sleep(interval_seconds)
+        delay = interval_seconds if failures == 0 else min(2 ** min(failures - 1, 4), interval_seconds)
+        await asyncio.sleep(delay)
+        fusion_available = True if fusion_url is None else await fusion_endpoint_available(fusion_url)
+        if fusion_url is not None and fusion_available != last_fusion_available:
+            print(
+                "Fusion MCP watchdog: port recovered" if fusion_available else "Fusion MCP watchdog: port unavailable; reconnect requested",
+                flush=True,
+            )
+        last_fusion_available = fusion_available
+        if not fusion_available and reconnect_event is not None:
+            reconnect_event.set()
         try:
-            await bridge.post("heartbeat", {"fusion_available": True})
+            await bridge.post("heartbeat", {"fusion_available": fusion_available})
+            if failures:
+                print(f"Bridge heartbeat recovered after {failures} failure(s)", flush=True)
+            failures = 0
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                # Bridge may have restarted and lost its process-local node state.
                 try:
-                    await bridge.post("register", {"fusion_available": True, "tools": tools})
+                    await bridge.post(
+                        "register",
+                        {"fusion_available": fusion_available, "tools": tools if fusion_available else []},
+                    )
+                    if failures:
+                        print(f"Bridge heartbeat recovered after {failures} failure(s)", flush=True)
+                    failures = 0
                 except Exception as register_exc:
-                    print(f"Bridge re-registration failed ({type(register_exc).__name__})", flush=True)
+                    failures += 1
+                    print(f"Bridge heartbeat degraded: failures={failures} error={type(register_exc).__name__}", flush=True)
             else:
-                print(f"Bridge heartbeat failed (HTTP {exc.code})", flush=True)
+                failures += 1
+                if failures == 1 or failures in {3, 6}:
+                    print(f"Bridge heartbeat degraded: failures={failures} error=HTTP{exc.code}", flush=True)
         except Exception as exc:
-            print(f"Bridge heartbeat failed ({type(exc).__name__})", flush=True)
+            failures += 1
+            if failures == 1 or failures in {3, 6}:
+                print(f"Bridge heartbeat degraded: failures={failures} error={type(exc).__name__}", flush=True)
 
 
 async def submit_result_safely(
-    bridge: BridgeClient,
+    bridge: Any,
     command_id: str,
     result: dict[str, Any],
     tools: list[dict[str, Any]] | None = None,
+    fusion_available: bool = True,
 ) -> bool:
     """Persistently deliver one completed result; never replay the CAD command."""
     attempt = 0
@@ -58,7 +184,10 @@ async def submit_result_safely(
                 return False
             if exc.code == 404 and tools is not None:
                 try:
-                    await bridge.post("register", {"fusion_available": True, "tools": tools})
+                    await bridge.post(
+                        "register",
+                        {"fusion_available": fusion_available, "tools": tools if fusion_available else []},
+                    )
                 except Exception as register_exc:
                     print(f"Bridge re-registration during result delivery failed ({type(register_exc).__name__})", flush=True)
             elif exc.code not in {408, 425, 429} and exc.code < 500:
@@ -69,15 +198,19 @@ async def submit_result_safely(
             await asyncio.sleep(delay)
         except (urllib.error.URLError, TimeoutError) as exc:
             delay = min(2 ** min(attempt, 5), 30)
-            print(
-                f"Bridge result delivery failed ({type(exc).__name__}); retrying in {delay}s",
-                flush=True,
-            )
+            print(f"Bridge result delivery failed ({type(exc).__name__}); retrying in {delay}s", flush=True)
             attempt += 1
             await asyncio.sleep(delay)
 
 
-async def run(bridge: BridgeClient, fusion_url: str, reconnect_seconds: float, heartbeat_seconds: float, fusion_call_timeout_seconds: float) -> None:
+async def run(
+    bridge: BridgeClient,
+    fusion_url: str,
+    reconnect_seconds: float,
+    heartbeat_seconds: float,
+    fusion_call_timeout_seconds: float,
+    claim_wait_seconds: float,
+) -> None:
     while True:
         try:
             async with AsyncExitStack() as stack:
@@ -88,45 +221,80 @@ async def run(bridge: BridgeClient, fusion_url: str, reconnect_seconds: float, h
                 names = {tool["name"] for tool in tools}
                 await bridge.post("register", {"fusion_available": True, "tools": tools})
                 print(f"Connected: Fusion MCP tools discovered: {len(tools)}", flush=True)
-                keepalive_task = asyncio.create_task(keepalive(bridge, tools, heartbeat_seconds))
+                reconnect_event = asyncio.Event()
+                keepalive_task = asyncio.create_task(keepalive(bridge, tools, heartbeat_seconds, fusion_url, reconnect_event))
                 try:
                     while True:
-                        command = (await bridge.post("claim", query="?wait=25")).get("command")
+                        if reconnect_event.is_set():
+                            raise RuntimeError("Fusion MCP watchdog requested reconnect")
+                        command = (await bridge.post("claim", query=f"?wait={claim_wait_seconds:g}")).get("command")
                         if command is None:
                             continue
                         operation_id = command.get("operation_id", command["command_id"])
                         print(f"Fusion operation {operation_id}: {command['tool_name']} started", flush=True)
                         reconnect_after_result = False
-                        if command["tool_name"] not in names:
+                        if reconnect_event.is_set():
+                            result = {"content": [{"type": "text", "text": "Fusion MCP became unavailable before execution"}], "isError": True}
+                            reconnect_after_result = True
+                        elif command["tool_name"] not in names:
                             result = {"content": [{"type": "text", "text": "Tool is no longer discovered"}], "isError": True}
                         else:
                             try:
-                                result = result_json(await session.call_tool(command["tool_name"], command.get("arguments", {}), read_timeout_seconds=fusion_call_timeout_seconds))
+                                result = result_json(await session.call_tool(
+                                    command["tool_name"], command.get("arguments", {}),
+                                    read_timeout_seconds=fusion_call_timeout_seconds,
+                                ))
                             except Exception as exc:
                                 result = {"content": [{"type": "text", "text": f"Fusion tool call failed: {type(exc).__name__}"}], "isError": True}
                                 reconnect_after_result = True
-                        delivered = await submit_result_safely(bridge, command["command_id"], result, tools)
-                        print(
-                            f"Fusion operation {operation_id}: result {'delivered' if delivered else 'stale'}",
-                            flush=True,
+                        delivered = await submit_result_safely(
+                            bridge, command["command_id"], result, tools,
+                            fusion_available=not reconnect_event.is_set(),
                         )
-                        if reconnect_after_result:
-                            raise RuntimeError("Fusion MCP call failed; reconnecting session")
+                        print(f"Fusion operation {operation_id}: result {'delivered' if delivered else 'stale'}", flush=True)
+                        if reconnect_after_result or reconnect_event.is_set():
+                            raise RuntimeError("Fusion MCP session requires reconnect")
                 finally:
                     keepalive_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await keepalive_task
         except Exception as exc:
             print(f"Fusion/Bridge unavailable ({type(exc).__name__}); retrying in {reconnect_seconds:g}s", flush=True)
-            try: await bridge.post("register", {"fusion_available": False, "tools": []})
-            except Exception: pass
+            try:
+                await bridge.post("register", {"fusion_available": False, "tools": []})
+            except Exception:
+                pass
             await asyncio.sleep(reconnect_seconds)
+
+
+async def async_main(args: argparse.Namespace) -> None:
+    bridge = BridgeClient(args.bridge_url, args.node_id, args.token)
+    try:
+        await run(
+            bridge, args.fusion_url, args.reconnect_seconds, args.heartbeat_seconds,
+            args.fusion_call_timeout_seconds, args.claim_wait_seconds,
+        )
+    finally:
+        await bridge.close()
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bridge-url", default=os.environ.get("DEVELOPMENT_BRIDGE_URL")); parser.add_argument("--node-id", default=os.environ.get("DEVELOPMENT_BRIDGE_NODE_ID")); parser.add_argument("--token", default=os.environ.get("DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN")); parser.add_argument("--fusion-url", default=os.environ.get("FUSION_MCP_URL", DEFAULT_FUSION_URL)); parser.add_argument("--reconnect-seconds", type=float, default=5); parser.add_argument("--heartbeat-seconds", type=float, default=10); parser.add_argument("--fusion-call-timeout-seconds", type=float, default=285)
+    parser.add_argument("--bridge-url", default=os.environ.get("DEVELOPMENT_BRIDGE_URL"))
+    parser.add_argument("--node-id", default=os.environ.get("DEVELOPMENT_BRIDGE_NODE_ID"))
+    parser.add_argument("--token", default=os.environ.get("DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN"))
+    parser.add_argument("--fusion-url", default=os.environ.get("FUSION_MCP_URL", DEFAULT_FUSION_URL))
+    parser.add_argument("--reconnect-seconds", type=float, default=5)
+    parser.add_argument("--heartbeat-seconds", type=float, default=5)
+    parser.add_argument("--fusion-call-timeout-seconds", type=float, default=285)
+    parser.add_argument("--claim-wait-seconds", type=float, default=10)
     args = parser.parse_args()
-    if not args.bridge_url or not args.node_id or not args.token: parser.error("bridge URL, node ID, and token are required via CLI or environment")
-    if args.reconnect_seconds <= 0 or args.heartbeat_seconds <= 0 or args.fusion_call_timeout_seconds <= 0: parser.error("timing values must be positive")
-    asyncio.run(run(BridgeClient(args.bridge_url, args.node_id, args.token), args.fusion_url, args.reconnect_seconds, args.heartbeat_seconds, args.fusion_call_timeout_seconds))
-if __name__ == "__main__": main()
+    if not args.bridge_url or not args.node_id or not args.token:
+        parser.error("bridge URL, node ID, and token are required via CLI or environment")
+    if min(args.reconnect_seconds, args.heartbeat_seconds, args.fusion_call_timeout_seconds, args.claim_wait_seconds) <= 0:
+        parser.error("timing values must be positive")
+    asyncio.run(async_main(args))
+
+
+if __name__ == "__main__":
+    main()

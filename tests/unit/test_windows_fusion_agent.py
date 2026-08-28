@@ -91,3 +91,32 @@ async def test_result_delivery_reregisters_node_after_bridge_restart(monkeypatch
         bridge, "cmd-restart", {"ok": True}, [{"name": "fusion_mcp_read"}]
     ) is True
     assert bridge.actions == ["result", "register", "result"]
+
+
+@pytest.mark.asyncio
+async def test_keepalive_marks_fusion_unavailable_and_requests_reconnect(monkeypatch):
+    seen = asyncio.Event()
+    reconnect = asyncio.Event()
+
+    async def no_fusion(_url):
+        return False
+
+    monkeypatch.setattr("agents.windows_fusion_agent.fusion_endpoint_available", no_fusion)
+
+    class Bridge:
+        async def post(self, action, body=None, query=""):
+            assert action == "heartbeat"
+            assert body == {"fusion_available": False}
+            seen.set()
+            return {}
+
+    task = asyncio.create_task(
+        keepalive(Bridge(), [{"name": "fusion_mcp_read"}], 0.001, "http://127.0.0.1:27182/mcp", reconnect)
+    )
+    try:
+        await asyncio.wait_for(seen.wait(), 0.2)
+        assert reconnect.is_set()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
