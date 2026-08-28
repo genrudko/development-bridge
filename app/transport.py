@@ -75,9 +75,15 @@ def create_streamable_http_app(
             if not isinstance(body, dict):
                 raise ValueError
             if action == "register":
-                return JSONResponse(await desktop.register(node_id, body.get("tools", []), bool(body.get("fusion_available", False))))
+                return JSONResponse(await desktop.register(node_id, body.get("tools", []), bool(body.get("fusion_available", False)), body.get("telemetry")))
             if action == "heartbeat":
-                return JSONResponse(await desktop.heartbeat(node_id, body.get("tools"), body.get("fusion_available")))
+                return JSONResponse(await desktop.heartbeat(node_id, body.get("tools"), body.get("fusion_available"), body.get("telemetry")))
+            if action == "result-upload-start":
+                return JSONResponse(desktop.begin_result_upload(node_id, body["command_id"], body["size_bytes"], body["sha256"]))
+            if action == "result-upload-chunk":
+                return JSONResponse(desktop.append_result_upload(node_id, body["upload_id"], body["offset"], body["data"]))
+            if action == "result-upload-finalize":
+                return JSONResponse(desktop.finalize_result_upload(node_id, body["upload_id"]))
             if action == "result":
                 await desktop.submit_result(node_id, body["command_id"], body["result"])
                 return JSONResponse({"accepted": True})
@@ -169,6 +175,21 @@ def create_streamable_http_app(
                     job_id=request.path_params["job_id"],
                 )
             )
+
+    async def desktop_result_export(request: Request):
+        resolved = desktop.resolve_external_export(request.path_params["token"])
+        if resolved is None:
+            return JSONResponse({"error": "Desktop result is not available"}, status_code=404)
+        path, item = resolved
+        return FileResponse(
+            path,
+            media_type="application/json",
+            filename=path.name,
+            headers={
+                "Cache-Control": "private, no-store",
+                "ETag": f'"sha256:{item["sha256"]}"',
+            },
+        )
 
     async def knowledge_attachment_download(request: Request):
         try:
@@ -437,6 +458,7 @@ def create_streamable_http_app(
     custom_routes = []
     custom_routes.append(Route(settings.server.endpoint.rstrip("/") + "/desktop-nodes/{node_id}/{action}", desktop_route, methods=["POST"], name="desktop_node_agent"))
     custom_routes.append(Route(settings.server.endpoint.rstrip("/") + "/desktop-nodes/{node_id}/operator/{action}", desktop_operator_route, methods=["POST"], name="desktop_node_operator"))
+    custom_routes.append(Route(settings.server.endpoint.rstrip("/") + "/desktop-results/exports/{token}", desktop_result_export, methods=["GET", "HEAD"], name="desktop_result_export"))
     if container.oauth is not None:
         assert settings.oauth.issuer_url is not None
         assert settings.oauth.resource_url is not None

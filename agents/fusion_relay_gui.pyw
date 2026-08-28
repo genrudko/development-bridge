@@ -26,6 +26,18 @@ TOKEN_FILE = APP_DIR / "desktop-node-token.dpapi"
 LOG_FILE = APP_DIR / "relay.log"
 ROOT = Path(__file__).resolve().parent
 AGENT = ROOT / "windows_fusion_agent.py"
+TIMESTAMPED_LINE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s")
+
+
+def timestamp_log_line(line: str, now: float | None = None) -> str:
+    """Prefix a local millisecond timestamp once while preserving parser text."""
+    clean = line.rstrip("\r\n")
+    if TIMESTAMPED_LINE.match(clean):
+        return clean
+    moment = time.time() if now is None else now
+    local = time.localtime(moment)
+    millis = int(moment * 1000) % 1000
+    return time.strftime("%H:%M:%S", local) + f".{millis:03d} " + clean
 
 
 class DATA_BLOB(ctypes.Structure):
@@ -102,6 +114,8 @@ class FusionBridgeGUI(tk.Tk):
         self.connected = False
         self.heartbeat_ok: bool | None = None
         self.heartbeat_failures = 0
+        self.delivery_degraded = False
+        self.outbox_count = 0
         self._build()
         self._update_token_state()
         threading.Thread(target=self._status_worker, daemon=True).start()
@@ -121,7 +135,8 @@ class FusionBridgeGUI(tk.Tk):
         self.relay_label = ttk.Label(status, text="Relay: остановлен")
         self.connection_label = ttk.Label(status, text="MCP session: не подключена")
         self.heartbeat_label = ttk.Label(status, text="Bridge heartbeat: ожидание…")
-        for widget in (self.fusion_label, self.bridge_label, self.relay_label, self.connection_label, self.heartbeat_label):
+        self.delivery_label = ttk.Label(status, text="Result delivery: ожидание…")
+        for widget in (self.fusion_label, self.bridge_label, self.relay_label, self.connection_label, self.heartbeat_label, self.delivery_label):
             widget.pack(anchor="w", pady=2)
 
         token_frame = ttk.LabelFrame(outer, text="Desktop-node token", padding=10)
@@ -184,6 +199,8 @@ class FusionBridgeGUI(tk.Tk):
                     self.connected = False
                     self.heartbeat_ok = None
                     self.heartbeat_failures = 0
+                    self.delivery_degraded = False
+                    self.outbox_count = 0
                     self.start_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
                 self._refresh_relay_labels()
@@ -204,8 +221,15 @@ class FusionBridgeGUI(tk.Tk):
             self._set_text(self.heartbeat_label, "Bridge heartbeat", True, "OK")
         else:
             self.heartbeat_label.configure(text="Bridge heartbeat: ожидание…")
+        if not running:
+            self._set_text(self.delivery_label, "Result delivery", False, "relay остановлен")
+        elif self.delivery_degraded:
+            self._set_text(self.delivery_label, "Result delivery", False, f"degraded; outbox: {self.outbox_count}")
+        else:
+            self._set_text(self.delivery_label, "Result delivery", True, f"OK; outbox: {self.outbox_count}")
 
     def _append_log(self, line: str) -> None:
+        line = timestamp_log_line(line)
         self.log.configure(state="normal")
         self.log.insert("end", line.rstrip() + "\n")
         lines = int(self.log.index("end-1c").split(".")[0])
@@ -270,7 +294,8 @@ class FusionBridgeGUI(tk.Tk):
         with LOG_FILE.open("a", encoding="utf-8") as logfile:
             assert proc.stdout is not None
             for line in proc.stdout:
-                logfile.write(line)
+                stamped = timestamp_log_line(line)
+                logfile.write(stamped + "\n")
                 logfile.flush()
                 if "Connected: Fusion MCP tools discovered:" in line:
                     self.heartbeat_ok = True
@@ -285,7 +310,14 @@ class FusionBridgeGUI(tk.Tk):
                 elif "Bridge heartbeat recovered" in line:
                     self.heartbeat_failures = 0
                     self.heartbeat_ok = True
-                self.events.put(("log", line))
+                if "Bridge result delivery degraded:" in line or "Bridge result delivery exhausted" in line or "retained in outbox" in line:
+                    self.delivery_degraded = True
+                    match = re.search(r"outbox=(\d+)", line)
+                    self.outbox_count = int(match.group(1)) if match else max(1, self.outbox_count)
+                elif "Bridge result delivery recovered:" in line:
+                    self.outbox_count = 0
+                    self.delivery_degraded = False
+                self.events.put(("log", stamped))
         proc.wait()
         self.events.put(("stopped", proc.returncode))
 

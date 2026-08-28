@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from mcp import types
 
 from app.api.registry import RegisteredTool
@@ -22,6 +23,21 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             args.get("arguments", {}),
             args.get("journal"),
         )
+        reference = data.get("external_result") if isinstance(data, dict) else None
+        if isinstance(reference, dict):
+            full, metadata = container.desktop_nodes.external_result(reference)
+            summary = success(request_context.request_id, {"external_result": metadata})
+            blocks: list[types.ContentBlock] = [types.TextContent(type="text", text=json.dumps(summary.model_dump(mode="json", exclude_none=True), sort_keys=True))]
+            for item in full.get("content", []):
+                if isinstance(item, dict) and item.get("type") == "image" and isinstance(item.get("data"), str) and isinstance(item.get("mimeType"), str):
+                    blocks.append(types.ImageContent(type="image", data=item["data"], mimeType=item["mimeType"]))
+            if metadata.get("export_url"):
+                blocks.append(types.ResourceLink(
+                    uri=metadata["export_url"], name=metadata["file_name"], title=metadata["file_name"],
+                    mimeType="application/json", size=metadata["size_bytes"],
+                    description="Full high-resolution Fusion tool result",
+                ))
+            return types.CallToolResult(content=blocks, isError=bool(full.get("isError", False)))
         return to_mcp_result(success(request_context.request_id, data))
 
     node = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"}

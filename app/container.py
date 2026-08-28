@@ -137,6 +137,9 @@ def build_container(
         if configured.desktop_nodes.journal_path is not None
         else None
     )
+    desktop_result_directory = (
+        configured.desktop_nodes.result_artifact_directory.expanduser().resolve()
+    )
     managed_repository_root = configured.managed_repositories.root.expanduser().resolve()
     github_artifact_directory = configured.github.artifact_directory.expanduser().resolve()
     for state_path, label in (
@@ -147,6 +150,7 @@ def build_container(
         (telegram_session_path, "Telegram session"),
         (knowledge_attachment_directory, "Knowledge attachment directory"),
         (desktop_journal_path, "Desktop operation journal"),
+        (desktop_result_directory, "Desktop result artifact directory"),
         (managed_repository_root, "Managed repository root"),
         (github_artifact_directory, "GitHub artifact directory"),
     ):
@@ -348,5 +352,9 @@ def build_container(
         route_registry=route_registry,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
-        desktop_nodes=DesktopNodeService(configured.desktop_nodes),
+        desktop_nodes=DesktopNodeService(
+            configured.desktop_nodes,
+            str(configured.server.public_base_url) if configured.server.public_base_url else None,
+            configured.server.endpoint,
+        ),
     )

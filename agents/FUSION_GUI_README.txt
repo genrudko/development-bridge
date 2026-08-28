@@ -18,7 +18,9 @@ GUI shows:
 - Bridge network reachability;
 - relay process state;
 - Fusion-to-Bridge connected state;
-- live relay log.
+- live relay log with local HH:MM:SS.mmm timestamps;
+- result-delivery health and pending outbox state. Full-resolution screenshots
+  automatically use verified external spill when too large for inline delivery.
 
 Security:
 - token is never stored as plaintext;

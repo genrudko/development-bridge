@@ -15,4 +15,16 @@ def test_gui_bootstrap_is_consoleless_and_gui_uses_dpapi():
     assert "DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN" in gui
     assert "Test-NetConnection" not in gui
     assert "Bridge heartbeat" in gui
+    assert "Result delivery" in gui
     assert "Fusion MCP watchdog" in gui
+
+def test_gui_timestamp_helper_prefixes_exactly_once():
+    gui=(ROOT / "agents" / "fusion_relay_gui.pyw").read_text(encoding="utf-8")
+    namespace = {}
+    start = gui.index("TIMESTAMPED_LINE =")
+    end = gui.index("\n\n\nclass DATA_BLOB", start)
+    exec("import re\nimport time\n" + gui[start:end], namespace)
+    stamp = namespace["timestamp_log_line"]
+    first = stamp("Connected: ready\n", now=0.123)
+    assert first[2:] == ":00:00.123 Connected: ready"
+    assert stamp(first, now=1.456) == first

@@ -16,7 +16,9 @@ Optional YAML keys under `desktop_nodes` are
 `offline_after_seconds` (45), `claim_timeout_seconds` (25),
 `call_timeout_seconds` (300), `max_pending_commands` (32),
 `max_request_bytes` (262144), `max_arguments_bytes` (131072),
-`max_result_bytes` (1048576), optional `journal_path`, `journal_history_limit`
+`max_result_bytes` (1048576), `result_artifact_directory`,
+`result_artifact_ttl_seconds` (3600), `max_result_upload_bytes` (64 MiB), optional
+`journal_path`, `journal_history_limit`
 (200), and `journal_max_bytes` (5242880). Without the token, agent HTTP routes return 404
 and the Fusion MCP tools fail closed as not configured.
 
@@ -31,12 +33,25 @@ and the Fusion MCP tools fail closed as not configured.
    `py -3.12 -m pip install "mcp==2.0.0"`.
 3. Prefer the bundled PowerShell launcher. It creates/reuses a local venv,
    installs `mcp==2.0.0` only when needed, hides token input, logs to
-   `%LOCALAPPDATA%\DevelopmentBridgeFusion\relay.log`, and keeps retrying if
+   `%LOCALAPPDATA%\DevelopmentBridgeFusion\relay.log`, and uses bounded retries if
    Fusion is not running yet:
 
 ```powershell
 .\agents\START_FUSION_AGENT.ps1
 ```
+
+Relay logs use local `HH:MM:SS.mmm` timestamps. Completed results are first
+saved under `%LOCALAPPDATA%\DevelopmentBridgeFusion\outbox` (override with
+`DEVELOPMENT_BRIDGE_FUSION_OUTBOX`). The GUI shows result-delivery degradation
+and the outbox count separately from heartbeat health.
+
+Results up to 192 KiB stay inline. Larger results are uploaded in ordered
+128 KiB chunks and verified by total byte length and SHA-256 before a small
+external-result reference is accepted. Full-resolution screenshots are exposed
+to MCP clients as native image content plus a short-lived capability resource
+link to the complete result; generic large results receive bounded metadata and
+the full-result resource pointer. Screenshot resolution does not need to be
+lowered as a transport workaround.
 
    Direct Python invocation remains available for development/automation by
    setting `DEVELOPMENT_BRIDGE_URL`, `DEVELOPMENT_BRIDGE_NODE_ID`,

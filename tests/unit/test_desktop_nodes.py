@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import json
 import time
 import pytest
 
@@ -29,6 +32,39 @@ async def test_service_roundtrip_discovery_and_tool_result():
     assert status["age_seconds"] >= 0
     assert status["pending_commands"] == 0
     assert status["claimed_commands"] == 0
+    assert status["result_delivery_degraded"] is False
+    assert status["result_outbox_count"] == 0
+    assert status["last_result_delivery"] is not None
+    assert status["last_claim"] is not None
+
+
+@pytest.mark.asyncio
+async def test_external_upload_validates_and_accepts_verified_result(tmp_path):
+    service = DesktopNodeService(configured(call_timeout_seconds=1, result_artifact_directory=tmp_path))
+    await service.register("desk-1", [{"name": "read"}], True, {"result_delivery_degraded": True, "result_outbox_count": 1})
+    call = asyncio.create_task(service.call("desk-1", "read", {}))
+    command = await service.claim("desk-1", .2)
+    raw = json.dumps({"content": [{"type": "text", "text": "full"}]}).encode()
+    upload = service.begin_result_upload("desk-1", command["command_id"], len(raw), hashlib.sha256(raw).hexdigest())
+    with pytest.raises(BridgeError, match="offset"):
+        service.append_result_upload("desk-1", upload["upload_id"], 1, base64.b64encode(raw).decode())
+    with pytest.raises(BridgeError, match="chunk size"):
+        service.append_result_upload("desk-1", upload["upload_id"], 0, base64.b64encode(raw + b"x").decode())
+    service.append_result_upload("desk-1", upload["upload_id"], 0, base64.b64encode(raw).decode())
+    completed = service.finalize_result_upload("desk-1", upload["upload_id"])
+    await service.submit_result("desk-1", command["command_id"], completed)
+    assert (await call)["external_result"]["size_bytes"] == len(raw)
+    assert service.status("desk-1")["result_outbox_count"] == 1
+
+    pending = asyncio.create_task(service.call("desk-1", "read", {}))
+    second = await service.claim("desk-1", .2)
+    bad = service.begin_result_upload("desk-1", second["command_id"], len(raw), "0" * 64)
+    service.append_result_upload("desk-1", bad["upload_id"], 0, base64.b64encode(raw).decode())
+    with pytest.raises(BridgeError, match="SHA-256 mismatch"):
+        service.finalize_result_upload("desk-1", bad["upload_id"])
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
 
 
 @pytest.mark.asyncio

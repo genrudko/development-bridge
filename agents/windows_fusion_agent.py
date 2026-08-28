@@ -3,20 +3,68 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
 import http.client
 import io
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.parse
 from contextlib import AsyncExitStack, suppress
 from typing import Any
+from pathlib import Path
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 DEFAULT_FUSION_URL = "http://127.0.0.1:27182/mcp"
+INLINE_RESULT_BYTES = 192 * 1024
+RESULT_CHUNK_BYTES = 128 * 1024
+RESULT_DELIVERY_ATTEMPTS = 6
+RESULT_DELIVERY_SECONDS = 90.0
+
+
+def default_outbox_directory() -> Path:
+    configured = os.environ.get("DEVELOPMENT_BRIDGE_FUSION_OUTBOX")
+    base = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "DevelopmentBridgeFusion"
+    return Path(configured) if configured else base / "outbox"
+
+
+class ResultOutbox:
+    """Atomic local result spool; files are removed only after accepted/stale delivery."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def save(self, command_id: str, result: dict[str, Any]) -> Path:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        path = self.directory / f"{command_id}.json"
+        temporary = self.directory / f".{command_id}.tmp"
+        temporary.write_text(json.dumps({"command_id": command_id, "result": result}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(temporary, path)
+        return path
+
+    def remove(self, command_id: str) -> None:
+        (self.directory / f"{command_id}.json").unlink(missing_ok=True)
+
+    def entries(self) -> list[tuple[str, dict[str, Any]]]:
+        if not self.directory.exists():
+            return []
+        entries = []
+        for path in sorted(self.directory.glob("*.json"), key=lambda item: item.stat().st_mtime):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(value.get("command_id"), str) and isinstance(value.get("result"), dict):
+                    entries.append((value["command_id"], value["result"]))
+            except (OSError, ValueError, AttributeError):
+                print(f"Invalid Fusion result outbox entry retained: {path.name}", flush=True)
+        return entries
+
+    def count(self) -> int:
+        return len(self.entries())
 
 
 class _PersistentHTTPSChannel:
@@ -121,6 +169,7 @@ async def keepalive(
     interval_seconds: float,
     fusion_url: str | None = None,
     reconnect_event: asyncio.Event | None = None,
+    telemetry: dict[str, Any] | None = None,
 ) -> None:
     """Keep Bridge liveness and local Fusion-port health independent from CAD calls."""
     failures = 0
@@ -138,16 +187,25 @@ async def keepalive(
         if not fusion_available and reconnect_event is not None:
             reconnect_event.set()
         try:
-            await bridge.post("heartbeat", {"fusion_available": fusion_available})
+            body: dict[str, Any] = {"fusion_available": fusion_available}
+            if telemetry is not None:
+                body["telemetry"] = dict(telemetry)
+            await bridge.post("heartbeat", body)
             if failures:
                 print(f"Bridge heartbeat recovered after {failures} failure(s)", flush=True)
             failures = 0
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 try:
+                    registration: dict[str, Any] = {
+                        "fusion_available": fusion_available,
+                        "tools": tools if fusion_available else [],
+                    }
+                    if telemetry is not None:
+                        registration["telemetry"] = dict(telemetry)
                     await bridge.post(
                         "register",
-                        {"fusion_available": fusion_available, "tools": tools if fusion_available else []},
+                        registration,
                     )
                     if failures:
                         print(f"Bridge heartbeat recovered after {failures} failure(s)", flush=True)
@@ -171,16 +229,42 @@ async def submit_result_safely(
     result: dict[str, Any],
     tools: list[dict[str, Any]] | None = None,
     fusion_available: bool = True,
+    outbox: ResultOutbox | None = None,
+    max_attempts: int = RESULT_DELIVERY_ATTEMPTS,
+    max_elapsed_seconds: float = RESULT_DELIVERY_SECONDS,
 ) -> bool:
-    """Persistently deliver one completed result; never replay the CAD command."""
+    """Deliver a completed result with bounded retries; never replay the CAD command."""
+    if outbox is not None:
+        outbox.save(command_id, result)
+    serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     attempt = 0
-    while True:
+    started = time.monotonic()
+    while attempt < max_attempts and time.monotonic() - started <= max_elapsed_seconds:
         try:
-            await bridge.post("result", {"command_id": command_id, "result": result})
+            delivered_result = result
+            if len(serialized) > INLINE_RESULT_BYTES:
+                digest = hashlib.sha256(serialized).hexdigest()
+                upload = await bridge.post("result-upload-start", {"command_id": command_id, "size_bytes": len(serialized), "sha256": digest})
+                upload_id = upload["upload_id"]
+                offset = 0
+                while offset < len(serialized):
+                    chunk = serialized[offset:offset + RESULT_CHUNK_BYTES]
+                    response = await bridge.post("result-upload-chunk", {
+                        "upload_id": upload_id, "offset": offset,
+                        "data": base64.b64encode(chunk).decode("ascii"),
+                    })
+                    offset = response["offset"]
+                finalized = await bridge.post("result-upload-finalize", {"upload_id": upload_id})
+                delivered_result = finalized
+            await bridge.post("result", {"command_id": command_id, "result": delivered_result})
+            if outbox is not None:
+                outbox.remove(command_id)
             return True
         except urllib.error.HTTPError as exc:
             if exc.code in {400, 409}:
                 print(f"Bridge no longer accepts command {command_id}; result discarded safely", flush=True)
+                if outbox is not None:
+                    outbox.remove(command_id)
                 return False
             if exc.code == 404 and tools is not None:
                 try:
@@ -191,7 +275,8 @@ async def submit_result_safely(
                 except Exception as register_exc:
                     print(f"Bridge re-registration during result delivery failed ({type(register_exc).__name__})", flush=True)
             elif exc.code not in {408, 425, 429} and exc.code < 500:
-                raise
+                print(f"Bridge permanently rejected command {command_id} result (HTTP {exc.code}); retained in outbox", flush=True)
+                return False
             delay = min(2 ** min(attempt, 5), 30)
             print(f"Bridge result delivery HTTP {exc.code}; retrying in {delay}s", flush=True)
             attempt += 1
@@ -201,6 +286,31 @@ async def submit_result_safely(
             print(f"Bridge result delivery failed ({type(exc).__name__}); retrying in {delay}s", flush=True)
             attempt += 1
             await asyncio.sleep(delay)
+    print(f"Bridge result delivery exhausted for command {command_id}; retained in outbox", flush=True)
+    return False
+
+
+async def flush_outbox(
+    bridge: Any,
+    outbox: ResultOutbox,
+    tools: list[dict[str, Any]],
+    telemetry: dict[str, Any],
+) -> bool:
+    entries = outbox.entries()
+    telemetry["result_outbox_count"] = len(entries)
+    telemetry["result_delivery_degraded"] = bool(entries)
+    if entries:
+        print(f"Bridge result delivery degraded: outbox={len(entries)}; flushing before claims", flush=True)
+    for command_id, result in entries:
+        delivered = await submit_result_safely(bridge, command_id, result, tools, outbox=outbox)
+        telemetry["result_outbox_count"] = outbox.count()
+        if not delivered and telemetry["result_outbox_count"]:
+            telemetry["result_delivery_degraded"] = True
+            return False
+    telemetry["result_delivery_degraded"] = False
+    if entries:
+        print("Bridge result delivery recovered: outbox=0", flush=True)
+    return True
 
 
 async def run(
@@ -211,6 +321,8 @@ async def run(
     fusion_call_timeout_seconds: float,
     claim_wait_seconds: float,
 ) -> None:
+    outbox = ResultOutbox(default_outbox_directory())
+    telemetry: dict[str, Any] = {"result_delivery_degraded": False, "result_outbox_count": outbox.count()}
     while True:
         try:
             async with AsyncExitStack() as stack:
@@ -219,10 +331,14 @@ async def run(
                 await session.initialize()
                 tools = [tool.model_dump(mode="json", exclude_none=True) for tool in (await session.list_tools()).tools]
                 names = {tool["name"] for tool in tools}
-                await bridge.post("register", {"fusion_available": True, "tools": tools})
+                telemetry["result_outbox_count"] = outbox.count()
+                telemetry["result_delivery_degraded"] = bool(telemetry["result_outbox_count"])
+                await bridge.post("register", {"fusion_available": True, "tools": tools, "telemetry": telemetry})
                 print(f"Connected: Fusion MCP tools discovered: {len(tools)}", flush=True)
+                if not await flush_outbox(bridge, outbox, tools, telemetry):
+                    raise RuntimeError("Fusion result outbox remains undeliverable")
                 reconnect_event = asyncio.Event()
-                keepalive_task = asyncio.create_task(keepalive(bridge, tools, heartbeat_seconds, fusion_url, reconnect_event))
+                keepalive_task = asyncio.create_task(keepalive(bridge, tools, heartbeat_seconds, fusion_url, reconnect_event, telemetry))
                 try:
                     while True:
                         if reconnect_event.is_set():
@@ -250,8 +366,14 @@ async def run(
                         delivered = await submit_result_safely(
                             bridge, command["command_id"], result, tools,
                             fusion_available=not reconnect_event.is_set(),
+                            outbox=outbox,
                         )
-                        print(f"Fusion operation {operation_id}: result {'delivered' if delivered else 'stale'}", flush=True)
+                        telemetry["result_outbox_count"] = outbox.count()
+                        telemetry["result_delivery_degraded"] = bool(telemetry["result_outbox_count"])
+                        state = "delivered" if delivered else "retained/stale"
+                        print(f"Fusion operation {operation_id}: result {state}", flush=True)
+                        if telemetry["result_delivery_degraded"]:
+                            raise RuntimeError("Fusion result delivery degraded; reconnecting before new claims")
                         if reconnect_after_result or reconnect_event.is_set():
                             raise RuntimeError("Fusion MCP session requires reconnect")
                 finally:

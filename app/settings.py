@@ -204,6 +204,11 @@ class DesktopNodeSettings(BaseModel):
     max_request_bytes: int = Field(default=262_144, ge=4096, le=2_097_152)
     max_arguments_bytes: int = Field(default=131_072, ge=1024, le=1_048_576)
     max_result_bytes: int = Field(default=1_048_576, ge=4096, le=8_388_608)
+    result_artifact_directory: Path = Field(
+        default_factory=lambda: Path.home() / ".local" / "state" / "development-bridge" / "desktop-results"
+    )
+    result_artifact_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
+    max_result_upload_bytes: int = Field(default=67_108_864, ge=1_048_576, le=268_435_456)
     journal_path: Path | None = None
     journal_history_limit: int = Field(default=200, ge=20, le=5000)
     journal_max_bytes: int = Field(default=5_242_880, ge=65_536, le=67_108_864)

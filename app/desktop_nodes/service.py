@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -8,8 +9,11 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from secrets import token_urlsafe
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
+from app.api.capability_exports import CapabilityExportRegistry
 from app.api.errors import BridgeError, ErrorCode
 from app.desktop_nodes.journal import OperationJournal
 from app.settings import DesktopNodeSettings
@@ -35,6 +39,21 @@ class NodeState:
     fusion_available: bool = False
     queue: deque[PendingCommand] = field(default_factory=deque)
     commands: dict[str, PendingCommand] = field(default_factory=dict)
+    result_delivery_degraded: bool = False
+    result_outbox_count: int = 0
+    last_result_delivery: float | None = None
+    last_claim: float | None = None
+
+
+@dataclass(slots=True)
+class ResultUpload:
+    upload_id: str
+    node_id: str
+    command_id: str
+    size_bytes: int
+    sha256: str
+    path: Path
+    offset: int = 0
 
 
 class DesktopNodeService:
@@ -47,10 +66,15 @@ class DesktopNodeService:
     _MUTATING_TOOLS = {"fusion_mcp_execute", "fusion_mcp_update"}
     _TERMINAL_OPERATION_STATES = {"succeeded", "failed", "late_succeeded", "late_failed"}
 
-    def __init__(self, settings: DesktopNodeSettings) -> None:
+    def __init__(self, settings: DesktopNodeSettings, public_base_url: str | None = None, endpoint: str = "/mcp") -> None:
         self.settings = settings
         self._nodes: dict[str, NodeState] = {}
         self._condition = asyncio.Condition()
+        self._uploads: dict[str, ResultUpload] = {}
+        self._external_results: dict[str, dict[str, Any]] = {}
+        self._exports = CapabilityExportRegistry[str](settings.result_artifact_ttl_seconds)
+        self._public_base_url = public_base_url.rstrip("/") if public_base_url else None
+        self._export_path = endpoint.rstrip("/") + "/desktop-results/exports"
         self._journal = OperationJournal(
             settings.journal_path,
             settings.journal_history_limit,
@@ -162,7 +186,18 @@ class DesktopNodeService:
         node.last_seen = time.monotonic()
         node.last_seen_wall = time.time()
 
-    async def register(self, node_id: str, tools: list[dict[str, Any]], fusion_available: bool) -> dict[str, Any]:
+    @staticmethod
+    def _apply_telemetry(node: NodeState, telemetry: dict[str, Any] | None) -> None:
+        if telemetry is None:
+            return
+        degraded = telemetry.get("result_delivery_degraded")
+        outbox = telemetry.get("result_outbox_count")
+        if not isinstance(degraded, bool) or not isinstance(outbox, int) or isinstance(outbox, bool) or not 0 <= outbox <= 10000:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Desktop result delivery telemetry is invalid")
+        node.result_delivery_degraded = degraded
+        node.result_outbox_count = outbox
+
+    async def register(self, node_id: str, tools: list[dict[str, Any]], fusion_available: bool, telemetry: dict[str, Any] | None = None) -> dict[str, Any]:
         self._configured()
         self._validate_node_id(node_id)
         self._validate_tools(tools)
@@ -174,10 +209,11 @@ class DesktopNodeService:
             self._touch(node)
             node.tools = tools
             node.fusion_available = fusion_available
+            self._apply_telemetry(node, telemetry)
             self._condition.notify_all()
         return self.status(node_id)
 
-    async def heartbeat(self, node_id: str, tools: list[dict[str, Any]] | None = None, fusion_available: bool | None = None) -> dict[str, Any]:
+    async def heartbeat(self, node_id: str, tools: list[dict[str, Any]] | None = None, fusion_available: bool | None = None, telemetry: dict[str, Any] | None = None) -> dict[str, Any]:
         self._configured()
         self._validate_node_id(node_id)
         if tools is not None:
@@ -189,6 +225,7 @@ class DesktopNodeService:
                 node.tools = tools
             if fusion_available is not None:
                 node.fusion_available = fusion_available
+            self._apply_telemetry(node, telemetry)
             self._condition.notify_all()
         return self.status(node_id)
 
@@ -205,6 +242,10 @@ class DesktopNodeService:
             "tool_count": len(node.tools),
             "pending_commands": len(node.commands),
             "claimed_commands": sum(command.claimed for command in node.commands.values()),
+            "result_delivery_degraded": node.result_delivery_degraded,
+            "result_outbox_count": node.result_outbox_count,
+            "last_result_delivery": node.last_result_delivery,
+            "last_claim": node.last_claim,
             "last_operation": recent[-1] if recent else None,
             "recent_operations": recent,
             "uncertain_operations": self._journal.uncertain(node_id, 20),
@@ -295,6 +336,7 @@ class DesktopNodeService:
                     command = node.queue.popleft()
                     if command.command_id in node.commands:
                         command.claimed = True
+                        node.last_claim = time.time()
                         self._journal.update(command.operation_id, status="claimed", claimed_at=time.time())
                         return {
                             "command_id": command.command_id,
@@ -317,7 +359,13 @@ class DesktopNodeService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion command result must be a JSON-safe object")
         if self._json_size(result) > self.settings.max_result_bytes:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion command result is too large")
-        result_hash = self._json_hash(result)
+        external = result.get("external_result")
+        result_hash = (
+            external.get("sha256")
+            if isinstance(external, dict)
+            and isinstance(external.get("sha256"), str)
+            else self._json_hash(result)
+        )
         result_failed = bool(result.get("isError", False))
         async with self._condition:
             node = self._node(node_id)
@@ -350,4 +398,117 @@ class DesktopNodeService:
             )
             if not command.future.done():
                 command.future.set_result(result)
+            node.last_result_delivery = time.time()
             self._condition.notify_all()
+
+    def _artifact_dir(self) -> Path:
+        path = self.settings.result_artifact_directory.expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _cleanup_external_results(self) -> None:
+        cutoff = time.time() - self.settings.result_artifact_ttl_seconds
+        for result_id, item in list(self._external_results.items()):
+            if item["created_at"] <= cutoff:
+                try:
+                    item["path"].unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self._external_results.pop(result_id, None)
+
+    def begin_result_upload(self, node_id: str, command_id: str, size_bytes: int, sha256: str) -> dict[str, Any]:
+        node = self._node(node_id)
+        current = node.commands.get(command_id)
+        archived = self._journal.by_command(command_id)
+        accepted_late = (
+            archived is not None
+            and archived.get("node_id") == node_id
+            and archived.get("status") not in self._TERMINAL_OPERATION_STATES
+        )
+        if not ((current is not None and current.claimed) or accepted_late):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Command is unknown or no longer pending")
+        if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or not 1 <= size_bytes <= self.settings.max_result_upload_bytes:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result size is invalid")
+        if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result SHA-256 is invalid")
+        self._cleanup_external_results()
+        upload_id = token_urlsafe(18)
+        path = self._artifact_dir() / f".{upload_id}.upload"
+        path.write_bytes(b"")
+        self._uploads[upload_id] = ResultUpload(upload_id, node_id, command_id, size_bytes, sha256, path)
+        return {"upload_id": upload_id, "offset": 0}
+
+    def append_result_upload(self, node_id: str, upload_id: str, offset: int, data: str) -> dict[str, Any]:
+        upload = self._uploads.get(upload_id)
+        if upload is None or upload.node_id != node_id:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result upload is unknown")
+        if offset != upload.offset:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result upload offset is invalid")
+        try:
+            chunk = base64.b64decode(data, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result chunk is invalid") from exc
+        if not chunk or upload.offset + len(chunk) > upload.size_bytes:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result chunk size is invalid")
+        with upload.path.open("ab") as target:
+            target.write(chunk)
+            target.flush()
+        upload.offset += len(chunk)
+        return {"upload_id": upload_id, "offset": upload.offset}
+
+    def finalize_result_upload(self, node_id: str, upload_id: str) -> dict[str, Any]:
+        upload = self._uploads.get(upload_id)
+        if upload is None or upload.node_id != node_id:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result upload is unknown")
+        if upload.offset != upload.size_bytes:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result upload is incomplete")
+        digest = hashlib.sha256(upload.path.read_bytes()).hexdigest()
+        if digest != upload.sha256:
+            upload.path.unlink(missing_ok=True)
+            self._uploads.pop(upload_id, None)
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result SHA-256 mismatch")
+        try:
+            value = json.loads(upload.path.read_bytes())
+        except (OSError, ValueError) as exc:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result is not valid JSON") from exc
+        if not isinstance(value, dict):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result must be an object")
+        result_id = token_urlsafe(18)
+        final_path = self._artifact_dir() / f"{result_id}.json"
+        upload.path.replace(final_path)
+        self._uploads.pop(upload_id, None)
+        self._external_results[result_id] = {
+            "path": final_path, "node_id": node_id, "command_id": upload.command_id,
+            "size_bytes": upload.size_bytes, "sha256": upload.sha256, "created_at": time.time(),
+        }
+        return {
+            "external_result": {
+                "result_id": result_id,
+                "size_bytes": upload.size_bytes,
+                "sha256": upload.sha256,
+            },
+            "isError": bool(value.get("isError", False)),
+        }
+
+    def external_result(self, reference: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        self._cleanup_external_results()
+        result_id = reference.get("result_id") if isinstance(reference, dict) else None
+        item = self._external_results.get(result_id)
+        if item is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop result is unavailable")
+        value = json.loads(item["path"].read_bytes())
+        metadata = {key: item[key] for key in ("size_bytes", "sha256")}
+        metadata["file_name"] = f"fusion-result-{result_id}.json"
+        if self._public_base_url is not None:
+            token, grant = self._exports.issue(result_id)
+            metadata["export_url"] = f"{self._public_base_url}{self._export_path}/{quote(token, safe='')}"
+            metadata["expires_at"] = grant.expires_at.isoformat()
+        return value, metadata
+
+    def resolve_external_export(self, token: str) -> tuple[Path, dict[str, Any]] | None:
+        grant = self._exports.lookup(token)
+        if grant is None:
+            return None
+        self._cleanup_external_results()
+        item = self._external_results.get(grant.subject)
+        return (item["path"], item) if item is not None else None
