@@ -68,6 +68,7 @@ async def run(bridge: BridgeClient, fusion_url: str, reconnect_seconds: float, h
                 tools = [tool.model_dump(mode="json", exclude_none=True) for tool in (await session.list_tools()).tools]
                 names = {tool["name"] for tool in tools}
                 await bridge.post("register", {"fusion_available": True, "tools": tools})
+                print(f"Connected: Fusion MCP tools discovered: {len(tools)}", flush=True)
                 keepalive_task = asyncio.create_task(keepalive(bridge, tools, heartbeat_seconds))
                 try:
                     while True:
