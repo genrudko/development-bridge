@@ -14,7 +14,7 @@ DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN=<random-token>
 
 Optional YAML keys under `desktop_nodes` are
 `offline_after_seconds` (45), `claim_timeout_seconds` (25),
-`call_timeout_seconds` (60), `max_pending_commands` (32),
+`call_timeout_seconds` (300), `max_pending_commands` (32),
 `max_request_bytes` (262144), `max_arguments_bytes` (131072), and
 `max_result_bytes` (1048576). Without the token, agent HTTP routes return 404
 and the Fusion MCP tools fail closed as not configured.
@@ -43,6 +43,11 @@ py -3.12 agents\windows_fusion_agent.py
    one discovered tool name and JSON object arguments.
 
 If Fusion is closed or its MCP endpoint is disabled, the agent reports the node
-unavailable when it can reach Bridge and retries both connections. Calls are
-bounded and only dynamically discovered Fusion tools can be invoked; there is
-no arbitrary command or target-URL facility.
+unavailable when it can reach Bridge and retries both connections. While a Fusion
+tool call is running, a separate 10-second keepalive prevents the node from being
+marked offline. Fusion MCP reads are bounded to 285 seconds by default and the
+Bridge call waits up to 300 seconds. A stale late result is discarded without
+tearing down an otherwise healthy Fusion session. Calls still only invoke
+dynamically discovered Fusion tools; there is no arbitrary command or target-URL
+facility. Do not blindly retry a mutating CAD command after an uncertain timeout:
+inspect the model first because Fusion may have completed the operation locally.

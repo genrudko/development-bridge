@@ -199,7 +199,7 @@ class DesktopNodeSettings(BaseModel):
     token: SecretStr | None = Field(default=None, repr=False, exclude=True)
     offline_after_seconds: float = Field(default=45, gt=1, le=300)
     claim_timeout_seconds: float = Field(default=25, gt=0, le=60)
-    call_timeout_seconds: float = Field(default=60, gt=0, le=300)
+    call_timeout_seconds: float = Field(default=300, gt=0, le=300)
     max_pending_commands: int = Field(default=32, ge=1, le=256)
     max_request_bytes: int = Field(default=262_144, ge=4096, le=2_097_152)
     max_arguments_bytes: int = Field(default=131_072, ge=1024, le=1_048_576)

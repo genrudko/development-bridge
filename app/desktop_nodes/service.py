@@ -123,7 +123,7 @@ class DesktopNodeService:
     def status(self, node_id: str) -> dict[str, Any]:
         self._configured()
         node = self._node(node_id)
-        return {"node_id": node.node_id, "last_seen": node.last_seen_wall, "age_seconds": max(0.0, self._now() - node.last_seen), "online": self._online(node), "fusion_available": node.fusion_available, "tool_count": len(node.tools)}
+        return {"node_id": node.node_id, "last_seen": node.last_seen_wall, "age_seconds": max(0.0, self._now() - node.last_seen), "online": self._online(node), "fusion_available": node.fusion_available, "tool_count": len(node.tools), "pending_commands": len(node.commands), "claimed_commands": sum(command.claimed for command in node.commands.values())}
 
     def tools(self, node_id: str) -> dict[str, Any]:
         node = self._node(node_id)

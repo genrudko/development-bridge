@@ -27,6 +27,8 @@ async def test_service_roundtrip_discovery_and_tool_result():
     status = service.status("desk-1")
     assert abs(status["last_seen"] - time.time()) < 2
     assert status["age_seconds"] >= 0
+    assert status["pending_commands"] == 0
+    assert status["claimed_commands"] == 0
 
 
 @pytest.mark.asyncio
