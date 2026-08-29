@@ -221,6 +221,7 @@ class EodBrowserSettings(BaseModel):
     url: AnyHttpUrl = "http://127.0.0.1:8931/sse"
     allowed_origin: AnyHttpUrl = "http://127.0.0.1:8766"
     launcher: Path | None = None
+    output_dir: Path | None = None
 
     @model_validator(mode="after")
     def endpoints_are_local_and_bounded(self) -> EodBrowserSettings:
@@ -233,6 +234,8 @@ class EodBrowserSettings(BaseModel):
             raise ValueError("eod_browser.allowed_origin must be an origin without a path")
         if self.allowed_origin.query is not None or self.allowed_origin.fragment is not None:
             raise ValueError("eod_browser.allowed_origin must not contain query or fragment")
+        if self.output_dir is not None and not self.output_dir.is_absolute():
+            raise ValueError("eod_browser.output_dir must be absolute")
         return self
 
 

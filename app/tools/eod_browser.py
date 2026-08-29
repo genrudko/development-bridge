@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
+import re
 from contextlib import AsyncExitStack
+from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 from urllib.request import urlopen
 
@@ -182,6 +186,58 @@ async def _run_launcher(path) -> None:
         raise RuntimeError(f"EOD browser launcher failed: {detail}")
 
 
+
+_SCREENSHOT_LINK_RE = re.compile(r"\[Screenshot[^\]]*\]\(\./([^)]+)\)")
+_MAX_INLINE_SCREENSHOT_BYTES = 12 * 1024 * 1024
+
+
+def _inline_screenshot_content(output_dir: Path | None, result: types.CallToolResult):
+    if output_dir is None:
+        return []
+    relative = None
+    for item in result.content:
+        if not isinstance(item, types.TextContent):
+            continue
+        match = _SCREENSHOT_LINK_RE.search(item.text)
+        if match is not None:
+            relative = match.group(1)
+            break
+    if not relative:
+        return []
+    root = output_dir.resolve()
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            "EOD browser screenshot escaped the configured output directory",
+            details={"path": relative},
+        )
+    if not candidate.is_file():
+        return []
+    size = candidate.stat().st_size
+    if size > _MAX_INLINE_SCREENSHOT_BYTES:
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            "EOD browser screenshot is too large to inline",
+            details={"size_bytes": size, "limit_bytes": _MAX_INLINE_SCREENSHOT_BYTES},
+        )
+    mime_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+    if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            "EOD browser screenshot has an unsupported media type",
+            details={"mime_type": mime_type},
+        )
+    return [
+        types.ImageContent(
+            type="image",
+            data=base64.b64encode(candidate.read_bytes()).decode("ascii"),
+            mimeType=mime_type,
+        )
+    ]
+
 def _health_probe(origin: str) -> dict[str, object]:
     target = urljoin(origin.rstrip("/") + "/", "_health/")
     with urlopen(target, timeout=3) as response:
@@ -197,6 +253,7 @@ def eod_browser_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
     upstream_url = str(settings.url)
     allowed_origin = str(settings.allowed_origin).rstrip("/")
     launcher = settings.launcher
+    output_dir = settings.output_dir
     browser = _BrowserWorker(upstream_url, launcher)
 
     async def status(ctx, params, request_context):
@@ -276,8 +333,13 @@ def eod_browser_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             type="text",
             text=json.dumps(header.model_dump(mode="json", exclude_none=True), sort_keys=True),
         )
+        inline_content = (
+            _inline_screenshot_content(output_dir, result)
+            if tool_name == "browser_take_screenshot" and not result.is_error
+            else []
+        )
         return types.CallToolResult(
-            content=[envelope, *list(result.content)],
+            content=[envelope, *list(result.content), *inline_content],
             is_error=bool(result.is_error),
         )
 
