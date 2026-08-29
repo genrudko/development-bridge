@@ -84,13 +84,16 @@ async def test_contributor_issue_and_fork_head_pr_are_narrowly_allowed(tmp_path)
     assert (await service.pull_create(repository, {
         "title": "External", "head": "alice:feature/safe", "base": "main", "draft": True,
     }))["number"] == 2
+    transport.add("PATCH", repo + "/issues/1", issue())
+    transport.add("POST", repo + "/issues/1/comments", comment())
+    assert (await service.issue_update(repository, 1, {"title": "Updated"}))["number"] == 1
+    assert (await service.issue_comment(repository, 1, "Follow-up"))["id"] == 9
     with pytest.raises(BridgeError) as invalid:
         await service.pull_create(repository, {
             "title": "Bad", "head": "alice:bad..branch", "base": "main",
         })
     assert invalid.value.code is ErrorCode.INVALID_ARGUMENT
     for operation in (
-        lambda: service.issue_update(repository, 1, {"title": "Denied"}),
         lambda: service.actions_dispatch(repository, "ci.yml", "main", {}),
         lambda: service.pull_merge(repository, 2, "a" * 40, "merge"),
     ):
@@ -156,7 +159,7 @@ async def test_repository_fork_reuses_valid_existing_fork_without_post(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_classic_transport_is_used_only_for_repository_fork(tmp_path):
+async def test_classic_transport_is_used_for_external_contribution_writes_and_fork(tmp_path):
     repository = github_repository(
         tmp_path, {"git_read": True, "github_contribute": True}
     )
@@ -166,6 +169,8 @@ async def test_classic_transport_is_used_only_for_repository_fork(tmp_path):
         "default_branch": "main", "visibility": "private", "private": True,
         "archived": False, "html_url": "https://github.com/acme/widgets",
     })
+    classic.add("POST", "/repos/acme/widgets/issues", issue())
+    classic.add("POST", "/repos/acme/widgets/pulls", pull())
     classic.add("GET", "/user", {"login": "classic-user"})
     classic.add("GET", "/repos/classic-user/widgets", {
         "full_name": "classic-user/widgets", "fork": True,
@@ -191,14 +196,43 @@ async def test_classic_transport_is_used_only_for_repository_fork(tmp_path):
     )
 
     assert (await service.repository_status(repository))["default_branch"] == "main"
+    assert (await service.issue_create(repository, {"title": "External"}))["number"] == 1
+    assert (await service.pull_create(repository, {
+        "title": "External PR", "head": "classic-user:fix/live-sync",
+        "base": "main", "draft": True,
+    }))["number"] == 2
     result = await service.repository_fork(repository, "project", "classic-fork")
 
     assert result["origin_url"] == "https://github.com/classic-user/widgets.git"
     assert primary.calls == [("GET", "/repos/acme/widgets", None)]
     assert classic.calls == [
+        ("POST", "/repos/acme/widgets/issues", {"title": "External"}),
+        ("POST", "/repos/acme/widgets/pulls", {
+            "title": "External PR", "head": "classic-user:fix/live-sync",
+            "base": "main", "draft": True,
+        }),
         ("GET", "/user", None),
         ("GET", "/repos/classic-user/widgets", None),
     ]
+
+
+@pytest.mark.asyncio
+async def test_classic_transport_does_not_replace_primary_for_owned_writable_repo(tmp_path):
+    repository = github_repository(
+        tmp_path, {"git_read": True, "git_write": True, "github_contribute": True}
+    )
+    primary = FakeGitHubTransport()
+    classic = FakeGitHubTransport()
+    primary.add("POST", "/repos/acme/widgets/issues", issue())
+    service = GitHubHostService(
+        GitRunner(), CapabilityPolicy(), primary, fork_transport=classic
+    )
+
+    assert (await service.issue_create(repository, {"title": "Owned"}))["number"] == 1
+    assert primary.calls == [
+        ("POST", "/repos/acme/widgets/issues", {"title": "Owned"})
+    ]
+    assert classic.calls == []
 
 
 @pytest.mark.asyncio
@@ -264,6 +298,14 @@ async def test_repository_fork_timeout_is_retryable_without_installing_workspace
     assert sleeps == [0.25]
     assert runner.clone_calls == []
     assert not (tmp_path / "managed" / "manifest.json").exists()
+
+
+def comment():
+    return {
+        "id": 9, "body": "Follow-up", "user": {"login": "alice"},
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        "html_url": "https://github.com/acme/widgets/issues/1#issuecomment-9",
+    }
 
 
 def issue(number=1, **updates):

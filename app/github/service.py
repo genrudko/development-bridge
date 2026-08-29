@@ -47,7 +47,10 @@ class GitHubHostService:
         self.runner = runner
         self.policy = policy
         self.transport = transport
-        self._fork_transport = fork_transport if fork_transport is not None else transport
+        # A classic PAT is optional and intentionally scoped to external public
+        # contribution workflows. Own writable repositories continue using the
+        # primary (normally fine-grained) credential.
+        self._contribution_transport = fork_transport if fork_transport is not None else transport
         self.managed_repositories = managed_repositories
         self._fork_poll_attempts = fork_poll_attempts
         self._fork_poll_delay_seconds = fork_poll_delay_seconds
@@ -125,10 +128,10 @@ class GitHubHostService:
         return await self._repo_request(repository, "POST", "/issues", payload, True, self._issue, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def issue_update(self, repository, number, payload):
-        return await self._repo_request(repository, "PATCH", f"/issues/{number}", payload, True, self._issue)
+        return await self._repo_request(repository, "PATCH", f"/issues/{number}", payload, True, self._issue, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def issue_comment(self, repository, number, body):
-        return await self._repo_request(repository, "POST", f"/issues/{number}/comments", {"body": body}, True, self._comment)
+        return await self._repo_request(repository, "POST", f"/issues/{number}/comments", {"body": body}, True, self._comment, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def pull_list(self, repository, filters):
         identity = await self.identity(repository)
@@ -152,9 +155,9 @@ class GitHubHostService:
     async def repository_fork(self, repository, project_id, repository_id, depth=50):
         identity = await self.identity(repository)
         self._require(repository, Capability.GITHUB_CONTRIBUTE)
-        if self._fork_transport is None or self.managed_repositories is None:
+        if self._contribution_transport is None or self.managed_repositories is None:
             raise BridgeError(ErrorCode.GITHUB_NOT_CONFIGURED, "GitHub contribution is not configured")
-        response = await self._fork_transport.request("GET", "/user")
+        response = await self._contribution_transport.request("GET", "/user")
         if response.status != 200:
             raise _http_error(response.status, response.headers)
         user = response.json()
@@ -163,12 +166,12 @@ class GitHubHostService:
             raise BridgeError(ErrorCode.GITHUB_API_ERROR, "GitHub authenticated user is invalid")
         full_name = f"{login}/{identity.repository}"
         fork_path = f"/repos/{full_name}"
-        response = await self._fork_transport.request("GET", fork_path)
+        response = await self._contribution_transport.request("GET", fork_path)
         if response.status == 200:
             data = response.json()
             clone_url = self._validate_fork(data, full_name, identity.slug)
         elif response.status == 404:
-            response = await self._fork_transport.request("POST", f"{self._repo(identity)}/forks", payload={})
+            response = await self._contribution_transport.request("POST", f"{self._repo(identity)}/forks", payload={})
             if response.status not in {201, 202}:
                 raise _http_error(response.status, response.headers)
             if response.body:
@@ -188,8 +191,8 @@ class GitHubHostService:
         for attempt in range(self._fork_poll_attempts):
             if attempt:
                 await self._sleep(self._fork_poll_delay_seconds)
-            assert self._fork_transport is not None
-            response = await self._fork_transport.request("GET", path)
+            assert self._contribution_transport is not None
+            response = await self._contribution_transport.request("GET", path)
             if response.status == 200:
                 return self._validate_fork(response.json(), full_name, upstream)
             if response.status != 404:
@@ -216,13 +219,13 @@ class GitHubHostService:
     async def pull_update(self, repository, number, payload):
         draft = payload.pop("draft", None)
         current = await self.pull_get(repository, number) if draft is not None else None
-        data = await self._repo_request(repository, "PATCH", f"/pulls/{number}", payload, True, self._pull) if payload else current
+        data = await self._repo_request(repository, "PATCH", f"/pulls/{number}", payload, True, self._pull, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE)) if payload else current
         if draft is not None and bool(current["draft"]) != draft:
             mutation = "convertPullRequestToDraft" if draft else "markPullRequestReadyForReview"
             graphql, _ = await self._request(repository, "POST", "/graphql", {
                 "query": f"mutation($id:ID!){{{mutation}(input:{{pullRequestId:$id}}){{pullRequest{{id}}}}}}",
                 "variables": {"id": current["node_id"]},
-            }, write=True)
+            }, write=True, capability=(Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
             if graphql.get("errors"):
                 raise BridgeError(
                     ErrorCode.GITHUB_CONFLICT,
@@ -270,10 +273,10 @@ class GitHubHostService:
         return {"files": [self._pull_file(item) for item in data[:bounded_limit]]}
 
     async def pull_review(self, repository, number, payload):
-        return await self._repo_request(repository, "POST", f"/pulls/{number}/reviews", payload, True, self._review)
+        return await self._repo_request(repository, "POST", f"/pulls/{number}/reviews", payload, True, self._review, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def request_reviewers(self, repository, number, payload):
-        return await self._repo_request(repository, "POST", f"/pulls/{number}/requested_reviewers", payload, True, self._pull)
+        return await self._repo_request(repository, "POST", f"/pulls/{number}/requested_reviewers", payload, True, self._pull, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def pull_merge(self, repository, number, expected_head, method):
         self._require(repository, Capability.GIT_WRITE)
@@ -615,9 +618,17 @@ class GitHubHostService:
                 self._require(repository, required[0])
         else:
             self._require(repository, required)
-        if self.transport is None:
+        transport = self.transport
+        if (
+            write
+            and self._contribution_transport is not None
+            and repository.capabilities.allows(Capability.GITHUB_CONTRIBUTE)
+            and not repository.capabilities.allows(Capability.GIT_WRITE)
+        ):
+            transport = self._contribution_transport
+        if transport is None:
             raise BridgeError(ErrorCode.GITHUB_NOT_CONFIGURED, "GitHub token is not configured")
-        return await self.transport.request(method, path, payload=payload)
+        return await transport.request(method, path, payload=payload)
 
     def _require(self, repository, capability):
         self.policy.require(repository.capabilities, capability, project_id=repository.project_id, repository_id=repository.id)

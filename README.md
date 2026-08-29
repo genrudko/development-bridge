@@ -216,10 +216,11 @@ job database, so queued runs retain their meaning across restart.
 
 GitHub host integration is optional and reads its credentials only from the
 runtime environment. `DEVELOPMENT_BRIDGE_GITHUB_TOKEN` is the primary credential.
-Repository fork creation may separately use
-`DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN`; when set, only the fork flow (including
-its identity and target-fork checks) uses that credential. All other GitHub and Git
-operations continue using the primary token. Repository identity is derived from
+External public contribution workflows may separately use
+`DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN`. When set, repositories that have
+`github_contribute` but not `git_write` use that credential for GitHub host writes
+(issue/PR collaboration) and fork creation. Own writable repositories, Git pushes,
+releases, and Actions continue using the primary token. Repository identity is derived from
 the registered Git `origin`; tools cannot supply an
 owner, repository, or arbitrary API URL. Managed external repositories retain
 GitHub read access through `git_read` but cannot mutate host state because they
