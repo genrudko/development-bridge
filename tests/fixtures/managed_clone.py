@@ -57,3 +57,9 @@ class FakeManagedCloneRunner:
             ).stdout.strip()
 
         return git("branch", "--show-current"), git("rev-parse", "HEAD")
+
+    async def configure_fork(
+        self, repository: Path, push_url: str, upstream_url: str
+    ) -> None:
+        subprocess.run(["git", "remote", "set-url", "--push", "origin", push_url], cwd=repository, check=True)
+        subprocess.run(["git", "remote", "add", "upstream", upstream_url], cwd=repository, check=True)

@@ -53,7 +53,8 @@ async def test_clone_is_immediately_available_to_read_apis_and_remains_read_only
                     assert described["repositories"][0]["id"] == "upstream"
                     assert described["repositories"][0]["capabilities"] == {
                         "read": True, "write": False, "git_read": True,
-                        "git_write": False, "execute": False,
+                        "git_write": False, "github_contribute": True,
+                        "execute": False,
                     }
                     listed = payload(await session.call_tool("project_list", {}))["data"]
                     assert listed["projects"][0]["repository_count"] == 1

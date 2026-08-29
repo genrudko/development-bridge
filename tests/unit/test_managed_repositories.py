@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -48,6 +49,7 @@ async def test_managed_clone_is_idempotent_and_persists_across_container_rebuild
     repository = first.projects.repositories.get("project", "upstream")
     assert repository.capabilities.allows(Capability.READ)
     assert repository.capabilities.allows(Capability.GIT_READ)
+    assert repository.capabilities.allows(Capability.GITHUB_CONTRIBUTE)
     assert not repository.capabilities.allows(Capability.WRITE)
     assert not repository.capabilities.allows(Capability.GIT_WRITE)
     assert not repository.capabilities.allows(Capability.EXECUTE)
@@ -93,6 +95,38 @@ async def test_managed_clone_ref_is_persisted_and_part_of_idempotency(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_writable_fork_profile_and_remotes_persist_exactly(tmp_path):
+    runner = FakeManagedCloneRunner()
+    configured = settings(tmp_path)
+    container = build_container(configured, managed_clone_runner=runner)
+    cloned = await container.managed_repositories.clone(
+        "project", "my-fork", "https://github.com/alice/reference.git",
+        kind="fork", push_url="git@github.com:alice/reference.git",
+        upstream_url=URL,
+    )
+    assert cloned["kind"] == "fork"
+    assert cloned["capabilities"] == {
+        "read": True, "write": True, "git_read": True, "git_write": True,
+        "github_contribute": False, "execute": True,
+    }
+    root = tmp_path / "managed" / "project" / "my-fork"
+    push = subprocess.run(
+        ["git", "remote", "get-url", "--push", "origin"], cwd=root,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    upstream = subprocess.run(
+        ["git", "remote", "get-url", "upstream"], cwd=root,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert push == "git@github.com:alice/reference.git"
+    assert upstream == URL
+    rebuilt = build_container(configured, managed_clone_runner=runner)
+    assert rebuilt.projects.repositories.get(
+        "project", "my-fork"
+    ).capabilities.as_dict() == cloned["capabilities"]
+
+
+@pytest.mark.asyncio
 async def test_old_manifest_schema_loads_with_null_requested_ref(tmp_path):
     runner = FakeManagedCloneRunner()
     configured = settings(tmp_path)
@@ -101,6 +135,7 @@ async def test_old_manifest_schema_loads_with_null_requested_ref(tmp_path):
     manifest_path = tmp_path / "managed" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["repositories"][0].pop("requested_ref")
+    manifest["repositories"][0].pop("kind")
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     rebuilt = build_container(configured, managed_clone_runner=runner)

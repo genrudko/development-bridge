@@ -23,7 +23,13 @@ from .registry import ProjectRegistry
 MANIFEST_MAX_BYTES = 1_048_576
 MANIFEST_MAX_REPOSITORIES = 4096
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-REFERENCE_CAPABILITIES = CapabilitySet.from_mapping({"read": True, "git_read": True})
+REFERENCE_CAPABILITIES = CapabilitySet.from_mapping(
+    {"read": True, "git_read": True, "github_contribute": True}
+)
+FORK_CAPABILITIES = CapabilitySet.from_mapping(
+    {"read": True, "write": True, "git_read": True, "git_write": True, "execute": True}
+)
+MANAGED_KINDS = {"reference": REFERENCE_CAPABILITIES, "fork": FORK_CAPABILITIES}
 
 
 class ManagedCloneRunner(Protocol):
@@ -32,6 +38,10 @@ class ManagedCloneRunner(Protocol):
     ) -> None: ...
 
     async def inspect(self, repository: Path) -> tuple[str, str]: ...
+
+    async def configure_fork(
+        self, repository: Path, push_url: str, upstream_url: str
+    ) -> None: ...
 
 
 class SubprocessManagedCloneRunner:
@@ -63,6 +73,12 @@ class SubprocessManagedCloneRunner:
             "git", "-C", str(repository), "rev-parse", "HEAD"
         )).strip()
         return branch, head
+
+    async def configure_fork(
+        self, repository: Path, push_url: str, upstream_url: str
+    ) -> None:
+        await self._run("git", "-C", str(repository), "remote", "set-url", "--push", "origin", push_url)
+        await self._run("git", "-C", str(repository), "remote", "add", "upstream", upstream_url)
 
     async def _run(self, *arguments: str) -> str:
         process = await asyncio.create_subprocess_exec(
@@ -105,6 +121,7 @@ class ManagedRepositoryRecord:
     depth: int
     created_at: str
     requested_ref: str | None = None
+    kind: str = "reference"
 
     def as_dict(self) -> dict[str, str | int | None]:
         return {
@@ -114,6 +131,7 @@ class ManagedRepositoryRecord:
             "depth": self.depth,
             "created_at": self.created_at,
             "requested_ref": self.requested_ref,
+            "kind": self.kind,
         }
 
 
@@ -139,6 +157,10 @@ class ManagedRepositoryService:
         url: str,
         depth: int = 50,
         requested_ref: str | None = None,
+        *,
+        kind: str = "reference",
+        push_url: str | None = None,
+        upstream_url: str | None = None,
     ) -> dict:
         self.projects.get(project_id)
         origin_url = self._validate_url(url)
@@ -147,6 +169,14 @@ class ManagedRepositoryService:
                 ErrorCode.INVALID_ARGUMENT, "Clone depth must be between 1 and 10000"
             )
         requested_ref = self._validate_ref(requested_ref)
+        if kind not in MANAGED_KINDS:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Managed repository kind is invalid")
+        if kind == "fork":
+            if not isinstance(push_url, str) or re.fullmatch(r"git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git", push_url) is None:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fork push URL is invalid")
+            upstream_url = self._validate_url(upstream_url or "")
+        elif push_url is not None or upstream_url is not None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Reference clones cannot configure fork remotes")
         async with self._lock:
             key = (project_id, repository_id)
             if self.projects.repositories.is_configured(*key):
@@ -156,6 +186,7 @@ class ManagedRepositoryService:
                 if (
                     existing.origin_url != origin_url
                     or existing.requested_ref != requested_ref
+                    or existing.kind != kind
                 ):
                     raise self._conflict(project_id, repository_id)
                 if not self._valid_managed_target(self._target(*key)):
@@ -189,6 +220,9 @@ class ManagedRepositoryService:
                         "Clone did not produce a Git repository",
                     )
                 branch, head = await self.runner.inspect(clone_path)
+                if kind == "fork":
+                    assert push_url is not None and upstream_url is not None
+                    await self.runner.configure_fork(clone_path, push_url, upstream_url)
                 os.replace(clone_path, target)
                 installed = True
                 record = ManagedRepositoryRecord(
@@ -198,6 +232,7 @@ class ManagedRepositoryService:
                     depth,
                     datetime.now(UTC).isoformat(),
                     requested_ref,
+                    kind,
                 )
                 updated = {**self._records, key: record}
                 self._write_manifest(updated)
@@ -235,13 +270,13 @@ class ManagedRepositoryService:
                 old_keys = {
                     "project_id", "repository_id", "origin_url", "depth", "created_at"
                 }
-                if not isinstance(entry, dict) or frozenset(entry) not in {
-                    frozenset(old_keys), frozenset({*old_keys, "requested_ref"})
-                }:
+                allowed = {*old_keys, "requested_ref", "kind"}
+                if not isinstance(entry, dict) or not old_keys <= set(entry) or not set(entry) <= allowed:
                     raise ValueError("invalid entry shape")
                 record = ManagedRepositoryRecord(
                     **entry,
                     **({"requested_ref": None} if "requested_ref" not in entry else {}),
+                    **({"kind": "reference"} if "kind" not in entry else {}),
                 )
                 self._validate_record(record)
                 key = (record.project_id, record.repository_id)
@@ -276,6 +311,8 @@ class ManagedRepositoryService:
         if not isinstance(record.created_at, str) or len(record.created_at) > 100:
             raise ValueError("invalid timestamp")
         self._validate_ref(record.requested_ref)
+        if record.kind not in MANAGED_KINDS:
+            raise ValueError("invalid managed repository kind")
 
     @staticmethod
     def _validate_url(url: str) -> str:
@@ -357,7 +394,7 @@ class ManagedRepositoryService:
             record.project_id,
             record.repository_id,
             self._target(record.project_id, record.repository_id),
-            REFERENCE_CAPABILITIES,
+            MANAGED_KINDS[record.kind],
         )
 
     async def _metadata(self, record: ManagedRepositoryRecord, status: str) -> dict:
@@ -379,7 +416,8 @@ class ManagedRepositoryService:
             "branch": branch,
             "head": head,
             "depth": record.depth,
-            "capabilities": REFERENCE_CAPABILITIES.as_dict(),
+            "kind": record.kind,
+            "capabilities": MANAGED_KINDS[record.kind].as_dict(),
         }
 
     def _write_manifest(

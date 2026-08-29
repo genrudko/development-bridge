@@ -281,7 +281,7 @@ def build_container(
             timeout_seconds=configured.github.timeout_seconds,
             response_limit_bytes=configured.github.response_limit_bytes,
         )
-    github = GitHubHostService(runner, policy, github_transport)
+    github = GitHubHostService(runner, policy, github_transport, managed_repositories)
     github_artifact_exports = GitHubActionsArtifactExportService(
         github,
         CapabilityExportRegistry[GitHubArtifactSnapshot](

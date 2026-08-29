@@ -37,6 +37,7 @@ SUPPORTED_TOOLS = {
     "job_artifact_export",
     "repository_exec",
     "github_repository_status",
+    "github_repository_fork",
     "github_commit_checks",
     "github_release_list",
     "github_release_get",
@@ -99,7 +100,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 89
+    assert len(registry.definitions) == 90
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",
@@ -109,6 +110,15 @@ def test_registered_tool_surface_is_exact():
         "telegram-supervisor",
         "fusion-desktop",
     }
+
+    fork_schema = registry.get("github_repository_fork").definition.input_schema
+    assert fork_schema["required"] == [
+        "project_id", "repository_id", "fork_repository_id",
+    ]
+    assert fork_schema["properties"]["fork_repository_id"]["pattern"] == (
+        "^[a-z][a-z0-9-]{0,62}$"
+    )
+    assert fork_schema["additionalProperties"] is False
 
 
 def test_legacy_global_workspace_names_are_absent():

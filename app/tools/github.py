@@ -30,6 +30,12 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     async def repository_status(ctx, params, rc):
         return result(rc, await container.github.repository_status(repository(params.arguments)))
 
+    async def repository_fork(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.repository_fork(
+            repository(a), a["project_id"], a["fork_repository_id"], a.get("depth", 50)
+        ))
+
     async def commit_checks(ctx, params, rc):
         a = params.arguments
         return result(rc, await container.github.commit_checks(repository(a), a["sha"]))
@@ -182,6 +188,7 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
 
     definitions = (
         ("github_repository_status", "Show GitHub repository identity and host status", {}, [], repository_status),
+        ("github_repository_fork", "Fork an upstream GitHub repository and register a writable managed workspace", {"fork_repository_id": IDENTIFIER_SCHEMA, "depth": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 50}}, ["fork_repository_id"], repository_fork),
         ("github_commit_checks", "Show check runs and commit status contexts", {"sha": SHA}, ["sha"], commit_checks),
         ("github_issue_list", "List bounded GitHub issues", {**state, "labels": NAMES, **limit}, [], issue_list),
         ("github_issue_get", "Get one GitHub issue", issue_number, ["issue_number"], issue_get),

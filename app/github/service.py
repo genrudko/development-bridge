@@ -12,7 +12,7 @@ from urllib.parse import quote, urlencode, urlparse
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import Capability, CapabilityPolicy
 from app.git import GitRunner
-from app.projects import Repository
+from app.projects import ManagedRepositoryService, Repository
 
 from .client import GitHubTransport, _http_error
 
@@ -36,10 +36,12 @@ class GitHubHostService:
         runner: GitRunner,
         policy: CapabilityPolicy,
         transport: GitHubTransport | None,
+        managed_repositories: ManagedRepositoryService | None = None,
     ) -> None:
         self.runner = runner
         self.policy = policy
         self.transport = transport
+        self.managed_repositories = managed_repositories
         self._release_plans: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._release_apply_lock = asyncio.Lock()
 
@@ -110,7 +112,7 @@ class GitHubHostService:
         return {"comments": [self._comment(item) for item in data[:bounded_limit]]}
 
     async def issue_create(self, repository, payload):
-        return await self._repo_request(repository, "POST", "/issues", payload, True, self._issue)
+        return await self._repo_request(repository, "POST", "/issues", payload, True, self._issue, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def issue_update(self, repository, number, payload):
         return await self._repo_request(repository, "PATCH", f"/issues/{number}", payload, True, self._issue)
@@ -129,9 +131,40 @@ class GitHubHostService:
         return await self._repo_request(repository, "GET", f"/pulls/{number}", None, False, self._pull)
 
     async def pull_create(self, repository, payload):
-        if ":" in payload["head"]:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "fork-style PR heads are not supported")
-        return await self._repo_request(repository, "POST", "/pulls", payload, True, self._pull)
+        head = payload["head"]
+        capability = Capability.GIT_WRITE
+        if ":" in head:
+            if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}):[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,253}[A-Za-z0-9._-])?", head) is None or ".." in head or "//" in head or "@{" in head:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "fork-style PR head is invalid")
+            capability = (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE)
+        return await self._repo_request(repository, "POST", "/pulls", payload, True, self._pull, capability)
+
+    async def repository_fork(self, repository, project_id, repository_id, depth=50):
+        identity = await self.identity(repository)
+        self._require(repository, Capability.GITHUB_CONTRIBUTE)
+        if self.transport is None or self.managed_repositories is None:
+            raise BridgeError(ErrorCode.GITHUB_NOT_CONFIGURED, "GitHub contribution is not configured")
+        user, _ = await self._request(repository, "GET", "/user", write=False)
+        login = user.get("login")
+        if not isinstance(login, str) or re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login) is None:
+            raise BridgeError(ErrorCode.GITHUB_API_ERROR, "GitHub authenticated user is invalid")
+        response = await self.transport.request("POST", f"{self._repo(identity)}/forks", payload={})
+        if response.status not in {201, 202}:
+            raise _http_error(response.status, response.headers)
+        data = response.json()
+        full_name = f"{login}/{identity.repository}"
+        parent = data.get("parent") or data.get("source") or {}
+        if data.get("full_name") != full_name or parent.get("full_name") != identity.slug or data.get("fork") is not True:
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork relationship")
+        clone_url = data.get("clone_url")
+        expected_clone = f"https://github.com/{full_name}.git"
+        if clone_url != expected_clone:
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork clone URL")
+        return await self.managed_repositories.clone(
+            project_id, repository_id, clone_url, depth, kind="fork",
+            push_url=f"git@github.com:{full_name}.git",
+            upstream_url=f"https://github.com/{identity.slug}.git",
+        )
 
     async def pull_update(self, repository, number, payload):
         draft = payload.pop("draft", None)
@@ -196,6 +229,7 @@ class GitHubHostService:
         return await self._repo_request(repository, "POST", f"/pulls/{number}/requested_reviewers", payload, True, self._pull)
 
     async def pull_merge(self, repository, number, expected_head, method):
+        self._require(repository, Capability.GIT_WRITE)
         current = await self.pull_get(repository, number)
         if current["head_sha"] != expected_head:
             raise BridgeError(ErrorCode.GITHUB_CONFLICT, "Pull request head changed")
@@ -514,21 +548,26 @@ class GitHubHostService:
             "release_assets_write": {"bridge_support": False, "credential_permission": "not_exposed"},
         }
 
-    async def _repo_request(self, repository, method, suffix, payload, write, normalize):
+    async def _repo_request(self, repository, method, suffix, payload, write, normalize, capability=None):
         identity = await self.identity(repository)
-        data, _ = await self._request(repository, method, self._repo(identity) + suffix, payload, write=write)
+        data, _ = await self._request(repository, method, self._repo(identity) + suffix, payload, write=write, capability=capability)
         return normalize(data) if normalize else data
 
-    async def _request(self, repository, method, path, payload=None, *, write):
-        response = await self._raw(repository, method, path, payload, write=write)
+    async def _request(self, repository, method, path, payload=None, *, write, capability=None):
+        response = await self._raw(repository, method, path, payload, write=write, capability=capability)
         if not 200 <= response.status < 300:
             raise _http_error(response.status, response.headers)
         if not response.body:
             return {}, response.headers
         return response.json(), response.headers
 
-    async def _raw(self, repository, method, path, payload=None, *, write):
-        self._require(repository, Capability.GIT_WRITE if write else Capability.GIT_READ)
+    async def _raw(self, repository, method, path, payload=None, *, write, capability=None):
+        required = capability or (Capability.GIT_WRITE if write else Capability.GIT_READ)
+        if isinstance(required, tuple):
+            if not any(repository.capabilities.allows(item) for item in required):
+                self._require(repository, required[0])
+        else:
+            self._require(repository, required)
         if self.transport is None:
             raise BridgeError(ErrorCode.GITHUB_NOT_CONFIGURED, "GitHub token is not configured")
         return await self.transport.request(method, path, payload=payload)

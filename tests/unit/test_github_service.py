@@ -6,10 +6,13 @@ import pytest
 
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import CapabilityPolicy, CapabilitySet
+from app.container import build_container
 from app.git import GitRunner
 from app.github import GitHubHostService, resolve_github_origin
 from app.projects import Repository
+from app.settings import BridgeSettings
 from tests.fixtures.github_transport import FakeGitHubTransport
+from tests.fixtures.managed_clone import FakeManagedCloneRunner
 from tests.fixtures.repositories import create_git_repository
 
 
@@ -65,6 +68,93 @@ async def test_github_optional_configuration_and_capability_split(tmp_path):
     with pytest.raises(BridgeError) as denied:
         await service.issue_create(read_only, {"title": "No"})
     assert denied.value.code is ErrorCode.PERMISSION_DENIED
+
+
+@pytest.mark.asyncio
+async def test_contributor_issue_and_fork_head_pr_are_narrowly_allowed(tmp_path):
+    repository = github_repository(
+        tmp_path, {"git_read": True, "github_contribute": True}
+    )
+    transport = FakeGitHubTransport()
+    service = GitHubHostService(GitRunner(), CapabilityPolicy(), transport)
+    repo = "/repos/acme/widgets"
+    transport.add("POST", repo + "/issues", issue())
+    transport.add("POST", repo + "/pulls", pull())
+    assert (await service.issue_create(repository, {"title": "External"}))["number"] == 1
+    assert (await service.pull_create(repository, {
+        "title": "External", "head": "alice:feature/safe", "base": "main", "draft": True,
+    }))["number"] == 2
+    with pytest.raises(BridgeError) as invalid:
+        await service.pull_create(repository, {
+            "title": "Bad", "head": "alice:bad..branch", "base": "main",
+        })
+    assert invalid.value.code is ErrorCode.INVALID_ARGUMENT
+    for operation in (
+        lambda: service.issue_update(repository, 1, {"title": "Denied"}),
+        lambda: service.actions_dispatch(repository, "ci.yml", "main", {}),
+        lambda: service.pull_merge(repository, 2, "a" * 40, "merge"),
+    ):
+        with pytest.raises(BridgeError) as denied:
+            await operation()
+        assert denied.value.code is ErrorCode.PERMISSION_DENIED
+
+
+@pytest.mark.asyncio
+async def test_repository_fork_validates_relationship_and_registers_workspace(tmp_path):
+    upstream = create_git_repository(tmp_path, "upstream")
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/acme/widgets.git"],
+        cwd=upstream, check=True,
+    )
+    settings = BridgeSettings.model_validate({
+        "managed_repositories": {"root": tmp_path / "managed"},
+        "projects": [{"id": "project", "name": "Project", "repositories": [{
+            "id": "upstream", "path": upstream,
+            "capabilities": {"git_read": True, "github_contribute": True},
+        }]}],
+    })
+    transport = FakeGitHubTransport()
+    transport.add("GET", "/user", {"login": "alice"})
+    transport.add("POST", "/repos/acme/widgets/forks", {
+        "full_name": "alice/widgets", "fork": True,
+        "clone_url": "https://github.com/alice/widgets.git",
+        "parent": {"full_name": "acme/widgets"},
+    }, status=201)
+    container = build_container(
+        settings, github_transport=transport,
+        managed_clone_runner=FakeManagedCloneRunner(),
+    )
+    result = await container.github.repository_fork(
+        container.projects.repositories.get("project", "upstream"),
+        "project", "alice-fork", 25,
+    )
+    assert result["kind"] == "fork"
+    assert result["origin_url"] == "https://github.com/alice/widgets.git"
+    assert transport.calls == [
+        ("GET", "/user", None),
+        ("POST", "/repos/acme/widgets/forks", {}),
+    ]
+    manifest = (tmp_path / "managed" / "manifest.json").read_text()
+    assert "token" not in manifest.lower()
+    assert "git@github.com:alice/widgets.git" not in manifest
+
+    bad_transport = FakeGitHubTransport()
+    bad_transport.add("GET", "/user", {"login": "alice"})
+    bad_transport.add("POST", "/repos/acme/widgets/forks", {
+        "full_name": "mallory/widgets", "fork": True,
+        "clone_url": "https://github.com/mallory/widgets.git",
+        "parent": {"full_name": "acme/widgets"},
+    }, status=201)
+    bad = GitHubHostService(
+        GitRunner(), CapabilityPolicy(), bad_transport,
+        container.managed_repositories,
+    )
+    with pytest.raises(BridgeError) as rejected:
+        await bad.repository_fork(
+            container.projects.repositories.get("project", "upstream"),
+            "project", "bad-fork",
+        )
+    assert rejected.value.code is ErrorCode.GITHUB_CONFLICT
 
 
 def issue(number=1, **updates):
