@@ -949,3 +949,40 @@ def test_browser_host_pages_filters_closing_json_list_ghosts(tmp_path: Path, mon
     monkeypatch.setattr(module.requests, "get", lambda *a, **k: Response(rows), raising=False)
     host.live_page_ids = lambda: {"live"}
     assert [item["id"] for item in host.pages()] == ["live"]
+
+
+def test_browser_host_clears_only_tab_restore_state(tmp_path: Path):
+    module = _module()
+    cfg = _config(module, tmp_path)
+    host = module.BrowserHost(cfg)
+    default = Path(cfg.profile) / "Default"
+    (default / "Sessions").mkdir(parents=True)
+    (default / "Sessions" / "Tabs_1").write_text("tabs")
+    (default / "Sessions_Encrypted").mkdir(parents=True)
+    (default / "Sessions_Encrypted" / "Session_1").write_text("session")
+    (default / "Current Tabs").write_text("legacy")
+    (default / "Cookies").write_text("auth-must-stay")
+
+    host.clear_session_restore_state()
+
+    assert not (default / "Sessions").exists()
+    assert not (default / "Sessions_Encrypted").exists()
+    assert not (default / "Current Tabs").exists()
+    assert (default / "Cookies").read_text() == "auth-must-stay"
+
+
+def test_browser_host_terminate_has_bounded_waits(tmp_path: Path, monkeypatch):
+    module = _module()
+    waits = []
+    kills = []
+    class Proc:
+        pid = 12345
+        def poll(self): return None
+        def wait(self, timeout):
+            waits.append(timeout)
+            if timeout == 4: raise TimeoutError("still alive")
+            return 0
+    monkeypatch.setattr(module.os, "killpg", lambda pid, sig: kills.append((pid, sig)))
+    module.terminate(Proc())
+    assert waits == [4, 1]
+    assert kills == [(12345, module.signal.SIGTERM), (12345, module.signal.SIGKILL)]
