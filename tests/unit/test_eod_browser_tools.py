@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -9,9 +10,11 @@ from app.tools import eod_browser as module
 from app.tools.eod_browser import SAFE_BROWSER_TOOLS, eod_browser_tools
 
 
-def container(enabled=True):
+def container(enabled=True, output_dir=None):
     return SimpleNamespace(
-        settings=SimpleNamespace(eod_browser=EodBrowserSettings(enabled=enabled))
+        settings=SimpleNamespace(
+            eod_browser=EodBrowserSettings(enabled=enabled, output_dir=output_dir)
+        )
     )
 
 
@@ -128,3 +131,64 @@ async def test_worker_reuses_one_session_for_sequential_calls(monkeypatch):
         "browser_navigate",
         "browser_snapshot",
     ]
+
+
+def test_relative_browser_output_directory_is_rejected():
+    with pytest.raises(ValueError, match="output_dir"):
+        EodBrowserSettings(enabled=True, output_dir=Path("relative-output"))
+
+
+@pytest.mark.asyncio
+async def test_screenshot_is_inlined_from_bounded_output_directory(monkeypatch, tmp_path):
+    screenshot = tmp_path / "proof.png"
+    screenshot.write_bytes(b"\x89PNG\r\n\x1a\nproof")
+
+    async def fake_call(self, tool_name, arguments):
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text="### Result\n- [Screenshot of viewport](./proof.png)",
+                )
+            ],
+            isError=False,
+        )
+
+    monkeypatch.setattr(module._BrowserWorker, "call_tool", fake_call)
+    call = next(
+        item
+        for item in eod_browser_tools(container(output_dir=tmp_path))
+        if item.definition.name == "eod_browser_call"
+    )
+    result = await call.handler(
+        None,
+        SimpleNamespace(
+            arguments={
+                "tool_name": "browser_take_screenshot",
+                "arguments": {"filename": "proof.png"},
+            }
+        ),
+        SimpleNamespace(request_id="req-image"),
+    )
+
+    images = [item for item in result.content if isinstance(item, types.ImageContent)]
+    assert len(images) == 1
+    assert images[0].mime_type == "image/png"
+    assert images[0].data
+
+
+def test_screenshot_path_escape_is_rejected(tmp_path):
+    outside = tmp_path.parent / "escape.png"
+    outside.write_bytes(b"not-used")
+    result = types.CallToolResult(
+        content=[
+            types.TextContent(
+                type="text",
+                text="### Result\n- [Screenshot of viewport](./../escape.png)",
+            )
+        ],
+        isError=False,
+    )
+    with pytest.raises(BridgeError) as captured:
+        module._inline_screenshot_content(tmp_path, result)
+    assert captured.value.code == ErrorCode.POLICY_VIOLATION
