@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import AsyncExitStack
 from urllib.parse import urljoin, urlsplit
 from urllib.request import urlopen
 
@@ -61,11 +62,107 @@ def _validate_navigation(allowed_origin: str, tool_name: str, arguments: dict) -
         )
 
 
-async def _list_upstream(url: str):
-    async with sse_client(url, timeout=5, sse_read_timeout=20) as (read, write):
-        async with ClientSession(read, write) as session:
+class _BrowserWorker:
+    def __init__(self, url: str, launcher) -> None:
+        self.url = url
+        self.launcher = launcher
+        self._queue: asyncio.Queue[tuple[str, str | None, dict, asyncio.Future]] = (
+            asyncio.Queue()
+        )
+        self._task: asyncio.Task | None = None
+        self._start_lock = asyncio.Lock()
+
+    async def _open_session(self) -> tuple[AsyncExitStack, ClientSession]:
+        stack = AsyncExitStack()
+        try:
+            read, write = await stack.enter_async_context(
+                sse_client(self.url, timeout=5, sse_read_timeout=90)
+            )
+            session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-            return await session.list_tools()
+            return stack, session
+        except BaseException:
+            await stack.aclose()
+            raise
+
+    async def _connect(self) -> tuple[AsyncExitStack, ClientSession]:
+        try:
+            return await self._open_session()
+        except Exception:
+            if self.launcher is None:
+                raise
+            await _run_launcher(self.launcher)
+            await asyncio.sleep(0.25)
+            return await self._open_session()
+
+    async def _run(self) -> None:
+        stack: AsyncExitStack | None = None
+        terminal_error: BaseException | None = None
+        try:
+            stack, session = await self._connect()
+            while True:
+                kind, tool_name, arguments, future = await self._queue.get()
+                if future.cancelled():
+                    continue
+                if kind == "stop":
+                    future.set_result(None)
+                    break
+                try:
+                    if kind == "list":
+                        result = await session.list_tools()
+                    else:
+                        result = await session.call_tool(
+                            tool_name or "",
+                            arguments,
+                            read_timeout_seconds=90,
+                        )
+                except BaseException as exc:
+                    terminal_error = exc
+                    if not future.done():
+                        future.set_exception(exc)
+                    break
+                else:
+                    if not future.done():
+                        future.set_result(result)
+        except BaseException as exc:
+            terminal_error = exc
+        finally:
+            if stack is not None:
+                try:
+                    await stack.aclose()
+                except BaseException as exc:
+                    terminal_error = terminal_error or exc
+            failure = terminal_error or RuntimeError("EOD browser worker stopped")
+            while True:
+                try:
+                    _, _, _, future = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if not future.done():
+                    future.set_exception(failure)
+            self._task = None
+
+    async def _submit(self, kind: str, tool_name: str | None = None, arguments: dict | None = None):
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        await self._queue.put((kind, tool_name, arguments or {}, future))
+        async with self._start_lock:
+            if self._task is None or self._task.done():
+                self._task = asyncio.create_task(self._run(), name="eod-browser-upstream")
+        return await future
+
+    async def list_tools(self):
+        return await self._submit("list")
+
+    async def call_tool(self, tool_name: str, arguments: dict):
+        return await self._submit("call", tool_name, arguments)
+
+    async def close(self) -> None:
+        task = self._task
+        if task is None or task.done():
+            return
+        await self._submit("stop")
+        await task
 
 
 async def _run_launcher(path) -> None:
@@ -85,28 +182,6 @@ async def _run_launcher(path) -> None:
         raise RuntimeError(f"EOD browser launcher failed: {detail}")
 
 
-async def _ensure_upstream(url: str, launcher):
-    try:
-        return await _list_upstream(url)
-    except Exception:
-        if launcher is None:
-            raise
-        await _run_launcher(launcher)
-        await asyncio.sleep(0.25)
-        return await _list_upstream(url)
-
-
-async def _call_upstream(url: str, tool_name: str, arguments: dict):
-    async with sse_client(url, timeout=5, sse_read_timeout=90) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            return await session.call_tool(
-                tool_name,
-                arguments,
-                read_timeout_seconds=90,
-            )
-
-
 def _health_probe(origin: str) -> dict[str, object]:
     target = urljoin(origin.rstrip("/") + "/", "_health/")
     with urlopen(target, timeout=3) as response:
@@ -122,11 +197,12 @@ def eod_browser_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
     upstream_url = str(settings.url)
     allowed_origin = str(settings.allowed_origin).rstrip("/")
     launcher = settings.launcher
+    browser = _BrowserWorker(upstream_url, launcher)
 
     async def status(ctx, params, request_context):
         try:
             upstream, health = await asyncio.gather(
-                _ensure_upstream(upstream_url, launcher),
+                browser.list_tools(),
                 asyncio.to_thread(_health_probe, allowed_origin),
             )
         except Exception as exc:
@@ -151,7 +227,7 @@ def eod_browser_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
 
     async def tools(ctx, params, request_context):
         try:
-            upstream = await _ensure_upstream(upstream_url, launcher)
+            upstream = await browser.list_tools()
         except Exception as exc:
             raise BridgeError(
                 ErrorCode.INTERNAL_ERROR,
@@ -182,11 +258,7 @@ def eod_browser_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             )
         _validate_navigation(allowed_origin, tool_name, tool_arguments)
         try:
-            try:
-                await _ensure_upstream(upstream_url, launcher)
-            except Exception as exc:
-                raise RuntimeError(f"EOD browser startup failed: {exc}") from exc
-            result = await _call_upstream(upstream_url, tool_name, tool_arguments)
+            result = await browser.call_tool(tool_name, tool_arguments)
         except BridgeError:
             raise
         except Exception as exc:
