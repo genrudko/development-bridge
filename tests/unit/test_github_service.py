@@ -100,7 +100,7 @@ async def test_contributor_issue_and_fork_head_pr_are_narrowly_allowed(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_repository_fork_validates_relationship_and_registers_workspace(tmp_path):
+async def test_repository_fork_reuses_valid_existing_fork_without_post(tmp_path):
     upstream = create_git_repository(tmp_path, "upstream")
     subprocess.run(
         ["git", "remote", "add", "origin", "https://github.com/acme/widgets.git"],
@@ -115,11 +115,11 @@ async def test_repository_fork_validates_relationship_and_registers_workspace(tm
     })
     transport = FakeGitHubTransport()
     transport.add("GET", "/user", {"login": "alice"})
-    transport.add("POST", "/repos/acme/widgets/forks", {
+    transport.add("GET", "/repos/alice/widgets", {
         "full_name": "alice/widgets", "fork": True,
         "clone_url": "https://github.com/alice/widgets.git",
         "parent": {"full_name": "acme/widgets"},
-    }, status=201)
+    })
     container = build_container(
         settings, github_transport=transport,
         managed_clone_runner=FakeManagedCloneRunner(),
@@ -132,29 +132,92 @@ async def test_repository_fork_validates_relationship_and_registers_workspace(tm
     assert result["origin_url"] == "https://github.com/alice/widgets.git"
     assert transport.calls == [
         ("GET", "/user", None),
-        ("POST", "/repos/acme/widgets/forks", {}),
+        ("GET", "/repos/alice/widgets", None),
     ]
     manifest = (tmp_path / "managed" / "manifest.json").read_text()
     assert "token" not in manifest.lower()
     assert "git@github.com:alice/widgets.git" not in manifest
 
+
     bad_transport = FakeGitHubTransport()
     bad_transport.add("GET", "/user", {"login": "alice"})
-    bad_transport.add("POST", "/repos/acme/widgets/forks", {
-        "full_name": "mallory/widgets", "fork": True,
-        "clone_url": "https://github.com/mallory/widgets.git",
-        "parent": {"full_name": "acme/widgets"},
-    }, status=201)
-    bad = GitHubHostService(
-        GitRunner(), CapabilityPolicy(), bad_transport,
-        container.managed_repositories,
-    )
+    bad_transport.add("GET", "/repos/alice/widgets", {
+        "full_name": "alice/widgets", "fork": False,
+        "clone_url": "https://github.com/alice/widgets.git",
+    })
+    bad = GitHubHostService(GitRunner(), CapabilityPolicy(), bad_transport, container.managed_repositories)
     with pytest.raises(BridgeError) as rejected:
         await bad.repository_fork(
             container.projects.repositories.get("project", "upstream"),
             "project", "bad-fork",
         )
     assert rejected.value.code is ErrorCode.GITHUB_CONFLICT
+    assert all(call[0] != "POST" for call in bad_transport.calls)
+
+
+@pytest.mark.asyncio
+async def test_repository_fork_polls_after_accepted_creation(tmp_path):
+    repository = github_repository(tmp_path, {"git_read": True, "github_contribute": True})
+    transport = FakeGitHubTransport()
+    fork = {
+        "full_name": "alice/widgets", "fork": True,
+        "clone_url": "https://github.com/alice/widgets.git",
+        "parent": {"full_name": "acme/widgets"},
+    }
+    transport.add("GET", "/user", {"login": "alice"})
+    transport.add("GET", "/repos/alice/widgets", {}, status=404)
+    transport.add("POST", "/repos/acme/widgets/forks", fork, status=202)
+    transport.add("GET", "/repos/alice/widgets", {}, status=404)
+    transport.add("GET", "/repos/alice/widgets", fork)
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    runner = FakeManagedCloneRunner()
+    settings = BridgeSettings.model_validate({
+        "managed_repositories": {"root": tmp_path / "managed"},
+        "projects": [{"id": "project", "name": "Project", "repositories": [{
+            "id": "upstream", "path": repository.root,
+            "capabilities": {"git_read": True, "github_contribute": True},
+        }]}],
+    })
+    container = build_container(settings, github_transport=transport, managed_clone_runner=runner)
+    container.github._sleep = sleep
+    result = await container.github.repository_fork(repository, "project", "alice-fork")
+
+    assert result["origin_url"] == "https://github.com/alice/widgets.git"
+    assert sleeps == [1.0]
+    assert sum(call[0] == "POST" for call in transport.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_repository_fork_timeout_is_retryable_without_installing_workspace(tmp_path):
+    repository = github_repository(tmp_path, {"git_read": True, "github_contribute": True})
+    transport = FakeGitHubTransport()
+    transport.add("GET", "/user", {"login": "alice"})
+    transport.add("GET", "/repos/alice/widgets", {}, status=404)
+    transport.add("POST", "/repos/acme/widgets/forks", {}, status=202)
+    transport.add("GET", "/repos/alice/widgets", {}, status=404)
+    transport.add("GET", "/repos/alice/widgets", {}, status=404)
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    runner = FakeManagedCloneRunner()
+    service = GitHubHostService(
+        GitRunner(), CapabilityPolicy(), transport,
+        build_container(BridgeSettings.model_validate({"managed_repositories": {"root": tmp_path / "managed"}}), managed_clone_runner=runner).managed_repositories,
+        fork_poll_attempts=2, fork_poll_delay_seconds=0.25, sleep=sleep,
+    )
+    with pytest.raises(BridgeError) as raised:
+        await service.repository_fork(repository, "project", "alice-fork")
+    assert raised.value.code is ErrorCode.GITHUB_REPOSITORY_UNAVAILABLE
+    assert raised.value.retryable is True
+    assert sleeps == [0.25]
+    assert runner.clone_calls == []
+    assert not (tmp_path / "managed" / "manifest.json").exists()
 
 
 def issue(number=1, **updates):

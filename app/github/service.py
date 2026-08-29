@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
@@ -37,11 +38,18 @@ class GitHubHostService:
         policy: CapabilityPolicy,
         transport: GitHubTransport | None,
         managed_repositories: ManagedRepositoryService | None = None,
+        *,
+        fork_poll_attempts: int = 5,
+        fork_poll_delay_seconds: float = 1.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.runner = runner
         self.policy = policy
         self.transport = transport
         self.managed_repositories = managed_repositories
+        self._fork_poll_attempts = fork_poll_attempts
+        self._fork_poll_delay_seconds = fork_poll_delay_seconds
+        self._sleep = sleep
         self._release_plans: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._release_apply_lock = asyncio.Lock()
 
@@ -148,23 +156,56 @@ class GitHubHostService:
         login = user.get("login")
         if not isinstance(login, str) or re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login) is None:
             raise BridgeError(ErrorCode.GITHUB_API_ERROR, "GitHub authenticated user is invalid")
-        response = await self.transport.request("POST", f"{self._repo(identity)}/forks", payload={})
-        if response.status not in {201, 202}:
-            raise _http_error(response.status, response.headers)
-        data = response.json()
         full_name = f"{login}/{identity.repository}"
-        parent = data.get("parent") or data.get("source") or {}
-        if data.get("full_name") != full_name or parent.get("full_name") != identity.slug or data.get("fork") is not True:
-            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork relationship")
-        clone_url = data.get("clone_url")
-        expected_clone = f"https://github.com/{full_name}.git"
-        if clone_url != expected_clone:
-            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork clone URL")
+        fork_path = f"/repos/{full_name}"
+        response = await self.transport.request("GET", fork_path)
+        if response.status == 200:
+            data = response.json()
+            clone_url = self._validate_fork(data, full_name, identity.slug)
+        elif response.status == 404:
+            response = await self.transport.request("POST", f"{self._repo(identity)}/forks", payload={})
+            if response.status not in {201, 202}:
+                raise _http_error(response.status, response.headers)
+            if response.body:
+                response_data = response.json()
+                if response_data:
+                    self._validate_fork(response_data, full_name, identity.slug)
+            clone_url = await self._wait_for_fork(fork_path, full_name, identity.slug)
+        else:
+            raise _http_error(response.status, response.headers)
         return await self.managed_repositories.clone(
             project_id, repository_id, clone_url, depth, kind="fork",
             push_url=f"git@github.com:{full_name}.git",
             upstream_url=f"https://github.com/{identity.slug}.git",
         )
+
+    async def _wait_for_fork(self, path: str, full_name: str, upstream: str) -> str:
+        for attempt in range(self._fork_poll_attempts):
+            if attempt:
+                await self._sleep(self._fork_poll_delay_seconds)
+            response = await self.transport.request("GET", path)
+            if response.status == 200:
+                return self._validate_fork(response.json(), full_name, upstream)
+            if response.status != 404:
+                raise _http_error(response.status, response.headers)
+        raise BridgeError(
+            ErrorCode.GITHUB_REPOSITORY_UNAVAILABLE,
+            "GitHub fork is not ready; retry the request",
+            retryable=True,
+        )
+
+    @staticmethod
+    def _validate_fork(data: Any, full_name: str, upstream: str) -> str:
+        if not isinstance(data, dict):
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork relationship")
+        parent = data.get("parent") or data.get("source") or {}
+        if data.get("full_name") != full_name or parent.get("full_name") != upstream or data.get("fork") is not True:
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork relationship")
+        clone_url = data.get("clone_url")
+        expected_clone = f"https://github.com/{full_name}.git"
+        if clone_url != expected_clone:
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork clone URL")
+        return clone_url
 
     async def pull_update(self, repository, number, payload):
         draft = payload.pop("draft", None)
