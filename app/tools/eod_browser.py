@@ -4,9 +4,9 @@ import asyncio
 import base64
 import json
 import mimetypes
-import re
 from contextlib import AsyncExitStack
 from pathlib import Path
+from uuid import uuid4
 from urllib.parse import urljoin, urlsplit
 from urllib.request import urlopen
 
@@ -187,53 +187,64 @@ async def _run_launcher(path) -> None:
 
 
 
-_SCREENSHOT_LINK_RE = re.compile(r"\[Screenshot[^\]]*\]\(\./([^)]+)\)")
 _MAX_INLINE_SCREENSHOT_BYTES = 12 * 1024 * 1024
 
 
-def _inline_screenshot_content(output_dir: Path | None, result: types.CallToolResult):
-    if output_dir is None:
-        return []
-    relative = None
-    for item in result.content:
-        if not isinstance(item, types.TextContent):
-            continue
-        match = _SCREENSHOT_LINK_RE.search(item.text)
-        if match is not None:
-            relative = match.group(1)
-            break
-    if not relative:
-        return []
+def _prepare_tool_arguments(
+    output_dir: Path | None, tool_name: str, arguments: dict
+) -> tuple[dict, Path | None]:
+    prepared = dict(arguments)
+    if tool_name != "browser_take_screenshot" or output_dir is None:
+        return prepared, None
     root = output_dir.resolve()
-    candidate = (root / relative).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    requested = prepared.get("filename")
+    if requested:
+        requested = str(requested)
+        if Path(requested).name != requested or requested in {".", ".."}:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "EOD browser screenshot filename must not contain path components",
+                details={"filename": requested},
+            )
+        filename = requested
+    else:
+        filename = f"eod-eye-{uuid4().hex}.png"
+    target = (root / filename).resolve()
     try:
-        candidate.relative_to(root)
+        target.relative_to(root)
     except ValueError:
         raise BridgeError(
             ErrorCode.POLICY_VIOLATION,
             "EOD browser screenshot escaped the configured output directory",
-            details={"path": relative},
+            details={"filename": filename},
         )
-    if not candidate.is_file():
-        return []
-    size = candidate.stat().st_size
-    if size > _MAX_INLINE_SCREENSHOT_BYTES:
-        raise BridgeError(
-            ErrorCode.POLICY_VIOLATION,
-            "EOD browser screenshot is too large to inline",
-            details={"size_bytes": size, "limit_bytes": _MAX_INLINE_SCREENSHOT_BYTES},
-        )
-    mime_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
         raise BridgeError(
             ErrorCode.POLICY_VIOLATION,
             "EOD browser screenshot has an unsupported media type",
             details={"mime_type": mime_type},
         )
+    prepared["filename"] = str(target)
+    return prepared, target
+
+
+def _inline_screenshot_content(target: Path | None):
+    if target is None or not target.is_file():
+        return []
+    size = target.stat().st_size
+    if size > _MAX_INLINE_SCREENSHOT_BYTES:
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            "EOD browser screenshot is too large to inline",
+            details={"size_bytes": size, "limit_bytes": _MAX_INLINE_SCREENSHOT_BYTES},
+        )
+    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return [
         types.ImageContent(
             type="image",
-            data=base64.b64encode(candidate.read_bytes()).decode("ascii"),
+            data=base64.b64encode(target.read_bytes()).decode("ascii"),
             mimeType=mime_type,
         )
     ]
@@ -306,14 +317,17 @@ def eod_browser_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
     async def call(ctx, params, request_context):
         arguments = params.arguments
         tool_name = arguments["tool_name"]
-        tool_arguments = arguments.get("arguments", {})
+        raw_tool_arguments = arguments.get("arguments", {})
         if tool_name not in SAFE_BROWSER_TOOLS:
             raise BridgeError(
                 ErrorCode.POLICY_VIOLATION,
                 "EOD browser tool is not in the safe allowlist",
                 details={"tool_name": tool_name},
             )
-        _validate_navigation(allowed_origin, tool_name, tool_arguments)
+        _validate_navigation(allowed_origin, tool_name, raw_tool_arguments)
+        tool_arguments, screenshot_target = _prepare_tool_arguments(
+            output_dir, tool_name, raw_tool_arguments
+        )
         try:
             result = await browser.call_tool(tool_name, tool_arguments)
         except BridgeError:
@@ -334,7 +348,7 @@ def eod_browser_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             text=json.dumps(header.model_dump(mode="json", exclude_none=True), sort_keys=True),
         )
         inline_content = (
-            _inline_screenshot_content(output_dir, result)
+            _inline_screenshot_content(screenshot_target)
             if tool_name == "browser_take_screenshot" and not result.is_error
             else []
         )
