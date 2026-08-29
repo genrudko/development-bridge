@@ -10,6 +10,7 @@ from .bridge_restart import bridge_restart_tools
 from .changes import change_tools
 from .chatgpt_share import chatgpt_share_tools
 from .commands import command_tools
+from .compact import compact_tools
 from .coordinator import coordinator_tools
 from .eod_browser import eod_browser_tools
 from .files import file_tools
@@ -52,5 +53,7 @@ def build_tool_registry(
         + telegram_supervisor_tools(container)
         + command_tools(container)
     )
-    registry.register_many(guide_tools(registry))
+    registry.register_many(guide_tools(registry, tool_surface=container.settings.server.tool_surface))
+    if container.settings.server.tool_surface == "compact":
+        registry.register_many(compact_tools(container, registry))
     return registry

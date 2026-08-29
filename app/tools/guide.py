@@ -32,7 +32,7 @@ def _category(name: str) -> str:
     return "bridge"
 
 
-def guide_tools(registry: ToolRegistry) -> tuple[RegisteredTool, ...]:
+def guide_tools(registry: ToolRegistry, *, tool_surface: str = "full") -> tuple[RegisteredTool, ...]:
     async def bridge_guide(ctx, params, request_context):
         catalog: dict[str, list[dict[str, str]]] = defaultdict(list)
         for tool in registry.definitions:
@@ -88,8 +88,17 @@ def guide_tools(registry: ToolRegistry) -> tuple[RegisteredTool, ...]:
                 "knowledge": "Search/read configured knowledge sources and threads; sync or export attachments only when configured.",
                 "workspace": "Project, repository, file, task, job, change, and artifact tools are scoped by explicit project_id/repository_id.",
             },
+            "tool_surface": tool_surface,
             "tool_count": len(registry.definitions),
-            "tools_by_category": dict(sorted(catalog.items())),
+            "tools_by_category": (
+                dict(sorted(catalog.items()))
+                if tool_surface == "full"
+                else {name: {"count": len(rows), "examples": [row["name"] for row in rows[:4]]} for name, rows in sorted(catalog.items())}
+            ),
+            "compact_discovery": (
+                "Use bridge_search, bridge_schema, and bridge_call for hidden capabilities."
+                if tool_surface == "compact" else None
+            ),
         }))
 
     return (RegisteredTool(

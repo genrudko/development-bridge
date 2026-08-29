@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Development Bridge</title>
+<style>
+:root { color-scheme: light dark; }
+html,body { margin:0; padding:0; background:transparent; overflow:hidden; }
+body { font:13px/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:CanvasText; }
+.card { box-sizing:border-box; width:100%; padding:12px 14px; border:1px solid color-mix(in srgb,CanvasText 14%,transparent); border-radius:14px; background:color-mix(in srgb,Canvas 94%,CanvasText 6%); }
+.head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.title { font-weight:700; font-size:14px; }
+.badge { padding:3px 8px; border-radius:999px; background:color-mix(in srgb,#16a34a 14%,transparent); color:#16a34a; font-weight:650; font-size:11px; }
+.grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:10px; }
+.cell { min-width:0; padding:8px 9px; border-radius:10px; background:color-mix(in srgb,CanvasText 5%,transparent); }
+.k { color:GrayText; font-size:11px; }
+.v { margin-top:2px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.foot { margin-top:9px; color:GrayText; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+@media(max-width:520px){ .grid{grid-template-columns:repeat(2,minmax(0,1fr));} }
+</style>
+<div class="card">
+  <div class="head"><div class="title">⚡ Development Bridge</div><div id="status" class="badge">online</div></div>
+  <div class="grid">
+    <div class="cell"><div class="k">Tools</div><div id="tools" class="v">—</div></div>
+    <div class="cell"><div class="k">Disk</div><div id="disk" class="v">—</div></div>
+    <div class="cell"><div class="k">RAM free</div><div id="ram" class="v">—</div></div>
+    <div class="cell"><div class="k">Projects</div><div id="projects" class="v">—</div></div>
+  </div>
+  <div id="foot" class="foot">Compact tool surface</div>
+</div>
+<script type="module">
+import { App } from "https://unpkg.com/@modelcontextprotocol/ext-apps@1.7.5/dist/src/app-with-deps.js";
+const app = new App({name:"Development Bridge Dashboard",version:"1.0.0"},{autoResize:true});
+const $ = id => document.getElementById(id);
+function render(result){
+  const d=result?.structuredContent || {};
+  $("status").textContent=d.status || "online";
+  $("tools").textContent=`${d.visible_tools ?? "—"} / ${d.internal_tools ?? "—"}`;
+  $("disk").textContent=d.disk ? `${d.disk.free_gib} GiB free` : "—";
+  $("ram").textContent=d.memory ? `${d.memory.available_gib} GiB` : "—";
+  $("projects").textContent=d.projects ?? "—";
+  const route=d.route?.route_id ? ` · route ${d.route.route_id}` : "";
+  $("foot").textContent=`${d.tool_surface || "compact"} surface${route}`;
+  requestAnimationFrame(()=>{ try{ app.sendSizeChanged({height:document.documentElement.scrollHeight}); }catch(_){} });
+}
+app.ontoolresult=render;
+await app.connect();
+</script>
