@@ -269,3 +269,42 @@ def test_clone_tool_identity_schema_prevents_traversal(tmp_path):
     assert set(schema["properties"]) == {
         "project_id", "repository_id", "url", "depth", "ref"
     }
+
+
+@pytest.mark.asyncio
+async def test_identical_reference_clone_reuses_existing_storage(tmp_path):
+    runner = FakeManagedCloneRunner()
+    configured = settings(tmp_path)
+    container = build_container(configured, managed_clone_runner=runner)
+    first = await container.managed_repositories.clone("project", "ref-a", URL, depth=20)
+    second = await container.managed_repositories.clone("project", "ref-b", URL, depth=10)
+    assert first["status"] == "cloned"
+    assert second["status"] == "aliased"
+    assert second["storage_repository_id"] == "ref-a"
+    assert second["storage_shared"] is True
+    a = container.projects.repositories.get("project", "ref-a")
+    b = container.projects.repositories.get("project", "ref-b")
+    assert a.root == b.root
+    assert not (tmp_path / "managed" / "project" / "ref-b").exists()
+
+    rebuilt = build_container(configured, managed_clone_runner=runner)
+    restored = rebuilt.projects.repositories.get("project", "ref-b")
+    assert restored.root == tmp_path / "managed" / "project" / "ref-a"
+
+
+def test_manifest_alias_must_reference_canonical_same_origin(tmp_path):
+    runner = FakeManagedCloneRunner()
+    configured = settings(tmp_path)
+    first = build_container(configured, managed_clone_runner=runner)
+    import asyncio
+    asyncio.run(first.managed_repositories.clone("project", "ref-a", URL))
+    manifest_path = tmp_path / "managed" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    bad = dict(manifest["repositories"][0])
+    bad["repository_id"] = "ref-b"
+    bad["storage_repository_id"] = "missing"
+    manifest["repositories"].append(bad)
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(BridgeError) as raised:
+        build_container(configured, managed_clone_runner=runner)
+    assert raised.value.code is ErrorCode.MANAGED_REPOSITORY_STATE_CORRUPT
