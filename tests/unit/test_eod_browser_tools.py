@@ -139,18 +139,15 @@ def test_relative_browser_output_directory_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_screenshot_is_inlined_from_bounded_output_directory(monkeypatch, tmp_path):
-    screenshot = tmp_path / "proof.png"
-    screenshot.write_bytes(b"\x89PNG\r\n\x1a\nproof")
+async def test_screenshot_is_forced_into_bounded_output_directory(monkeypatch, tmp_path):
+    observed = {}
 
     async def fake_call(self, tool_name, arguments):
+        observed.update(arguments)
+        target = Path(arguments["filename"])
+        target.write_bytes(b"\x89PNG\r\n\x1a\nproof")
         return types.CallToolResult(
-            content=[
-                types.TextContent(
-                    type="text",
-                    text="### Result\n- [Screenshot of viewport](./proof.png)",
-                )
-            ],
+            content=[types.TextContent(type="text", text="screenshot ok")],
             isError=False,
         )
 
@@ -171,24 +168,31 @@ async def test_screenshot_is_inlined_from_bounded_output_directory(monkeypatch, 
         SimpleNamespace(request_id="req-image"),
     )
 
+    assert Path(observed["filename"]) == tmp_path / "proof.png"
     images = [item for item in result.content if isinstance(item, types.ImageContent)]
     assert len(images) == 1
     assert images[0].mime_type == "image/png"
     assert images[0].data
 
 
-def test_screenshot_path_escape_is_rejected(tmp_path):
-    outside = tmp_path.parent / "escape.png"
-    outside.write_bytes(b"not-used")
-    result = types.CallToolResult(
-        content=[
-            types.TextContent(
-                type="text",
-                text="### Result\n- [Screenshot of viewport](./../escape.png)",
-            )
-        ],
-        isError=False,
-    )
+def test_screenshot_filename_path_components_are_rejected(tmp_path):
     with pytest.raises(BridgeError) as captured:
-        module._inline_screenshot_content(tmp_path, result)
+        module._prepare_tool_arguments(
+            tmp_path,
+            "browser_take_screenshot",
+            {"filename": "../escape.png"},
+        )
     assert captured.value.code == ErrorCode.POLICY_VIOLATION
+
+
+def test_screenshot_filename_is_generated_when_omitted(tmp_path):
+    arguments, target = module._prepare_tool_arguments(
+        tmp_path,
+        "browser_take_screenshot",
+        {},
+    )
+    assert target is not None
+    assert target.parent == tmp_path
+    assert target.name.startswith("eod-eye-")
+    assert target.suffix == ".png"
+    assert arguments["filename"] == str(target)
