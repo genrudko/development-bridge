@@ -55,6 +55,7 @@ class CoordinatorService:
     MAX_DELAY_SECONDS = 300.0
     LEASE_SECONDS = 20.0
     BROWSER_PREFLIGHT_TTL_SECONDS = 15.0
+    MAX_UNDELIVERED_AGE_SECONDS = 1800.0
 
     def __init__(
         self,
@@ -679,7 +680,7 @@ class CoordinatorService:
         job_ids = ",".join(job.job_id for job in jobs)
         suffix = f"; message={message}" if message else ""
         job_states = ", ".join(f"{job.job_id}={job.status.value}" for job in jobs)
-        escalation = ("⚠️ Coordinator continuation was not acknowledged after X delivery.\n" f"Channel: {channel_id}\n" f"Jobs: {job_states}\n" f"Reason: {reason}\n" "Please check ChatGPT / Browser Host and continue the work manually.")
+        escalation = ("⚠️ Coordinator continuation did not complete through X.\n" f"Channel: {channel_id}\n" f"Jobs: {job_states}\n" f"Reason: {reason}\n" "Please check ChatGPT / Browser Host and continue the work manually.")
         return await self.arm_resilient(f"jobs={job_ids}; reason={reason}{suffix}", channel_id=channel_id, delay_seconds=self.JOB_WAKE_DEBOUNCE_SECONDS, conflict="coalesce", escalation_message=escalation[: self.MAX_ESCALATION_MESSAGE_CHARS])
 
     async def escalations_due(self) -> list[dict]:
@@ -687,24 +688,39 @@ class CoordinatorService:
         async with self._lock:
             due = []
             for channel_id, wake in self._pending.items():
-                if (
-                    wake.continuation_id is None
-                    or wake.model_acknowledged
-                    or wake.escalation_at is None
-                    or wake.escalation_at > now
-                    or (not wake.transport_delivered and wake.delivery_attempts < wake.max_delivery_attempts)
-                ):
+                if wake.continuation_id is None or wake.model_acknowledged:
                     continue
+                stale_undelivered = (
+                    not wake.transport_delivered
+                    and wake.created_at + self.MAX_UNDELIVERED_AGE_SECONDS <= now
+                )
+                normal_due = (
+                    wake.escalation_at is not None
+                    and wake.escalation_at <= now
+                    and (wake.transport_delivered or wake.delivery_attempts >= wake.max_delivery_attempts)
+                )
+                if not stale_undelivered and not normal_due:
+                    continue
+                if stale_undelivered:
+                    escalation_message = (
+                        "⚠️ Coordinator continuation expired before X delivery.\n"
+                        f"Channel: {channel_id}\n"
+                        f"Pending: {wake.message[:700]}\n"
+                        "Please check ChatGPT / Browser Host and continue the work manually."
+                    )
+                else:
+                    escalation_message = self._bounded_escalation(
+                        (wake.escalation_message, *wake.queued_escalation_messages)
+                    )
                 due.append(
                     {
                         "continuation_id": wake.continuation_id,
                         "channel_id": channel_id,
                         "delivery_attempts": wake.delivery_attempts,
                         "max_delivery_attempts": wake.max_delivery_attempts,
-                        "escalation_message": self._bounded_escalation(
-                            (wake.escalation_message, *wake.queued_escalation_messages)
-                        ),
+                        "escalation_message": escalation_message[: self.MAX_ESCALATION_MESSAGE_CHARS],
                         "queued_events": len(wake.queued_messages),
+                        "reason": "undelivered_timeout" if stale_undelivered else "delivery_exhausted",
                     }
                 )
             return due
