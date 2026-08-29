@@ -36,17 +36,13 @@ def test_remote_browser_endpoint_is_rejected():
 
 @pytest.mark.asyncio
 async def test_navigation_is_bounded_to_eod_origin(monkeypatch):
-    async def fake_call(url, tool_name, arguments):
+    async def fake_call(self, tool_name, arguments):
         return types.CallToolResult(
             content=[types.TextContent(type="text", text="ok")],
             isError=False,
         )
 
-    async def fake_ensure(url, launcher):
-        return SimpleNamespace(tools=[])
-
-    monkeypatch.setattr(module, "_ensure_upstream", fake_ensure)
-    monkeypatch.setattr(module, "_call_upstream", fake_call)
+    monkeypatch.setattr(module._BrowserWorker, "call_tool", fake_call)
     call = next(
         item
         for item in eod_browser_tools(container())
@@ -77,3 +73,58 @@ async def test_navigation_is_bounded_to_eod_origin(monkeypatch):
     )
     assert result.is_error is False
     assert result.content[-1].text == "ok"
+
+
+@pytest.mark.asyncio
+async def test_worker_reuses_one_session_for_sequential_calls(monkeypatch):
+    sessions = []
+    transports = []
+
+    class FakeTransport:
+        async def __aenter__(self):
+            transports.append(self)
+            return object(), object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeSession:
+        def __init__(self, read, write):
+            self.calls = []
+            sessions.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def initialize(self):
+            return None
+
+        async def list_tools(self):
+            return SimpleNamespace(tools=[])
+
+        async def call_tool(self, name, arguments, read_timeout_seconds):
+            self.calls.append((name, arguments, read_timeout_seconds))
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=name)],
+                isError=False,
+            )
+
+    monkeypatch.setattr(module, "sse_client", lambda *args, **kwargs: FakeTransport())
+    monkeypatch.setattr(module, "ClientSession", FakeSession)
+
+    worker = module._BrowserWorker("http://127.0.0.1:8931/sse", launcher=None)
+    first = await worker.call_tool("browser_navigate", {"url": "http://127.0.0.1:8766/"})
+    second = await worker.call_tool("browser_snapshot", {})
+    await worker.close()
+
+    assert first.content[0].text == "browser_navigate"
+    assert second.content[0].text == "browser_snapshot"
+    assert len(transports) == 1
+    assert len(sessions) == 1
+    assert [item[0] for item in sessions[0].calls] == [
+        "browser_navigate",
+        "browser_snapshot",
+    ]
