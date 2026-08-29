@@ -1990,6 +1990,19 @@ class BrowserHost:
                 try:
                     early_status = self.coordinator_local_status()
                     early_continuation_id = early_status.get("continuation_id")
+                    if early_status.get("state") == "idle":
+                        # No continuation needs the MCP App right now. Do not reload ChatGPT or
+                        # resurrect old coordinator cards just to keep a listener warm. The local
+                        # coordinator status probe is enough to notice the next wake, at which point
+                        # normal listener recovery resumes.
+                        self.write_state(
+                            status="idle", cdp_ok=True, target_ok=True,
+                            coordinator_iframes=0, polling_ok=False,
+                            polling_detail="coordinator idle; listener recovery parked",
+                            current_url=current_url, title=title,
+                        )
+                        time.sleep(self.cfg.check_interval)
+                        continue
                     if (
                         early_status.get("state") == "browser_preflight"
                         and isinstance(early_continuation_id, str)
@@ -2219,13 +2232,21 @@ def healthcheck(cfg: Config) -> int:
         return 1
     updated = datetime.fromisoformat(state["updated_at"])
     age = (datetime.now(timezone.utc) - updated).total_seconds()
-    healthy = (
+    freshness_ok = age <= max(20, cfg.check_interval * 4)
+    active_healthy = (
         state.get("status") == "healthy"
         and state.get("target_ok") is True
         and int(state.get("coordinator_iframes", 0)) > 0
         and state.get("polling_ok") is True
-        and age <= max(20, cfg.check_interval * 4)
+        and freshness_ok
     )
+    idle_healthy = (
+        state.get("status") == "idle"
+        and state.get("cdp_ok") is True
+        and state.get("target_ok") is True
+        and freshness_ok
+    )
+    healthy = active_healthy or idle_healthy
     state["state_age_seconds"] = round(age, 1)
     state["healthy"] = healthy
     print(json.dumps(state, ensure_ascii=False, indent=2))
