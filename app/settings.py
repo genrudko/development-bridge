@@ -215,6 +215,27 @@ class DesktopNodeSettings(BaseModel):
     journal_max_bytes: int = Field(default=5_242_880, ge=65_536, le=67_108_864)
 
 
+class EodBrowserSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+    enabled: bool = False
+    url: AnyHttpUrl = "http://127.0.0.1:8931/sse"
+    allowed_origin: AnyHttpUrl = "http://127.0.0.1:8766"
+    launcher: Path | None = None
+
+    @model_validator(mode="after")
+    def endpoints_are_local_and_bounded(self) -> EodBrowserSettings:
+        for name, value in (("url", self.url), ("allowed_origin", self.allowed_origin)):
+            if value.host not in {"127.0.0.1", "localhost"}:
+                raise ValueError(f"eod_browser.{name} must stay on localhost")
+            if value.username is not None or value.password is not None:
+                raise ValueError(f"eod_browser.{name} must not contain credentials")
+        if self.allowed_origin.path not in {None, "", "/"}:
+            raise ValueError("eod_browser.allowed_origin must be an origin without a path")
+        if self.allowed_origin.query is not None or self.allowed_origin.fragment is not None:
+            raise ValueError("eod_browser.allowed_origin must not contain query or fragment")
+        return self
+
+
 class RepositorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(pattern=IDENTIFIER_PATTERN)
@@ -258,6 +279,7 @@ class BridgeSettings(BaseModel):
     coordinator: CoordinatorRoutingSettings = Field(default_factory=CoordinatorRoutingSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     desktop_nodes: DesktopNodeSettings = Field(default_factory=DesktopNodeSettings)
+    eod_browser: EodBrowserSettings = Field(default_factory=EodBrowserSettings)
     projects: tuple[ProjectSettings, ...] = ()
 
     @model_validator(mode="after")
