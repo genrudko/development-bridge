@@ -382,3 +382,25 @@ async def test_browser_preflight_authorization_is_one_shot_and_expires(monkeypat
     claim = await service.claim("route-g9")
     assert claim["claimed"] is True
     assert service._pending["route-g9"].browser_preflight_authorized_at is None
+
+
+@pytest.mark.asyncio
+async def test_undelivered_resilient_wake_escalates_after_max_age(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(browser_preflight_required=True)
+    service.MAX_UNDELIVERED_AGE_SECONDS = 30.0
+    armed = await service.arm_resilient(
+        "jobs=job_deadbeef; reason=all_terminal",
+        channel_id="route-g9",
+        delay_seconds=0,
+        escalation_message="generic fallback",
+    )
+    assert await service.escalations_due() == []
+    clock[0] = 1031.0
+    due = await service.escalations_due()
+    assert len(due) == 1
+    assert due[0]["continuation_id"] == armed["continuation_id"]
+    assert due[0]["delivery_attempts"] == 0
+    assert due[0]["reason"] == "undelivered_timeout"
+    assert "expired before X delivery" in due[0]["escalation_message"]
