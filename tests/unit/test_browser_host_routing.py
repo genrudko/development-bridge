@@ -918,3 +918,18 @@ def test_browser_host_snapshot_completion_uses_final_after_latest_user_not_curre
     assert result["latest_user_id"] == "message-user"
     assert result["latest_final_id"] == "message-final"
     assert result["latest_turn_complete"] is True
+
+
+def test_browser_host_chrome_launch_bounds_disk_cache(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    seen = {}
+    class Proc:
+        def poll(self): return None
+    def fake_popen(argv, **kwargs):
+        seen["argv"] = argv
+        return Proc()
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    host.start_chrome()
+    assert "--disk-cache-size=268435456" in seen["argv"]
+    assert "--media-cache-size=67108864" in seen["argv"]
