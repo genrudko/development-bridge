@@ -32,6 +32,10 @@ let busy = false;
 let modelContextContinuation = null;
 let modelContextSupported = true;
 let appConnected = false;
+let pollDelayMs = 1000;
+let pollTimer = null;
+const pollInstanceId = (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+const POLL_LEASE_TTL_MS = 7000;
 const CONTROL_OPS_KEY = "development-bridge/control-ops-v1";
 function loadHandledControlOperations() {
   try {
@@ -164,14 +168,41 @@ window.addEventListener("message", (event) => {
   });
 });
 
+function acquirePollLease() {
+  const key = `development-bridge/poll-leader-v1/${channelId}`;
+  const now = Date.now();
+  try {
+    const current = JSON.parse(localStorage.getItem(key) || "null");
+    if (current && current.id !== pollInstanceId && Number(current.until || 0) > now) return false;
+    localStorage.setItem(key, JSON.stringify({ id: pollInstanceId, until: now + POLL_LEASE_TTL_MS }));
+    const confirmed = JSON.parse(localStorage.getItem(key) || "null");
+    return confirmed?.id === pollInstanceId;
+  } catch (_) {
+    return true;
+  }
+}
+
+function schedulePoll(delay = pollDelayMs) {
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  pollTimer = setTimeout(runPoll, Math.max(250, delay));
+}
+
+async function runPoll() {
+  if (!acquirePollLease()) { schedulePoll(2500); return; }
+  await poll();
+  schedulePoll();
+}
+
 async function poll() {
   if (busy) return;
   try {
     const state = await request("status");
     if (!state.ready) {
+      pollDelayMs = 5000;
       if (state.state === "idle" && modelContextContinuation !== null) await clearProtocolContext();
       render("ready", "Готов"); return;
     }
+    pollDelayMs = 1000;
     render("working", "Продолжаю", "Передаю завершённую задачу в чат");
     busy = true;
     const claim = await request("claim", { method: "POST" });
@@ -220,6 +251,7 @@ async function poll() {
     if (!ack.acknowledged) throw new Error("ACK was rejected");
     render("ready", "Готов");
   } catch (error) {
+    pollDelayMs = 5000;
     console.error("Coordinator error", error);
     render("error", "Нужна проверка", "Связь с Bridge временно недоступна");
   } finally {
@@ -231,7 +263,7 @@ try {
   await app.connect();
   appConnected = true;
   render("ready", "Готов");
-  setInterval(poll, 1000);
+  schedulePoll(250);
 } catch (error) {
   console.error("Coordinator connect error", error);
   render("error", "Не подключён", "Обновите инструменты Bridge");
