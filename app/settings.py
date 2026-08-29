@@ -114,6 +114,7 @@ def _default_github_artifact_root() -> Path:
 class GitHubSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     token: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    classic_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
     timeout_seconds: float = Field(default=20, gt=0, le=120)
     response_limit_bytes: int = Field(default=2_097_152, ge=65_536, le=16_777_216)
     artifact_directory: Path = Field(default_factory=_default_github_artifact_root)
@@ -322,8 +323,10 @@ def load_settings(
             raise ValueError(
                 "OAuth owner verifier must be supplied through the deployment environment"
             )
-        if isinstance(raw.get("github"), dict) and "token" in raw["github"]:
-            raise ValueError("GitHub token must be supplied through the deployment environment")
+        if isinstance(raw.get("github"), dict) and (
+            "token" in raw["github"] or "classic_token" in raw["github"]
+        ):
+            raise ValueError("GitHub tokens must be supplied through the deployment environment")
         if isinstance(raw.get("server"), dict) and "x_trigger_token" in raw["server"]:
             raise ValueError(
                 "X trigger token must be supplied through the deployment environment"
@@ -399,9 +402,27 @@ def load_settings(
             {**settings.oauth.model_dump(), "owner_verifier": owner_verifier}
         )
 
+    github_updates: dict[str, Any] = {}
     if github_token := environment.get("DEVELOPMENT_BRIDGE_GITHUB_TOKEN"):
+        github_updates["token"] = github_token
+    if github_classic_token := environment.get("DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN"):
+        github_updates["classic_token"] = github_classic_token
+    if github_updates:
         environment_updates["github"] = GitHubSettings.model_validate(
-            {**settings.github.model_dump(), "token": github_token}
+            {
+                **settings.github.model_dump(),
+                **(
+                    {"token": settings.github.token}
+                    if settings.github.token is not None
+                    else {}
+                ),
+                **(
+                    {"classic_token": settings.github.classic_token}
+                    if settings.github.classic_token is not None
+                    else {}
+                ),
+                **github_updates,
+            }
         )
     desktop_updates: dict[str, Any] = {}
     if desktop_token := environment.get("DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN"):

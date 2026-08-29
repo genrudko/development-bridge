@@ -18,7 +18,8 @@ jobs:
 #   result_artifact_ttl_seconds: 3600
 #   max_result_upload_bytes: 67108864
 # GitHub host workflows are optional. The token is supplied only through
-# DEVELOPMENT_BRIDGE_GITHUB_TOKEN, never in this file.
+# DEVELOPMENT_BRIDGE_GITHUB_TOKEN and the optional fork-only
+# DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN, never in this file.
 # github:
 #   timeout_seconds: 20
 #   response_limit_bytes: 2097152

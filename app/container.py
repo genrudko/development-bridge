@@ -92,6 +92,7 @@ def build_container(
     telegram_adapter: TelegramAdapter | None = None,
     managed_clone_runner: ManagedCloneRunner | None = None,
     github_transport: GitHubTransport | None = None,
+    github_fork_transport: GitHubTransport | None = None,
     chatgpt_share_transport: ChatGPTShareTransport | None = None,
 ) -> ApplicationContainer:
     configured = settings or load_settings()
@@ -275,13 +276,27 @@ def build_container(
         if configured.github.token is not None
         else None
     )
+    github_classic_token = (
+        configured.github.classic_token.get_secret_value()
+        if configured.github.classic_token is not None
+        else None
+    )
     if github_transport is None and github_token is not None:
         github_transport = UrllibGitHubTransport(
             github_token,
             timeout_seconds=configured.github.timeout_seconds,
             response_limit_bytes=configured.github.response_limit_bytes,
         )
-    github = GitHubHostService(runner, policy, github_transport, managed_repositories)
+    if github_fork_transport is None and github_classic_token is not None:
+        github_fork_transport = UrllibGitHubTransport(
+            github_classic_token,
+            timeout_seconds=configured.github.timeout_seconds,
+            response_limit_bytes=configured.github.response_limit_bytes,
+        )
+    github = GitHubHostService(
+        runner, policy, github_transport, managed_repositories,
+        fork_transport=github_fork_transport,
+    )
     github_artifact_exports = GitHubActionsArtifactExportService(
         github,
         CapabilityExportRegistry[GitHubArtifactSnapshot](

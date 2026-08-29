@@ -156,6 +156,52 @@ async def test_repository_fork_reuses_valid_existing_fork_without_post(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_classic_transport_is_used_only_for_repository_fork(tmp_path):
+    repository = github_repository(
+        tmp_path, {"git_read": True, "github_contribute": True}
+    )
+    primary = FakeGitHubTransport()
+    classic = FakeGitHubTransport()
+    primary.add("GET", "/repos/acme/widgets", {
+        "default_branch": "main", "visibility": "private", "private": True,
+        "archived": False, "html_url": "https://github.com/acme/widgets",
+    })
+    classic.add("GET", "/user", {"login": "classic-user"})
+    classic.add("GET", "/repos/classic-user/widgets", {
+        "full_name": "classic-user/widgets", "fork": True,
+        "clone_url": "https://github.com/classic-user/widgets.git",
+        "parent": {"full_name": "acme/widgets"},
+    })
+    runner = FakeManagedCloneRunner()
+    managed = build_container(
+        BridgeSettings.model_validate({
+            "managed_repositories": {"root": tmp_path / "managed"},
+            "projects": [{
+                "id": "project", "name": "Project", "repositories": [{
+                    "id": "repo", "path": repository.root,
+                    "capabilities": {"git_read": True, "github_contribute": True},
+                }],
+            }],
+        }),
+        managed_clone_runner=runner,
+    ).managed_repositories
+    service = GitHubHostService(
+        GitRunner(), CapabilityPolicy(), primary, managed,
+        fork_transport=classic,
+    )
+
+    assert (await service.repository_status(repository))["default_branch"] == "main"
+    result = await service.repository_fork(repository, "project", "classic-fork")
+
+    assert result["origin_url"] == "https://github.com/classic-user/widgets.git"
+    assert primary.calls == [("GET", "/repos/acme/widgets", None)]
+    assert classic.calls == [
+        ("GET", "/user", None),
+        ("GET", "/repos/classic-user/widgets", None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_repository_fork_polls_after_accepted_creation(tmp_path):
     repository = github_repository(tmp_path, {"git_read": True, "github_contribute": True})
     transport = FakeGitHubTransport()

@@ -39,6 +39,7 @@ class GitHubHostService:
         transport: GitHubTransport | None,
         managed_repositories: ManagedRepositoryService | None = None,
         *,
+        fork_transport: GitHubTransport | None = None,
         fork_poll_attempts: int = 5,
         fork_poll_delay_seconds: float = 1.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -46,6 +47,7 @@ class GitHubHostService:
         self.runner = runner
         self.policy = policy
         self.transport = transport
+        self._fork_transport = fork_transport if fork_transport is not None else transport
         self.managed_repositories = managed_repositories
         self._fork_poll_attempts = fork_poll_attempts
         self._fork_poll_delay_seconds = fork_poll_delay_seconds
@@ -150,20 +152,23 @@ class GitHubHostService:
     async def repository_fork(self, repository, project_id, repository_id, depth=50):
         identity = await self.identity(repository)
         self._require(repository, Capability.GITHUB_CONTRIBUTE)
-        if self.transport is None or self.managed_repositories is None:
+        if self._fork_transport is None or self.managed_repositories is None:
             raise BridgeError(ErrorCode.GITHUB_NOT_CONFIGURED, "GitHub contribution is not configured")
-        user, _ = await self._request(repository, "GET", "/user", write=False)
+        response = await self._fork_transport.request("GET", "/user")
+        if response.status != 200:
+            raise _http_error(response.status, response.headers)
+        user = response.json()
         login = user.get("login")
         if not isinstance(login, str) or re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login) is None:
             raise BridgeError(ErrorCode.GITHUB_API_ERROR, "GitHub authenticated user is invalid")
         full_name = f"{login}/{identity.repository}"
         fork_path = f"/repos/{full_name}"
-        response = await self.transport.request("GET", fork_path)
+        response = await self._fork_transport.request("GET", fork_path)
         if response.status == 200:
             data = response.json()
             clone_url = self._validate_fork(data, full_name, identity.slug)
         elif response.status == 404:
-            response = await self.transport.request("POST", f"{self._repo(identity)}/forks", payload={})
+            response = await self._fork_transport.request("POST", f"{self._repo(identity)}/forks", payload={})
             if response.status not in {201, 202}:
                 raise _http_error(response.status, response.headers)
             if response.body:
@@ -183,7 +188,8 @@ class GitHubHostService:
         for attempt in range(self._fork_poll_attempts):
             if attempt:
                 await self._sleep(self._fork_poll_delay_seconds)
-            response = await self.transport.request("GET", path)
+            assert self._fork_transport is not None
+            response = await self._fork_transport.request("GET", path)
             if response.status == 200:
                 return self._validate_fork(response.json(), full_name, upstream)
             if response.status != 404:

@@ -214,9 +214,13 @@ does not use a shell, and accepts no cwd, environment, stdin, or privilege
 override. Its execution specification and idempotency digest are stored in the
 job database, so queued runs retain their meaning across restart.
 
-GitHub host integration is optional and reads
-`DEVELOPMENT_BRIDGE_GITHUB_TOKEN` only from the runtime environment. Repository
-identity is derived from the registered Git `origin`; tools cannot supply an
+GitHub host integration is optional and reads its credentials only from the
+runtime environment. `DEVELOPMENT_BRIDGE_GITHUB_TOKEN` is the primary credential.
+Repository fork creation may separately use
+`DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN`; when set, only the fork flow (including
+its identity and target-fork checks) uses that credential. All other GitHub and Git
+operations continue using the primary token. Repository identity is derived from
+the registered Git `origin`; tools cannot supply an
 owner, repository, or arbitrary API URL. Managed external repositories retain
 GitHub read access through `git_read` but cannot mutate host state because they
 lack `git_write`. Git push remains `git_push`; the GitHub service owns issues,

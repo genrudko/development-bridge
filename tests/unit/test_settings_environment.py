@@ -33,6 +33,22 @@ def test_github_token_survives_other_environment_overrides():
     assert "github-secret" not in repr(settings)
 
 
+def test_github_primary_and_classic_tokens_are_environment_only_and_secret():
+    settings = load_settings(environ={
+        "DEVELOPMENT_BRIDGE_GITHUB_TOKEN": "primary-secret",
+        "DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN": "classic-secret",
+    })
+
+    assert settings.github.token.get_secret_value() == "primary-secret"
+    assert settings.github.classic_token.get_secret_value() == "classic-secret"
+    dumped = settings.model_dump()
+    assert "token" not in dumped["github"]
+    assert "classic_token" not in dumped["github"]
+    for secret in ("primary-secret", "classic-secret"):
+        assert secret not in repr(settings)
+        assert secret not in repr(dumped)
+
+
 def test_owner_verifier_survives_github_environment_override():
     settings = load_settings(environ={
         "DEVELOPMENT_BRIDGE_OWNER_VERIFIER": "owner-secret",
@@ -92,4 +108,13 @@ def test_rejects_x_trigger_token_in_yaml(tmp_path):
     config.write_text("server:\n  x_trigger_token: forbidden\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="X trigger token"):
+        load_settings(config, environ={})
+
+
+@pytest.mark.parametrize("field", ["token", "classic_token"])
+def test_rejects_github_tokens_in_yaml(tmp_path, field):
+    config = tmp_path / "bridge.yaml"
+    config.write_text(f"github:\n  {field}: forbidden\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="GitHub tokens"):
         load_settings(config, environ={})
