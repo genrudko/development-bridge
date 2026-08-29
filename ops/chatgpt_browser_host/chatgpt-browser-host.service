@@ -13,6 +13,9 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15
 KillMode=mixed
+MemoryHigh=1800M
+MemoryMax=2600M
+TasksMax=256
 UMask=0077
 
 [Install]

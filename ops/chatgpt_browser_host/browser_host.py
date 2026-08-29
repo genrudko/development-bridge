@@ -268,6 +268,8 @@ class BrowserHost:
                 "--no-default-browser-check",
                 "--disable-dev-shm-usage",
                 "--disable-session-crashed-bubble",
+                "--disk-cache-size=268435456",
+                "--media-cache-size=67108864",
                 "--window-size=1280,900",
                 self.target_url,
             ],
