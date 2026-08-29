@@ -182,6 +182,14 @@ class CoordinatorService:
             and authorized_at + self.BROWSER_PREFLIGHT_TTL_SECONDS > now
         )
 
+    def _undelivered_expired(self, wake: PendingWake, now: float) -> bool:
+        return (
+            wake.continuation_id is not None
+            and not wake.transport_delivered
+            and not wake.model_acknowledged
+            and wake.created_at + self.MAX_UNDELIVERED_AGE_SECONDS <= now
+        )
+
     def _web_backoff_until(self, now: float) -> float:
         if self._state_path is None:
             return 0.0
@@ -406,6 +414,7 @@ class CoordinatorService:
                     return {"channel_id": channel_id, "state": "idle", "ready": False}
             claimed = self._lease_active(wake, now)
             exhausted = wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts
+            expired_undelivered = self._undelivered_expired(wake, now)
             web_backoff_until = self._web_backoff_until(now)
             web_cooldown_until = self._web_turn_cooldown_until(channel_id)
             other_claim_until = self._other_claim_until(channel_id, now)
@@ -416,6 +425,7 @@ class CoordinatorService:
                 not wake.transport_delivered
                 and not claimed
                 and not exhausted
+                and not expired_undelivered
                 and not web_blocked
                 and not cooldown_blocked
                 and now >= wake.available_at
@@ -424,6 +434,7 @@ class CoordinatorService:
             ready = (
                 not claimed
                 and not exhausted
+                and not expired_undelivered
                 and not wake.transport_delivered
                 and not web_blocked
                 and not cooldown_blocked
@@ -432,6 +443,8 @@ class CoordinatorService:
             )
             if claimed:
                 state = "claimed"
+            elif expired_undelivered:
+                state = "escalation_due"
             elif wake.transport_delivered:
                 state = ("escalation_due" if (wake.escalation_at or float("inf")) <= now else "waiting_model_ack")
             elif exhausted:
@@ -454,7 +467,7 @@ class CoordinatorService:
                 "channel_id": channel_id,
                 "state": state,
                 "ready": ready,
-                "retry_after_seconds": max(0.0, max(wake.available_at, web_backoff_until, web_cooldown_until, other_claim_until) - now) if not exhausted else 0.0,
+                "retry_after_seconds": max(0.0, max(wake.available_at, web_backoff_until, web_cooldown_until, other_claim_until) - now) if not exhausted and not expired_undelivered else 0.0,
                 "web_backoff_seconds": max(0.0, web_backoff_until - now),
                 "web_turn_cooldown_seconds": max(0.0, max(web_cooldown_until, other_claim_until) - now),
                 "lease_remaining_seconds": (
@@ -493,6 +506,7 @@ class CoordinatorService:
                 or self._lease_active(wake, now)
                 or wake.transport_delivered
                 or wake.model_acknowledged
+                or self._undelivered_expired(wake, now)
                 or not self._browser_preflight_authorized(wake, now)
                 or (wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts)
             ):
@@ -543,6 +557,7 @@ class CoordinatorService:
                 or not wake.model_ack_required
                 or wake.transport_delivered
                 or wake.model_acknowledged
+                or self._undelivered_expired(wake, now)
                 or self._lease_active(wake, now)
             ):
                 return {
@@ -690,10 +705,7 @@ class CoordinatorService:
             for channel_id, wake in self._pending.items():
                 if wake.continuation_id is None or wake.model_acknowledged:
                     continue
-                stale_undelivered = (
-                    not wake.transport_delivered
-                    and wake.created_at + self.MAX_UNDELIVERED_AGE_SECONDS <= now
-                )
+                stale_undelivered = self._undelivered_expired(wake, now)
                 normal_due = (
                     wake.escalation_at is not None
                     and wake.escalation_at <= now

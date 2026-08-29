@@ -404,3 +404,26 @@ async def test_undelivered_resilient_wake_escalates_after_max_age(monkeypatch):
     assert due[0]["delivery_attempts"] == 0
     assert due[0]["reason"] == "undelivered_timeout"
     assert "expired before X delivery" in due[0]["escalation_message"]
+
+
+@pytest.mark.asyncio
+async def test_expired_undelivered_wake_cannot_reenter_browser_delivery(monkeypatch):
+    clock = [2000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(browser_preflight_required=True)
+    service.MAX_UNDELIVERED_AGE_SECONDS = 30.0
+    armed = await service.arm_resilient(
+        "jobs=job_stale; reason=all_terminal",
+        channel_id="route-g10",
+        delay_seconds=0,
+    )
+    clock[0] = 2031.0
+    status = await service.status("route-g10")
+    assert status["state"] == "escalation_due"
+    assert status["ready"] is False
+    assert status["retry_after_seconds"] == 0.0
+    authorized = await service.authorize_browser_preflight("route-g10", armed["continuation_id"] )
+    assert authorized["authorized"] is False
+    assert (await service.claim("route-g10"))["claimed"] is False
+    due = await service.escalations_due()
+    assert due[0]["reason"] == "undelivered_timeout"
