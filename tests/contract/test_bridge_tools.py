@@ -43,7 +43,14 @@ def test_v1_schemas_are_closed_objects():
     )
     assert tools["bridge_restart"].input_schema == {
         "type": "object",
-        "properties": {},
+        "properties": {
+            "channel_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            }
+        },
         "additionalProperties": False,
     }
     assert tools["repository_status"].input_schema["required"] == [
