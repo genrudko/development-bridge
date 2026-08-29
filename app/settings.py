@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import (
@@ -24,6 +24,7 @@ class ServerSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8789, ge=1, le=65535)
     endpoint: str = "/mcp"
+    tool_surface: Literal["full", "compact"] = "full"
     public_base_url: AnyHttpUrl | None = None
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*")
     x_trigger_token: SecretStr | None = Field(default=None, repr=False, exclude=True)

@@ -14,6 +14,7 @@ from app.api.results import failure, to_mcp_result
 from app.audit import AuditEvent, AuditOutcome
 from app.container import ApplicationContainer, build_container
 from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
+from app.tools.compact import BRIDGE_DASHBOARD_UI_URI, exposed_tool_definitions
 from app.tools.registry import build_tool_registry
 
 
@@ -60,6 +61,7 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
     ui_html = (Path(__file__).parent / "coordinator" / "x_ui.html").read_text(
         encoding="utf-8"
     )
+    dashboard_html = (Path(__file__).parent / "dashboard" / "status_ui.html").read_text(encoding="utf-8")
     coordinator_path = application.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
     public_base = application.settings.server.public_base_url
     coordinator_url = (
@@ -70,39 +72,51 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
     ui_html = ui_html.replace("__COORDINATOR_ENDPOINT__", json.dumps(coordinator_url))
 
     async def list_tools(ctx, params):
-        return types.ListToolsResult(tools=list(registry.definitions))
+        exposed = exposed_tool_definitions(registry, application.settings.server.tool_surface)
+        return types.ListToolsResult(tools=list(exposed))
 
     async def initialized(ctx, params):
         await ctx.session.send_tool_list_changed()
 
     async def list_resources(ctx, params):
-        return types.ListResourcesResult(
-            resources=[
-                types.Resource(
-                    name=(
-                        "Development Bridge Coordinator"
-                        if uri == COORDINATOR_UI_URI
-                        else "Development Bridge Coordinator (legacy)"
-                    ),
-                    uri=uri,
-                    description="Mounted MCP App for delayed coordinator wake messages",
-                    mimeType="text/html;profile=mcp-app",
-                    _meta=widget_meta,
-                )
-                for uri in COORDINATOR_UI_URIS
-            ]
-        )
+        resources = [
+            types.Resource(
+                name=(
+                    "Development Bridge Coordinator"
+                    if uri == COORDINATOR_UI_URI
+                    else "Development Bridge Coordinator (legacy)"
+                ),
+                uri=uri,
+                description="Mounted MCP App for delayed coordinator wake messages",
+                mimeType="text/html;profile=mcp-app",
+                _meta=widget_meta,
+            )
+            for uri in COORDINATOR_UI_URIS
+        ]
+        if application.settings.server.tool_surface == "compact":
+            resources.append(types.Resource(
+                name="Development Bridge Dashboard",
+                uri=BRIDGE_DASHBOARD_UI_URI,
+                description="Compact user-facing Bridge health dashboard",
+                mimeType="text/html;profile=mcp-app",
+                _meta=widget_meta,
+            ))
+        return types.ListResourcesResult(resources=resources)
 
     async def read_resource(ctx, params):
         requested_uri = str(params.uri)
-        if requested_uri not in COORDINATOR_UI_URIS:
+        if requested_uri == BRIDGE_DASHBOARD_UI_URI and application.settings.server.tool_surface == "compact":
+            text = dashboard_html
+        elif requested_uri in COORDINATOR_UI_URIS:
+            text = ui_html
+        else:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Unknown resource")
         return types.ReadResourceResult(
             contents=[
                 types.TextResourceContents(
                     uri=requested_uri,
                     mimeType="text/html;profile=mcp-app",
-                    text=ui_html,
+                    text=text,
                     _meta=widget_meta,
                 )
             ]
