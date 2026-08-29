@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import signal
+import shutil
 from secrets import token_urlsafe
 import subprocess
 import sys
@@ -160,12 +161,15 @@ def terminate(proc: subprocess.Popen | None) -> None:
         return
     try:
         os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=8)
+        proc.wait(timeout=4)
+        return
     except Exception:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except Exception:
-            pass
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=1)
+    except Exception:
+        pass
 
 
 class BrowserHost:
@@ -250,6 +254,19 @@ class BrowserHost:
         if self.xvfb.poll() is not None:
             raise RuntimeError("Xvfb exited during startup")
 
+    def clear_session_restore_state(self) -> None:
+        profile = Path(self.cfg.profile) / "Default"
+        # Keep authentication/cookies, but remove only tab/session restore state.
+        # Otherwise Chrome can restore the previous ChatGPT tab and then also open
+        # target_url from argv, leaving two expensive live renderers for one route.
+        for directory in (profile / "Sessions", profile / "Sessions_Encrypted"):
+            shutil.rmtree(directory, ignore_errors=True)
+        for name in ("Current Session", "Current Tabs", "Last Session", "Last Tabs"):
+            try:
+                (profile / name).unlink()
+            except FileNotFoundError:
+                pass
+
     def start_chrome(self) -> None:
         chrome_env = os.environ.copy()
         chrome_env["DISPLAY"] = self.cfg.display
@@ -258,6 +275,7 @@ class BrowserHost:
             libs.append(chrome_env["LD_LIBRARY_PATH"])
         chrome_env["LD_LIBRARY_PATH"] = ":".join(libs)
         Path(self.cfg.profile).mkdir(parents=True, exist_ok=True)
+        self.clear_session_restore_state()
         self.chrome = subprocess.Popen(
             [
                 self.cfg.chrome,
