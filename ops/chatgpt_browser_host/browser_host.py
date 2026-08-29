@@ -293,13 +293,46 @@ class BrowserHost:
             time.sleep(0.5)
         raise RuntimeError("Chrome DevTools endpoint did not become ready")
 
+    def live_page_ids(self) -> set[str] | None:
+        """Return browser-authoritative live page targets; /json/list may retain closing ghosts."""
+        try:
+            version = requests.get(f"{self.cdp_base}/json/version", timeout=2)
+            version.raise_for_status()
+            browser_ws = version.json().get("webSocketDebuggerUrl")
+            if not browser_ws:
+                return None
+            ws = websocket.create_connection(browser_ws, timeout=2, suppress_origin=True)
+            try:
+                request_id = int(time.time() * 1000) % 1_000_000_000
+                ws.send(json.dumps({"id": request_id, "method": "Target.getTargets"}))
+                while True:
+                    message = json.loads(ws.recv())
+                    if message.get("id") != request_id:
+                        continue
+                    infos = message.get("result", {}).get("targetInfos", [])
+                    return {
+                        str(item.get("targetId"))
+                        for item in infos
+                        if item.get("type") == "page"
+                        and str(item.get("url", "")).startswith("https://chatgpt.com")
+                        and item.get("targetId")
+                    }
+            finally:
+                ws.close()
+        except Exception:
+            return None
+
     def pages(self) -> list[dict]:
         response = requests.get(f"{self.cdp_base}/json/list", timeout=2)
         response.raise_for_status()
-        return [
+        pages = [
             item for item in response.json()
             if item.get("type") == "page" and item.get("url", "").startswith("https://chatgpt.com")
         ]
+        live_ids = self.live_page_ids()
+        if live_ids is not None:
+            pages = [item for item in pages if str(item.get("id")) in live_ids]
+        return pages
 
     def create_blank_page(self) -> dict:
         response = requests.put(f"{self.cdp_base}/json/new?about:blank", timeout=2)
