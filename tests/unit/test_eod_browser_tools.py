@@ -42,6 +42,10 @@ async def test_navigation_is_bounded_to_eod_origin(monkeypatch):
             isError=False,
         )
 
+    async def fake_ensure(url, launcher):
+        return SimpleNamespace(tools=[])
+
+    monkeypatch.setattr(module, "_ensure_upstream", fake_ensure)
     monkeypatch.setattr(module, "_call_upstream", fake_call)
     call = next(
         item
