@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.api.errors import BridgeError
 from app.tools.compact import COMPACT_VISIBLE_TOOLS, compact_tools, exposed_tool_definitions
 from app.api.registry import ToolRegistry
 from app.api.registry import RegisteredTool
@@ -75,3 +76,23 @@ async def test_bridge_search_and_schema_cover_hidden_tools():
     )
     assert "input_schema" in schema.content[0].text
     assert "value" in schema.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_bridge_call_rejects_invalid_hidden_arguments():
+    registry = _registry()
+    container = SimpleNamespace(
+        settings=SimpleNamespace(server=SimpleNamespace(name="development-bridge")),
+        projects=SimpleNamespace(list=lambda: ()),
+        route_registry=SimpleNamespace(resolve=lambda: None),
+    )
+    tools = {tool.definition.name: tool for tool in compact_tools(container, registry)}
+    registry.register_many(tools.values())
+    request_context = SimpleNamespace(request_id="req_invalid_delegate")
+    with pytest.raises(BridgeError) as exc:
+        await tools["bridge_call"].handler(
+            None,
+            SimpleNamespace(arguments={"tool_name": "github_pull_request_get", "arguments": {"value": 3}}),
+            request_context,
+        )
+    assert "invalid arguments" in str(exc.value)
