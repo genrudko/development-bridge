@@ -39,6 +39,8 @@ class ManagedCloneRunner(Protocol):
 
     async def inspect(self, repository: Path) -> tuple[str, str]: ...
 
+    async def is_clean(self, repository: Path) -> bool: ...
+
     async def configure_fork(
         self, repository: Path, push_url: str, upstream_url: str
     ) -> None: ...
@@ -73,6 +75,10 @@ class SubprocessManagedCloneRunner:
             "git", "-C", str(repository), "rev-parse", "HEAD"
         )).strip()
         return branch, head
+
+    async def is_clean(self, repository: Path) -> bool:
+        status = await self._run("git", "-C", str(repository), "status", "--porcelain")
+        return not status.strip()
 
     async def configure_fork(
         self, repository: Path, push_url: str, upstream_url: str
@@ -122,6 +128,7 @@ class ManagedRepositoryRecord:
     created_at: str
     requested_ref: str | None = None
     kind: str = "reference"
+    storage_repository_id: str | None = None
 
     def as_dict(self) -> dict[str, str | int | None]:
         return {
@@ -132,6 +139,7 @@ class ManagedRepositoryRecord:
             "created_at": self.created_at,
             "requested_ref": self.requested_ref,
             "kind": self.kind,
+            "storage_repository_id": self.storage_repository_id,
         }
 
 
@@ -189,7 +197,7 @@ class ManagedRepositoryService:
                     or existing.kind != kind
                 ):
                     raise self._conflict(project_id, repository_id)
-                if not self._valid_managed_target(self._target(*key)):
+                if not self._valid_managed_target(self._record_target(existing)):
                     raise BridgeError(
                         ErrorCode.MANAGED_REPOSITORY_STATE_CORRUPT,
                         "Managed repository directory is invalid",
@@ -220,6 +228,19 @@ class ManagedRepositoryService:
                         "Clone did not produce a Git repository",
                     )
                 branch, head = await self.runner.inspect(clone_path)
+                if kind == "reference":
+                    alias = await self._alias_candidate(origin_url, branch, head)
+                    if alias is not None:
+                        storage_id = alias.storage_repository_id or alias.repository_id
+                        record = ManagedRepositoryRecord(
+                            project_id, repository_id, origin_url, depth,
+                            datetime.now(UTC).isoformat(), requested_ref, kind, storage_id,
+                        )
+                        updated = {**self._records, key: record}
+                        self._write_manifest(updated)
+                        self.projects.repositories.register_managed(self._repository(record))
+                        self._records = updated
+                        return self._metadata_dict(record, "aliased", branch, head)
                 if kind == "fork":
                     assert push_url is not None and upstream_url is not None
                     await self.runner.configure_fork(clone_path, push_url, upstream_url)
@@ -233,6 +254,7 @@ class ManagedRepositoryService:
                     datetime.now(UTC).isoformat(),
                     requested_ref,
                     kind,
+                    None,
                 )
                 updated = {**self._records, key: record}
                 self._write_manifest(updated)
@@ -270,22 +292,35 @@ class ManagedRepositoryService:
                 old_keys = {
                     "project_id", "repository_id", "origin_url", "depth", "created_at"
                 }
-                allowed = {*old_keys, "requested_ref", "kind"}
+                allowed = {*old_keys, "requested_ref", "kind", "storage_repository_id"}
                 if not isinstance(entry, dict) or not old_keys <= set(entry) or not set(entry) <= allowed:
                     raise ValueError("invalid entry shape")
                 record = ManagedRepositoryRecord(
                     **entry,
                     **({"requested_ref": None} if "requested_ref" not in entry else {}),
                     **({"kind": "reference"} if "kind" not in entry else {}),
+                    **({"storage_repository_id": None} if "storage_repository_id" not in entry else {}),
                 )
                 self._validate_record(record)
                 key = (record.project_id, record.repository_id)
                 if key in records or self.projects.repositories.is_configured(*key):
                     raise ValueError("repository collision")
-                target = self._target(*key)
-                if not self._valid_managed_target(target):
-                    raise ValueError("repository directory missing")
                 records[key] = record
+            for key, record in records.items():
+                storage_id = record.storage_repository_id
+                if storage_id is not None:
+                    target_record = records.get((record.project_id, storage_id))
+                    if (
+                        storage_id == record.repository_id
+                        or target_record is None
+                        or target_record.storage_repository_id is not None
+                        or target_record.kind != "reference"
+                        or record.kind != "reference"
+                        or target_record.origin_url != record.origin_url
+                    ):
+                        raise ValueError("invalid managed repository storage alias")
+                if not self._valid_managed_target(self._record_target(record)):
+                    raise ValueError("repository directory missing")
         except (BridgeError, OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise BridgeError(
                 ErrorCode.MANAGED_REPOSITORY_STATE_CORRUPT,
@@ -313,6 +348,8 @@ class ManagedRepositoryService:
         self._validate_ref(record.requested_ref)
         if record.kind not in MANAGED_KINDS:
             raise ValueError("invalid managed repository kind")
+        if record.storage_repository_id is not None and not IDENTIFIER.fullmatch(record.storage_repository_id):
+            raise ValueError("invalid storage repository identifier")
 
     @staticmethod
     def _validate_url(url: str) -> str:
@@ -389,18 +426,50 @@ class ManagedRepositoryService:
         except OSError:
             return False
 
+    def _record_target(self, record: ManagedRepositoryRecord) -> Path:
+        return self._target(
+            record.project_id, record.storage_repository_id or record.repository_id
+        )
+
+    async def _alias_candidate(
+        self, origin_url: str, branch: str, head: str
+    ) -> ManagedRepositoryRecord | None:
+        candidates = sorted(
+            (
+                record for record in self._records.values()
+                if record.kind == "reference" and record.origin_url == origin_url
+            ),
+            key=lambda record: (record.depth, record.created_at),
+            reverse=True,
+        )
+        seen_targets: set[Path] = set()
+        for record in candidates:
+            target = self._record_target(record)
+            if target in seen_targets:
+                continue
+            seen_targets.add(target)
+            try:
+                existing_branch, existing_head = await self.runner.inspect(target)
+                if (
+                    existing_branch == branch
+                    and existing_head == head
+                    and await self.runner.is_clean(target)
+                ):
+                    return record
+            except (BridgeError, OSError, ValueError):
+                continue
+        return None
+
     def _repository(self, record: ManagedRepositoryRecord) -> Repository:
         return Repository(
             record.project_id,
             record.repository_id,
-            self._target(record.project_id, record.repository_id),
+            self._record_target(record),
             MANAGED_KINDS[record.kind],
         )
 
     async def _metadata(self, record: ManagedRepositoryRecord, status: str) -> dict:
-        branch, head = await self.runner.inspect(
-            self._target(record.project_id, record.repository_id)
-        )
+        branch, head = await self.runner.inspect(self._record_target(record))
         return self._metadata_dict(record, status, branch, head)
 
     @staticmethod
@@ -417,6 +486,8 @@ class ManagedRepositoryService:
             "head": head,
             "depth": record.depth,
             "kind": record.kind,
+            "storage_repository_id": record.storage_repository_id or record.repository_id,
+            "storage_shared": record.storage_repository_id is not None,
             "capabilities": MANAGED_KINDS[record.kind].as_dict(),
         }
 
