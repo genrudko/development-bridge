@@ -933,3 +933,19 @@ def test_browser_host_chrome_launch_bounds_disk_cache(tmp_path: Path, monkeypatc
     host.start_chrome()
     assert "--disk-cache-size=268435456" in seen["argv"]
     assert "--media-cache-size=67108864" in seen["argv"]
+
+
+def test_browser_host_pages_filters_closing_json_list_ghosts(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    class Response:
+        def __init__(self, payload): self.payload = payload
+        def raise_for_status(self): pass
+        def json(self): return self.payload
+    rows = [
+        {"id": "live", "type": "page", "url": host.target_url, "webSocketDebuggerUrl": "ws://live"},
+        {"id": "ghost", "type": "page", "url": host.target_url, "webSocketDebuggerUrl": "ws://ghost"},
+    ]
+    monkeypatch.setattr(module.requests, "get", lambda *a, **k: Response(rows), raising=False)
+    host.live_page_ids = lambda: {"live"}
+    assert [item["id"] for item in host.pages()] == ["live"]
