@@ -34,6 +34,8 @@ def _category(name: str) -> str:
 
 def guide_tools(registry: ToolRegistry, *, tool_surface: str = "full") -> tuple[RegisteredTool, ...]:
     async def bridge_guide(ctx, params, request_context):
+        from app.tools.compact import exposed_tool_definitions
+        visible_tool_count = len(exposed_tool_definitions(registry, tool_surface))
         catalog: dict[str, list[dict[str, str]]] = defaultdict(list)
         for tool in registry.definitions:
             catalog[_category(tool.name)].append(
@@ -89,7 +91,8 @@ def guide_tools(registry: ToolRegistry, *, tool_surface: str = "full") -> tuple[
                 "workspace": "Project, repository, file, task, job, change, and artifact tools are scoped by explicit project_id/repository_id.",
             },
             "tool_surface": tool_surface,
-            "tool_count": len(registry.definitions),
+            "tool_count": visible_tool_count,
+            "internal_tool_count": len(registry.definitions),
             "tools_by_category": (
                 dict(sorted(catalog.items()))
                 if tool_surface == "full"
@@ -104,7 +107,7 @@ def guide_tools(registry: ToolRegistry, *, tool_surface: str = "full") -> tuple[
     return (RegisteredTool(
         types.Tool(
             name="bridge_guide",
-            description="START HERE: call first in new coordinator chats for bounded operating guidance and the complete live tool catalog",
+            description="START HERE: call first in new coordinator chats for bounded operating guidance and the live capability summary",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
         ),
         bridge_guide,
