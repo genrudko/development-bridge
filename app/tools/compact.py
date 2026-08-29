@@ -3,14 +3,17 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 from types import SimpleNamespace
 from typing import Any
 
 from mcp import types
+from jsonschema import ValidationError, validate
 
 from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool, ToolRegistry
 from app.api.results import success, to_mcp_result
+from app.audit import AuditEvent, AuditOutcome
 from app.container import ApplicationContainer
 
 BRIDGE_DASHBOARD_UI_URI = "ui://development-bridge/dashboard-v1.html"
@@ -157,8 +160,43 @@ def compact_tools(container: ApplicationContainer, registry: ToolRegistry) -> tu
         delegated_arguments = arguments.get("arguments") or {}
         if not isinstance(delegated_arguments, dict):
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "arguments must be an object")
+        try:
+            validate(instance=delegated_arguments, schema=registered.definition.input_schema or {})
+        except ValidationError as exc:
+            path = ".".join(str(item) for item in exc.absolute_path)
+            location = f" at {path}" if path else ""
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"invalid arguments for {name}{location}: {exc.message}",
+            ) from exc
+
         delegated = SimpleNamespace(name=name, arguments=delegated_arguments)
-        return await registered.handler(ctx, delegated, request_context)
+        started = time.perf_counter()
+        outcome = AuditOutcome.SUCCESS
+        error_code = None
+        try:
+            return await registered.handler(ctx, delegated, request_context)
+        except BridgeError as error:
+            outcome = AuditOutcome.ERROR
+            error_code = error.code.value
+            raise
+        except Exception:
+            outcome = AuditOutcome.ERROR
+            error_code = ErrorCode.INTERNAL_ERROR.value
+            raise
+        finally:
+            audit = getattr(container, "audit", None)
+            if audit is not None:
+                await audit.emit(AuditEvent(
+                    request_id=request_context.request_id,
+                    tool=name,
+                    outcome=outcome,
+                    duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                    project_id=delegated_arguments.get("project_id"),
+                    repository_id=delegated_arguments.get("repository_id"),
+                    error_code=error_code,
+                    event="delegated_via_bridge_call",
+                ))
 
     async def bridge_dashboard(ctx, params, request_context):
         disk = shutil.disk_usage("/")
