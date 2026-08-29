@@ -986,3 +986,29 @@ def test_browser_host_terminate_has_bounded_waits(tmp_path: Path, monkeypatch):
     module.terminate(Proc())
     assert waits == [4, 1]
     assert kills == [(12345, module.signal.SIGTERM), (12345, module.signal.SIGKILL)]
+
+
+def test_browser_host_parks_listener_recovery_while_coordinator_idle():
+    module = _module()
+    source = __import__("inspect").getsource(module.BrowserHost.run)
+    idle = source.index('early_status.get("state") == "idle"')
+    iframe_probe = source.index("iframe_count, iframe_error = self.safe_coordinator_iframe_count(page)")
+    assert idle < iframe_probe
+    assert "listener recovery parked" in source[idle:iframe_probe]
+
+
+def test_browser_host_healthcheck_accepts_fresh_idle_park(tmp_path: Path, monkeypatch, capsys):
+    module = _module()
+    cfg = _config(module, tmp_path)
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg.state_file.write_text(__import__("json").dumps({
+        "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "status": "idle",
+        "cdp_ok": True,
+        "target_ok": True,
+        "coordinator_iframes": 0,
+        "polling_ok": False,
+    }))
+    assert module.healthcheck(cfg) == 0
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload["healthy"] is True
