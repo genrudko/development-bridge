@@ -117,7 +117,7 @@ async function handleControl(data) {
   ) return { nonce: String(data?.nonce || ""), ok: false, error: "invalid_control" };
   const action = String(data.action || "");
   if (action === "ping") {
-    return { nonce: data.nonce, action, ok: appConnected, channel_id: channelId, observer_only: observerOnly };
+    return { nonce: data.nonce, action, ok: appConnected, channel_id: channelId, observer_only: observerOnly, control_version: 2 };
   }
   if (!appConnected) {
     return { nonce: data.nonce, action, ok: false, error: "app_not_connected" };
@@ -131,7 +131,7 @@ async function handleControl(data) {
     deliveryLease = null;
     observerOnly = data.observer_only === true;
     await clearProtocolContext();
-    return { nonce: data.nonce, action, ok: true, channel_id: channelId, observer_only: observerOnly };
+    return { nonce: data.nonce, action, ok: true, channel_id: channelId, observer_only: observerOnly, control_version: 2 };
   }
   if (action === "bootstrap") {
     const operationId = String(data.operation_id || "");

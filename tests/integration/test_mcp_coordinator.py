@@ -56,6 +56,8 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                     assert "CONTROL_OPS_KEY" in resource.contents[0].text
                     assert "localStorage.setItem" in resource.contents[0].text
                     assert "__developmentBridgeControlV1" in resource.contents[0].text
+                    assert "observerOnly" in resource.contents[0].text
+                    assert "control_version: 2" in resource.contents[0].text
                     legacy = await session.read_resource(COORDINATOR_UI_URIS[1])
                     assert str(legacy.contents[0].uri) == COORDINATOR_UI_URIS[1]
                     assert legacy.contents[0].text == resource.contents[0].text

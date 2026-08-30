@@ -777,6 +777,22 @@ class BrowserHost:
                         "snapshot": snapshot,
                     }
 
+            observer = self.wait_for_control_channel(
+                fresh_page, self.channel_id, timeout=15
+            )
+            if (
+                not observer.get("ok")
+                or observer.get("channel_id") != self.channel_id
+                or observer.get("observer_only") is not True
+            ):
+                return {
+                    "authorized": False,
+                    "error": "browser_host_observer_binding_failed",
+                    "observer": observer,
+                    "leaf": leaf,
+                    "snapshot": snapshot,
+                }
+
             old_page_id = str(page.get("id") or "")
             fresh_page_id = str(fresh_page.get("id") or "")
             if old_page_id and fresh_page_id and old_page_id != fresh_page_id:
@@ -1442,6 +1458,12 @@ class BrowserHost:
                             raise RuntimeError("MCP App control evaluation failed")
                         value = result.get("result", {}).get("value")
                         if isinstance(value, dict):
+                            if (
+                                action == "bind"
+                                and payload.get("observer_only") is True
+                                and value.get("observer_only") is not True
+                            ):
+                                break
                             return value
                         break
             finally:

@@ -759,6 +759,10 @@ def test_browser_host_preflight_uses_fresh_current_chat_before_authorizing(tmp_p
     }
     host.safe_coordinator_iframe_count = lambda selected: (0, None)
     host.recover_listener = lambda selected: calls.append(("recover", selected["id"])) or True
+    host.wait_for_control_channel = lambda selected, channel_id, timeout=15: (
+        calls.append(("observer", selected["id"], channel_id))
+        or {"ok": True, "channel_id": channel_id, "observer_only": True}
+    )
     host.close_page = lambda page_id: calls.append(("close", page_id))
     host.wait_for_polling = lambda channel_id, timeout=20: (True, "matches=4")
     host.authorize_browser_preflight_local = lambda continuation_id: calls.append(
@@ -771,6 +775,7 @@ def test_browser_host_preflight_uses_fresh_current_chat_before_authorizing(tmp_p
     assert calls == [
         ("snapshot", "page-fresh"),
         ("recover", "page-fresh"),
+        ("observer", "page-fresh", "telegram-supervisor"),
         ("close", "page-stale"),
         ("authorize", "cont_abcdefghij"),
     ]
@@ -1053,3 +1058,30 @@ def test_browser_host_keeps_existing_observer_binding_without_rebinding(tmp_path
     result = host.ensure_control_channel({"id": "page"}, "telegram-ad5x-g7")
     assert result["observer_only"] is True
     assert calls == [("ping", {})]
+
+
+def test_browser_host_preflight_fails_closed_when_hidden_app_cannot_be_observer(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    page = {"id": "page-stale", "url": host.target_url}
+    fresh = {"id": "page-fresh", "url": "about:blank"}
+    host.create_blank_page = lambda: fresh
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: _final_snapshot()
+    host.wait_for_settled_conversation = lambda selected, timeout=30, expected_message_id=None: {
+        "settled": True, "current": True, "last_message_id": expected_message_id,
+    }
+    host.safe_coordinator_iframe_count = lambda selected: (1, None)
+    host.wait_for_control_channel = lambda selected, channel_id, timeout=15: {
+        "ok": True, "channel_id": channel_id, "observer_only": False
+    }
+    authorized = []
+    host.authorize_browser_preflight_local = lambda continuation_id: authorized.append(continuation_id)
+    closed = []
+    host.close_page = lambda page_id: closed.append(page_id)
+
+    result = host.prepare_browser_preflight(page, "cont_abcdefghij")
+
+    assert result["authorized"] is False
+    assert result["error"] == "browser_host_observer_binding_failed"
+    assert authorized == []
+    assert closed == ["page-fresh"]
