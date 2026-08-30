@@ -180,6 +180,7 @@ class BrowserHost:
     PREFLIGHT_MAX_LIVE_ATTEMPTS = 3
     PREFLIGHT_RETRY_BASE_SECONDS = 60.0
     PREFLIGHT_RETRY_MAX_SECONDS = 240.0
+    TARGET_RECOVERY_RETRY_SECONDS = 60.0
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -200,6 +201,8 @@ class BrowserHost:
         self.preflight_attempts = 0
         self.preflight_retry_at = 0.0
         self.preflight_inflight = False
+        self.target_recovery_page_id: str | None = None
+        self.target_recovery_retry_at = 0.0
         self._restore_web_backoff()
         self._restore_preflight_budget()
         self.last_bridge_turn_id = 0
@@ -347,7 +350,6 @@ class BrowserHost:
                         str(item.get("targetId"))
                         for item in infos
                         if item.get("type") == "page"
-                        and str(item.get("url", "")).startswith("https://chatgpt.com")
                         and item.get("targetId")
                     }
             finally:
@@ -355,17 +357,20 @@ class BrowserHost:
         except Exception:
             return None
 
-    def pages(self) -> list[dict]:
+    def browser_pages(self) -> list[dict]:
         response = requests.get(f"{self.cdp_base}/json/list", timeout=2)
         response.raise_for_status()
-        pages = [
-            item for item in response.json()
-            if item.get("type") == "page" and item.get("url", "").startswith("https://chatgpt.com")
-        ]
+        pages = [item for item in response.json() if item.get("type") == "page"]
         live_ids = self.live_page_ids()
         if live_ids is not None:
             pages = [item for item in pages if str(item.get("id")) in live_ids]
         return pages
+
+    def pages(self) -> list[dict]:
+        return [
+            item for item in self.browser_pages()
+            if item.get("url", "").startswith("https://chatgpt.com")
+        ]
 
     def create_blank_page(self) -> dict:
         response = requests.put(f"{self.cdp_base}/json/new?about:blank", timeout=2)
@@ -2045,10 +2050,30 @@ class BrowserHost:
             (page for page in pages if is_target_url(page.get("url", ""), self.target_url)),
             None,
         )
-        if target is None:
+        if target is not None:
+            self.target_recovery_page_id = None
+            self.target_recovery_retry_at = 0.0
+        else:
             if not pages:
+                # Persisted web backoff starts Chrome on about:blank. Reuse that
+                # existing debuggable page so recovery cannot multiply tabs.
+                candidates = self.browser_pages()
+                page = next(
+                    (item for item in candidates if str(item.get("id")) == self.target_recovery_page_id),
+                    None,
+                )
+                if page is None:
+                    page = next((item for item in candidates if item.get("url") == "about:blank"), None)
+                if page is None:
+                    page = self.create_blank_page()
+            else:
+                page = pages[0]
+            self.target_recovery_page_id = str(page.get("id"))
+            now = time.monotonic()
+            if now < self.target_recovery_retry_at:
                 return False, None
-            self.navigate(pages[0], self.target_url)
+            self.target_recovery_retry_at = now + self.TARGET_RECOVERY_RETRY_SECONDS
+            self.navigate(page, self.target_url)
             time.sleep(4)
             pages = self.pages()
             target = next(
@@ -2057,6 +2082,8 @@ class BrowserHost:
             )
             if target is None:
                 return False, None
+            self.target_recovery_page_id = None
+            self.target_recovery_retry_at = 0.0
             self.repair_count += 1
 
         for page in pages:

@@ -70,6 +70,40 @@ def test_browser_host_reload_route_target_refreshes_same_conversation(tmp_path: 
     assert calls == [("page-1", host.target_url)]
 
 
+def test_browser_host_live_page_ids_include_blank_recovery_targets(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    seen = {}
+
+    class FakeWS:
+        def send(self, payload):
+            seen["request"] = __import__("json").loads(payload)
+        def recv(self):
+            rid = seen["request"]["id"]
+            return __import__("json").dumps({
+                "id": rid,
+                "result": {"targetInfos": [
+                    {"targetId": "blank", "type": "page", "url": "about:blank"},
+                    {"targetId": "chat", "type": "page", "url": host.target_url},
+                    {"targetId": "worker", "type": "worker", "url": host.target_url},
+                ]},
+            })
+        def close(self):
+            pass
+
+    class VersionResponse:
+        ok = True
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"webSocketDebuggerUrl": "ws://browser"}
+
+    monkeypatch.setattr(module.requests, "get", lambda *a, **k: VersionResponse(), raising=False)
+    monkeypatch.setattr(module.websocket, "create_connection", lambda *a, **k: FakeWS(), raising=False)
+
+    assert host.live_page_ids() == {"blank", "chat"}
+
+
 def test_browser_host_accepts_versioned_coordinator_iframes(tmp_path: Path, monkeypatch):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
@@ -202,6 +236,86 @@ def test_browser_host_chrome_starts_blank_during_persisted_backoff(tmp_path: Pat
 
     assert seen["argv"][-1] == "about:blank"
     assert host.target_url not in seen["argv"]
+
+
+def test_browser_host_enforce_target_recovers_from_existing_backoff_blank_page(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    target = {
+        "id": "target",
+        "url": host.target_url,
+        "webSocketDebuggerUrl": "ws://target",
+    }
+    blank = {"id": "blank", "url": "about:blank", "webSocketDebuggerUrl": "ws://blank"}
+    pages = [[], [target]]
+    navigated = []
+    host.pages = lambda: pages.pop(0)
+    host.browser_pages = lambda: [blank]
+    host.create_blank_page = lambda: (_ for _ in ()).throw(AssertionError("must reuse startup blank page"))
+    host.navigate = lambda page, url: navigated.append((page, url))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 1000.0)
+
+    ok, page = host.enforce_target()
+
+    assert ok is True
+    assert page == target
+    assert navigated == [(blank, host.target_url)]
+
+
+def test_browser_host_failed_blank_recovery_reuses_page_and_throttles_navigation(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    blank = {"id": "blank", "url": "about:blank", "webSocketDebuggerUrl": "ws://blank"}
+    clock = [1000.0]
+    navigated = []
+    host.pages = lambda: []
+    host.browser_pages = lambda: [blank]
+    host.create_blank_page = lambda: (_ for _ in ()).throw(AssertionError("must not create duplicate blank pages"))
+    host.navigate = lambda page, url: navigated.append((page, url))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    assert host.enforce_target() == (False, None)
+    assert host.enforce_target() == (False, None)
+    assert navigated == [(blank, host.target_url)]
+
+    clock[0] += host.TARGET_RECOVERY_RETRY_SECONDS + 1.0
+    assert host.enforce_target() == (False, None)
+    assert navigated == [(blank, host.target_url), (blank, host.target_url)]
+
+
+def test_browser_host_non_target_chat_recovery_is_throttled(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    other = {"id": "other", "url": "https://chatgpt.com/c/other", "webSocketDebuggerUrl": "ws://other"}
+    clock = [1000.0]
+    navigated = []
+    host.pages = lambda: [other]
+    host.navigate = lambda page, url: navigated.append((page, url))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    assert host.enforce_target() == (False, None)
+    assert host.enforce_target() == (False, None)
+    assert navigated == [(other, host.target_url)]
+
+    clock[0] += host.TARGET_RECOVERY_RETRY_SECONDS + 1.0
+    assert host.enforce_target() == (False, None)
+    assert navigated == [(other, host.target_url), (other, host.target_url)]
+
+
+def test_browser_host_async_target_success_clears_recovery_state(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    target = {"id": "target", "url": host.target_url, "webSocketDebuggerUrl": "ws://target"}
+    host.target_recovery_page_id = "stale"
+    host.target_recovery_retry_at = 1234.0
+    host.pages = lambda: [target]
+
+    assert host.enforce_target() == (True, target)
+    assert host.target_recovery_page_id is None
+    assert host.target_recovery_retry_at == 0.0
 
 
 def test_browser_host_run_blocks_persisted_backoff_before_route_web_work():
