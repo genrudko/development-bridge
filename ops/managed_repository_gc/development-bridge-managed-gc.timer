@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Development Bridge managed repository GC daily
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+RandomizedDelaySec=20m
+Persistent=true
+Unit=development-bridge-managed-gc.service
+
+[Install]
+WantedBy=timers.target

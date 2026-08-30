@@ -59,7 +59,8 @@ def _category(name: str) -> str:
     if name.startswith("change_"):
         return "changes"
     if name.startswith("project_") or name in {
-        "repository_status", "repository_clone", "repository_retention_set", "repository_gc_plan"
+        "repository_status", "repository_clone", "repository_retention_set",
+        "repository_gc_plan", "repository_gc_apply",
     }:
         return "projects"
     if name.startswith("eod_browser_"):

@@ -367,3 +367,64 @@ async def test_managed_forks_are_always_pinned(tmp_path):
             "project", "my-fork-retention", "ephemeral"
         )
     assert changed.value.code is ErrorCode.POLICY_VIOLATION
+
+@pytest.mark.asyncio
+async def test_identical_references_never_alias_across_projects(tmp_path):
+    runner = FakeManagedCloneRunner()
+    configured = BridgeSettings.model_validate({
+        "managed_repositories": {"root": tmp_path / "managed"},
+        "projects": [
+            {"id": "first", "name": "First", "repositories": []},
+            {"id": "second", "name": "Second", "repositories": []},
+        ],
+    })
+    container = build_container(configured, managed_clone_runner=runner)
+    first = await container.managed_repositories.clone("first", "same", URL, depth=20)
+    second = await container.managed_repositories.clone("second", "same", URL, depth=20)
+    assert first["storage_shared"] is False
+    assert second["storage_shared"] is False
+    assert (tmp_path / "managed" / "first" / "same" / ".git").is_dir()
+    assert (tmp_path / "managed" / "second" / "same" / ".git").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_gc_apply_removes_stale_clean_storage_group_and_all_aliases(tmp_path):
+    from dataclasses import replace
+
+    runner = FakeManagedCloneRunner()
+    container = build_container(settings(tmp_path), managed_clone_runner=runner)
+    await container.managed_repositories.clone(
+        "project", "old-a", URL, depth=20, retention="ephemeral"
+    )
+    aliased = await container.managed_repositories.clone(
+        "project", "old-b", URL, depth=10, retention="ephemeral"
+    )
+    assert aliased["storage_shared"] is True
+    stale = "2020-01-01T00:00:00+00:00"
+    for key, record in list(container.managed_repositories._records.items()):
+        container.managed_repositories._records[key] = replace(record, last_used_at=stale)
+    container.managed_repositories._write_manifest(container.managed_repositories._records)
+    target = tmp_path / "managed" / "project" / "old-a"
+    assert target.is_dir()
+
+    applied = await container.managed_repositories.gc_apply(
+        "project", ephemeral_days=14, cache_days=30, max_groups=4, confirm=True
+    )
+    assert applied["deleted_storage_groups"] == 1
+    assert applied["deleted_logical_repositories"] == 2
+    assert not target.exists()
+    with pytest.raises(BridgeError) as missing:
+        container.projects.repositories.get("project", "old-a")
+    assert missing.value.code is ErrorCode.REPOSITORY_NOT_FOUND
+    with pytest.raises(BridgeError):
+        container.projects.repositories.get("project", "old-b")
+    manifest = json.loads((tmp_path / "managed" / "manifest.json").read_text())
+    assert manifest["repositories"] == []
+
+
+@pytest.mark.asyncio
+async def test_gc_apply_requires_explicit_confirmation(tmp_path):
+    container = build_container(settings(tmp_path), managed_clone_runner=FakeManagedCloneRunner())
+    with pytest.raises(BridgeError) as refused:
+        await container.managed_repositories.gc_apply("project")
+    assert refused.value.code is ErrorCode.POLICY_VIOLATION

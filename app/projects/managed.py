@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import CapabilitySet
@@ -246,7 +247,7 @@ class ManagedRepositoryService:
                     )
                 branch, head = await self.runner.inspect(clone_path)
                 if kind == "reference":
-                    alias = await self._alias_candidate(origin_url, branch, head)
+                    alias = await self._alias_candidate(project_id, origin_url, branch, head)
                     if alias is not None:
                         storage_id = alias.storage_repository_id or alias.repository_id
                         now = datetime.now(UTC).isoformat()
@@ -385,6 +386,106 @@ class ManagedRepositoryService:
         if record.last_used_at is not None:
             self._parse_timestamp(record.last_used_at)
 
+    async def gc_apply(
+        self,
+        project_id: str | None = None,
+        *,
+        cache_days: int = 30,
+        ephemeral_days: int = 14,
+        max_groups: int = 4,
+        confirm: bool = False,
+    ) -> dict:
+        if confirm is not True:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "Managed repository GC apply requires confirm=true",
+            )
+        if isinstance(max_groups, bool) or not 1 <= max_groups <= 32:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "max_groups must be 1..32")
+
+        moved: list[tuple[Path, Path]] = []
+        removed_keys: set[tuple[str, str]] = set()
+        selected: list[dict] = []
+        self.projects.repositories.begin_managed_maintenance()
+        try:
+            async with self._lock:
+                plan = await self.gc_plan(
+                    project_id, cache_days=cache_days, ephemeral_days=ephemeral_days
+                )
+                selected = list(plan["candidate_storage_groups"][:max_groups])
+                if not selected:
+                    return {
+                        "applied": True,
+                        "deleted_storage_groups": 0,
+                        "deleted_logical_repositories": 0,
+                        "trash_cleanup_errors": [],
+                        "remaining_candidate_groups": plan["candidate_count"],
+                    }
+
+                trash_root = self.root / ".gc-trash"
+                trash_root.mkdir(parents=True, exist_ok=True)
+                for row in selected:
+                    group_project = str(row["project_id"])
+                    storage_id = str(row["storage_repository_id"])
+                    physical = self._records.get((group_project, storage_id))
+                    if physical is None:
+                        raise BridgeError(
+                            ErrorCode.MANAGED_REPOSITORY_STATE_CORRUPT,
+                            "GC storage owner disappeared during apply",
+                        )
+                    target = self._record_target(physical)
+                    quarantine = trash_root / (
+                        f"{group_project}-{storage_id}-{uuid4().hex}"
+                    )
+                    os.replace(target, quarantine)
+                    moved.append((target, quarantine))
+                    for logical in row["logical_repositories"]:
+                        removed_keys.add((group_project, str(logical["repository_id"])))
+
+                updated = {
+                    key: record for key, record in self._records.items()
+                    if key not in removed_keys
+                }
+                self._write_manifest(updated)
+                for key in sorted(removed_keys):
+                    self.projects.repositories.unregister_managed(*key)
+                    self._last_access_touch.pop(key, None)
+                self._records = updated
+        except Exception:
+            for target, quarantine in reversed(moved):
+                try:
+                    if quarantine.exists() and not target.exists():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(quarantine, target)
+                except OSError:
+                    pass
+            raise
+        finally:
+            self.projects.repositories.end_managed_maintenance()
+
+        cleanup_errors = []
+        for _target, quarantine in moved:
+            try:
+                shutil.rmtree(quarantine)
+            except OSError as exc:
+                cleanup_errors.append({
+                    "path": str(quarantine),
+                    "error": type(exc).__name__,
+                })
+        try:
+            trash_root = self.root / ".gc-trash"
+            if trash_root.is_dir() and not any(trash_root.iterdir()):
+                trash_root.rmdir()
+        except OSError:
+            pass
+        return {
+            "applied": True,
+            "deleted_storage_groups": len(moved),
+            "deleted_logical_repositories": len(removed_keys),
+            "trash_cleanup_errors": cleanup_errors,
+            "remaining_candidate_groups": max(0, plan["candidate_count"] - len(selected)),
+        }
+
     @staticmethod
     def _validate_retention(value: str) -> str:
         if value not in RETENTION_POLICIES:
@@ -466,7 +567,8 @@ class ManagedRepositoryService:
             self.projects.get(project_id)
         now = datetime.now(UTC)
         groups: dict[tuple[str, str], list[ManagedRepositoryRecord]] = {}
-        for record in self._records.values():
+        records_snapshot = tuple(self._records.values())
+        for record in records_snapshot:
             if project_id is not None and record.project_id != project_id:
                 continue
             storage_id = record.storage_repository_id or record.repository_id
@@ -618,12 +720,16 @@ class ManagedRepositoryService:
         )
 
     async def _alias_candidate(
-        self, origin_url: str, branch: str, head: str
+        self, project_id: str, origin_url: str, branch: str, head: str
     ) -> ManagedRepositoryRecord | None:
         candidates = sorted(
             (
                 record for record in self._records.values()
-                if record.kind == "reference" and record.origin_url == origin_url
+                if (
+                    record.project_id == project_id
+                    and record.kind == "reference"
+                    and record.origin_url == origin_url
+                )
             ),
             key=lambda record: (record.depth, record.created_at),
             reverse=True,

@@ -77,6 +77,23 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
         )
         return to_mcp_result(success(request_context.request_id, data))
 
+    async def repository_gc_apply(ctx, params, request_context):
+        arguments = params.arguments or {}
+
+        async def apply_gc():
+            return await container.managed_repositories.gc_apply(
+                arguments.get("project_id"),
+                cache_days=arguments.get("cache_days", 30),
+                ephemeral_days=arguments.get("ephemeral_days", 14),
+                max_groups=arguments.get("max_groups", 4),
+                confirm=arguments.get("confirm", False),
+            )
+
+        data = await container.jobs.run_when_globally_idle(
+            apply_gc, operation_name="repository_gc_apply"
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
     project_schema = {
         "type": "object",
         "properties": {"project_id": IDENTIFIER_SCHEMA},
@@ -189,6 +206,35 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
                 },
             ),
             repository_gc_plan,
+            "v1",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="repository_gc_apply",
+                description=(
+                    "Delete a bounded set of stale clean managed-reference storage groups; "
+                    "requires confirm=true and global durable-job idleness"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "project_id": IDENTIFIER_SCHEMA,
+                        "cache_days": {
+                            "type": "integer", "minimum": 1, "maximum": 3650, "default": 30
+                        },
+                        "ephemeral_days": {
+                            "type": "integer", "minimum": 1, "maximum": 3650, "default": 14
+                        },
+                        "max_groups": {
+                            "type": "integer", "minimum": 1, "maximum": 32, "default": 4
+                        },
+                        "confirm": {"type": "boolean"},
+                    },
+                    "required": ["confirm"],
+                    "additionalProperties": False,
+                },
+            ),
+            repository_gc_apply,
             "v1",
         ),
         RegisteredTool(
