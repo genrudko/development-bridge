@@ -117,6 +117,16 @@ def test_launch_builds_documented_headless_argv_and_bounded_prompt(tmp_path):
     assert launch.stdin is None and launch.environment_keys == ("HOME", "SSH_CONNECTION")
 
 
+def test_review_launch_does_not_force_test_suite(tmp_path):
+    executor, _ = make_executor(tmp_path)
+    repository = Repository("p", "r", tmp_path, CapabilitySet.from_mapping({"execute": True}))
+    request = ExecutorRequest("inspect only", TaskKind.REVIEW, ExecutorName.ANTIGRAVITY, 60, 4096, None)
+    launch = executor.launch(repository, request, callable_status())
+    prompt = launch.arguments[1]
+    assert "Do not run test suites unless the task explicitly asks." in prompt
+    assert "pytest -q" not in prompt
+
+
 @pytest.mark.parametrize(("changes", "reason"), [
     ({"available": False}, "unavailable"), ({"authenticated": False}, "auth_required"),
     ({"busy": True}, "busy"), ({"quota_state": QuotaState.EXHAUSTED}, "quota_exhausted"),

@@ -83,14 +83,21 @@ Invariants:
 - Do not expose secrets or Bridge-native GitHub credentials.
 - Do not push or deploy.
 - Do not start background schedulers or delegate the task.
-Verification:
-- Run the repository's targeted tests for the changed behavior.
-- Stop after running: pytest -q
+{verification}
 Stop conditions:
 - Stop on an authentication, quota, permission, or environment blocker.
 - Return concise evidence: files changed, tests run, and remaining blocker.
 """
 
+
+
+def _verification(task_kind) -> str:
+    if task_kind.value == "implementation":
+        return ("Verification:\n- Run targeted tests for changed behavior.\n"
+                "- Run the full test suite only when the task or repository rules require it.")
+    if task_kind.value == "review":
+        return "Verification:\n- Do not run test suites unless the task explicitly asks."
+    return "Verification:\n- Run only the checks needed to answer the bounded task."
 
 def _environment(extra: tuple[str, ...] = ("HOME", "SSH_CONNECTION")) -> dict[str, str]:
     return {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", *extra) if key in os.environ}
@@ -161,7 +168,7 @@ class AntigravityExecutor:
         if not 1 <= len(request.task.encode("utf-8")) <= 65_536:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Task must contain between 1 and 65536 UTF-8 bytes")
         timeout = min(ceil(request.timeout_seconds), ceil(self._settings.task_timeout_seconds))
-        arguments = ["-p", _PROMPT.format(task=request.task), "--output-format", "json", "--sandbox",
+        arguments = ["-p", _PROMPT.format(task=request.task, verification=_verification(request.task_kind)), "--output-format", "json", "--sandbox",
                      "--print-timeout", f"{timeout}s"]
         if self._settings.model is not None:
             arguments.extend(("--model", self._settings.model))
