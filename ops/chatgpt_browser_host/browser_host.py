@@ -1192,14 +1192,20 @@ class BrowserHost:
                   })
                 }))()''')
                 current = str((state or {}).get("url") or "") if isinstance(state, dict) else ""
-                if "/c/" in current and current.startswith(project_prefix + "/c/"):
-                    try:
-                        candidate_url = canonical_chat_url(current)
-                    except ValueError:
-                        candidate_url = None
-                    if candidate_url:
-                        page = {**page, "url": candidate_url}
-                        break
+                if "/c/" in current:
+                    current_prefix = current.rsplit("/c/", 1)[0]
+                    same_project = (
+                        current_prefix == project_prefix
+                        or current_prefix.startswith(project_prefix + "-")
+                    )
+                    if same_project:
+                        try:
+                            candidate_url = canonical_chat_url(current)
+                        except ValueError:
+                            candidate_url = None
+                        if candidate_url:
+                            page = {**page, "url": candidate_url}
+                            break
                 time.sleep(1)
             if candidate_url is None:
                 raise RuntimeError("ChatGPT fresh project chat did not produce a stable conversation URL")

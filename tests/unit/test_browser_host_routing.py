@@ -497,7 +497,7 @@ def test_browser_host_creates_successor_from_project_home(tmp_path: Path, monkey
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
     page = {"id": "fresh", "url": "about:blank", "webSocketDebuggerUrl": "ws://fresh"}
-    candidate_url = "https://chatgpt.com/g/g-p-ad5x/c/conv-fresh"
+    candidate_url = "https://chatgpt.com/g/g-p-ad5x-plaginy-ad5x/c/conv-fresh"
     host.create_blank_page = lambda: dict(page)
     navigated = []
     host.navigate = lambda selected, url: navigated.append(url)
