@@ -233,7 +233,10 @@ class CoordinatorService:
 
     def _delivery_lease_matches(self, channel_id: str, delivery_lease: str | None) -> bool:
         item = self._delivery_leases.get(channel_id)
-        if item is None:
+        if item is None or delivery_lease is None:
+            # Cached/legacy coordinator widgets may miss the tool-result event that carries
+            # the current lease. The physical channel already identifies the exact chat, so
+            # allow an omitted lease while still rejecting any explicitly stale lease.
             return True
         return isinstance(delivery_lease, str) and delivery_lease == item.get("lease_id")
 

@@ -458,6 +458,18 @@ async def test_new_mount_invalidates_old_physical_chat_delivery_lease(tmp_path):
             )
             assert old.json()["claimed"] is False
             assert old.json()["state"] == "standby"
+            legacy = await client.post(
+                "/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0"
+            )
+            assert legacy.json()["claimed"] is True
+            assert (await container.coordinator.ack(
+                "telegram-ad5x-g0", legacy.json()["claim_id"]
+            ))["acknowledged"] is True
+            container.coordinator._global_cooldown_until = 0
+            container.coordinator._cooldown_until["telegram-ad5x-g0"] = 0
+            await container.coordinator.arm(
+                "wake-current-chat-again", channel_id="telegram-ad5x-g0", delay_seconds=0
+            )
             current = await client.post(
                 f"/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease={new_lease}"
             )
