@@ -123,6 +123,11 @@ def dashboard_snapshot(
     if route is not None and binding is not None and binding.get("generation") is not None:
         if int(binding["generation"]) != int(route.get("generation", 0)):
             route = None
+    elif binding is None:
+        snapshot = container.route_registry.snapshot()
+        requested_route = snapshot.get("requested_route")
+        if requested_route is not None:
+            route = container.route_registry.resolve(str(requested_route))
     progress = None
     if route is not None:
         progress = _progress_store(container).get(str(route["route_id"]))

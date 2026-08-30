@@ -141,3 +141,44 @@ async def test_progress_tools_are_hidden_and_dashboard_includes_route_progress(t
     )
     assert dashboard.structured_content["progress"]["title"] == "Bridge optimization"
     assert dashboard.structured_content["progress"]["percent"] == 50
+
+
+@pytest.mark.asyncio
+async def test_dashboard_unbound_session_uses_requested_route_progress(tmp_path):
+    registry = _registry()
+
+    class Routes:
+        path = tmp_path / "routes.json"
+        def snapshot(self):
+            return {"requested_route": "ad5x"}
+        def resolve(self, route_id=None):
+            if route_id == "ad5x":
+                return {"route_id": "ad5x", "channel_id": "telegram-ad5x"}
+            return None
+
+    container = SimpleNamespace(
+        settings=SimpleNamespace(server=SimpleNamespace(name="development-bridge")),
+        projects=SimpleNamespace(list=lambda: ()),
+        route_registry=Routes(),
+        coordinator=SimpleNamespace(session_binding=lambda session_id: None),
+    )
+    tools = {tool.definition.name: tool for tool in compact_tools(container, registry)}
+    registry.register_many(tools.values())
+    request_context = SimpleNamespace(request_id="req_unbound_progress")
+    await tools["work_progress_update"].handler(
+        None,
+        SimpleNamespace(arguments={
+            "route_id": "ad5x",
+            "title": "Progress dashboard",
+            "total": 4,
+            "completed": 1,
+            "status": "working",
+        }),
+        request_context,
+    )
+    dashboard = await tools["bridge_dashboard"].handler(
+        None, SimpleNamespace(arguments={}), request_context
+    )
+    assert dashboard.structured_content["route"]["route_id"] == "ad5x"
+    assert dashboard.structured_content["progress"]["title"] == "Progress dashboard"
+    assert dashboard.structured_content["progress"]["percent"] == 25
