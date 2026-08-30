@@ -267,7 +267,7 @@ def test_clone_tool_identity_schema_prevents_traversal(tmp_path):
     assert schema["properties"]["project_id"]["pattern"] == "^[a-z][a-z0-9-]{0,62}$"
     assert schema["properties"]["repository_id"]["pattern"] == "^[a-z][a-z0-9-]{0,62}$"
     assert set(schema["properties"]) == {
-        "project_id", "repository_id", "url", "depth", "ref"
+        "project_id", "repository_id", "url", "depth", "ref", "retention"
     }
 
 
@@ -308,3 +308,62 @@ def test_manifest_alias_must_reference_canonical_same_origin(tmp_path):
     with pytest.raises(BridgeError) as raised:
         build_container(configured, managed_clone_runner=runner)
     assert raised.value.code is ErrorCode.MANAGED_REPOSITORY_STATE_CORRUPT
+
+@pytest.mark.asyncio
+async def test_managed_retention_tracks_access_and_plans_gc(tmp_path, monkeypatch):
+    runner = FakeManagedCloneRunner()
+    container = build_container(settings(tmp_path), managed_clone_runner=runner)
+    cloned = await container.managed_repositories.clone(
+        "project", "cache-one", URL, depth=12, retention="ephemeral"
+    )
+    assert cloned["retention"] == "ephemeral"
+    assert cloned["last_used_at"] is not None
+
+    # Simulate a stale last-use timestamp, then verify ordinary repository access refreshes it.
+    record = container.managed_repositories._records[("project", "cache-one")]
+    stale = "2020-01-01T00:00:00+00:00"
+    updated = __import__("dataclasses").replace(record, last_used_at=stale)
+    container.managed_repositories._records[("project", "cache-one")] = updated
+    container.managed_repositories._write_manifest(container.managed_repositories._records)
+    container.managed_repositories._last_access_touch.clear()
+    container.projects.repositories.get("project", "cache-one")
+    touched = container.managed_repositories._records[("project", "cache-one")]
+    assert touched.last_used_at != stale
+
+    await container.managed_repositories.set_retention("project", "cache-one", "pinned")
+    pinned_plan = await container.managed_repositories.gc_plan(
+        "project", cache_days=1, ephemeral_days=1
+    )
+    assert pinned_plan["candidate_count"] == 0
+    assert any(
+        "cache-one:pinned" in row.get("blocked_by", [])
+        for row in pinned_plan["blocked_storage_groups"]
+    )
+
+    await container.managed_repositories.set_retention("project", "cache-one", "ephemeral")
+    record = container.managed_repositories._records[("project", "cache-one")]
+    container.managed_repositories._records[("project", "cache-one")] = __import__("dataclasses").replace(
+        record, last_used_at=stale
+    )
+    container.managed_repositories._write_manifest(container.managed_repositories._records)
+    plan = await container.managed_repositories.gc_plan(
+        "project", cache_days=30, ephemeral_days=14
+    )
+    assert plan["candidate_count"] == 1
+    assert plan["candidate_storage_groups"][0]["storage_repository_id"] == "cache-one"
+
+
+@pytest.mark.asyncio
+async def test_managed_forks_are_always_pinned(tmp_path):
+    runner = FakeManagedCloneRunner()
+    container = build_container(settings(tmp_path), managed_clone_runner=runner)
+    cloned = await container.managed_repositories.clone(
+        "project", "my-fork-retention", "https://github.com/alice/reference.git",
+        kind="fork", push_url="git@github.com:alice/reference.git", upstream_url=URL,
+    )
+    assert cloned["retention"] == "pinned"
+    with pytest.raises(BridgeError) as changed:
+        await container.managed_repositories.set_retention(
+            "project", "my-fork-retention", "ephemeral"
+        )
+    assert changed.value.code is ErrorCode.POLICY_VIOLATION
