@@ -300,7 +300,8 @@ def create_streamable_http_app(
         try:
             return JSONResponse(
                 await container.coordinator.status(
-                    request.query_params.get("channel_id", "coordinator")
+                    request.query_params.get("channel_id", "coordinator"),
+                    delivery_lease=request.query_params.get("delivery_lease"),
                 ),
                 headers=coordinator_ui_headers,
             )
@@ -311,7 +312,8 @@ def create_streamable_http_app(
         try:
             return JSONResponse(
                 await container.coordinator.claim(
-                    request.query_params.get("channel_id", "coordinator")
+                    request.query_params.get("channel_id", "coordinator"),
+                    delivery_lease=request.query_params.get("delivery_lease"),
                 ),
                 headers=coordinator_ui_headers,
             )
@@ -324,6 +326,7 @@ def create_streamable_http_app(
                 await container.coordinator.ack(
                     request.query_params.get("channel_id", "coordinator"),
                     request.query_params.get("claim_id", ""),
+                    delivery_lease=request.query_params.get("delivery_lease"),
                 ),
                 headers=coordinator_ui_headers,
             )

@@ -120,6 +120,12 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         channel_id = str(binding["channel_id"])
         if binding.get("route_id") is not None and binding.get("route_state") == "active":
             container.route_registry.request(str(binding["route_id"]))
+        delivery = container.coordinator.issue_delivery_lease(
+            channel_id,
+            session_id=_session_id(ctx),
+            route_id=(str(binding["route_id"]) if binding.get("route_id") is not None else None),
+            generation=(int(binding["generation"]) if binding.get("generation") is not None else None),
+        )
         result = to_mcp_result(
             success(
                 request_context.request_id,
@@ -140,6 +146,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         result.structured_content = {
             "channel_id": channel_id,
             "trigger_url": trigger_url,
+            "delivery_lease": delivery["lease_id"],
             **({"route_id": binding["route_id"], "generation": binding.get("generation"), "route_state": binding.get("route_state")} if binding.get("route_id") is not None else {}),
         }
         result.meta = dict(COORDINATOR_UI_META)
