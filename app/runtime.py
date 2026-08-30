@@ -14,7 +14,13 @@ from app.api.results import failure, to_mcp_result
 from app.audit import AuditEvent, AuditOutcome
 from app.container import ApplicationContainer, build_container
 from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
-from app.tools.compact import BRIDGE_DASHBOARD_UI_URI, exposed_tool_definitions
+from app.tools.compact import (
+    BRIDGE_DASHBOARD_STATE_URI,
+    BRIDGE_DASHBOARD_UI_LEGACY_URI,
+    BRIDGE_DASHBOARD_UI_URI,
+    dashboard_snapshot,
+    exposed_tool_definitions,
+)
 from app.tools.registry import build_tool_registry
 
 
@@ -94,30 +100,46 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
             for uri in COORDINATOR_UI_URIS
         ]
         if application.settings.server.tool_surface == "compact":
-            resources.append(types.Resource(
-                name="Development Bridge Dashboard",
-                uri=BRIDGE_DASHBOARD_UI_URI,
-                description="Compact user-facing Bridge health dashboard",
-                mimeType="text/html;profile=mcp-app",
-                _meta=widget_meta,
+            resources.extend((
+                types.Resource(
+                    name="Development Bridge Dashboard",
+                    uri=BRIDGE_DASHBOARD_UI_URI,
+                    description="Compact user-facing Bridge health and work-progress dashboard",
+                    mimeType="text/html;profile=mcp-app",
+                    _meta=widget_meta,
+                ),
+                types.Resource(
+                    name="Development Bridge Dashboard State",
+                    uri=BRIDGE_DASHBOARD_STATE_URI,
+                    description="Lightweight live dashboard state for the mounted MCP App",
+                    mimeType="application/json",
+                ),
             ))
         return types.ListResourcesResult(resources=resources)
 
     async def read_resource(ctx, params):
         requested_uri = str(params.uri)
-        if requested_uri == BRIDGE_DASHBOARD_UI_URI and application.settings.server.tool_surface == "compact":
+        if requested_uri in {BRIDGE_DASHBOARD_UI_URI, BRIDGE_DASHBOARD_UI_LEGACY_URI} and application.settings.server.tool_surface == "compact":
             text = dashboard_html
+            mime_type = "text/html;profile=mcp-app"
+            meta = widget_meta
+        elif requested_uri == BRIDGE_DASHBOARD_STATE_URI and application.settings.server.tool_surface == "compact":
+            text = json.dumps(dashboard_snapshot(application, registry), ensure_ascii=False)
+            mime_type = "application/json"
+            meta = None
         elif requested_uri in COORDINATOR_UI_URIS:
             text = ui_html
+            mime_type = "text/html;profile=mcp-app"
+            meta = widget_meta
         else:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Unknown resource")
         return types.ReadResourceResult(
             contents=[
                 types.TextResourceContents(
                     uri=requested_uri,
-                    mimeType="text/html;profile=mcp-app",
+                    mimeType=mime_type,
                     text=text,
-                    _meta=widget_meta,
+                    _meta=meta,
                 )
             ]
         )

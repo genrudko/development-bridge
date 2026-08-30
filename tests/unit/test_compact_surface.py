@@ -96,3 +96,46 @@ async def test_bridge_call_rejects_invalid_hidden_arguments():
             request_context,
         )
     assert "invalid arguments" in str(exc.value)
+
+@pytest.mark.asyncio
+async def test_progress_tools_are_hidden_and_dashboard_includes_route_progress(tmp_path):
+    registry = _registry()
+
+    class Routes:
+        path = tmp_path / "routes.json"
+        def resolve(self, route_id=None):
+            selected = route_id or "ad5x"
+            return {"route_id": selected, "channel_id": f"telegram-{selected}"}
+
+    container = SimpleNamespace(
+        settings=SimpleNamespace(server=SimpleNamespace(name="development-bridge")),
+        projects=SimpleNamespace(list=lambda: ()),
+        route_registry=Routes(),
+    )
+    tools = {tool.definition.name: tool for tool in compact_tools(container, registry)}
+    registry.register_many(tools.values())
+    exposed = {tool.name for tool in exposed_tool_definitions(registry, "compact")}
+    assert "work_progress_update" not in exposed
+    assert "work_progress_get" not in exposed
+
+    request_context = SimpleNamespace(request_id="req_progress")
+    update = await tools["work_progress_update"].handler(
+        None,
+        SimpleNamespace(arguments={
+            "title": "Bridge optimization",
+            "total": 4,
+            "completed": 2,
+            "phase": "Dashboard",
+            "status": "working",
+            "current": "Run tests",
+            "next": "Deploy",
+        }),
+        request_context,
+    )
+    assert "50" in update.content[0].text
+
+    dashboard = await tools["bridge_dashboard"].handler(
+        None, SimpleNamespace(arguments={}), request_context
+    )
+    assert dashboard.structured_content["progress"]["title"] == "Bridge optimization"
+    assert dashboard.structured_content["progress"]["percent"] == 50
