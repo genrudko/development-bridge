@@ -71,6 +71,7 @@ class CoordinatorService:
         self._cooldown_until: dict[str, float] = {}
         self._global_cooldown_until = 0.0
         self._session_bindings: dict[str, dict[str, object]] = {}
+        self._delivery_leases: dict[str, dict[str, object]] = {}
         self._lock = asyncio.Lock()
         self._load_state()
 
@@ -109,6 +110,19 @@ class CoordinatorService:
                 self._pending[channel] = PendingWake(**payload)
             except (BridgeError, TypeError, ValueError, KeyError):
                 continue
+        for channel_id, item in list((data.get("delivery_leases") or {}).items())[: self.MAX_CHANNELS]:
+            try:
+                channel = self.validate_channel(channel_id)
+                if not isinstance(item, dict):
+                    raise ValueError("persisted delivery lease is invalid")
+                lease_id = str(item["lease_id"])
+                if not 10 <= len(lease_id) <= 128:
+                    raise ValueError("persisted delivery lease token is invalid")
+                payload = dict(item)
+                payload["lease_id"] = lease_id
+                self._delivery_leases[channel] = payload
+            except (BridgeError, TypeError, ValueError, KeyError):
+                continue
 
     def _save_state(self) -> None:
         if self._state_path is None:
@@ -119,7 +133,13 @@ class CoordinatorService:
         self._cooldown_until = {key: value for key, value in self._cooldown_until.items() if value > now}
         if self._global_cooldown_until <= now:
             self._global_cooldown_until = 0.0
-        data = {"version": 1, "pending": {key: asdict(value) for key, value in self._pending.items()}, "cooldown_until": self._cooldown_until, "global_cooldown_until": self._global_cooldown_until}
+        data = {
+            "version": 1,
+            "pending": {key: asdict(value) for key, value in self._pending.items()},
+            "cooldown_until": self._cooldown_until,
+            "global_cooldown_until": self._global_cooldown_until,
+            "delivery_leases": self._delivery_leases,
+        }
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, self._state_path)
 
@@ -179,6 +199,43 @@ class CoordinatorService:
         self._prune_session_bindings()
         item = self._session_bindings.get(session)
         return dict(item) if item is not None else None
+
+    def issue_delivery_lease(
+        self,
+        channel_id: str,
+        *,
+        session_id: str | None = None,
+        route_id: str | None = None,
+        generation: int | None = None,
+    ) -> dict[str, object]:
+        channel = self.validate_channel(channel_id)
+        session = self.validate_session_id(session_id) if session_id is not None else None
+        current = self._delivery_leases.get(channel)
+        if current is not None and session is not None and current.get("session_id") == session:
+            item = dict(current)
+        else:
+            item = {"lease_id": token_urlsafe(24), "issued_at": time.time()}
+        if session is not None:
+            item["session_id"] = session
+        if route_id is not None:
+            item["route_id"] = str(route_id)
+        if generation is not None:
+            item["generation"] = int(generation)
+        item["refreshed_at"] = time.time()
+        self._delivery_leases[channel] = item
+        self._save_state()
+        return {"channel_id": channel, **item}
+
+    def delivery_lease(self, channel_id: str) -> dict[str, object] | None:
+        channel = self.validate_channel(channel_id)
+        item = self._delivery_leases.get(channel)
+        return {"channel_id": channel, **item} if item is not None else None
+
+    def _delivery_lease_matches(self, channel_id: str, delivery_lease: str | None) -> bool:
+        item = self._delivery_leases.get(channel_id)
+        if item is None:
+            return True
+        return isinstance(delivery_lease, str) and delivery_lease == item.get("lease_id")
 
     @staticmethod
     def validate_channel(channel_id: str) -> str:
@@ -459,8 +516,17 @@ class CoordinatorService:
             escalation_message=escalation_message,
         )
 
-    async def status(self, channel_id: str = DEFAULT_CHANNEL) -> dict:
+    async def status(
+        self, channel_id: str = DEFAULT_CHANNEL, *, delivery_lease: str | None = None
+    ) -> dict:
         channel_id = self.validate_channel(channel_id)
+        if not self._delivery_lease_matches(channel_id, delivery_lease):
+            return {
+                "channel_id": channel_id,
+                "state": "standby",
+                "ready": False,
+                "delivery_lease_required": True,
+            }
         now = time.time()
         async with self._lock:
             wake = self._pending.get(channel_id)
@@ -552,8 +618,17 @@ class CoordinatorService:
                 )
             return data
 
-    async def claim(self, channel_id: str = DEFAULT_CHANNEL) -> dict:
+    async def claim(
+        self, channel_id: str = DEFAULT_CHANNEL, *, delivery_lease: str | None = None
+    ) -> dict:
         channel_id = self.validate_channel(channel_id)
+        if not self._delivery_lease_matches(channel_id, delivery_lease):
+            return {
+                "channel_id": channel_id,
+                "claimed": False,
+                "state": "standby",
+                "delivery_lease_required": True,
+            }
         now = time.time()
         async with self._lock:
             wake = self._pending.get(channel_id)
@@ -634,9 +709,18 @@ class CoordinatorService:
                 "expires_after_seconds": self.BROWSER_PREFLIGHT_TTL_SECONDS,
             }
 
-    async def ack(self, channel_id: str, claim_id: str) -> dict:
+    async def ack(
+        self, channel_id: str, claim_id: str, *, delivery_lease: str | None = None
+    ) -> dict:
         "Acknowledge one iframe transport delivery attempt."
         channel_id = self.validate_channel(channel_id)
+        if not self._delivery_lease_matches(channel_id, delivery_lease):
+            return {
+                "channel_id": channel_id,
+                "acknowledged": False,
+                "state": "standby",
+                "delivery_lease_required": True,
+            }
         now = time.time()
         async with self._lock:
             wake = self._pending.get(channel_id)

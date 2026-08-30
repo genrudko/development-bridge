@@ -28,6 +28,7 @@ const detailEl = document.getElementById("detail");
 const stateEl = document.getElementById("state");
 const app = new App({ name: "Development Bridge Coordinator", version: "1.1.0" }, { autoResize: true });
 let channelId = "coordinator";
+let deliveryLease = null;
 let busy = false;
 let modelContextContinuation = null;
 let modelContextSupported = true;
@@ -71,6 +72,8 @@ function render(kind, state, detail = "") {
 app.ontoolresult = (result) => {
   const routed = result?.structuredContent?.channel_id;
   if (typeof routed === "string" && routed.length) channelId = routed;
+  const lease = result?.structuredContent?.delivery_lease;
+  if (typeof lease === "string" && lease.length) deliveryLease = lease;
   const triggerUrl = result?.structuredContent?.trigger_url;
   if (typeof triggerUrl === "string" && triggerUrl.length) {
     endpoint = new URL(triggerUrl, window.location.href);
@@ -80,6 +83,7 @@ app.ontoolresult = (result) => {
 async function request(name, init = {}) {
   const url = new URL(name, endpoint);
   url.searchParams.set("channel_id", channelId);
+  if (deliveryLease) url.searchParams.set("delivery_lease", deliveryLease);
   const response = await fetch(url, { cache: "no-store", ...init });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
@@ -123,6 +127,7 @@ async function handleControl(data) {
   }
   channelId = requestedChannel;
   if (action === "bind") {
+    deliveryLease = null;
     await clearProtocolContext();
     return { nonce: data.nonce, action, ok: true, channel_id: channelId };
   }
@@ -245,6 +250,7 @@ async function poll() {
     const ackUrl = new URL("ack", endpoint);
     ackUrl.searchParams.set("channel_id", channelId);
     ackUrl.searchParams.set("claim_id", claim.claim_id);
+    if (deliveryLease) ackUrl.searchParams.set("delivery_lease", deliveryLease);
     const ackResponse = await fetch(ackUrl, { method: "POST", cache: "no-store" });
     if (!ackResponse.ok) throw new Error(`ACK HTTP ${ackResponse.status}`);
     const ack = await ackResponse.json();

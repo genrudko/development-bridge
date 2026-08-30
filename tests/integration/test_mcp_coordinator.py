@@ -65,10 +65,10 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                     assert mounted.meta["ui"]["resourceUri"] == COORDINATOR_UI_URI
                     assert mounted.meta["ui/resourceUri"] == COORDINATOR_UI_URI
                     assert mounted.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
-                    assert mounted.structured_content == {
-                        "channel_id": "chat-42",
-                        "trigger_url": "https://bridge.example/mcp/x/coordinator/",
-                    }
+                    assert mounted.structured_content["channel_id"] == "chat-42"
+                    assert mounted.structured_content["trigger_url"] == "https://bridge.example/mcp/x/coordinator/"
+                    delivery_lease = mounted.structured_content["delivery_lease"]
+                    assert isinstance(delivery_lease, str) and len(delivery_lease) >= 10
                     armed = await container.coordinator.arm_resilient(
                         "compat", channel_id="chat-42", delay_seconds=0
                     )
@@ -90,13 +90,15 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                         tool for tool in listed.tools if tool.name == "coordinator_continue"
                     )
                     assert continue_tool.input_schema["required"] == ["message"]
-            status = await client.get("/mcp/x/coordinator/status?channel_id=chat-42")
+            status = await client.get(f"/mcp/x/coordinator/status?channel_id=chat-42&delivery_lease={delivery_lease}")
             assert status.headers["access-control-allow-origin"] == "*"
-            claim = await client.post("/mcp/x/coordinator/claim?channel_id=chat-42")
+            claim = await client.post(f"/mcp/x/coordinator/claim?channel_id=chat-42&delivery_lease={delivery_lease}")
             assert claim.headers["access-control-allow-origin"] == "*"
             assert claim.json()["message"] == "resume"
             assert (
-                await container.coordinator.ack("chat-42", claim.json()["claim_id"])
+                await container.coordinator.ack(
+                    "chat-42", claim.json()["claim_id"], delivery_lease=delivery_lease
+                )
             )["acknowledged"] is True
             container.coordinator._global_cooldown_until = 0
             container.coordinator._cooldown_until["chat-42"] = 0
@@ -395,6 +397,7 @@ async def test_stale_physical_session_cannot_implicitly_wake_successor(tmp_path)
                     await session.initialize()
                     mounted = await session.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
                     assert mounted.structured_content["generation"] == 0
+                    old_delivery_lease = mounted.structured_content["delivery_lease"]
 
                     pending = container.route_registry.prepare_rollover("ad5x")
                     container.route_registry.record_rollover_candidate(
@@ -412,5 +415,48 @@ async def test_stale_physical_session_cannot_implicitly_wake_successor(tmp_path)
                     assert payload["ok"] is False
                     assert payload["error"]["code"] == "POLICY_VIOLATION"
                     assert "stale route generation" in payload["error"]["message"]
-                    assert (await container.coordinator.status("telegram-ad5x-g0"))["state"] == "idle"
+                    assert (
+                        await container.coordinator.status(
+                            "telegram-ad5x-g0", delivery_lease=old_delivery_lease
+                        )
+                    )["state"] == "idle"
                     assert (await container.coordinator.status("telegram-ad5x-g1"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_new_mount_invalidates_old_physical_chat_delivery_lease(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "server": {"tool_surface": "compact"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "ad5x",
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000061",
+        "telegram-ad5x-g0",
+        "AD5X",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+            async def mount_once():
+                async with streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams:
+                    async with ClientSession(*streams) as session:
+                        await session.initialize()
+                        result = await session.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
+                        return result.structured_content["delivery_lease"]
+
+            old_lease = await mount_once()
+            new_lease = await mount_once()
+            assert old_lease != new_lease
+
+            await container.coordinator.arm("wake-current-chat", channel_id="telegram-ad5x-g0", delay_seconds=0)
+            old = await client.post(
+                f"/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease={old_lease}"
+            )
+            assert old.json()["claimed"] is False
+            assert old.json()["state"] == "standby"
+            current = await client.post(
+                f"/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease={new_lease}"
+            )
+            assert current.json()["claimed"] is True
