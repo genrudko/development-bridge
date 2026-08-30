@@ -60,10 +60,27 @@ def test_bridge_guide_is_registry_derived_and_complete():
     assert "AGENTS.md" in delegation["rule"]
     assert "ECONOMY MODE" in delegation["prompt_suffix"]
     assert "do not poll durable jobs frequently" in delegation["prompt_suffix"]
+    assert "compact tool surface does not mean a capability is unavailable" in delegation["prompt_suffix"].lower()
+    assert "bridge_search -> bridge_schema -> bridge_call" in delegation["prompt_suffix"]
+    assert "shell credentials" in delegation["prompt_suffix"].lower()
+    assert "do not use shell git push" in delegation["prompt_suffix"].lower()
+    assert "do not mutate origin" in delegation["prompt_suffix"].lower()
+    assert "exact tool" in delegation["prompt_suffix"].lower() and "error code" in delegation["prompt_suffix"].lower()
+    evidence = delegation["evidence_first"]
+    assert any("compact tool surface" in rule.lower() for rule in evidence)
+    assert any("shell credentials" in rule.lower() for rule in evidence)
+    assert any("origin" in rule.lower() and "git_push" in rule for rule in evidence)
+    assert any("blocker" in rule.lower() and "exact tool" in rule.lower() for rule in evidence)
     agent_rules = (Path(__file__).parents[2] / "AGENTS.md").read_text(encoding="utf-8")
     assert "## Economy Mode" in agent_rules
     assert "one bounded work cycle" in agent_rules
     assert "Never retry live UI actions during rate-limit/backoff" in agent_rules
+    assert "## Evidence-First Bridge Semantics" in agent_rules
+    assert "bridge_search -> bridge_schema -> bridge_call" in agent_rules
+    assert "Shell credentials are not evidence" in agent_rules
+    assert "Do not use shell `git push`" in agent_rules
+    assert "Do not mutate `origin`" in agent_rules
+    assert "A blocker must be proven" in agent_rules
 
 
 def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():
