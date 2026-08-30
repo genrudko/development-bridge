@@ -314,7 +314,22 @@ def build_container(
     )
 
     async def resume_coordinator_waiter(payload, records, reason):
-        await coordinator.arm_job_continuation(records, reason, channel_id=str(payload["channel_id"]), message=(str(payload["message"]) if payload.get("message") is not None else None))
+        route_id = payload.get("route_id")
+        if route_id is not None:
+            route = route_registry.resolve(str(route_id))
+            if route is None:
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    f"durable coordinator waiter route no longer exists: {route_id}",
+                    retryable=True,
+                )
+            channel_id = str(route["channel_id"])
+        else:
+            channel_id = str(payload["channel_id"])
+        await coordinator.arm_job_continuation(
+            records, reason, channel_id=channel_id,
+            message=(str(payload["message"]) if payload.get("message") is not None else None),
+        )
 
     jobs.register_durable_terminal_handler("coordinator", resume_coordinator_waiter)
     supervisor_settings = configured.telegram_supervisor

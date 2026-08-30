@@ -124,7 +124,13 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
             mime_type = "text/html;profile=mcp-app"
             meta = widget_meta
         elif requested_uri == BRIDGE_DASHBOARD_STATE_URI and application.settings.server.tool_surface == "compact":
-            text = json.dumps(dashboard_snapshot(application, registry), ensure_ascii=False)
+            session = getattr(ctx, "session", None)
+            connection = getattr(session, "_connection", None)
+            session_id = getattr(connection, "session_id", None)
+            text = json.dumps(
+                dashboard_snapshot(application, registry, session_id=(str(session_id) if session_id else None)),
+                ensure_ascii=False,
+            )
             mime_type = "application/json"
             meta = None
         elif requested_uri in COORDINATOR_UI_URIS:

@@ -44,12 +44,16 @@ def test_v1_schemas_are_closed_objects():
     assert tools["bridge_restart"].input_schema == {
         "type": "object",
         "properties": {
+            "route_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,30}$",
+            },
             "channel_id": {
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 64,
                 "pattern": "^[A-Za-z0-9_-]{1,64}$",
-            }
+            },
         },
         "additionalProperties": False,
     }

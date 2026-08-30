@@ -81,18 +81,48 @@ def _progress_store(container: ApplicationContainer) -> RouteProgressStore:
     return RouteProgressStore(container.route_registry.path.parent / "route-progress.json")
 
 
-def _resolved_route(container: ApplicationContainer, route_id: str | None = None) -> dict[str, Any]:
-    route = container.route_registry.resolve(route_id) if route_id else container.route_registry.resolve()
+def _request_session_id(ctx) -> str | None:
+    session = getattr(ctx, "session", None)
+    connection = getattr(session, "_connection", None)
+    value = getattr(connection, "session_id", None)
+    return str(value) if value else None
+
+
+def _resolved_route(
+    container: ApplicationContainer,
+    route_id: str | None = None,
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    if route_id:
+        route = container.route_registry.resolve(route_id)
+    else:
+        binding = container.coordinator.session_binding(session_id)
+        bound_route = binding.get("route_id") if binding is not None else None
+        route = container.route_registry.resolve(str(bound_route)) if bound_route is not None else None
     if route is None:
-        raise BridgeError(ErrorCode.INVALID_ARGUMENT, "No logical route is active")
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            "No logical route is bound to this MCP session; call coordinator_x_mount with route_id first",
+        )
     return route
 
 
-def dashboard_snapshot(container: ApplicationContainer, registry: ToolRegistry) -> dict[str, Any]:
+def dashboard_snapshot(
+    container: ApplicationContainer,
+    registry: ToolRegistry,
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     disk = shutil.disk_usage("/")
     mem = _memory_snapshot()
     visible = exposed_tool_definitions(registry, "compact")
-    route = container.route_registry.resolve()
+    binding = container.coordinator.session_binding(session_id)
+    bound_route = binding.get("route_id") if binding is not None else None
+    route = container.route_registry.resolve(str(bound_route)) if bound_route is not None else None
+    if route is not None and binding is not None and binding.get("generation") is not None:
+        if int(binding["generation"]) != int(route.get("generation", 0)):
+            route = None
     progress = None
     if route is not None:
         progress = _progress_store(container).get(str(route["route_id"]))
@@ -245,31 +275,35 @@ def compact_tools(container: ApplicationContainer, registry: ToolRegistry) -> tu
                     event="delegated_via_bridge_call",
                 ))
 
-    def progress_route(arguments: dict[str, Any]) -> dict[str, Any]:
+    def progress_route(ctx, arguments: dict[str, Any]) -> dict[str, Any]:
         route_id = arguments.get("route_id")
-        return _resolved_route(container, str(route_id) if route_id is not None else None)
+        return _resolved_route(
+            container,
+            str(route_id) if route_id is not None else None,
+            session_id=_request_session_id(ctx),
+        )
 
     async def work_progress_get(ctx, params, request_context):
         arguments = params.arguments or {}
-        route = progress_route(arguments)
+        route = progress_route(ctx, arguments)
         data = _progress_store(container).get(str(route["route_id"]))
         return to_mcp_result(success(request_context.request_id, {"progress": data}))
 
     async def work_progress_update(ctx, params, request_context):
         arguments = dict(params.arguments or {})
-        route = progress_route(arguments)
+        route = progress_route(ctx, arguments)
         arguments.pop("route_id", None)
         data = _progress_store(container).update(str(route["route_id"]), arguments)
         return to_mcp_result(success(request_context.request_id, {"progress": data}))
 
     async def work_progress_clear(ctx, params, request_context):
         arguments = params.arguments or {}
-        route = progress_route(arguments)
+        route = progress_route(ctx, arguments)
         data = _progress_store(container).clear(str(route["route_id"]))
         return to_mcp_result(success(request_context.request_id, data))
 
     async def bridge_dashboard(ctx, params, request_context):
-        data = dashboard_snapshot(container, registry)
+        data = dashboard_snapshot(container, registry, session_id=_request_session_id(ctx))
         result = to_mcp_result(success(request_context.request_id, data))
         result.structured_content = data
         result.meta = dict(BRIDGE_DASHBOARD_UI_META)

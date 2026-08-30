@@ -111,6 +111,7 @@ async def test_progress_tools_are_hidden_and_dashboard_includes_route_progress(t
         settings=SimpleNamespace(server=SimpleNamespace(name="development-bridge")),
         projects=SimpleNamespace(list=lambda: ()),
         route_registry=Routes(),
+        coordinator=SimpleNamespace(session_binding=lambda session_id: {"route_id": "ad5x"}),
     )
     tools = {tool.definition.name: tool for tool in compact_tools(container, registry)}
     registry.register_many(tools.values())
@@ -122,6 +123,7 @@ async def test_progress_tools_are_hidden_and_dashboard_includes_route_progress(t
     update = await tools["work_progress_update"].handler(
         None,
         SimpleNamespace(arguments={
+            "route_id": "ad5x",
             "title": "Bridge optimization",
             "total": 4,
             "completed": 2,

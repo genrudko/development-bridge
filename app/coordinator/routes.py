@@ -98,6 +98,24 @@ class RouteRegistry:
         route = data["routes"].get(selected)
         return {**route, "route_id": selected} if route else None
 
+    def route_for_channel(self, channel_id: str) -> dict | None:
+        channel = str(channel_id).strip()
+        data = self._load()
+        for route_id, route in data["routes"].items():
+            if route.get("channel_id") == channel:
+                return {**route, "route_id": route_id, "route_state": "active"}
+        for route_id, pending in (data.get("rollovers") or {}).items():
+            if isinstance(pending, dict) and pending.get("channel_id") == channel:
+                return {
+                    "route_id": route_id,
+                    "channel_id": channel,
+                    "generation": int(pending.get("target_generation", 0)),
+                    "route_state": "pending",
+                    "project_id": pending.get("project_id"),
+                    "url": pending.get("candidate_url"),
+                }
+        return None
+
     def request(self, route_id: str) -> dict:
         route_id = self.validate_route_id(route_id)
         data = self._load()
