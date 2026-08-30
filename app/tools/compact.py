@@ -15,8 +15,11 @@ from app.api.registry import RegisteredTool, ToolRegistry
 from app.api.results import success, to_mcp_result
 from app.audit import AuditEvent, AuditOutcome
 from app.container import ApplicationContainer
+from app.coordinator.progress import RouteProgressStore
 
-BRIDGE_DASHBOARD_UI_URI = "ui://development-bridge/dashboard-v1.html"
+BRIDGE_DASHBOARD_UI_URI = "ui://development-bridge/dashboard-v2.html"
+BRIDGE_DASHBOARD_UI_LEGACY_URI = "ui://development-bridge/dashboard-v1.html"
+BRIDGE_DASHBOARD_STATE_URI = "bridge://development-bridge/dashboard-state"
 BRIDGE_DASHBOARD_UI_META = {
     "ui": {"resourceUri": BRIDGE_DASHBOARD_UI_URI},
     "ui/resourceUri": BRIDGE_DASHBOARD_UI_URI,
@@ -72,6 +75,47 @@ def _category(name: str) -> str:
     if name == "run_command":
         return "commands"
     return "bridge"
+
+
+def _progress_store(container: ApplicationContainer) -> RouteProgressStore:
+    return RouteProgressStore(container.route_registry.path.parent / "route-progress.json")
+
+
+def _resolved_route(container: ApplicationContainer, route_id: str | None = None) -> dict[str, Any]:
+    route = container.route_registry.resolve(route_id) if route_id else container.route_registry.resolve()
+    if route is None:
+        raise BridgeError(ErrorCode.INVALID_ARGUMENT, "No logical route is active")
+    return route
+
+
+def dashboard_snapshot(container: ApplicationContainer, registry: ToolRegistry) -> dict[str, Any]:
+    disk = shutil.disk_usage("/")
+    mem = _memory_snapshot()
+    visible = exposed_tool_definitions(registry, "compact")
+    route = container.route_registry.resolve()
+    progress = None
+    if route is not None:
+        progress = _progress_store(container).get(str(route["route_id"]))
+    return {
+        "status": "online",
+        "name": container.settings.server.name,
+        "version": "1.0.0",
+        "api_version": "1.0",
+        "tool_surface": "compact",
+        "visible_tools": len(visible),
+        "internal_tools": len(registry.definitions),
+        "projects": len(container.projects.list()),
+        "disk": {
+            "total_gib": round(disk.total / 1024**3, 1),
+            "free_gib": round(disk.free / 1024**3, 1),
+            "used_percent": round((disk.used / disk.total) * 100, 1) if disk.total else 0,
+        },
+        "memory": mem,
+        "load": [round(value, 2) for value in os.getloadavg()],
+        "route": ({"route_id": route.get("route_id"), "channel_id": route.get("channel_id")} if route else None),
+        "progress": progress,
+        "workflow": "search → schema (when needed) → call; use direct shell/job tools for common execution",
+    }
 
 
 def exposed_tool_definitions(registry: ToolRegistry, surface: str) -> tuple[types.Tool, ...]:
@@ -201,30 +245,31 @@ def compact_tools(container: ApplicationContainer, registry: ToolRegistry) -> tu
                     event="delegated_via_bridge_call",
                 ))
 
+    def progress_route(arguments: dict[str, Any]) -> dict[str, Any]:
+        route_id = arguments.get("route_id")
+        return _resolved_route(container, str(route_id) if route_id is not None else None)
+
+    async def work_progress_get(ctx, params, request_context):
+        arguments = params.arguments or {}
+        route = progress_route(arguments)
+        data = _progress_store(container).get(str(route["route_id"]))
+        return to_mcp_result(success(request_context.request_id, {"progress": data}))
+
+    async def work_progress_update(ctx, params, request_context):
+        arguments = dict(params.arguments or {})
+        route = progress_route(arguments)
+        arguments.pop("route_id", None)
+        data = _progress_store(container).update(str(route["route_id"]), arguments)
+        return to_mcp_result(success(request_context.request_id, {"progress": data}))
+
+    async def work_progress_clear(ctx, params, request_context):
+        arguments = params.arguments or {}
+        route = progress_route(arguments)
+        data = _progress_store(container).clear(str(route["route_id"]))
+        return to_mcp_result(success(request_context.request_id, data))
+
     async def bridge_dashboard(ctx, params, request_context):
-        disk = shutil.disk_usage("/")
-        mem = _memory_snapshot()
-        visible = exposed_tool_definitions(registry, "compact")
-        route = container.route_registry.resolve()
-        data = {
-            "status": "online",
-            "name": container.settings.server.name,
-            "version": "1.0.0",
-            "api_version": "1.0",
-            "tool_surface": "compact",
-            "visible_tools": len(visible),
-            "internal_tools": len(registry.definitions),
-            "projects": len(container.projects.list()),
-            "disk": {
-                "total_gib": round(disk.total / 1024**3, 1),
-                "free_gib": round(disk.free / 1024**3, 1),
-                "used_percent": round((disk.used / disk.total) * 100, 1) if disk.total else 0,
-            },
-            "memory": mem,
-            "load": [round(value, 2) for value in os.getloadavg()],
-            "route": ({"route_id": route.get("route_id"), "channel_id": route.get("channel_id")} if route else None),
-            "workflow": "search → schema (when needed) → call; use direct shell/job tools for common execution",
-        }
+        data = dashboard_snapshot(container, registry)
         result = to_mcp_result(success(request_context.request_id, data))
         result.structured_content = data
         result.meta = dict(BRIDGE_DASHBOARD_UI_META)
@@ -268,6 +313,43 @@ def compact_tools(container: ApplicationContainer, registry: ToolRegistry) -> tu
                 "additionalProperties": False,
             },
         ), bridge_call, "compact"),
+        RegisteredTool(types.Tool(
+            name="work_progress_get",
+            description="Read durable user-facing work progress for the active or specified logical route",
+            inputSchema={
+                "type": "object",
+                "properties": {"route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"}},
+                "additionalProperties": False,
+            },
+        ), work_progress_get, "compact"),
+        RegisteredTool(types.Tool(
+            name="work_progress_update",
+            description="Create or update a durable semantic work-progress checkpoint for the active or specified logical route",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
+                    "title": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "phase": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "status": {"type": "string", "enum": ["planning", "working", "waiting", "blocked", "completed"]},
+                    "completed": {"type": "integer", "minimum": 0, "maximum": 1000},
+                    "total": {"type": "integer", "minimum": 1, "maximum": 1000},
+                    "current": {"type": "string", "minLength": 1, "maxLength": 300},
+                    "next": {"type": "string", "minLength": 1, "maxLength": 300},
+                    "detail": {"type": "string", "minLength": 1, "maxLength": 500},
+                },
+                "additionalProperties": False,
+            },
+        ), work_progress_update, "compact"),
+        RegisteredTool(types.Tool(
+            name="work_progress_clear",
+            description="Clear durable user-facing work progress for the active or specified logical route",
+            inputSchema={
+                "type": "object",
+                "properties": {"route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"}},
+                "additionalProperties": False,
+            },
+        ), work_progress_clear, "compact"),
         RegisteredTool(types.Tool(
             name="bridge_dashboard",
             description="Show a compact user-facing Development Bridge health and capacity dashboard",

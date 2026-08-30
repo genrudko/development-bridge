@@ -205,3 +205,59 @@ async def test_rollover_control_keeps_active_route_until_commit(tmp_path):
             assert committed.status_code == 200
             assert committed.json()["conversation_id"] == "conv-b"
             assert container.route_registry.resolve("ad5x")["conversation_id"] == "conv-b"
+
+@pytest.mark.asyncio
+async def test_compact_dashboard_live_state_resource(tmp_path):
+    from app.tools.compact import BRIDGE_DASHBOARD_STATE_URI, BRIDGE_DASHBOARD_UI_URI
+
+    settings = BridgeSettings.model_validate({
+        "server": {"tool_surface": "compact"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "ad5x",
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "telegram-ad5x-g1",
+        "AD5X",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client:
+            async with streamable_http_client(
+                "http://127.0.0.1/mcp", http_client=client
+            ) as streams:
+                async with ClientSession(*streams) as session:
+                    await session.initialize()
+                    resources = await session.list_resources()
+                    uris = {str(item.uri) for item in resources.resources}
+                    assert BRIDGE_DASHBOARD_UI_URI in uris
+                    assert BRIDGE_DASHBOARD_STATE_URI in uris
+
+                    listed = await session.list_tools()
+                    names = {tool.name for tool in listed.tools}
+                    assert len(names) == 14
+                    assert "work_progress_update" not in names
+
+                    updated = await session.call_tool("bridge_call", {
+                        "tool_name": "work_progress_update",
+                        "arguments": {
+                            "title": "Live dashboard",
+                            "total": 5,
+                            "completed": 2,
+                            "status": "working",
+                            "current": "Integration test",
+                        },
+                    })
+                    assert json.loads(updated.content[0].text)["ok"] is True
+
+                    state = await session.read_resource(BRIDGE_DASHBOARD_STATE_URI)
+                    payload = json.loads(state.contents[0].text)
+                    assert payload["progress"]["title"] == "Live dashboard"
+                    assert payload["progress"]["percent"] == 40
+
+                    ui = await session.read_resource(BRIDGE_DASHBOARD_UI_URI)
+                    assert "readServerResource" in ui.contents[0].text
+                    assert BRIDGE_DASHBOARD_STATE_URI in ui.contents[0].text
