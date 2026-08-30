@@ -111,7 +111,8 @@ def test_launch_builds_documented_headless_argv_and_bounded_prompt(tmp_path):
     request = ExecutorRequest("make change", TaskKind.IMPLEMENTATION, ExecutorName.ANTIGRAVITY, 901, 262144, None)
     launch = executor.launch(repository, request, callable_status())
     assert launch.arguments[0] == "-p"
-    assert launch.arguments[-6:] == ("--print-timeout", "900s", "--model", "gemini-3.1-pro", "--cwd", str(tmp_path))
+    assert launch.arguments[-4:] == ("--print-timeout", "900s", "--model", "gemini-3.1-pro")
+    assert "--cwd" not in launch.arguments
     assert "AGENTS.md" in launch.arguments[1] and "Do not push or deploy" in launch.arguments[1]
     assert launch.stdin is None and launch.environment_keys == ("HOME", "SSH_CONNECTION")
 

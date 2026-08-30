@@ -165,6 +165,5 @@ class AntigravityExecutor:
                      "--print-timeout", f"{timeout}s"]
         if self._settings.model is not None:
             arguments.extend(("--model", self._settings.model))
-        arguments.extend(("--cwd", str(repository.root)))
         return ExecutorLaunch(str(Path(self._settings.executable).expanduser()), tuple(arguments), None,
             ("HOME", "SSH_CONNECTION"), ExecutorName.ANTIGRAVITY, self._settings.model, status.quota_state)
