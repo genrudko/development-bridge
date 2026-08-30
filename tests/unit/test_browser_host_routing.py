@@ -125,6 +125,177 @@ def test_browser_host_rate_limit_backoff_is_bounded_and_persisted(tmp_path: Path
     assert host.rate_limit_count == 2
 
 
+def test_browser_host_restores_persisted_web_backoff_and_blocks_live_probe(tmp_path: Path, monkeypatch):
+    module = _module()
+    cfg = _config(module, tmp_path)
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg.web_backoff_file.write_text(
+        '{"version":1,"reason":"chatgpt_rate_limit","detected_at":"x","until":1120.0,"attempt":2}\n'
+    )
+    monkeypatch.setattr(module.time, "time", lambda: 1000.0)
+    host = module.BrowserHost(cfg)
+    probed = []
+    host.rate_limit_detected = lambda page: probed.append(True) or False
+
+    gate = host.guard_live_web_work({"id": "page"})
+
+    assert gate["allowed"] is False
+    assert gate["reason"] == "web_backoff"
+    assert gate["retry_after_seconds"] == 120.0
+    assert host.rate_limit_count == 2
+    assert probed == []
+
+
+def test_browser_host_chrome_starts_blank_during_persisted_backoff(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.rate_limit_until = 1120.0
+    monkeypatch.setattr(module.time, "time", lambda: 1000.0)
+    seen = {}
+    class Proc:
+        def poll(self): return None
+    def fake_popen(argv, **kwargs):
+        seen["argv"] = argv
+        return Proc()
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+
+    host.start_chrome()
+
+    assert seen["argv"][-1] == "about:blank"
+    assert host.target_url not in seen["argv"]
+
+
+def test_browser_host_run_blocks_persisted_backoff_before_route_web_work():
+    source = (Path(__file__).parents[2] / "ops/chatgpt_browser_host/browser_host.py").read_text()
+    run_source = source[source.index("    def run(self) -> int:"):]
+    gate = run_source.index("loop_backoff_seconds = self.web_backoff_remaining()")
+    route = run_source.index("route_changed = self.refresh_route_target()")
+    enforce = run_source.index("target_ok, page = self.enforce_target()")
+    rollover = run_source.index("rollover_result = self.process_pending_rollover()")
+    assert gate < route < rollover < enforce
+
+
+def test_browser_host_inflight_preflight_has_durable_crash_cooldown(tmp_path: Path, monkeypatch):
+    module = _module()
+    cfg = _config(module, tmp_path)
+    clock = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    host = module.BrowserHost(cfg)
+
+    started = host._begin_browser_preflight_attempt("cont_abcdefghij")
+    assert started["allowed"] is True
+    assert started["preflight_attempts"] == 1
+
+    restarted = module.BrowserHost(cfg)
+    blocked = restarted._begin_browser_preflight_attempt("cont_abcdefghij")
+    assert blocked["error"] == "browser_preflight_cooldown"
+    assert blocked["preflight_attempts"] == 1
+    assert blocked["retry_after_seconds"] == host.PREFLIGHT_RETRY_BASE_SECONDS
+
+
+def test_browser_host_preflight_failure_enters_cooldown_without_new_page(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    clock = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    created = []
+    host.create_blank_page = lambda: created.append(True) or {
+        "id": f"page-{len(created)}", "url": "about:blank",
+    }
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: {
+        "ok": True, "latest_turn_complete": False,
+    }
+    host.close_page = lambda page_id: None
+
+    first = host.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")
+    second = host.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")
+
+    assert first["error"] == "conversation_latest_turn_not_final"
+    assert second["error"] == "browser_preflight_cooldown"
+    assert second["preflight_attempts"] == 1
+    assert second["retry_after_seconds"] == 60.0
+    assert len(created) == 1
+
+
+def test_browser_host_preflight_live_attempt_budget_is_hard_bounded(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    clock = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    created = []
+    host.create_blank_page = lambda: created.append(True) or {
+        "id": f"page-{len(created)}", "url": "about:blank",
+    }
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: {
+        "ok": True, "latest_turn_complete": False,
+    }
+    host.close_page = lambda page_id: None
+
+    assert host.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")["error"] == "conversation_latest_turn_not_final"
+    clock[0] += 60.0
+    assert host.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")["error"] == "conversation_latest_turn_not_final"
+    clock[0] += 120.0
+    assert host.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")["error"] == "conversation_latest_turn_not_final"
+    exhausted = host.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")
+
+    assert exhausted["error"] == "browser_preflight_budget_exhausted"
+    assert exhausted["preflight_attempts"] == 3
+    assert len(created) == 3
+
+
+def test_browser_host_restores_preflight_budget_across_restart(tmp_path: Path, monkeypatch):
+    module = _module()
+    cfg = _config(module, tmp_path)
+    clock = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    host = module.BrowserHost(cfg)
+    host.create_blank_page = lambda: {"id": "page-fresh", "url": "about:blank"}
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: {
+        "ok": True, "latest_turn_complete": False,
+    }
+    host.close_page = lambda page_id: None
+
+    first = host.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")
+    assert first["preflight_attempts"] == 1
+
+    restarted = module.BrowserHost(cfg)
+    blocked = restarted.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")
+    assert blocked["error"] == "browser_preflight_cooldown"
+    assert blocked["preflight_attempts"] == 1
+    assert blocked["retry_after_seconds"] == 60.0
+
+
+def test_browser_host_new_continuation_replaces_persisted_preflight_budget(tmp_path: Path, monkeypatch):
+    module = _module()
+    cfg = _config(module, tmp_path)
+    clock = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    host = module.BrowserHost(cfg)
+    host.create_blank_page = lambda: {"id": "page-fresh", "url": "about:blank"}
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: {
+        "ok": True, "latest_turn_complete": False,
+    }
+    host.close_page = lambda page_id: None
+    host.prepare_browser_preflight({"id": "old"}, "cont_abcdefghij")
+
+    restarted = module.BrowserHost(cfg)
+    restarted.create_blank_page = host.create_blank_page
+    restarted.refresh_conversation_snapshot = host.refresh_conversation_snapshot
+    restarted.close_page = host.close_page
+    result = restarted.prepare_browser_preflight({"id": "old"}, "cont_newabcdefgh")
+
+    assert result["error"] == "conversation_latest_turn_not_final"
+    assert result["preflight_attempts"] == 1
+
+
+def test_browser_host_run_applies_web_guard_before_preflight():
+    source = (Path(__file__).parents[2] / "ops/chatgpt_browser_host/browser_host.py").read_text()
+    run_source = source[source.index("    def run(self) -> int:"):]
+    guard = run_source.index("guard_live_web_work(page)")
+    preflight = run_source.index("early_status = self.coordinator_local_status()")
+    assert guard < preflight
+
+
 def test_browser_host_model_turn_observer_baselines_before_ack(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
@@ -758,7 +929,9 @@ def test_browser_host_preflight_uses_fresh_current_chat_before_authorizing(tmp_p
         "last_key": "leaf-ready", "last_message_id": "message-current", "assistant_chars": 42
     }
     host.safe_coordinator_iframe_count = lambda selected: (0, None)
-    host.recover_listener = lambda selected: calls.append(("recover", selected["id"])) or True
+    host.recover_listener = lambda selected, allow_during_preflight=False: (
+        calls.append(("recover", selected["id"])) or True
+    )
     host.wait_for_control_channel = lambda selected, channel_id, timeout=15: (
         calls.append(("observer", selected["id"], channel_id))
         or {"ok": True, "channel_id": channel_id, "observer_only": True}
@@ -770,6 +943,8 @@ def test_browser_host_preflight_uses_fresh_current_chat_before_authorizing(tmp_p
     ) or {"authorized": True, "continuation_id": continuation_id}
     result = host.prepare_browser_preflight(page, "cont_abcdefghij")
     assert result["authorized"] is True
+    assert result["preflight_attempt"] == 1
+    assert result["preflight_attempts"] == 1
     assert result["leaf"]["last_key"] == "leaf-ready"
     assert result["fresh_page_id"] == "page-fresh"
     assert calls == [
@@ -901,6 +1076,59 @@ def test_browser_host_rejects_snapshot_without_current_message():
     })
     assert result["ok"] is False
     assert result["error"] == "conversation_current_node_missing"
+
+
+def test_browser_host_preflight_recovery_can_run_while_preflight_is_pending(tmp_path: Path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.coordinator_local_status = lambda: {"state": "browser_preflight"}
+
+    class FakeWS:
+        def __init__(self):
+            self.last = None
+        def send(self, payload):
+            self.last = __import__("json").loads(payload)
+        def recv(self):
+            return __import__("json").dumps({
+                "id": self.last["id"],
+                "result": {"result": {"value": {"frames": 1}}},
+            })
+        def close(self):
+            pass
+
+    monkeypatch.setattr(module.websocket, "create_connection", lambda *a, **k: FakeWS(), raising=False)
+    assert host.recover_listener(
+        {"webSocketDebuggerUrl": "ws://fake"}, allow_during_preflight=True
+    ) is True
+
+
+def test_browser_host_prepare_preflight_marks_listener_recovery_as_preflight_owned(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    page = {"id": "page-stale", "url": host.target_url}
+    fresh = {"id": "page-fresh", "url": "about:blank"}
+    seen = []
+    host.create_blank_page = lambda: fresh
+    host.refresh_conversation_snapshot = lambda selected, timeout=30: _final_snapshot()
+    host.wait_for_settled_conversation = lambda selected, timeout=30, expected_message_id=None: {
+        "settled": True, "current": True, "last_message_id": expected_message_id,
+    }
+    host.safe_coordinator_iframe_count = lambda selected: (0, None)
+    host.recover_listener = lambda selected, allow_during_preflight=False: (
+        seen.append(allow_during_preflight) or True
+    )
+    host.wait_for_control_channel = lambda selected, channel_id, timeout=15: {
+        "ok": True, "channel_id": channel_id, "observer_only": True,
+    }
+    host.close_page = lambda page_id: None
+    host.wait_for_polling = lambda channel_id, timeout=20: (True, "matches=1")
+    host.authorize_browser_preflight_local = lambda continuation_id: {
+        "authorized": True, "continuation_id": continuation_id,
+    }
+
+    result = host.prepare_browser_preflight(page, "cont_abcdefghij")
+    assert result["authorized"] is True
+    assert seen == [True]
 
 
 def test_browser_host_listener_recovery_yields_to_pending_preflight(tmp_path: Path, monkeypatch):

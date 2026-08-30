@@ -66,6 +66,10 @@ class Config:
     def web_backoff_file(self) -> Path:
         return self.state_dir.parent / "web-backoff.json"
 
+    @property
+    def preflight_budget_file(self) -> Path:
+        return self.state_dir.parent / "browser-preflight-budget.json"
+
 
 def env(name: str, default: str) -> str:
     return os.environ.get(name, default).strip()
@@ -173,6 +177,10 @@ def terminate(proc: subprocess.Popen | None) -> None:
 
 
 class BrowserHost:
+    PREFLIGHT_MAX_LIVE_ATTEMPTS = 3
+    PREFLIGHT_RETRY_BASE_SECONDS = 60.0
+    PREFLIGHT_RETRY_MAX_SECONDS = 240.0
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.stop = False
@@ -188,6 +196,12 @@ class BrowserHost:
         self.route_generation = 0
         self.rate_limit_count = 0
         self.rate_limit_until = 0.0
+        self.preflight_continuation_id: str | None = None
+        self.preflight_attempts = 0
+        self.preflight_retry_at = 0.0
+        self.preflight_inflight = False
+        self._restore_web_backoff()
+        self._restore_preflight_budget()
         self.last_bridge_turn_id = 0
         self.last_bridge_turn_key: str | None = None
         self.bridge_turn_baselined = False
@@ -276,6 +290,7 @@ class BrowserHost:
         chrome_env["LD_LIBRARY_PATH"] = ":".join(libs)
         Path(self.cfg.profile).mkdir(parents=True, exist_ok=True)
         self.clear_session_restore_state()
+        initial_url = "about:blank" if self.web_backoff_remaining() > 0 else self.target_url
         self.chrome = subprocess.Popen(
             [
                 self.cfg.chrome,
@@ -289,7 +304,7 @@ class BrowserHost:
                 "--disk-cache-size=268435456",
                 "--media-cache-size=67108864",
                 "--window-size=1280,900",
-                self.target_url,
+                initial_url,
             ],
             env=chrome_env,
             stdout=subprocess.DEVNULL,
@@ -436,6 +451,44 @@ class BrowserHost:
                     return bool(message.get("result", {}).get("result", {}).get("value", False))
         finally:
             ws.close()
+
+    def _restore_web_backoff(self) -> None:
+        try:
+            payload = json.loads(self.cfg.web_backoff_file.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        try:
+            until = float(payload.get("until", 0.0) or 0.0)
+            attempt = int(payload.get("attempt", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if until > time.time() and attempt > 0:
+            self.rate_limit_until = until
+            self.rate_limit_count = attempt
+
+    def web_backoff_remaining(self) -> float:
+        return max(0.0, self.rate_limit_until - time.time())
+
+    def guard_live_web_work(self, page: dict) -> dict:
+        remaining = self.web_backoff_remaining()
+        if remaining > 0:
+            return {
+                "allowed": False,
+                "reason": "web_backoff",
+                "retry_after_seconds": remaining,
+            }
+        try:
+            rate_limited = self.rate_limit_detected(page)
+        except Exception:
+            rate_limited = False
+        if rate_limited:
+            remaining = self.activate_web_backoff()
+            return {
+                "allowed": False,
+                "reason": "rate_limit_detected",
+                "retry_after_seconds": remaining,
+            }
+        return {"allowed": True, "reason": None, "retry_after_seconds": 0.0}
 
     def activate_web_backoff(self) -> float:
         now = time.time()
@@ -714,7 +767,128 @@ class BrowserHost:
             time.sleep(0.75)
         return last
 
+    def _restore_preflight_budget(self) -> None:
+        try:
+            payload = json.loads(
+                self.cfg.preflight_budget_file.read_text(encoding="utf-8")
+            )
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        continuation_id = payload.get("continuation_id")
+        if not isinstance(continuation_id, str) or not continuation_id:
+            return
+        try:
+            attempts = int(payload.get("attempts", 0) or 0)
+            retry_at = float(payload.get("retry_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return
+        inflight = payload.get("inflight") is True
+        if not 0 <= attempts <= self.PREFLIGHT_MAX_LIVE_ATTEMPTS:
+            return
+        self.preflight_continuation_id = continuation_id
+        self.preflight_attempts = attempts
+        self.preflight_inflight = inflight
+        if inflight and attempts > 0:
+            delay = min(
+                self.PREFLIGHT_RETRY_MAX_SECONDS,
+                self.PREFLIGHT_RETRY_BASE_SECONDS * (2 ** (attempts - 1)),
+            )
+            self.preflight_retry_at = time.time() + delay
+            self.preflight_inflight = False
+            self._persist_preflight_budget()
+        else:
+            self.preflight_retry_at = max(0.0, retry_at)
+
+    def _persist_preflight_budget(self) -> None:
+        if not self.preflight_continuation_id:
+            try:
+                self.cfg.preflight_budget_file.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        atomic_json(self.cfg.preflight_budget_file, {
+            "version": 1,
+            "continuation_id": self.preflight_continuation_id,
+            "attempts": self.preflight_attempts,
+            "retry_at": self.preflight_retry_at,
+            "inflight": self.preflight_inflight,
+            "updated_at": utcnow(),
+        })
+
+    def _begin_browser_preflight_attempt(self, continuation_id: str) -> dict:
+        now = time.time()
+        if continuation_id != self.preflight_continuation_id:
+            self.preflight_continuation_id = continuation_id
+            self.preflight_attempts = 0
+            self.preflight_retry_at = 0.0
+            self.preflight_inflight = False
+            self._persist_preflight_budget()
+        if self.preflight_attempts >= self.PREFLIGHT_MAX_LIVE_ATTEMPTS:
+            return {
+                "allowed": False,
+                "error": "browser_preflight_budget_exhausted",
+                "preflight_attempts": self.preflight_attempts,
+                "retry_after_seconds": 0.0,
+            }
+        remaining = max(0.0, self.preflight_retry_at - now)
+        if remaining > 0:
+            return {
+                "allowed": False,
+                "error": "browser_preflight_cooldown",
+                "preflight_attempts": self.preflight_attempts,
+                "retry_after_seconds": remaining,
+            }
+        self.preflight_attempts += 1
+        self.preflight_inflight = True
+        self._persist_preflight_budget()
+        return {
+            "allowed": True,
+            "preflight_attempt": self.preflight_attempts,
+            "preflight_attempts": self.preflight_attempts,
+            "retry_after_seconds": 0.0,
+        }
+
+    def _finish_browser_preflight_attempt(self, continuation_id: str, *, authorized: bool) -> None:
+        if continuation_id != self.preflight_continuation_id:
+            return
+        if authorized:
+            self.preflight_continuation_id = None
+            self.preflight_attempts = 0
+            self.preflight_retry_at = 0.0
+            self.preflight_inflight = False
+            self._persist_preflight_budget()
+            return
+        if self.preflight_attempts >= self.PREFLIGHT_MAX_LIVE_ATTEMPTS:
+            self.preflight_retry_at = 0.0
+            self.preflight_inflight = False
+            self._persist_preflight_budget()
+            return
+        delay = min(
+            self.PREFLIGHT_RETRY_MAX_SECONDS,
+            self.PREFLIGHT_RETRY_BASE_SECONDS * (2 ** (self.preflight_attempts - 1)),
+        )
+        self.preflight_retry_at = time.time() + delay
+        self.preflight_inflight = False
+        self._persist_preflight_budget()
+
     def prepare_browser_preflight(self, page: dict, continuation_id: str) -> dict:
+        gate = self._begin_browser_preflight_attempt(continuation_id)
+        if gate.get("allowed") is not True:
+            return {"authorized": False, **gate}
+        try:
+            result = self._prepare_browser_preflight_live(page, continuation_id)
+        except Exception:
+            self._finish_browser_preflight_attempt(continuation_id, authorized=False)
+            raise
+        authorized = result.get("authorized") is True
+        self._finish_browser_preflight_attempt(continuation_id, authorized=authorized)
+        return {
+            **result,
+            "preflight_attempt": gate["preflight_attempt"],
+            "preflight_attempts": gate["preflight_attempts"],
+        }
+
+    def _prepare_browser_preflight_live(self, page: dict, continuation_id: str) -> dict:
         fresh_page: dict | None = None
         keep_fresh_page = False
         try:
@@ -761,7 +935,9 @@ class BrowserHost:
                 }
             if iframe_count == 0:
                 try:
-                    recovered = self.recover_listener(fresh_page)
+                    recovered = self.recover_listener(
+                        fresh_page, allow_during_preflight=True
+                    )
                 except TRANSIENT_CDP_ERRORS as exc:
                     return {
                         "authorized": False,
@@ -854,7 +1030,9 @@ class BrowserHost:
             self.last_bridge_turn_key = latest_key
         return None
 
-    def recover_listener(self, page: dict) -> bool:
+    def recover_listener(
+        self, page: dict, *, allow_during_preflight: bool = False
+    ) -> bool:
         """Load older virtualized turns until the coordinator MCP App iframe mounts."""
         deadline = time.monotonic() + self.cfg.listener_recovery_timeout
         ws = websocket.create_connection(
@@ -887,7 +1065,10 @@ class BrowserHost:
                     coordinator_status = self.coordinator_local_status()
                 except requests.RequestException:
                     coordinator_status = {}
-                if coordinator_status.get("state") == "browser_preflight":
+                if (
+                    coordinator_status.get("state") == "browser_preflight"
+                    and not allow_during_preflight
+                ):
                     return False
                 state = evaluate(r"""(()=>{
                   const frames=[...document.querySelectorAll('iframe')]
@@ -1922,6 +2103,24 @@ class BrowserHost:
                 if self.chrome is None or self.chrome.poll() is not None:
                     raise RuntimeError("Chrome is not running")
 
+                loop_backoff_seconds = self.web_backoff_remaining()
+                if loop_backoff_seconds > 0:
+                    poll_ok, poll_detail = self.polling_ok()
+                    self.write_state(
+                        status="rate_limited",
+                        cdp_ok=True,
+                        target_ok=False,
+                        polling_ok=poll_ok,
+                        polling_detail=poll_detail,
+                        current_url="about:blank",
+                        title="",
+                        web_backoff_seconds=round(loop_backoff_seconds, 1),
+                        web_backoff_reason="web_backoff",
+                        rate_limit_count=self.rate_limit_count,
+                    )
+                    time.sleep(max(self.cfg.check_interval, min(15.0, loop_backoff_seconds)))
+                    continue
+
                 route_changed = self.refresh_route_target()
                 if route_changed:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
@@ -1993,12 +2192,9 @@ class BrowserHost:
                     time.sleep(self.cfg.check_interval)
                     continue
 
-                try:
-                    rate_limited = self.rate_limit_detected(page)
-                except Exception:
-                    rate_limited = False
-                if rate_limited:
-                    backoff_seconds = self.activate_web_backoff()
+                web_gate = self.guard_live_web_work(page)
+                if web_gate.get("allowed") is not True:
+                    backoff_seconds = float(web_gate.get("retry_after_seconds", 0.0) or 0.0)
                     self.write_state(
                         status="rate_limited",
                         cdp_ok=True,
@@ -2008,6 +2204,7 @@ class BrowserHost:
                         current_url=current_url,
                         title=title,
                         web_backoff_seconds=round(backoff_seconds, 1),
+                        web_backoff_reason=web_gate.get("reason"),
                         rate_limit_count=self.rate_limit_count,
                     )
                     time.sleep(max(self.cfg.check_interval, min(15.0, backoff_seconds)))
