@@ -13,6 +13,7 @@ from .commands import command_tools
 from .compact import compact_tools
 from .coordinator import coordinator_tools
 from .eod_browser import eod_browser_tools
+from .executors import executor_tools
 from .files import file_tools
 from .fusion import fusion_tools
 from .git_read import git_read_tools
@@ -45,6 +46,7 @@ def build_tool_registry(
         + git_write_tools(container)
         + git_workspace_tools(container)
         + change_tools(container)
+        + executor_tools(container)
         + job_tools(container)
         + knowledge_tools(container)
         + github_tools(container)

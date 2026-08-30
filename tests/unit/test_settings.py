@@ -1,8 +1,34 @@
 import pytest
 from pydantic import ValidationError
+from pathlib import Path
 
 from app.auth import create_owner_verifier
 from app.settings import BridgeSettings, load_settings
+
+
+def test_antigravity_executor_is_disabled_by_default():
+    settings = BridgeSettings()
+    assert settings.executors.antigravity.enabled is False
+    assert settings.executors.antigravity.executable == Path("~/.local/bin/agy")
+
+
+def test_antigravity_executor_settings_are_bounded():
+    settings = BridgeSettings.model_validate({"executors": {"antigravity": {
+        "enabled": True, "executable": "/opt/agy/bin/agy",
+        "probe_timeout_seconds": 12, "task_timeout_seconds": 600,
+        "output_limit_bytes": 131072, "model": "gemini-3.1-pro",
+    }}})
+    assert settings.executors.antigravity.executable == Path("/opt/agy/bin/agy")
+    assert settings.executors.antigravity.model == "gemini-3.1-pro"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("probe_timeout_seconds", 0), ("task_timeout_seconds", 3601),
+    ("output_limit_bytes", 1023), ("output_limit_bytes", 1048577),
+])
+def test_antigravity_executor_rejects_out_of_bounds_values(field, value):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"executors": {"antigravity": {field: value}}})
 
 
 def test_defaults_allow_startup_without_registered_projects():

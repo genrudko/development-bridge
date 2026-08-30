@@ -17,7 +17,10 @@ def test_old_job_database_additively_migrates_execution_specs(tmp_path):
         UNIQUE(project_id, repository_id, task_id, idempotency_key))""")
     connection.commit(); connection.close()
     JobStore(database).initialize()
+    JobStore(database).initialize()
     connection = sqlite3.connect(database)
     tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
     connection.close()
     assert "job_execution_specs" in tables
+    assert {"executor", "executor_model", "executor_quota_state"} <= columns

@@ -67,6 +67,7 @@ async def test_repository_exec_uses_durable_job_lifecycle_and_literal_argv(tmp_p
                         }],
                     }
                     started = json.loads((await session.call_tool("repository_exec", args)).content[0].text)["data"]
+                    assert "executor" not in started and "executor_model" not in started and "executor_quota_state" not in started
                     repeated = json.loads((await session.call_tool("repository_exec", args)).content[0].text)["data"]
                     assert repeated["job_id"] == started["job_id"]
                     conflict_args = {**args, "arguments": ["-c", "print('different')"]}

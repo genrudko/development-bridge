@@ -380,6 +380,11 @@ class JobService:
         artifacts: list[dict] | tuple[dict, ...] = (),
         stdin: str | None = None,
         idempotency_key: str | None = None,
+        executor: str | None = None,
+        executor_model: str | None = None,
+        executor_quota_state: str | None = None,
+        environment_keys: tuple[str, ...] = (),
+        require_repository_idle: bool = False,
     ) -> JobRecord:
         self._require_execute(repository)
         if not isinstance(executable, str) or not 1 <= len(executable) <= 4096 or "\0" in executable:
@@ -408,6 +413,12 @@ class JobService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "artifact ids must be unique")
         if idempotency_key is not None and not 1 <= len(idempotency_key) <= 128:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "idempotency_key is invalid")
+        for value in (executor, executor_model, executor_quota_state):
+            if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 128):
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "executor attribution is invalid")
+        if (not isinstance(environment_keys, tuple) or len(environment_keys) != len(set(environment_keys))
+                or any(key not in {"HOME", "SSH_CONNECTION"} for key in environment_keys)):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "environment_keys are invalid")
         payload = {
             "project_id": repository.project_id,
             "repository_id": repository.id,
@@ -426,6 +437,10 @@ class JobService:
                 }
                 for item in configured_artifacts
             ],
+            "executor": executor,
+            "executor_model": executor_model,
+            "executor_quota_state": executor_quota_state,
+            "environment_keys": list(environment_keys),
         }
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         store = self._require_store(execution=True)
@@ -437,6 +452,10 @@ class JobService:
                 idempotency_key=idempotency_key,
                 payload_json=payload_json,
                 payload_digest=hashlib.sha256(payload_json.encode()).hexdigest(),
+                executor=executor,
+                executor_model=executor_model,
+                executor_quota_state=executor_quota_state,
+                require_repository_idle=require_repository_idle,
             )
             if created:
                 self._enqueue(job.job_id)
@@ -506,6 +525,18 @@ class JobService:
     def status(self, repository: Repository, job_id: str) -> JobRecord:
         self._require_execute(repository)
         return self._require_store().get(repository.project_id, repository.id, job_id)
+
+    def repository_busy(self, repository: Repository) -> bool:
+        self._require_execute(repository)
+        return self._require_store().has_active_for_repository(repository.project_id, repository.id)
+
+    def execution_by_idempotency(
+        self, repository: Repository, idempotency_key: str
+    ) -> JobRecord | None:
+        self._require_execute(repository)
+        return self._require_store().execution_by_idempotency(
+            repository.project_id, repository.id, idempotency_key
+        )
 
     def output(self, repository: Repository, job_id: str) -> JobRecord:
         return self.status(repository, job_id)
@@ -683,7 +714,7 @@ class JobService:
                 profile.executable,
                 *profile.arguments,
                 cwd=repository.root,
-                env=self._task_environment(),
+                env=self._task_environment(store.execution_environment_keys(job_id)),
                 start_new_session=True,
                 stdin=(asyncio.subprocess.PIPE if profile.stdin_text is not None else None),
                 stdout=asyncio.subprocess.PIPE,
@@ -836,10 +867,10 @@ class JobService:
         )
 
     @staticmethod
-    def _task_environment() -> dict[str, str]:
+    def _task_environment(extra_keys: tuple[str, ...] = ()) -> dict[str, str]:
         return {
             key: value
-            for key in ("PATH", "LANG", "LC_ALL")
+            for key in ("PATH", "LANG", "LC_ALL", *extra_keys)
             if (value := os.environ.get(key)) is not None
         }
 

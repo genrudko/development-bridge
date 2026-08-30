@@ -9,6 +9,14 @@ server:
   allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
 jobs:
   database_path: /absolute/path/to/development-bridge-jobs.sqlite3
+# executors:
+#   antigravity:
+#     enabled: false
+#     executable: ~/.local/bin/agy
+#     probe_timeout_seconds: 20
+#     task_timeout_seconds: 900
+#     output_limit_bytes: 262144
+#     model: gemini-3.1-pro
 # desktop_nodes:
 #   offline_after_seconds: 45
 #   claim_timeout_seconds: 25

@@ -18,6 +18,7 @@ from app.commands import RepositoryCommandService
 from app.coordinator import CoordinatorService, RouteRegistry
 from app.desktop_nodes import DesktopNodeService
 from app.files import FileService
+from app.executors import AntigravityExecutor, AsyncioProcessRunner, ExecutorSelector, ExecutorService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
     GitHubActionsArtifactExportService,
@@ -68,6 +69,7 @@ class ApplicationContainer:
     changes: ChangeService
     tasks: TaskRegistry
     jobs: JobService
+    executors: ExecutorService
     job_artifact_exports: JobArtifactExportService
     github: GitHubHostService
     github_artifact_exports: GitHubActionsArtifactExportService
@@ -258,6 +260,11 @@ def build_container(
         else None,
         max_concurrency=configured.jobs.max_concurrency,
     )
+    executors = ExecutorService(
+        jobs,
+        AntigravityExecutor(configured.executors.antigravity, AsyncioProcessRunner()),
+        ExecutorSelector(),
+    )
     job_artifact_exports = JobArtifactExportService(
         jobs,
         projects,
@@ -362,6 +369,7 @@ def build_container(
         changes=ChangeService(policy, revisions, mutations),
         tasks=tasks,
         jobs=jobs,
+        executors=executors,
         job_artifact_exports=job_artifact_exports,
         github=github,
         github_artifact_exports=github_artifact_exports,

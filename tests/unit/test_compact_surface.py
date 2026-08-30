@@ -20,7 +20,7 @@ async def _handler(ctx, params, request_context):
 
 def _registry():
     registry = ToolRegistry()
-    for name in ("file_read", "github_pull_request_get", "coordinator_ack"):
+    for name in ("file_read", "github_pull_request_get", "coordinator_ack", "executor_status", "executor_start"):
         registry.register(RegisteredTool(types.Tool(
             name=name,
             description=f"tool {name}",
@@ -41,6 +41,7 @@ def test_compact_surface_exposes_only_allowlisted_names():
     assert names <= set(COMPACT_VISIBLE_TOOLS)
     assert "bridge_call" in names
     assert "file_read" not in names
+    assert "executor_status" not in names and "executor_start" not in names
 
 
 @pytest.mark.asyncio

@@ -242,6 +242,35 @@ async def test_idempotent_start_returns_same_job(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_repository_busy_tracks_active_execution(tmp_path):
+    jobs, repository, _ = configured(tmp_path, "print('done')")
+    jobs._store.initialize()
+    assert jobs.repository_busy(repository) is False
+    started = await jobs.start_execution(repository, sys.executable, ["-c", "print('done')"],
+        "req", executor="antigravity", executor_model="gemini", executor_quota_state="unknown",
+        environment_keys=("HOME",))
+    assert jobs.repository_busy(repository) is True
+    assert jobs._store.start(started.job_id)
+    jobs._store.finish(started.job_id, JobStatus.SUCCEEDED, exit_code=0)
+    assert jobs.repository_busy(repository) is False
+
+
+@pytest.mark.asyncio
+async def test_executor_idle_admission_is_atomic_and_idempotent(tmp_path):
+    jobs, repository, _ = configured(tmp_path, "print('done')")
+    jobs._store.initialize()
+    kwargs = dict(idempotency_key="same", executor="antigravity",
+        executor_quota_state="unknown", require_repository_idle=True)
+    first = await jobs.start_execution(repository, sys.executable, ["-c", "print('one')"], "one", **kwargs)
+    repeated = await jobs.start_execution(repository, sys.executable, ["-c", "print('one')"], "two", **kwargs)
+    assert repeated.job_id == first.job_id
+    with pytest.raises(BridgeError) as busy:
+        await jobs.start_execution(repository, sys.executable, ["-c", "print('two')"], "three",
+            executor="antigravity", executor_quota_state="unknown", require_repository_idle=True)
+    assert busy.value.code is ErrorCode.JOB_BUSY
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("required", "expected_status"),
     [(True, JobStatus.FAILED), (False, JobStatus.SUCCEEDED)],

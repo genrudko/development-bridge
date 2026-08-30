@@ -47,6 +47,8 @@ _COMPACT_META_TOOLS = {"bridge_dashboard", "bridge_search", "bridge_schema", "br
 
 
 def _category(name: str) -> str:
+    if name.startswith("executor_"):
+        return "executors"
     if name.startswith("github_"):
         return "github"
     if name.startswith("knowledge_"):

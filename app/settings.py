@@ -95,6 +95,23 @@ class JobSettings(BaseModel):
     max_concurrency: int = Field(default=8, ge=1, le=32)
 
 
+class AntigravityExecutorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    executable: Path = Path("~/.local/bin/agy")
+    probe_timeout_seconds: float = Field(default=20, gt=0, le=60)
+    task_timeout_seconds: float = Field(default=900, gt=0, le=3600)
+    output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ExecutorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    antigravity: AntigravityExecutorSettings = Field(
+        default_factory=AntigravityExecutorSettings
+    )
+
+
 def _default_managed_repository_root() -> Path:
     data_home = os.environ.get("XDG_DATA_HOME")
     base = Path(data_home) if data_home else Path.home() / ".local" / "share"
@@ -274,6 +291,7 @@ class BridgeSettings(BaseModel):
     version: int = Field(default=1, ge=1, le=1)
     server: ServerSettings = Field(default_factory=ServerSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
+    executors: ExecutorSettings = Field(default_factory=ExecutorSettings)
     managed_repositories: ManagedRepositorySettings = Field(
         default_factory=ManagedRepositorySettings
     )

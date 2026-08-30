@@ -45,6 +45,9 @@ class JobStore:
                     stderr BLOB NOT NULL DEFAULT X'',
                     stdout_truncated INTEGER NOT NULL DEFAULT 0,
                     stderr_truncated INTEGER NOT NULL DEFAULT 0,
+                    executor TEXT,
+                    executor_model TEXT,
+                    executor_quota_state TEXT,
                     UNIQUE(project_id, repository_id, task_id, idempotency_key)
                 );
                 CREATE INDEX IF NOT EXISTS jobs_queue
@@ -83,6 +86,10 @@ class JobStore:
                 ON job_terminal_waiters(project_id, repository_id, created_at);
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+            for name in ("executor", "executor_model", "executor_quota_state"):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT")
             interrupted = self._rows(
                 connection.execute(
                     "SELECT * FROM jobs WHERE status = ?", (JobStatus.RUNNING.value,)
@@ -143,6 +150,17 @@ class JobStore:
             ).fetchone()
         return row is not None
 
+    def execution_by_idempotency(
+        self, project_id: str, repository_id: str, idempotency_key: str
+    ) -> JobRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM jobs WHERE project_id=? AND repository_id=?
+                   AND task_id=? AND idempotency_key=?""",
+                (project_id, repository_id, REPOSITORY_EXEC_TASK_ID, idempotency_key),
+            ).fetchone()
+        return None if row is None else self._row(row)
+
     def create(
         self,
         *,
@@ -198,21 +216,50 @@ class JobStore:
         idempotency_key: str | None,
         payload_json: str,
         payload_digest: str,
+        executor: str | None = None,
+        executor_model: str | None = None,
+        executor_quota_state: str | None = None,
+        require_repository_idle: bool = False,
     ) -> tuple[JobRecord, bool]:
         job_id = "job_" + uuid4().hex
         created_at = _now()
         with self._connect() as connection:
+            if idempotency_key is not None:
+                existing = connection.execute(
+                    """SELECT j.*, s.payload_digest FROM jobs j
+                       LEFT JOIN job_execution_specs s ON s.job_id=j.job_id
+                       WHERE j.project_id=? AND j.repository_id=?
+                         AND j.task_id=? AND j.idempotency_key=?""",
+                    (project_id, repository_id, REPOSITORY_EXEC_TASK_ID, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["payload_digest"] != payload_digest:
+                        raise BridgeError(ErrorCode.IDEMPOTENCY_CONFLICT,
+                            "idempotency_key is already bound to another execution specification")
+                    return self._row(existing), False
+            if require_repository_idle:
+                active = connection.execute(
+                    """SELECT 1 FROM jobs WHERE project_id=? AND repository_id=?
+                       AND status IN (?, ?) LIMIT 1""",
+                    (project_id, repository_id, JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+                ).fetchone()
+                if active is not None:
+                    raise BridgeError(ErrorCode.JOB_BUSY,
+                        "Executor submission is unavailable while this repository has an active job",
+                        retryable=True)
             try:
                 connection.execute(
                     """
                     INSERT INTO jobs (
                         job_id, project_id, repository_id, task_id, request_id,
-                        idempotency_key, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        idempotency_key, status, created_at, executor,
+                        executor_model, executor_quota_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         job_id, project_id, repository_id, REPOSITORY_EXEC_TASK_ID,
                         request_id, idempotency_key, JobStatus.QUEUED.value, created_at,
+                        executor, executor_model, executor_quota_state,
                     ),
                 )
                 connection.execute(
@@ -266,6 +313,16 @@ class JobStore:
             ),
             payload.get("stdin"),
         )
+
+    def execution_environment_keys(self, job_id: str) -> tuple[str, ...]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM job_execution_specs WHERE job_id=?", (job_id,)
+            ).fetchone()
+        if row is None:
+            return ()
+        payload = json.loads(row["payload_json"])
+        return tuple(payload.get("environment_keys", ()))
 
     def get(self, project_id: str, repository_id: str, job_id: str) -> JobRecord:
         with self._connect() as connection:
@@ -458,4 +515,7 @@ class JobStore:
             stderr=bytes(row["stderr"]),
             stdout_truncated=bool(row["stdout_truncated"]),
             stderr_truncated=bool(row["stderr_truncated"]),
+            executor=row["executor"],
+            executor_model=row["executor_model"],
+            executor_quota_state=row["executor_quota_state"],
         )

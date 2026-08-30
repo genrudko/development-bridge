@@ -1,4 +1,6 @@
 from app.jobs import JobStatus, JobStore
+import hashlib
+import json
 
 
 def test_store_is_durable_and_recovers_running_jobs(tmp_path):
@@ -40,3 +42,25 @@ def test_idempotency_key_returns_existing_job(tmp_path):
     assert first_created is True
     assert second_created is False
     assert second.job_id == first.job_id
+
+
+def test_execution_attribution_survives_store_restart(tmp_path):
+    path = tmp_path / "jobs.sqlite3"
+    store = JobStore(path)
+    store.initialize()
+    payload = {"project_id": "project", "repository_id": "repository", "executable": "agy",
+        "arguments": [], "timeout_seconds": 1.0, "output_limit_bytes": 1024,
+        "stdin": None, "artifacts": [], "environment_keys": ["HOME"]}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    job, _ = store.create_execution(project_id="project", repository_id="repository",
+        request_id="req", idempotency_key=None, payload_json=encoded,
+        payload_digest=hashlib.sha256(encoded.encode()).hexdigest(), executor="antigravity",
+        executor_model="gemini-3.1-pro", executor_quota_state="unknown")
+    rebuilt = JobStore(path)
+    rebuilt.initialize()
+    saved = rebuilt.get("project", "repository", job.job_id)
+    expected = {"executor": "antigravity", "executor_model": "gemini-3.1-pro",
+        "executor_quota_state": "unknown"}
+    assert saved.status_dict() | expected == saved.status_dict()
+    assert saved.output_dict() | expected == saved.output_dict()
+    assert rebuilt.execution_environment_keys(job.job_id) == ("HOME",)
