@@ -9,6 +9,7 @@ from app.executors.models import (
     normalize_quota,
 )
 from app.executors.antigravity import AntigravityExecutor, AsyncioProcessRunner, ProcessResult, ProcessRunner
+from app.executors.codex import CodexExecutor
 from app.executors.selector import ExecutorSelector
 from app.executors.service import ExecutorService
 
@@ -25,6 +26,7 @@ __all__ = [
     "AsyncioProcessRunner",
     "ProcessResult",
     "ProcessRunner",
+    "CodexExecutor",
     "ExecutorSelector",
     "ExecutorService",
 ]

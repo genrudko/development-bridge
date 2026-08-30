@@ -59,14 +59,32 @@ async def test_explicit_antigravity_submits_one_durable_execution(repository):
 
 
 @pytest.mark.asyncio
-async def test_codex_milestone_boundary_never_submits(repository):
-    jobs = Jobs()
-    service = ExecutorService(jobs, Antigravity(status()), ExecutorSelector())
-    with pytest.raises(BridgeError) as caught:
-        await service.start(repository, request(None), "req")
-    assert caught.value.code is ErrorCode.POLICY_VIOLATION
-    assert caught.value.details == {"selection_reason": "automatic_quota_unknown"}
-    assert jobs.calls == []
+async def test_explicit_codex_submits_durable_execution(repository):
+    jobs, antigravity = Jobs(), Antigravity(status())
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector()).start(repository, request(ExecutorName.CODEX), "req")
+    assert job.job_id == "job_1" and len(jobs.calls) == 1
+    args, kwargs = jobs.calls[0]
+    assert args[1] == "codex"
+    assert args[2] == ("exec", "--sandbox", "workspace-write", "-")
+    assert "You are executing one bounded Development Bridge repository task." in kwargs["stdin"]
+    assert "Task:\ntask" in kwargs["stdin"]
+    assert kwargs["executor"] == "codex"
+    assert kwargs["executor_quota_state"] == "unknown"
+    assert kwargs["executor_model"] is None
+    assert kwargs["environment_keys"] == ("HOME", "SSH_CONNECTION")
+    assert kwargs["require_repository_idle"] is True
+
+
+@pytest.mark.asyncio
+async def test_automatic_selection_codex_submits_durable_execution(repository):
+    jobs, antigravity = Jobs(), Antigravity(status(quota=QuotaState.UNKNOWN))
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector()).start(repository, request(None), "req")
+    assert job.job_id == "job_1" and len(jobs.calls) == 1
+    args, kwargs = jobs.calls[0]
+    assert args[1] == "codex"
+    assert args[2] == ("exec", "--sandbox", "workspace-write", "-")
+    assert kwargs["executor"] == "codex"
+    assert kwargs["executor_quota_state"] == "unknown"
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,13 @@ async def test_executor_tools_are_normalized_durable_and_hidden_capable(tmp_path
     settings = BridgeSettings.model_validate({
         "server": {"tool_surface": "compact"},
         "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
-        "executors": {"antigravity": {"enabled": True, "executable": agy}},
+        "executors": {
+            "antigravity": {
+                "enabled": True,
+                "executable": agy,
+                "quota_cache_path": tmp_path / "antigravity-quota.json",
+            }
+        },
         "projects": [{"id": "project", "name": "Project", "repositories": [{
             "id": "repo", "path": root, "capabilities": {"execute": True}}]}],
     })
@@ -67,3 +73,6 @@ async def test_executor_tools_are_normalized_durable_and_hidden_capable(tmp_path
                     final = await terminal(session, scope, started["job_id"])
                     output = json.loads((await session.call_tool("job_output", {**scope, "job_id": started["job_id"]})).content[0].text)["data"]
                     assert final["executor"] == "antigravity" and output["executor"] == "antigravity"
+                    started_codex = json.loads((await session.call_tool("bridge_call", {"tool_name": "executor_start", "arguments": {
+                        **scope, "task": "review", "task_kind": "review", "executor": "codex"}})).content[0].text)["data"]
+                    assert started_codex["executor"] == "codex" and started_codex["executor_quota_state"] == "unknown"

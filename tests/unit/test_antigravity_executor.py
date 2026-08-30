@@ -33,7 +33,10 @@ def make_executor(tmp_path, *, enabled=True, executable=None, results=(), model=
     if executable is None:
         path.write_text("fake")
     runner = FakeRunner(results)
-    settings = AntigravityExecutorSettings(enabled=enabled, executable=path, model=model)
+    settings = AntigravityExecutorSettings(
+        enabled=enabled, executable=path, model=model,
+        quota_cache_path=tmp_path / "antigravity-quota.json",
+    )
     return AntigravityExecutor(settings, runner), runner
 
 

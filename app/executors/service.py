@@ -1,5 +1,6 @@
 from app.api.errors import BridgeError, ErrorCode
 from app.executors.antigravity import AntigravityExecutor
+from app.executors.codex import CodexExecutor
 from app.executors.models import ExecutorName, ExecutorRequest, ExecutorStatus, QuotaState
 from app.executors.selector import ExecutorSelector
 from app.jobs import JobRecord, JobService
@@ -8,10 +9,12 @@ from app.projects.models import Repository
 
 class ExecutorService:
     def __init__(self, jobs: JobService, antigravity: AntigravityExecutor,
-                 selector: ExecutorSelector) -> None:
+                 selector: ExecutorSelector,
+                 codex: CodexExecutor | None = None) -> None:
         self._jobs = jobs
         self._antigravity = antigravity
         self._selector = selector
+        self._codex = codex if codex is not None else CodexExecutor()
 
     async def status(self, repository: Repository) -> dict[str, object]:
         busy = self._jobs.repository_busy(repository)
@@ -34,10 +37,11 @@ class ExecutorService:
                 antigravity.last_error, antigravity.last_success_at, antigravity.version)
         selection = self._selector.select(request, selection_status)
         if selection.executor is ExecutorName.CODEX:
-            raise BridgeError(ErrorCode.POLICY_VIOLATION,
-                "Automatic selection chose Codex, whose adapter is not part of milestone 1",
-                details={"selection_reason": selection.reason})
-        launch = self._antigravity.launch(repository, request, selection_status)
+            codex_status = ExecutorStatus(ExecutorName.CODEX, True, True, busy, None,
+                QuotaState.UNKNOWN, None, None, None, None, None)
+            launch = self._codex.launch(repository, request, codex_status)
+        else:
+            launch = self._antigravity.launch(repository, request, selection_status)
         return await self._jobs.start_execution(repository, launch.executable, launch.arguments,
             request_id, timeout_seconds=request.timeout_seconds,
             output_limit_bytes=request.output_limit_bytes, stdin=launch.stdin,
