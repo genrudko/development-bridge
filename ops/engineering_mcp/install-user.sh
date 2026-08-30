@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+USER_UID=$(id -u)
+if [[ -z "${HOME:-}" ]]; then
+    HOME=$(getent passwd "$USER_UID" | cut -d: -f6)
+    export HOME
+fi
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$USER_UID}
+export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
+
 SRC_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 USER_CONFIG="${HOME}/.config/engineering-mcp"
 UNIT_DIR="${HOME}/.config/systemd/user"
