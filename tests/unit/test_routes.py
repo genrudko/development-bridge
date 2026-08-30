@@ -57,7 +57,7 @@ def test_route_registry_rollover_is_fail_safe_until_commit(tmp_path: Path):
 
     candidate = registry.record_rollover_candidate(
         "ad5x", prepared["token"],
-        "https://chatgpt.com/g/g-p-project/c/conv-b?temporary=1",
+        "https://chatgpt.com/g/g-p-project-plaginy-ad5x/c/conv-b?temporary=1",
     )
     assert candidate["state"] == "candidate"
     assert candidate["candidate_conversation_id"] == "conv-b"

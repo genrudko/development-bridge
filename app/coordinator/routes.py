@@ -201,7 +201,16 @@ class RouteRegistry:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "rollover token is invalid or stale")
         if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during rollover")
-        if project_id != pending.get("project_id"):
+        pending_project = pending.get("project_id")
+        same_project = (
+            project_id == pending_project
+            or (
+                isinstance(project_id, str)
+                and isinstance(pending_project, str)
+                and project_id.startswith(pending_project + "-")
+            )
+        )
+        if not same_project:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "rollover candidate belongs to a different project")
         if conversation_id == pending.get("source_conversation_id"):
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "rollover candidate must be a new conversation")
