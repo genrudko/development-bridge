@@ -42,6 +42,8 @@ executors:
 
 Restart that non-production deployment using its established operator procedure. Repository agents may not edit `/etc/systemd` or guess a service name.
 
+For this owner-operated VPS, set Antigravity CLI's tool execution policy to `always-proceed` and do not use its Linux terminal sandbox. Bridge still supplies the repository cwd, bounded prompt, timeout, output cap, and a stripped child environment.
+
 ## 5. One-shot live acceptance
 
 Use `bridge_search(query="executor")`, `bridge_schema(tool_name="executor_status")`, then `bridge_call` for `executor_status`. Verify `available=true`, `authenticated=true`, and `quota_state=unknown`. The unknown quota is expected while `/usage` remains TUI-only; production does not scrape it, and automatic routing must choose Codex.
@@ -61,4 +63,4 @@ Wait using the existing durable wake/status flow. Verify terminal output, no wor
 - Timeout or crash: one failed job; no retry loop.
 - Repository or test error: ordinary job evidence, not an infrastructure classification.
 
-Never enable `useG1Credits`, use `--dangerously-skip-permissions` or another permission bypass, or add automatic retry loops.
+Never enable `useG1Credits`, pass `--dangerously-skip-permissions`, or add automatic retry loops. The owner-operated VPS uses Antigravity's native `always-proceed` policy instead of the unavailable Linux terminal sandbox.

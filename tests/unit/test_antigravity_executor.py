@@ -62,7 +62,7 @@ async def test_probe_marks_callable_runtime_with_unknown_quota(tmp_path):
     status = await executor.probe(busy=True)
     assert status.available and status.authenticated and status.busy
     assert status.quota_state is QuotaState.UNKNOWN and status.version == "agy 1.2.3"
-    assert runner.calls[1][0][1:] == ("-p", "Reply with exactly BRIDGE_PROBE_OK", "--output-format", "json", "--sandbox", "--print-timeout", "15s")
+    assert runner.calls[1][0][1:] == ("-p", "Reply with exactly BRIDGE_PROBE_OK", "--output-format", "json", "--print-timeout", "15s")
     assert set(runner.calls[1][1]["env"]) <= {"PATH", "LANG", "LC_ALL", "HOME", "SSH_CONNECTION"}
 
 
@@ -113,6 +113,7 @@ def test_launch_builds_documented_headless_argv_and_bounded_prompt(tmp_path):
     assert launch.arguments[0] == "-p"
     assert launch.arguments[-4:] == ("--print-timeout", "900s", "--model", "gemini-3.1-pro")
     assert "--cwd" not in launch.arguments
+    assert "--sandbox" not in launch.arguments
     assert "AGENTS.md" in launch.arguments[1] and "Do not push or deploy" in launch.arguments[1]
     assert launch.stdin is None and launch.environment_keys == ("HOME", "SSH_CONNECTION")
 

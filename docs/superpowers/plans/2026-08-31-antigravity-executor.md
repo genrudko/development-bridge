@@ -17,7 +17,7 @@
 - `agy` remains optional and disabled by default; implementation and offline tests must not install it, invoke an installer, or require it on `PATH`.
 - The operator alone runs `curl -fsSL https://antigravity.google/cli/install.sh | bash`, launches `~/.local/bin/agy` in an SSH terminal, opens the OAuth URL locally, completes Google sign-in/2FA, and pastes the authorization code into that same terminal.
 - Bridge must never accept, automate, intercept, proxy, persist, or log an OAuth URL, 2FA challenge, authorization code, Google credential, token, or Bridge-native GitHub credential.
-- Use Antigravity headless mode exactly as documented: one process with `-p`, `--output-format json`, `--sandbox`, `--print-timeout`, and `--cwd`; never pass `--dangerously-skip-permissions`, `--continue`, or `--conversation`.
+- Use Antigravity headless mode with one process using `-p`, `--output-format json`, and `--print-timeout`. On this owner-operated VPS do not pass `--sandbox`: its Linux nsjail cannot initialize in the host environment. Never pass `--dangerously-skip-permissions`, `--continue`, or `--conversation`.
 - Do not alter Git remotes, SSH configuration, `/etc/systemd`, external production deployments, or paid-overage settings; never expose Bridge GitHub credentials to the child environment.
 - `/usage` and `/quota` currently open an interactive TUI. Production code must not scrape it. Until a documented structured quota source exists, fresh Antigravity quota is `unknown`; automatic routing therefore selects Codex.
 - Explicit `antigravity` selection is allowed only when it is available, authenticated, not busy, and not known exhausted; explicit selection may proceed with `quota_state=unknown` and must record that state.

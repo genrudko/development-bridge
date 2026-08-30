@@ -23,7 +23,7 @@ Flow:
 
 The selector owns only routing policy. Each executor adapter owns process launch, bounded input/output, timeout handling, and result normalization.
 
-Antigravity should initially be integrated as a local VPS CLI executor using the installed `agy` binary. The first milestone should reuse the existing durable repository job model rather than introducing a second scheduler.
+Antigravity is integrated as a local VPS CLI executor using the installed `agy` binary. The first milestone reuses the existing durable repository job model rather than introducing a second scheduler. On this owner-operated VPS, Antigravity's Linux terminal sandbox is intentionally not used because its nsjail cannot initialize in the host environment; native `always-proceed` tool execution is used instead.
 
 ## Authentication
 

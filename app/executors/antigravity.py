@@ -135,7 +135,7 @@ class AntigravityExecutor:
                 last_error=_failure(version.stderr.decode("utf-8", "replace"), version.timed_out), **base)
         version_text = version.stdout[:16_384].decode("utf-8", "replace").strip()
         probe = await self._runner.run((str(executable), "-p", "Reply with exactly BRIDGE_PROBE_OK",
-            "--output-format", "json", "--sandbox", "--print-timeout", "15s"), cwd=executable.parent,
+            "--output-format", "json", "--print-timeout", "15s"), cwd=executable.parent,
             timeout_seconds=self._settings.probe_timeout_seconds, output_limit_bytes=16_384, env=_environment())
         diagnostic = probe.stderr.decode("utf-8", "replace")
         try:
@@ -168,7 +168,7 @@ class AntigravityExecutor:
         if not 1 <= len(request.task.encode("utf-8")) <= 65_536:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Task must contain between 1 and 65536 UTF-8 bytes")
         timeout = min(ceil(request.timeout_seconds), ceil(self._settings.task_timeout_seconds))
-        arguments = ["-p", _PROMPT.format(task=request.task, verification=_verification(request.task_kind)), "--output-format", "json", "--sandbox",
+        arguments = ["-p", _PROMPT.format(task=request.task, verification=_verification(request.task_kind)), "--output-format", "json",
                      "--print-timeout", f"{timeout}s"]
         if self._settings.model is not None:
             arguments.extend(("--model", self._settings.model))
