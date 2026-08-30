@@ -462,8 +462,11 @@ class BrowserHost:
             attempt = int(payload.get("attempt", 0) or 0)
         except (TypeError, ValueError):
             return
-        if until > time.time() and attempt > 0:
-            self.rate_limit_until = until
+        if attempt > 0:
+            # Preserve the consecutive rate-limit streak even when the persisted
+            # quiet period expired while Browser Host was stopped. A restart must
+            # not turn a persistent limit back into a first-attempt 120s probe loop.
+            self.rate_limit_until = max(0.0, until)
             self.rate_limit_count = attempt
 
     def web_backoff_remaining(self) -> float:
@@ -494,7 +497,10 @@ class BrowserHost:
         now = time.time()
         if now >= self.rate_limit_until:
             self.rate_limit_count += 1
-            delay = min(300.0, 120.0 * (2 ** min(self.rate_limit_count - 1, 2)))
+            # Consecutive rate limits are a circuit-breaker signal, not a reason
+            # to probe ChatGPT every five minutes forever. Escalate persistently
+            # to a one-hour quiet period; reset only after a fully healthy listener.
+            delay = min(3600.0, 120.0 * (2 ** min(self.rate_limit_count - 1, 5)))
             self.rate_limit_until = now + delay
             atomic_json(self.cfg.web_backoff_file, {
                 "version": 1,
@@ -504,6 +510,19 @@ class BrowserHost:
                 "attempt": self.rate_limit_count,
             })
         return max(0.0, self.rate_limit_until - now)
+
+    def mark_web_healthy(self) -> None:
+        if self.rate_limit_count <= 0 and self.rate_limit_until <= 0:
+            return
+        self.rate_limit_count = 0
+        self.rate_limit_until = 0.0
+        atomic_json(self.cfg.web_backoff_file, {
+            "version": 1,
+            "reason": "healthy",
+            "cleared_at": utcnow(),
+            "until": 0.0,
+            "attempt": 0,
+        })
 
     def bridge_turn_state(self, page: dict) -> dict:
         ws = websocket.create_connection(
@@ -2445,8 +2464,11 @@ class BrowserHost:
                     time.sleep(self.cfg.check_interval)
                     continue
 
+                is_healthy = poll_ok is True and iframe_count > 0
+                if is_healthy:
+                    self.mark_web_healthy()
                 self.write_state(
-                    status="healthy" if poll_ok is True and iframe_count > 0 else "starting",
+                    status="healthy" if is_healthy else "starting",
                     cdp_ok=True,
                     target_ok=True,
                     coordinator_iframes=iframe_count,

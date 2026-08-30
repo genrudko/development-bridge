@@ -125,6 +125,45 @@ def test_browser_host_rate_limit_backoff_is_bounded_and_persisted(tmp_path: Path
     assert host.rate_limit_count == 2
 
 
+def test_browser_host_repeated_rate_limits_escalate_past_five_minutes_and_survive_expired_restart(tmp_path: Path, monkeypatch):
+    module = _module()
+    cfg = _config(module, tmp_path)
+    clock = [1000.0]
+    monkeypatch.setattr(module.time, "time", lambda: clock[0])
+    host = module.BrowserHost(cfg)
+
+    for expected in (120.0, 240.0, 480.0, 960.0, 1920.0, 3600.0):
+        assert host.activate_web_backoff() == expected
+        clock[0] = host.rate_limit_until + 1.0
+
+    restarted = module.BrowserHost(cfg)
+    assert restarted.rate_limit_count == 6
+    assert restarted.web_backoff_remaining() == 0.0
+    assert restarted.activate_web_backoff() == 3600.0
+    assert restarted.rate_limit_count == 7
+
+
+def test_browser_host_healthy_listener_resets_persisted_rate_limit_streak(tmp_path: Path, monkeypatch):
+    module = _module()
+    cfg = _config(module, tmp_path)
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg.web_backoff_file.write_text(
+        '{"version":1,"reason":"chatgpt_rate_limit","detected_at":"x","until":900.0,"attempt":5}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module.time, "time", lambda: 1000.0)
+    host = module.BrowserHost(cfg)
+    assert host.rate_limit_count == 5
+
+    host.mark_web_healthy()
+
+    persisted = __import__("json").loads(cfg.web_backoff_file.read_text())
+    assert host.rate_limit_count == 0
+    assert host.rate_limit_until == 0.0
+    assert persisted["attempt"] == 0
+    assert persisted["until"] == 0.0
+
+
 def test_browser_host_restores_persisted_web_backoff_and_blocks_live_probe(tmp_path: Path, monkeypatch):
     module = _module()
     cfg = _config(module, tmp_path)
