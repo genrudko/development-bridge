@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import CapabilitySet
@@ -14,6 +14,7 @@ class RepositoryRegistry:
     def __init__(self, repositories: Mapping[tuple[str, str], Repository]) -> None:
         self._repositories = MappingProxyType(dict(repositories))
         self._configured = frozenset(repositories)
+        self._managed_access_callback: Callable[[str, str], None] | None = None
 
     @classmethod
     def from_settings(cls, settings: BridgeSettings) -> RepositoryRegistry:
@@ -60,6 +61,9 @@ class RepositoryRegistry:
                     "repository_id": repository_id,
                 },
             )
+        key = (project_id, repository_id)
+        if key not in self._configured and self._managed_access_callback is not None:
+            self._managed_access_callback(project_id, repository_id)
         return repository
 
     def for_project(self, project_id: str) -> tuple[Repository, ...]:
@@ -71,6 +75,11 @@ class RepositoryRegistry:
 
     def is_configured(self, project_id: str, repository_id: str) -> bool:
         return (project_id, repository_id) in self._configured
+
+    def set_managed_access_callback(
+        self, callback: Callable[[str, str], None] | None
+    ) -> None:
+        self._managed_access_callback = callback
 
     def register_managed(self, repository: Repository) -> None:
         key = (repository.project_id, repository.id)

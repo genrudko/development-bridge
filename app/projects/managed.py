@@ -6,8 +6,9 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -30,6 +31,8 @@ FORK_CAPABILITIES = CapabilitySet.from_mapping(
     {"read": True, "write": True, "git_read": True, "git_write": True, "execute": True}
 )
 MANAGED_KINDS = {"reference": REFERENCE_CAPABILITIES, "fork": FORK_CAPABILITIES}
+RETENTION_POLICIES = {"pinned", "cache", "ephemeral"}
+ACCESS_TOUCH_INTERVAL_SECONDS = 60.0
 
 
 class ManagedCloneRunner(Protocol):
@@ -129,6 +132,8 @@ class ManagedRepositoryRecord:
     requested_ref: str | None = None
     kind: str = "reference"
     storage_repository_id: str | None = None
+    retention: str = "cache"
+    last_used_at: str | None = None
 
     def as_dict(self) -> dict[str, str | int | None]:
         return {
@@ -140,6 +145,8 @@ class ManagedRepositoryRecord:
             "requested_ref": self.requested_ref,
             "kind": self.kind,
             "storage_repository_id": self.storage_repository_id,
+            "retention": self.retention,
+            "last_used_at": self.last_used_at,
         }
 
 
@@ -155,8 +162,10 @@ class ManagedRepositoryService:
         self.projects = projects
         self.runner = runner or SubprocessManagedCloneRunner()
         self._records: dict[tuple[str, str], ManagedRepositoryRecord] = {}
+        self._last_access_touch: dict[tuple[str, str], float] = {}
         self._lock = asyncio.Lock()
         self._load()
+        self.projects.repositories.set_managed_access_callback(self._touch_access)
 
     async def clone(
         self,
@@ -169,6 +178,7 @@ class ManagedRepositoryService:
         kind: str = "reference",
         push_url: str | None = None,
         upstream_url: str | None = None,
+        retention: str | None = None,
     ) -> dict:
         self.projects.get(project_id)
         origin_url = self._validate_url(url)
@@ -179,6 +189,13 @@ class ManagedRepositoryService:
         requested_ref = self._validate_ref(requested_ref)
         if kind not in MANAGED_KINDS:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Managed repository kind is invalid")
+        retention = self._validate_retention(
+            retention if retention is not None else ("pinned" if kind == "fork" else "cache")
+        )
+        if kind == "fork" and retention != "pinned":
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT, "Writable managed forks must use pinned retention"
+            )
         if kind == "fork":
             if not isinstance(push_url, str) or re.fullmatch(r"git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git", push_url) is None:
                 raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fork push URL is invalid")
@@ -232,9 +249,13 @@ class ManagedRepositoryService:
                     alias = await self._alias_candidate(origin_url, branch, head)
                     if alias is not None:
                         storage_id = alias.storage_repository_id or alias.repository_id
+                        now = datetime.now(UTC).isoformat()
                         record = ManagedRepositoryRecord(
-                            project_id, repository_id, origin_url, depth,
-                            datetime.now(UTC).isoformat(), requested_ref, kind, storage_id,
+                            project_id=project_id, repository_id=repository_id,
+                            origin_url=origin_url, depth=depth, created_at=now,
+                            requested_ref=requested_ref, kind=kind,
+                            storage_repository_id=storage_id, retention=retention,
+                            last_used_at=now,
                         )
                         updated = {**self._records, key: record}
                         self._write_manifest(updated)
@@ -246,15 +267,13 @@ class ManagedRepositoryService:
                     await self.runner.configure_fork(clone_path, push_url, upstream_url)
                 os.replace(clone_path, target)
                 installed = True
+                now = datetime.now(UTC).isoformat()
                 record = ManagedRepositoryRecord(
-                    project_id,
-                    repository_id,
-                    origin_url,
-                    depth,
-                    datetime.now(UTC).isoformat(),
-                    requested_ref,
-                    kind,
-                    None,
+                    project_id=project_id, repository_id=repository_id,
+                    origin_url=origin_url, depth=depth, created_at=now,
+                    requested_ref=requested_ref, kind=kind,
+                    storage_repository_id=None, retention=retention,
+                    last_used_at=now,
                 )
                 updated = {**self._records, key: record}
                 self._write_manifest(updated)
@@ -292,7 +311,10 @@ class ManagedRepositoryService:
                 old_keys = {
                     "project_id", "repository_id", "origin_url", "depth", "created_at"
                 }
-                allowed = {*old_keys, "requested_ref", "kind", "storage_repository_id"}
+                allowed = {
+                    *old_keys, "requested_ref", "kind", "storage_repository_id",
+                    "retention", "last_used_at",
+                }
                 if not isinstance(entry, dict) or not old_keys <= set(entry) or not set(entry) <= allowed:
                     raise ValueError("invalid entry shape")
                 record = ManagedRepositoryRecord(
@@ -300,6 +322,12 @@ class ManagedRepositoryService:
                     **({"requested_ref": None} if "requested_ref" not in entry else {}),
                     **({"kind": "reference"} if "kind" not in entry else {}),
                     **({"storage_repository_id": None} if "storage_repository_id" not in entry else {}),
+                    **({
+                        "retention": (
+                            "pinned" if entry.get("kind", "reference") == "fork" else "cache"
+                        )
+                    } if "retention" not in entry else {}),
+                    **({"last_used_at": entry.get("created_at")} if "last_used_at" not in entry else {}),
                 )
                 self._validate_record(record)
                 key = (record.project_id, record.repository_id)
@@ -350,6 +378,164 @@ class ManagedRepositoryService:
             raise ValueError("invalid managed repository kind")
         if record.storage_repository_id is not None and not IDENTIFIER.fullmatch(record.storage_repository_id):
             raise ValueError("invalid storage repository identifier")
+        if record.retention not in RETENTION_POLICIES:
+            raise ValueError("invalid managed repository retention")
+        if record.kind == "fork" and record.retention != "pinned":
+            raise ValueError("managed fork retention must be pinned")
+        if record.last_used_at is not None:
+            self._parse_timestamp(record.last_used_at)
+
+    @staticmethod
+    def _validate_retention(value: str) -> str:
+        if value not in RETENTION_POLICIES:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "retention must be one of: pinned, cache, ephemeral",
+            )
+        return value
+
+    @staticmethod
+    def _parse_timestamp(value: str) -> datetime:
+        if not isinstance(value, str) or not 1 <= len(value) <= 100:
+            raise ValueError("invalid timestamp")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return parsed.astimezone(UTC)
+
+    def _touch_access(self, project_id: str, repository_id: str) -> None:
+        key = (project_id, repository_id)
+        record = self._records.get(key)
+        if record is None:
+            return
+        now_mono = time.monotonic()
+        previous = self._last_access_touch.get(key, 0.0)
+        if now_mono - previous < ACCESS_TOUCH_INTERVAL_SECONDS:
+            return
+        now = datetime.now(UTC).isoformat()
+        updated_record = replace(record, last_used_at=now)
+        updated = {**self._records, key: updated_record}
+        self._write_manifest(updated)
+        self._records = updated
+        self._last_access_touch[key] = now_mono
+
+    async def set_retention(
+        self, project_id: str, repository_id: str, retention: str
+    ) -> dict:
+        retention = self._validate_retention(retention)
+        async with self._lock:
+            key = (project_id, repository_id)
+            record = self._records.get(key)
+            if record is None:
+                raise BridgeError(
+                    ErrorCode.REPOSITORY_NOT_FOUND,
+                    "Managed repository is not registered",
+                    details={"project_id": project_id, "repository_id": repository_id},
+                )
+            if record.kind == "fork" and retention != "pinned":
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Writable managed forks cannot be made collectable",
+                )
+            updated_record = replace(record, retention=retention)
+            updated = {**self._records, key: updated_record}
+            self._write_manifest(updated)
+            self._records = updated
+            return {
+                "project_id": project_id,
+                "repository_id": repository_id,
+                "retention": retention,
+                "last_used_at": updated_record.last_used_at,
+                "storage_repository_id": (
+                    updated_record.storage_repository_id or updated_record.repository_id
+                ),
+            }
+
+    async def gc_plan(
+        self,
+        project_id: str | None = None,
+        *,
+        cache_days: int = 30,
+        ephemeral_days: int = 14,
+    ) -> dict:
+        if isinstance(cache_days, bool) or not 1 <= cache_days <= 3650:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "cache_days must be 1..3650")
+        if isinstance(ephemeral_days, bool) or not 1 <= ephemeral_days <= 3650:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "ephemeral_days must be 1..3650")
+        if project_id is not None:
+            self.projects.get(project_id)
+        now = datetime.now(UTC)
+        groups: dict[tuple[str, str], list[ManagedRepositoryRecord]] = {}
+        for record in self._records.values():
+            if project_id is not None and record.project_id != project_id:
+                continue
+            storage_id = record.storage_repository_id or record.repository_id
+            groups.setdefault((record.project_id, storage_id), []).append(record)
+
+        candidates = []
+        blocked = []
+        for (group_project, storage_id), records in sorted(groups.items()):
+            physical = next((r for r in records if r.repository_id == storage_id), None)
+            if physical is None:
+                blocked.append({
+                    "project_id": group_project, "storage_repository_id": storage_id,
+                    "reason": "storage_owner_missing",
+                })
+                continue
+            reasons = []
+            logical = []
+            all_eligible = True
+            for record in records:
+                used = self._parse_timestamp(record.last_used_at or record.created_at)
+                age_days = max(0.0, (now - used).total_seconds() / 86400.0)
+                threshold = ephemeral_days if record.retention == "ephemeral" else cache_days
+                eligible = (
+                    record.kind == "reference"
+                    and record.retention != "pinned"
+                    and age_days >= threshold
+                )
+                logical.append({
+                    "repository_id": record.repository_id,
+                    "retention": record.retention,
+                    "last_used_at": record.last_used_at or record.created_at,
+                    "age_days": round(age_days, 1),
+                    "eligible": eligible,
+                })
+                if not eligible:
+                    all_eligible = False
+                    if record.kind != "reference": reasons.append(f"{record.repository_id}:writable")
+                    elif record.retention == "pinned": reasons.append(f"{record.repository_id}:pinned")
+                    else: reasons.append(f"{record.repository_id}:recent")
+            target = self._record_target(physical)
+            clean = False
+            if all_eligible:
+                try:
+                    clean = await self.runner.is_clean(target)
+                except (BridgeError, OSError, ValueError):
+                    clean = False
+                if not clean:
+                    reasons.append("storage_dirty_or_unreadable")
+                    all_eligible = False
+            row = {
+                "project_id": group_project,
+                "storage_repository_id": storage_id,
+                "logical_repositories": logical,
+                "reclaimable": all_eligible and clean,
+            }
+            if reasons:
+                row["blocked_by"] = sorted(set(reasons))
+            (candidates if row["reclaimable"] else blocked).append(row)
+        return {
+            "cache_days": cache_days,
+            "ephemeral_days": ephemeral_days,
+            "candidate_storage_groups": candidates,
+            "candidate_count": len(candidates),
+            "blocked_storage_groups": blocked,
+            "note": (
+                "Plan only: no repository is deleted. A storage group is reclaimable only "
+                "when every logical alias sharing it is old enough, read-only, unpinned, and clean."
+            ),
+        }
 
     @staticmethod
     def _validate_url(url: str) -> str:
@@ -488,6 +674,8 @@ class ManagedRepositoryService:
             "kind": record.kind,
             "storage_repository_id": record.storage_repository_id or record.repository_id,
             "storage_shared": record.storage_repository_id is not None,
+            "retention": record.retention,
+            "last_used_at": record.last_used_at,
             "capabilities": MANAGED_KINDS[record.kind].as_dict(),
         }
 
