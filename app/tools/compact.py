@@ -100,6 +100,11 @@ def _resolved_route(
         binding = container.coordinator.session_binding(session_id)
         bound_route = binding.get("route_id") if binding is not None else None
         route = container.route_registry.resolve(str(bound_route)) if bound_route is not None else None
+        if route is None and binding is None:
+            snapshot = container.route_registry.snapshot()
+            requested_route = snapshot.get("requested_route")
+            if requested_route is not None:
+                route = container.route_registry.resolve(str(requested_route))
     if route is None:
         raise BridgeError(
             ErrorCode.POLICY_VIOLATION,
@@ -308,6 +313,11 @@ def compact_tools(container: ApplicationContainer, registry: ToolRegistry) -> tu
         return to_mcp_result(success(request_context.request_id, data))
 
     async def bridge_dashboard(ctx, params, request_context):
+        arguments = params.arguments or {}
+        progress = arguments.get("progress")
+        if progress is not None:
+            route = progress_route(ctx, {})
+            _progress_store(container).start(str(route["route_id"]), dict(progress))
         data = dashboard_snapshot(container, registry, session_id=_request_session_id(ctx))
         result = to_mcp_result(success(request_context.request_id, data))
         result.structured_content = data
@@ -363,11 +373,12 @@ def compact_tools(container: ApplicationContainer, registry: ToolRegistry) -> tu
         ), work_progress_get, "compact"),
         RegisteredTool(types.Tool(
             name="work_progress_update",
-            description="Create or update a durable semantic work-progress checkpoint for the active or specified logical route",
+            description="Update a durable semantic work-progress checkpoint; pass operation_id from bridge_dashboard to reject stale updates",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
+                    "operation_id": {"type": "string", "minLength": 1, "maxLength": 64},
                     "title": {"type": "string", "minLength": 1, "maxLength": 160},
                     "phase": {"type": "string", "minLength": 1, "maxLength": 160},
                     "status": {"type": "string", "enum": ["planning", "working", "waiting", "blocked", "completed"]},
@@ -391,8 +402,27 @@ def compact_tools(container: ApplicationContainer, registry: ToolRegistry) -> tu
         ), work_progress_clear, "compact"),
         RegisteredTool(types.Tool(
             name="bridge_dashboard",
-            description="Show a compact user-facing Development Bridge health and capacity dashboard",
-            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+            description="Show the Development Bridge dashboard; optionally start one fresh bounded progress operation in this same visible call",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "progress": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "minLength": 1, "maxLength": 160},
+                            "total": {"type": "integer", "minimum": 1, "maximum": 1000},
+                            "phase": {"type": "string", "minLength": 1, "maxLength": 160},
+                            "current": {"type": "string", "minLength": 1, "maxLength": 300},
+                            "next": {"type": "string", "minLength": 1, "maxLength": 300},
+                            "detail": {"type": "string", "minLength": 1, "maxLength": 500},
+                            "status": {"type": "string", "enum": ["planning", "working"]},
+                        },
+                        "required": ["title", "total"],
+                        "additionalProperties": False,
+                    },
+                },
+                "additionalProperties": False,
+            },
             _meta=BRIDGE_DASHBOARD_UI_META,
         ), bridge_dashboard, "compact"),
     )

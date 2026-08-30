@@ -39,7 +39,20 @@ def test_bridge_guide_is_registry_derived_and_complete():
     assert any("Do not poll durable jobs" in rule for rule in economy["rules"])
     assert any("ChatGPT Web/Browser Host" in rule for rule in economy["rules"])
     assert any("Do not repeat discovery" in rule for rule in economy["rules"])
-    assert any("work_progress_update" in rule and "meaningful milestones" in rule for rule in economy["rules"])
+    assert any(
+        "bridge_dashboard once" in rule and "progress payload" in rule
+        for rule in economy["rules"]
+    )
+    assert any(
+        "work_progress_update" in rule
+        and "meaningful milestones" in rule
+        and "operation_id" in rule
+        for rule in economy["rules"]
+    )
+    assert any(
+        "never call bridge_dashboard repeatedly" in rule
+        for rule in economy["rules"]
+    )
     assert "check -> change -> targeted tests" in economy["rules"][0]
     assert "inspect exact state" in economy["executor_job_shape"]
     delegation = data["executor_delegation"]

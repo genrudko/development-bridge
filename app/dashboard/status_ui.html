@@ -28,6 +28,10 @@ body { font:13px/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans
 .progress-line { margin-top:6px; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .progress-line b { font-weight:650; }
 .progress-next,.progress-detail { color:GrayText; }
+.progress[data-lifecycle="collapsed"] { display:block; padding-top:8px; }
+.progress[data-lifecycle="collapsed"] .progress-track,
+.progress[data-lifecycle="collapsed"] .progress-meta,
+.progress[data-lifecycle="collapsed"] .progress-line { display:none; }
 .foot { margin-top:9px; color:GrayText; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 @media(max-width:520px){ .grid{grid-template-columns:repeat(2,minmax(0,1fr));} .progress-meta{display:block;} }
 @media(prefers-reduced-motion:reduce){ .progress-fill{transition:none;} }
@@ -40,7 +44,7 @@ body { font:13px/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans
     <div class="cell"><div class="k">RAM free</div><div id="ram" class="v">—</div></div>
     <div class="cell"><div class="k">Projects</div><div id="projects" class="v">—</div></div>
   </div>
-  <section id="progress" class="progress" aria-live="polite">
+  <section id="progress" class="progress" data-lifecycle="expanded" aria-live="polite">
     <div class="progress-head">
       <div id="progressTitle" class="progress-title">Current work</div>
       <div id="progressState" class="progress-state">working</div>
@@ -60,7 +64,23 @@ const STATE_URI="bridge://development-bridge/dashboard-state";
 const $ = id => document.getElementById(id);
 let timer=null;
 let currentProgress=null;
+let boundOperationId=null;
+let highestRenderedRevision=null;
+let collapseTimer=null;
+let pollingStopped=false;
+const COLLAPSE_DELAY_MS=2500;
 function text(id,value){ $(id).textContent=value ?? ""; }
+function collapseProgress(reason){
+  if(collapseTimer) clearTimeout(collapseTimer);
+  pollingStopped=true;
+  if(timer) clearTimeout(timer);
+  const panel=$("progress");
+  panel.dataset.lifecycle="collapsed";
+  text("progressState",reason);
+  $("progressState").className=`progress-state ${reason === "completed" ? "completed" : ""}`;
+  text("progressTitle",`${currentProgress?.title || "Operation"} · ${reason}`);
+  requestAnimationFrame(()=>{ try{ app.sendSizeChanged({height:document.documentElement.scrollHeight}); }catch(_){} });
+}
 function render(raw){
   const d=raw?.structuredContent || raw || {};
   text("status",d.status || "online");
@@ -68,12 +88,26 @@ function render(raw){
   text("disk",d.disk ? `${d.disk.free_gib} GiB free` : "—");
   text("ram",d.memory ? `${d.memory.available_gib} GiB` : "—");
   text("projects",d.projects ?? "—");
+  if(pollingStopped) return;
   const p=d.progress || null;
+  if(p?.operation_id && boundOperationId && p.operation_id !== boundOperationId){
+    collapseProgress("superseded");
+    return;
+  }
+  if(p?.operation_id && !boundOperationId) boundOperationId=p.operation_id;
+  const revision=typeof p?.revision === "number" && Number.isFinite(p.revision) ? p.revision : null;
+  if(revision !== null && highestRenderedRevision !== null && revision < highestRenderedRevision) return;
+  if(revision !== null) highestRenderedRevision=Math.max(highestRenderedRevision ?? revision,revision);
+  const status=p?.status || "working";
+  if(p && status !== "completed" && collapseTimer){
+    clearTimeout(collapseTimer);
+    collapseTimer=null;
+  }
   currentProgress=p;
   const panel=$("progress");
   panel.classList.toggle("show",Boolean(p));
   if(p){
-    const status=p.status || "working";
+    panel.dataset.lifecycle="expanded";
     text("progressTitle",p.title || "Current work");
     text("progressState",status);
     $("progressState").className=`progress-state ${status}`;
@@ -85,6 +119,9 @@ function render(raw){
     text("progressCurrent",p.current ? `Сейчас: ${p.current}` : "");
     text("progressNext",p.next ? `Далее: ${p.next}` : "");
     text("progressDetail",p.detail || "");
+    if(status === "completed" && !collapseTimer){
+      collapseTimer=setTimeout(()=>collapseProgress("completed"),COLLAPSE_DELAY_MS);
+    }
   }
   const route=d.route?.route_id ? ` · route ${d.route.route_id}` : "";
   text("foot",`${d.tool_surface || "compact"} surface${route} · live`);
@@ -92,21 +129,28 @@ function render(raw){
 }
 function schedule(){
   if(timer) clearTimeout(timer);
-  const active=currentProgress && !["completed","blocked"].includes(currentProgress.status);
+  if(pollingStopped) return;
+  const active=currentProgress && currentProgress.status !== "completed";
   timer=setTimeout(refresh,active ? 5000 : 20000);
 }
 async function refresh(){
   if(document.hidden){ schedule(); return; }
+  const boundOperationIdAtStart=boundOperationId;
   try{
     const result=await app.readServerResource({uri:STATE_URI});
     const content=(result?.contents || []).find(item => typeof item?.text === "string");
-    if(content) render(JSON.parse(content.text));
+    if(content){
+      const snapshot=JSON.parse(content.text);
+      const snapshotOperationId=snapshot?.progress?.operation_id;
+      const bindingChanged=boundOperationId !== boundOperationIdAtStart;
+      if(!bindingChanged || snapshotOperationId === boundOperationId) render(snapshot);
+    }
   }catch(_){ /* keep last known state */ }
   schedule();
 }
 app.ontoolresult=render;
 window.addEventListener("pagehide",()=>{ if(timer) clearTimeout(timer); },{once:true});
-document.addEventListener("visibilitychange",()=>{ if(!document.hidden){ if(timer) clearTimeout(timer); refresh(); } });
+document.addEventListener("visibilitychange",()=>{ if(!document.hidden && !pollingStopped){ if(timer) clearTimeout(timer); refresh(); } });
 await app.connect();
 schedule();
 </script>

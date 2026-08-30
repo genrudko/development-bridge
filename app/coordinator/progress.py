@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from app.api.errors import BridgeError, ErrorCode
 
@@ -19,6 +20,14 @@ _TEXT_LIMITS = {
     "next": 300,
     "detail": 500,
 }
+_PATH_LOCKS_GUARD = RLock()
+_PATH_LOCKS: dict[Path, RLock] = {}
+
+
+def _path_lock(path: Path) -> RLock:
+    canonical = path.resolve()
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(canonical, RLock())
 
 
 class RouteProgressStore:
@@ -26,7 +35,7 @@ class RouteProgressStore:
 
     def __init__(self, path: Path) -> None:
         self.path = path.expanduser()
-        self._lock = RLock()
+        self._lock = _path_lock(self.path)
 
     @staticmethod
     def _route_id(value: str) -> str:
@@ -62,54 +71,79 @@ class RouteProgressStore:
         route_id = self._route_id(route_id)
         with self._lock:
             data = self._load()
-            previous = data["progress"].get(route_id)
-            item = dict(previous) if isinstance(previous, dict) else {}
+            item = self._build_update(data["progress"].get(route_id), changes)
+            data["progress"][route_id] = item
+            self._save(data)
+            return {**item, "route_id": route_id}
 
-            for field, limit in _TEXT_LIMITS.items():
-                if field not in changes:
-                    continue
-                value = str(changes[field]).strip()
-                if not value or len(value) > limit:
-                    raise BridgeError(
-                        ErrorCode.INVALID_ARGUMENT,
-                        f"{field} must contain 1 to {limit} characters",
-                    )
-                item[field] = value
+    @staticmethod
+    def _build_update(previous: Any, changes: dict[str, Any]) -> dict[str, Any]:
+        item = dict(previous) if isinstance(previous, dict) else {}
 
-            if "status" in changes:
-                status = str(changes["status"]).strip().lower()
-                if status not in _ALLOWED_STATUSES:
-                    raise BridgeError(ErrorCode.INVALID_ARGUMENT, "progress status is invalid")
-                item["status"] = status
-            elif "status" not in item:
-                item["status"] = "working"
-
-            if "total" in changes:
-                total = int(changes["total"])
-                if total < 1 or total > 1000:
-                    raise BridgeError(ErrorCode.INVALID_ARGUMENT, "total must be between 1 and 1000")
-                item["total"] = total
-            if "completed" in changes:
-                completed = int(changes["completed"])
-                if completed < 0:
-                    raise BridgeError(ErrorCode.INVALID_ARGUMENT, "completed must be non-negative")
-                item["completed"] = completed
-
-            if not item.get("title") or "total" not in item:
+        operation_id = changes.get("operation_id")
+        if operation_id is not None:
+            operation_id = str(operation_id).strip()
+            if not operation_id or operation_id != item.get("operation_id"):
                 raise BridgeError(
                     ErrorCode.INVALID_ARGUMENT,
-                    "initial progress update requires title and total",
+                    "operation_id does not match the current progress operation",
                 )
 
-            item.setdefault("completed", 0)
-            if item["completed"] > item["total"]:
-                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "completed cannot exceed total")
-            if item["status"] == "completed" and "completed" not in changes:
-                item["completed"] = item["total"]
+        for field, limit in _TEXT_LIMITS.items():
+            if field not in changes:
+                continue
+            value = str(changes[field]).strip()
+            if not value or len(value) > limit:
+                raise BridgeError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"{field} must contain 1 to {limit} characters",
+                )
+            item[field] = value
 
-            item["percent"] = round((item["completed"] / item["total"]) * 100)
-            item["revision"] = int(item.get("revision", 0)) + 1
-            item["updated_at"] = datetime.now(UTC).isoformat()
+        if "status" in changes:
+            status = str(changes["status"]).strip().lower()
+            if status not in _ALLOWED_STATUSES:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "progress status is invalid")
+            item["status"] = status
+        elif "status" not in item:
+            item["status"] = "working"
+
+        if "total" in changes:
+            total = int(changes["total"])
+            if total < 1 or total > 1000:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "total must be between 1 and 1000")
+            item["total"] = total
+        if "completed" in changes:
+            completed = int(changes["completed"])
+            if completed < 0:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "completed must be non-negative")
+            item["completed"] = completed
+
+        if not item.get("title") or "total" not in item:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "initial progress update requires title and total",
+            )
+
+        item.setdefault("operation_id", uuid4().hex)
+
+        item.setdefault("completed", 0)
+        if item["completed"] > item["total"]:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "completed cannot exceed total")
+        if item["status"] == "completed" and "completed" not in changes:
+            item["completed"] = item["total"]
+
+        item["percent"] = round((item["completed"] / item["total"]) * 100)
+        item["revision"] = int(item.get("revision", 0)) + 1
+        item["updated_at"] = datetime.now(UTC).isoformat()
+        return item
+
+    def start(self, route_id: str, values: dict[str, Any]) -> dict[str, Any]:
+        route_id = self._route_id(route_id)
+        changes = dict(values)
+        with self._lock:
+            data = self._load()
+            item = self._build_update(None, changes)
             data["progress"][route_id] = item
             self._save(data)
             return {**item, "route_id": route_id}

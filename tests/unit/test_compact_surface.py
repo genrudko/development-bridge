@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.errors import BridgeError
-from app.tools.compact import COMPACT_VISIBLE_TOOLS, compact_tools, exposed_tool_definitions
+from app.tools.compact import (
+    BRIDGE_DASHBOARD_UI_META,
+    COMPACT_VISIBLE_TOOLS,
+    compact_tools,
+    exposed_tool_definitions,
+)
 from app.api.registry import ToolRegistry
 from app.api.registry import RegisteredTool
 from mcp import types
@@ -182,3 +187,84 @@ async def test_dashboard_unbound_session_uses_requested_route_progress(tmp_path)
     assert dashboard.structured_content["route"]["route_id"] == "ad5x"
     assert dashboard.structured_content["progress"]["title"] == "Progress dashboard"
     assert dashboard.structured_content["progress"]["percent"] == 25
+
+
+@pytest.mark.asyncio
+async def test_dashboard_progress_payload_starts_bound_operation_with_app_result(tmp_path):
+    registry = _registry()
+
+    class Routes:
+        path = tmp_path / "routes.json"
+        def resolve(self, route_id=None):
+            return {"route_id": route_id or "ad5x", "channel_id": "telegram-ad5x"}
+
+    container = SimpleNamespace(
+        settings=SimpleNamespace(server=SimpleNamespace(name="development-bridge")),
+        projects=SimpleNamespace(list=lambda: ()),
+        route_registry=Routes(),
+        coordinator=SimpleNamespace(session_binding=lambda session_id: {"route_id": "ad5x"}),
+    )
+    tools = {tool.definition.name: tool for tool in compact_tools(container, registry)}
+    registry.register_many(tools.values())
+    request_context = SimpleNamespace(request_id="req_dashboard_start")
+    dashboard_schema = tools["bridge_dashboard"].definition.input_schema
+    assert dashboard_schema["properties"]["progress"]["required"] == ["title", "total"]
+    assert dashboard_schema["properties"]["progress"]["properties"]["status"]["enum"] == [
+        "planning", "working",
+    ]
+    assert "operation_id" in tools["work_progress_update"].definition.input_schema["properties"]
+
+    result = await tools["bridge_dashboard"].handler(
+        None,
+        SimpleNamespace(arguments={"progress": {
+            "title": "Lifecycle change",
+            "total": 4,
+            "phase": "Tests",
+            "current": "Confirm RED",
+            "status": "planning",
+        }}),
+        request_context,
+    )
+
+    progress = result.structured_content["progress"]
+    assert progress["operation_id"]
+    assert progress["title"] == "Lifecycle change"
+    assert progress["status"] == "planning"
+    assert result.meta == BRIDGE_DASHBOARD_UI_META
+
+
+@pytest.mark.asyncio
+async def test_work_progress_update_has_no_dashboard_ui_metadata(tmp_path):
+    registry = _registry()
+
+    class Routes:
+        path = tmp_path / "routes.json"
+        def resolve(self, route_id=None):
+            return {"route_id": route_id or "ad5x", "channel_id": "telegram-ad5x"}
+
+    container = SimpleNamespace(
+        settings=SimpleNamespace(server=SimpleNamespace(name="development-bridge")),
+        projects=SimpleNamespace(list=lambda: ()),
+        route_registry=Routes(),
+        coordinator=SimpleNamespace(session_binding=lambda session_id: {"route_id": "ad5x"}),
+    )
+    tools = {tool.definition.name: tool for tool in compact_tools(container, registry)}
+    registry.register_many(tools.values())
+    request_context = SimpleNamespace(request_id="req_hidden_update")
+    started = await tools["bridge_dashboard"].handler(
+        None,
+        SimpleNamespace(arguments={"progress": {"title": "One card", "total": 2}}),
+        request_context,
+    )
+
+    update = await tools["work_progress_update"].handler(
+        None,
+        SimpleNamespace(arguments={
+            "operation_id": started.structured_content["progress"]["operation_id"],
+            "completed": 1,
+        }),
+        request_context,
+    )
+
+    assert update.structured_content is None
+    assert update.meta is None
