@@ -111,6 +111,38 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
 
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
+
+    def attach_coordinator_ui(result, ctx, binding: dict):
+        channel_id = str(binding["channel_id"])
+        if binding.get("route_id") is not None and binding.get("route_state") == "active":
+            container.route_registry.request(str(binding["route_id"]))
+        delivery = container.coordinator.issue_delivery_lease(
+            channel_id,
+            session_id=_session_id(ctx),
+            route_id=(str(binding["route_id"]) if binding.get("route_id") is not None else None),
+            generation=(int(binding["generation"]) if binding.get("generation") is not None else None),
+        )
+        trigger_path = container.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
+        public_base = container.settings.server.public_base_url
+        trigger_url = (
+            str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
+        )
+        result.structured_content = {
+            "channel_id": channel_id,
+            "trigger_url": trigger_url,
+            "delivery_lease": delivery["lease_id"],
+            **(
+                {
+                    "route_id": binding["route_id"],
+                    "generation": binding.get("generation"),
+                    "route_state": binding.get("route_state"),
+                }
+                if binding.get("route_id") is not None
+                else {}
+            ),
+        }
+        result.meta = dict(COORDINATOR_UI_META)
+        return result
     async def mount(ctx, params, request_context):
         arguments = params.arguments or {}
         requested_channel = arguments.get("channel_id")
@@ -258,7 +290,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         data["channel_id"] = channel_id
         if destination.get("route_id") is not None:
             data["route_id"] = destination["route_id"]
-        return to_mcp_result(success(request_context.request_id, data))
+        result = to_mcp_result(success(request_context.request_id, data))
+        return attach_coordinator_ui(result, ctx, destination)
 
     async def exec_and_wake(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -288,7 +321,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         response = {**job.status_dict(), **waiter, "channel_id": channel_id}
         if destination.get("route_id") is not None:
             response["route_id"] = destination["route_id"]
-        return to_mcp_result(success(request_context.request_id, response))
+        result = to_mcp_result(success(request_context.request_id, response))
+        return attach_coordinator_ui(result, ctx, destination)
 
     common_meta = COORDINATOR_UI_META
     return (
@@ -438,8 +472,9 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             types.Tool(
                 name="coordinator_wake_on_jobs",
                 description=(
-                    "Event-driven resilient X continuation for durable jobs. Requires an active "
-                    "coordinator_x_mount for the same channel. After jobs become terminal, delivery "
+                    "Event-driven resilient X continuation for durable jobs. With an explicit route/channel, "
+                    "the call renders/refreshes the coordinator MCP App; otherwise coordinator_x_mount supplies "
+                    "the existing destination binding. After jobs become terminal, delivery "
                     "keeps one active durable continuation_id per channel, batches concurrent terminal "
                     "groups without overwriting them, and deduplicates repeated events. Transport failures "
                     "may retry X up to 3 attempts; after successful ui/message transport ACK the continuation "
@@ -478,6 +513,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["project_id", "repository_id", "job_ids"],
                     "additionalProperties": False,
                 },
+                _meta=common_meta,
             ),
             wake_on_jobs,
             "coordinator-x",
@@ -485,7 +521,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_exec_and_wake",
-                description="Queue one durable repository execution and arm its coordinator waiter in the same request; cancels the new job if waiter registration fails.",
+                description="Queue one durable repository execution, arm its coordinator waiter, and render/refresh the coordinator MCP App in the same request; cancels the new job if waiter registration fails.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -505,6 +541,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["project_id", "repository_id", "executable"],
                     "additionalProperties": False,
                 },
+                _meta=common_meta,
             ),
             exec_and_wake,
             "coordinator-x",
