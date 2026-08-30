@@ -1012,3 +1012,44 @@ def test_browser_host_healthcheck_accepts_fresh_idle_park(tmp_path: Path, monkey
     assert module.healthcheck(cfg) == 0
     payload = __import__("json").loads(capsys.readouterr().out)
     assert payload["healthy"] is True
+
+
+def test_browser_host_forces_observer_binding_even_when_channel_already_matches(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    calls = []
+
+    def control(page, action, **payload):
+        calls.append((action, dict(payload)))
+        if action == "ping":
+            return {"ok": True, "channel_id": "telegram-ad5x-g7", "observer_only": False}
+        if action == "bind":
+            return {
+                "ok": True,
+                "channel_id": payload["channel_id"],
+                "observer_only": payload.get("observer_only") is True,
+            }
+        raise AssertionError(action)
+
+    host.coordinator_app_control = control
+    result = host.ensure_control_channel({"id": "page"}, "telegram-ad5x-g7")
+    assert result == {"ok": True, "channel_id": "telegram-ad5x-g7", "observer_only": True}
+    assert calls == [
+        ("ping", {}),
+        ("bind", {"channel_id": "telegram-ad5x-g7", "observer_only": True}),
+    ]
+
+
+def test_browser_host_keeps_existing_observer_binding_without_rebinding(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    calls = []
+
+    def control(page, action, **payload):
+        calls.append((action, dict(payload)))
+        return {"ok": True, "channel_id": "telegram-ad5x-g7", "observer_only": True}
+
+    host.coordinator_app_control = control
+    result = host.ensure_control_channel({"id": "page"}, "telegram-ad5x-g7")
+    assert result["observer_only"] is True
+    assert calls == [("ping", {})]

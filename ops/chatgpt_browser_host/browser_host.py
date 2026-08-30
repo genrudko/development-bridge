@@ -1452,9 +1452,11 @@ class BrowserHost:
         ping = self.coordinator_app_control(page, "ping")
         if not ping.get("ok"):
             return ping
-        if ping.get("channel_id") == channel_id:
+        if ping.get("channel_id") == channel_id and ping.get("observer_only") is True:
             return ping
-        return self.coordinator_app_control(page, "bind", channel_id=channel_id)
+        return self.coordinator_app_control(
+            page, "bind", channel_id=channel_id, observer_only=True
+        )
 
     def wait_for_control_channel(self, page: dict, channel_id: str, timeout: float = 30) -> dict:
         deadline = time.monotonic() + timeout

@@ -29,6 +29,7 @@ const stateEl = document.getElementById("state");
 const app = new App({ name: "Development Bridge Coordinator", version: "1.1.0" }, { autoResize: true });
 let channelId = "coordinator";
 let deliveryLease = null;
+let observerOnly = false;
 let busy = false;
 let modelContextContinuation = null;
 let modelContextSupported = true;
@@ -116,7 +117,7 @@ async function handleControl(data) {
   ) return { nonce: String(data?.nonce || ""), ok: false, error: "invalid_control" };
   const action = String(data.action || "");
   if (action === "ping") {
-    return { nonce: data.nonce, action, ok: appConnected, channel_id: channelId };
+    return { nonce: data.nonce, action, ok: appConnected, channel_id: channelId, observer_only: observerOnly };
   }
   if (!appConnected) {
     return { nonce: data.nonce, action, ok: false, error: "app_not_connected" };
@@ -128,8 +129,9 @@ async function handleControl(data) {
   channelId = requestedChannel;
   if (action === "bind") {
     deliveryLease = null;
+    observerOnly = data.observer_only === true;
     await clearProtocolContext();
-    return { nonce: data.nonce, action, ok: true, channel_id: channelId };
+    return { nonce: data.nonce, action, ok: true, channel_id: channelId, observer_only: observerOnly };
   }
   if (action === "bootstrap") {
     const operationId = String(data.operation_id || "");
@@ -202,6 +204,10 @@ async function poll() {
   if (busy) return;
   try {
     const state = await request("status");
+    if (observerOnly) {
+      pollDelayMs = 5000;
+      render("ready", "Наблюдаю"); return;
+    }
     if (!state.ready) {
       pollDelayMs = 5000;
       if (state.state === "idle" && modelContextContinuation !== null) await clearProtocolContext();
