@@ -103,6 +103,8 @@ class AntigravityExecutorSettings(BaseModel):
     task_timeout_seconds: float = Field(default=900, gt=0, le=3600)
     output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
     model: str | None = Field(default=None, min_length=1, max_length=128)
+    quota_cache_path: Path = Path("~/.local/state/development-bridge/antigravity-quota.json")
+    quota_cache_max_age_seconds: float = Field(default=120, gt=0, le=3600)
 
 
 class ExecutorSettings(BaseModel):

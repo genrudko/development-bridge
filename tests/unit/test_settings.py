@@ -237,3 +237,11 @@ def test_loads_optional_knowledge_database_path(tmp_path):
         {"knowledge": {"database_path": tmp_path / "knowledge.sqlite3"}}
     )
     assert settings.knowledge.database_path == tmp_path / "knowledge.sqlite3"
+
+
+def test_antigravity_quota_cache_defaults_and_bounds():
+    settings = BridgeSettings().executors.antigravity
+    assert settings.quota_cache_path == Path("~/.local/state/development-bridge/antigravity-quota.json")
+    assert settings.quota_cache_max_age_seconds == 120
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"executors": {"antigravity": {"quota_cache_max_age_seconds": 0}}})

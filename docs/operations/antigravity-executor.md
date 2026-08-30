@@ -64,3 +64,9 @@ Wait using the existing durable wake/status flow. Verify terminal output, no wor
 - Repository or test error: ordinary job evidence, not an infrastructure classification.
 
 Never enable `useG1Credits`, pass `--dangerously-skip-permissions`, or add automatic retry loops. The owner-operated VPS uses Antigravity's native `always-proceed` policy instead of the unavailable Linux terminal sandbox.
+
+## 7. Structured quota capture
+
+Antigravity's documented custom status-line protocol sends a JSON state payload to a configured command on stdin. The payload includes quota buckets with `remaining_fraction`, `reset_time`, and `reset_in_seconds`. Configure the deployment status line to run `app/executors/antigravity_quota.py --cache <quota_cache_path>` using an absolute Python/script path. The helper stores only quota/model/tier metadata, not the account email or transcript.
+
+`executor_status` reads the fresh cache after its callable `agy` probe. The most constraining matching `gemini-*` bucket is used for Gemini models; if no model family can be matched, the most constraining valid bucket is used conservatively. Cache older than `quota_cache_max_age_seconds` is treated as `unknown`.

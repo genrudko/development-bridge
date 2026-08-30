@@ -1,6 +1,8 @@
 import os
 import asyncio
 from pathlib import Path
+from datetime import UTC, datetime
+import json
 
 import pytest
 
@@ -78,6 +80,28 @@ async def test_probe_normalizes_failures(tmp_path, probe_result, error):
     assert probed.last_error == error
     if error == "quota_exhausted":
         assert probed.quota_state is QuotaState.EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_probe_uses_fresh_statusline_quota_cache(tmp_path):
+    cache = tmp_path / "quota.json"
+    cache.write_text(json.dumps({
+        "observed_at": datetime.now(UTC).isoformat(),
+        "model": {"display_name": "Gemini 3.7 Flash (High)"},
+        "plan_tier": "Google AI Pro",
+        "quota": {
+            "gemini-5h": {"remaining_fraction": 0.19, "reset_time": "2026-08-31T03:34:10Z"},
+            "gemini-weekly": {"remaining_fraction": 0.80, "reset_time": "2026-09-06T22:34:10Z"},
+        },
+    }))
+    path = tmp_path / "agy"; path.write_text("fake")
+    runner = FakeRunner([result(stdout=b"agy 1.2.3\n"), result(stdout=b'{"status":"SUCCESS","response":"BRIDGE_PROBE_OK"}')])
+    settings = AntigravityExecutorSettings(enabled=True, executable=path, quota_cache_path=cache)
+    status = await AntigravityExecutor(settings, runner).probe(busy=False)
+    assert status.quota_state is QuotaState.LOW
+    assert status.remaining_fraction == 0.19
+    assert status.reset_time == datetime(2026, 8, 31, 3, 34, 10, tzinfo=UTC)
+    assert status.model == "Gemini 3.7 Flash (High)"
 
 
 @pytest.mark.asyncio

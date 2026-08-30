@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Protocol
 
 from app.api.errors import BridgeError, ErrorCode
-from app.executors.models import ExecutorLaunch, ExecutorName, ExecutorRequest, ExecutorStatus, QuotaState
+from app.executors.models import ExecutorLaunch, ExecutorName, ExecutorRequest, ExecutorStatus, QuotaState, normalize_quota
+from app.executors.antigravity_quota import load_quota_snapshot
 from app.projects.models import Repository
 from app.settings import AntigravityExecutorSettings
 
@@ -147,6 +148,16 @@ class AntigravityExecutor:
             and isinstance(payload.get("response"), str)
             and payload["response"].strip() == "BRIDGE_PROBE_OK")
         if callable_runtime:
+            snapshot = load_quota_snapshot(
+                self._settings.quota_cache_path.expanduser(),
+                max_age_seconds=self._settings.quota_cache_max_age_seconds,
+            )
+            if snapshot is not None:
+                base["remaining_fraction"] = snapshot.remaining_fraction
+                base["reset_time"] = snapshot.reset_time
+                base["quota_state"] = normalize_quota(remaining_fraction=snapshot.remaining_fraction)
+                if base["model"] is None:
+                    base["model"] = snapshot.model
             return ExecutorStatus(available=True, authenticated=True, last_error=None,
                 last_success_at=datetime.now(UTC), version=version_text, **{k: v for k, v in base.items() if k not in {"last_success_at", "version"}})
         if isinstance(payload, dict):
