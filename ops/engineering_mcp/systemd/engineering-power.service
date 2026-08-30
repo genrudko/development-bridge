@@ -1,0 +1,30 @@
+[Unit]
+Description=PyPowsybl Power Systems MCP (lazy backend)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mcp-workspaces/pypowsybl
+Environment=HOME=%h
+Environment=MCP_PORT=8794
+Environment=MCP_HOST=127.0.0.1
+Environment=MCP_VERIFY_SSL=true
+Environment=LOG_DIR=%h/mcp-workspaces/pypowsybl/logs
+EnvironmentFile=-%h/.config/engineering-mcp/power.env
+ExecStart=%h/services/engineering-mcp/pypowsybl-mcp/.venv/bin/python -m pypowsybl_mcp.server
+Restart=on-failure
+RestartSec=4
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+MemoryHigh=768M
+MemoryMax=1536M
+TasksMax=192
+ReadWritePaths=%h/mcp-workspaces/pypowsybl

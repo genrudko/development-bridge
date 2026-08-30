@@ -1,0 +1,25 @@
+[Unit]
+Description=Engineering Bridge MCP facade
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/engineering-mcp/hub
+Environment=HOME=%h
+Environment=TMPDIR=%h/mcp-workspaces/hub/tmp
+Environment=LD_LIBRARY_PATH=%h/opt/cairo/usr/lib/x86_64-linux-gnu
+ExecStart=%h/services/engineering-mcp/hub/.venv/bin/python %h/services/engineering-mcp/hub/server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/mcp-workspaces/hub
+MemoryHigh=512M
+MemoryMax=1G
+TasksMax=128
+
+[Install]
+WantedBy=default.target
