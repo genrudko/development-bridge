@@ -225,6 +225,24 @@ async def test_failed_job_emits_failure_audit(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_antigravity_canceled_json_fails_even_when_cli_exits_zero(tmp_path):
+    jobs, repository, audit = configured(tmp_path, "print('unused')")
+    await jobs.start()
+    try:
+        script = 'print(\'{"status":"CANCELED","response":""}\')'
+        started = await jobs.start_execution(
+            repository, sys.executable, ["-c", script], "req_antigravity_canceled",
+            executor="antigravity", executor_quota_state="unknown",
+        )
+        failed = await wait_for_status(jobs, repository, started.job_id, {JobStatus.FAILED})
+        assert failed.exit_code == 0
+        assert failed.failure_reason == "executor_result_canceled"
+        assert audit.events[-1].event == "fail"
+    finally:
+        await jobs.stop()
+
+
+@pytest.mark.asyncio
 async def test_idempotent_start_returns_same_job(tmp_path):
     jobs, repository, _ = configured(tmp_path, "print('done')")
     await jobs.start()

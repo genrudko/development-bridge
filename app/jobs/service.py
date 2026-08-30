@@ -753,6 +753,12 @@ class JobService:
                 await stdin_writer
             self._processes.pop(job_id, None)
 
+        executor_failure = None
+        if failure_reason is None and process.returncode == 0:
+            current_output = store.get_by_id(job_id)
+            if current_output is not None:
+                executor_failure = self._executor_result_failure(current_output)
+
         artifact_failure = None
         if profile.artifacts:
             if self._artifacts is None:
@@ -792,9 +798,9 @@ class JobService:
             )
             final = store.get(job.project_id, job.repository_id, job_id)
             await self._emit(final, "cancel", AuditOutcome.SUCCESS)
-        elif failure_reason is not None or process.returncode != 0 or artifact_failure:
+        elif failure_reason is not None or process.returncode != 0 or executor_failure or artifact_failure:
             reason = failure_reason or (
-                "nonzero_exit" if process.returncode != 0 else artifact_failure
+                "nonzero_exit" if process.returncode != 0 else executor_failure or artifact_failure
             )
             await self._finish_job(
                 job_id,
@@ -865,6 +871,25 @@ class JobService:
                 task_id=job.task_id,
             )
         )
+
+    @staticmethod
+    def _executor_result_failure(job: JobRecord) -> str | None:
+        if job.executor != "antigravity":
+            return None
+        if job.stdout_truncated:
+            return "executor_result_invalid"
+        try:
+            payload = json.loads(job.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return "executor_result_invalid"
+        if not isinstance(payload, dict):
+            return "executor_result_invalid"
+        status = payload.get("status")
+        if status == "SUCCESS":
+            return None
+        if isinstance(status, str) and status in {"ERROR", "CANCELED", "INTERRUPTED", "INVALID", "WAITING", "RUNNING"}:
+            return f"executor_result_{status.lower()}"
+        return "executor_result_invalid"
 
     @staticmethod
     def _task_environment(extra_keys: tuple[str, ...] = ()) -> dict[str, str]:
