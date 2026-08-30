@@ -110,6 +110,7 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
                 "project_id": "project",
                 "repository_id": "repository",
                 "job_ids": [job.job_id],
+                "channel_id": "coordinator",
             }),
             SimpleNamespace(request_id="wake-request"),
         )
@@ -190,6 +191,7 @@ def test_coordinator_exec_and_wake_cancels_job_if_waiter_registration_fails(tmp_
         asyncio.run(tool.handler(None, SimpleNamespace(arguments={
             "project_id": "project", "repository_id": "repository",
             "executable": sys.executable, "arguments": ["-c", "print('orphan')"],
+            "channel_id": "coordinator",
         }), SimpleNamespace(request_id="atomic-fail")))
     except Exception:
         pass

@@ -20,16 +20,106 @@ COORDINATOR_UI_META = {
 }
 
 
+def _session_id(ctx) -> str | None:
+    session = getattr(ctx, "session", None)
+    connection = getattr(session, "_connection", None)
+    value = getattr(connection, "session_id", None)
+    return str(value) if value else None
+
+
+def _route_binding(container: ApplicationContainer, route: dict, *, route_state: str = "active") -> dict:
+    return {
+        "route_id": route["route_id"],
+        "channel_id": route["channel_id"],
+        "generation": int(route.get("generation", 0)),
+        "route_state": route_state,
+    }
+
+
+def _bind_session(container: ApplicationContainer, ctx, binding: dict) -> dict:
+    session_id = _session_id(ctx)
+    if session_id is None:
+        return binding
+    container.coordinator.bind_session(
+        session_id,
+        binding["channel_id"],
+        route_id=binding.get("route_id"),
+        generation=binding.get("generation"),
+        route_state=binding.get("route_state"),
+    )
+    return binding
+
+
+def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) -> dict:
+    from app.api.errors import BridgeError, ErrorCode
+
+    route_id = arguments.get("route_id")
+    channel_id = arguments.get("channel_id")
+    if route_id is not None:
+        route_id = container.route_registry.validate_route_id(route_id)
+        route = container.route_registry.resolve(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        if channel_id is not None and channel_id != route["channel_id"]:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "route_id and channel_id refer to different destinations")
+        return _bind_session(container, ctx, _route_binding(container, route))
+
+    if channel_id is not None:
+        channel = container.coordinator.validate_channel(channel_id)
+        route = container.route_registry.route_for_channel(channel)
+        if route is None:
+            return _bind_session(container, ctx, {"channel_id": channel, "route_state": "explicit"})
+        binding = _route_binding(container, route, route_state=str(route.get("route_state", "active")))
+        return _bind_session(container, ctx, binding)
+
+    binding = container.coordinator.session_binding(_session_id(ctx))
+    if binding is None:
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            "Coordinator destination is not bound to this MCP session; call coordinator_x_mount with route_id or channel_id first",
+        )
+    bound_route = binding.get("route_id")
+    if bound_route is not None:
+        route = container.route_registry.resolve(str(bound_route))
+        if route is None:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "Bound logical route no longer exists")
+        bound_generation = binding.get("generation")
+        current_generation = int(route.get("generation", 0))
+        if bound_generation is not None and int(bound_generation) != current_generation:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "This physical chat is bound to a stale route generation; remount or use the current successor chat",
+                retryable=True,
+                details={
+                    "route_id": str(bound_route),
+                    "bound_generation": int(bound_generation),
+                    "current_generation": current_generation,
+                    "current_channel_id": str(route["channel_id"]),
+                },
+            )
+        if str(binding.get("channel_id")) != str(route["channel_id"]):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "This physical chat channel is stale for the bound logical route",
+                retryable=True,
+            )
+    return dict(binding)
+
+
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
     async def mount(ctx, params, request_context):
-        requested_channel = (params.arguments or {}).get("channel_id", "coordinator")
+        arguments = params.arguments or {}
+        requested_channel = arguments.get("channel_id")
         if isinstance(requested_channel, str) and requested_channel.startswith("cont_"):
             ack = await container.coordinator.model_ack(requested_channel)
             data = dict(ack)
             data["state"] = "acknowledged" if ack.get("acknowledged") else "not_found"
             return to_mcp_result(success(request_context.request_id, data))
-        channel_id = container.coordinator.validate_channel(requested_channel)
+        binding = _resolve_destination(container, ctx, arguments)
+        channel_id = str(binding["channel_id"])
+        if binding.get("route_id") is not None and binding.get("route_state") == "active":
+            container.route_registry.request(str(binding["route_id"]))
         result = to_mcp_result(
             success(
                 request_context.request_id,
@@ -50,6 +140,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         result.structured_content = {
             "channel_id": channel_id,
             "trigger_url": trigger_url,
+            **({"route_id": binding["route_id"], "generation": binding.get("generation"), "route_state": binding.get("route_state")} if binding.get("route_id") is not None else {}),
         }
         result.meta = dict(COORDINATOR_UI_META)
         return result
@@ -120,9 +211,10 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
 
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
+        destination = _resolve_destination(container, ctx, arguments)
         data = await container.coordinator.arm(
             arguments["message"],
-            channel_id=arguments.get("channel_id", "coordinator"),
+            channel_id=str(destination["channel_id"]),
             delay_seconds=arguments.get("delay_seconds", 12),
             conflict=arguments.get("conflict", "coalesce"),
         )
@@ -136,15 +228,14 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
 
     async def wake_on_jobs(ctx, params, request_context):
         arguments = params.arguments or {}
-        channel_id = container.coordinator.validate_channel(
-            arguments.get("channel_id", "coordinator")
-        )
+        destination = _resolve_destination(container, ctx, arguments)
+        channel_id = str(destination["channel_id"])
         message = arguments.get("message")
 
         repository = container.projects.repositories.get(
             arguments["project_id"], arguments["repository_id"]
         )
-        payload = {"channel_id": channel_id}
+        payload = ({"route_id": str(destination["route_id"])} if destination.get("route_id") is not None else {"channel_id": channel_id})
         if message is not None:
             payload["message"] = message
         data = await container.jobs.wake_on_jobs_durable(
@@ -155,11 +246,14 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             payload,
         )
         data["channel_id"] = channel_id
+        if destination.get("route_id") is not None:
+            data["route_id"] = destination["route_id"]
         return to_mcp_result(success(request_context.request_id, data))
 
     async def exec_and_wake(ctx, params, request_context):
         arguments = params.arguments or {}
-        channel_id = container.coordinator.validate_channel(arguments.get("channel_id", "coordinator"))
+        destination = _resolve_destination(container, ctx, arguments)
+        channel_id = str(destination["channel_id"])
         repository = container.projects.repositories.get(arguments["project_id"], arguments["repository_id"])
         job = await container.jobs.start_execution(
             repository, arguments["executable"], arguments.get("arguments", []), request_context.request_id,
@@ -168,7 +262,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             artifacts=arguments.get("artifacts", []), stdin=arguments.get("stdin"),
             idempotency_key=arguments.get("idempotency_key"),
         )
-        payload = {"channel_id": channel_id}
+        payload = ({"route_id": str(destination["route_id"])} if destination.get("route_id") is not None else {"channel_id": channel_id})
         if arguments.get("message") is not None:
             payload["message"] = arguments["message"]
         try:
@@ -181,7 +275,10 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             except Exception:
                 pass
             raise
-        return to_mcp_result(success(request_context.request_id, {**job.status_dict(), **waiter, "channel_id": channel_id}))
+        response = {**job.status_dict(), **waiter, "channel_id": channel_id}
+        if destination.get("route_id") is not None:
+            response["route_id"] = destination["route_id"]
+        return to_mcp_result(success(request_context.request_id, response))
 
     common_meta = COORDINATOR_UI_META
     return (
@@ -192,11 +289,11 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
                         "channel_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{1,64}$",
-                            "default": "coordinator",
-                        }
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -282,10 +379,10 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 inputSchema={
                     "type": "object",
                     "properties": {
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
                         "channel_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{1,64}$",
-                            "default": "coordinator",
                         },
                         "message": {"type": "string", "minLength": 1, "maxLength": 4000},
                         "delay_seconds": {
@@ -353,10 +450,10 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                             "uniqueItems": True,
                             "items": JOB_ID_SCHEMA,
                         },
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
                         "channel_id": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{1,64}$",
-                            "default": "coordinator",
                         },
                         "message": {
                             "type": "string", "minLength": 1, "maxLength": 200,
@@ -390,7 +487,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                         "artifacts": {"type": "array", "maxItems": 32, "items": ArtifactSettings.model_json_schema(), "default": []},
                         "stdin": {"type": "string", "maxLength": 1048576},
                         "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
-                        "channel_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$", "default": "coordinator"},
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
+                        "channel_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
                         "message": {"type": "string", "minLength": 1, "maxLength": 200},
                         "policy": {"type": "string", "enum": ["all_terminal", "failure_or_all_terminal"], "default": "all_terminal"},
                     },

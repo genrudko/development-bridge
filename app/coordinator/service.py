@@ -56,6 +56,8 @@ class CoordinatorService:
     LEASE_SECONDS = 20.0
     BROWSER_PREFLIGHT_TTL_SECONDS = 15.0
     MAX_UNDELIVERED_AGE_SECONDS = 1800.0
+    SESSION_BINDING_TTL_SECONDS = 86_400.0
+    MAX_SESSION_BINDINGS = 256
 
     def __init__(
         self,
@@ -68,6 +70,7 @@ class CoordinatorService:
         self._pending: dict[str, PendingWake] = {}
         self._cooldown_until: dict[str, float] = {}
         self._global_cooldown_until = 0.0
+        self._session_bindings: dict[str, dict[str, object]] = {}
         self._lock = asyncio.Lock()
         self._load_state()
 
@@ -119,6 +122,63 @@ class CoordinatorService:
         data = {"version": 1, "pending": {key: asdict(value) for key, value in self._pending.items()}, "cooldown_until": self._cooldown_until, "global_cooldown_until": self._global_cooldown_until}
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, self._state_path)
+
+    @staticmethod
+    def validate_session_id(session_id: str) -> str:
+        if not isinstance(session_id, str) or not 1 <= len(session_id) <= 256:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "session_id is invalid")
+        return session_id
+
+    def _prune_session_bindings(self) -> None:
+        now = time.time()
+        self._session_bindings = {
+            key: value
+            for key, value in self._session_bindings.items()
+            if float(value.get("bound_at", 0.0)) + self.SESSION_BINDING_TTL_SECONDS > now
+        }
+        if len(self._session_bindings) <= self.MAX_SESSION_BINDINGS:
+            return
+        ordered = sorted(
+            self._session_bindings.items(),
+            key=lambda item: float(item[1].get("bound_at", 0.0)),
+            reverse=True,
+        )
+        self._session_bindings = dict(ordered[: self.MAX_SESSION_BINDINGS])
+
+    def bind_session(
+        self,
+        session_id: str,
+        channel_id: str,
+        *,
+        route_id: str | None = None,
+        generation: int | None = None,
+        route_state: str | None = None,
+    ) -> dict[str, object]:
+        session = self.validate_session_id(session_id)
+        channel = self.validate_channel(channel_id)
+        self._prune_session_bindings()
+        item: dict[str, object] = {
+            "session_id": session,
+            "channel_id": channel,
+            "bound_at": time.time(),
+        }
+        if route_id is not None:
+            item["route_id"] = str(route_id)
+        if generation is not None:
+            item["generation"] = int(generation)
+        if route_state is not None:
+            item["route_state"] = str(route_state)
+        self._session_bindings[session] = item
+        self._prune_session_bindings()
+        return dict(item)
+
+    def session_binding(self, session_id: str | None) -> dict[str, object] | None:
+        if session_id is None:
+            return None
+        session = self.validate_session_id(session_id)
+        self._prune_session_bindings()
+        item = self._session_bindings.get(session)
+        return dict(item) if item is not None else None
 
     @staticmethod
     def validate_channel(channel_id: str) -> str:
