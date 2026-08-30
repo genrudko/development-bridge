@@ -1,0 +1,26 @@
+[Unit]
+Description=MCP-KiCad 10 over Streamable HTTP (lazy backend)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/engineering-mcp/mcp-kicad/bin
+Environment=HOME=%h
+Environment=PATH=%h/opt/node-v22/bin:%h/.local/bin:/usr/bin:/bin
+ExecStart=%h/services/engineering-mcp/gateway/node_modules/.bin/supergateway --stdio "%h/services/engineering-mcp/mcp-kicad/bin/mcp-kicad" --outputTransport streamableHttp --stateful --sessionTimeout 180000 --port 8795 --streamableHttpPath /mcp --healthEndpoint /healthz --protocolVersion 2025-11-25 --logLevel info
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+MemoryHigh=768M
+MemoryMax=1536M
+TasksMax=192
+ReadWritePaths=%h/mcp-workspaces/kicad
