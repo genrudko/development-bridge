@@ -2021,10 +2021,28 @@ class BrowserHost:
                     early_status = self.coordinator_local_status()
                     early_continuation_id = early_status.get("continuation_id")
                     if early_status.get("state") == "idle":
-                        # No continuation needs the MCP App right now. Do not reload ChatGPT or
-                        # resurrect old coordinator cards just to keep a listener warm. The local
-                        # coordinator status probe is enough to notice the next wake, at which point
-                        # normal listener recovery resumes.
+                        # A newly committed rollover still needs one bootstrap turn in the successor
+                        # even when no ordinary wake is pending. Finish that hand-off before parking
+                        # listener recovery, otherwise bootstrap_sent can remain false forever.
+                        active_rollover = self.active_rollover_record()
+                        if (
+                            active_rollover is not None
+                            and active_rollover.get("bootstrap_sent") is not True
+                            and active_rollover.get("state") != "complete"
+                        ):
+                            bootstrap_result = self.complete_rollover_bootstrap(page)
+                            if bootstrap_result is not None:
+                                self.write_state(
+                                    status="rollover", cdp_ok=True, target_ok=True,
+                                    coordinator_iframes=0, polling_ok=poll_ok,
+                                    polling_detail=poll_detail, current_url=current_url, title=title,
+                                    rollover=bootstrap_result,
+                                )
+                                time.sleep(self.cfg.check_interval)
+                                continue
+                        # No continuation or rollover bootstrap needs the MCP App right now. Do not
+                        # reload ChatGPT or resurrect old coordinator cards just to keep a listener
+                        # warm. The local coordinator status probe is enough to notice the next wake.
                         self.write_state(
                             status="idle", cdp_ok=True, target_ok=True,
                             coordinator_iframes=0, polling_ok=False,

@@ -811,6 +811,16 @@ def test_browser_host_prioritizes_browser_preflight_before_generic_iframe_recove
     assert "prepare_browser_preflight(page, early_continuation_id)" in run_source[early:iframe_probe]
 
 
+def test_browser_host_idle_finishes_rollover_bootstrap_before_parking():
+    source = (Path(__file__).parents[2] / "ops/chatgpt_browser_host/browser_host.py").read_text()
+    run_source = source[source.index("    def run(self) -> int:"):]
+    idle = run_source.index('if early_status.get("state") == "idle":')
+    park = run_source.index('polling_detail="coordinator idle; listener recovery parked"', idle)
+    segment = run_source[idle:park]
+    assert "active_rollover = self.active_rollover_record()" in segment
+    assert "bootstrap_result = self.complete_rollover_bootstrap(page)" in segment
+
+
 def test_browser_host_preflight_refuses_stale_dom_leaf(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
