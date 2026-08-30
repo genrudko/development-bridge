@@ -243,6 +243,27 @@ async def test_antigravity_canceled_json_fails_even_when_cli_exits_zero(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_antigravity_soft_denied_tool_fails_even_with_success_json(tmp_path):
+    jobs, repository, audit = configured(tmp_path, "print('unused')")
+    await jobs.start()
+    try:
+        script = (
+            'import sys; print(\'{"status":"SUCCESS","response":""}\'); '
+            'print(\'tool permission cannot prompt; auto-denied\', file=sys.stderr)'
+        )
+        started = await jobs.start_execution(
+            repository, sys.executable, ["-c", script], "req_antigravity_denied",
+            executor="antigravity", executor_quota_state="unknown",
+        )
+        failed = await wait_for_status(jobs, repository, started.job_id, {JobStatus.FAILED})
+        assert failed.exit_code == 0
+        assert failed.failure_reason == "executor_permission_denied"
+        assert audit.events[-1].event == "fail"
+    finally:
+        await jobs.stop()
+
+
+@pytest.mark.asyncio
 async def test_idempotent_start_returns_same_job(tmp_path):
     jobs, repository, _ = configured(tmp_path, "print('done')")
     await jobs.start()

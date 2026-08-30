@@ -876,6 +876,9 @@ class JobService:
     def _executor_result_failure(job: JobRecord) -> str | None:
         if job.executor != "antigravity":
             return None
+        diagnostic = job.stderr[:16_384].decode("utf-8", errors="replace").lower()
+        if "auto-denied" in diagnostic or ("permission" in diagnostic and "cannot prompt" in diagnostic):
+            return "executor_permission_denied"
         if job.stdout_truncated:
             return "executor_result_invalid"
         try:
