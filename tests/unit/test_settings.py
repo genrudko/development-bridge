@@ -367,3 +367,14 @@ coordinator_wake_delivery:
     assert settings.coordinator_wake_delivery.review_gpt.browser_endpoint == "http://localhost:9222"
     assert settings.coordinator_wake_delivery.review_gpt.receipt_directory == Path("/var/lib/receipts")
     assert settings.coordinator_wake_delivery.review_gpt.process_timeout_seconds == 90.0
+
+def test_review_gpt_on_demand_browser_lifecycle_settings_require_a_pair():
+    defaults = BridgeSettings().coordinator_wake_delivery.review_gpt
+    assert defaults.browser_start_command == ()
+    assert defaults.browser_stop_command == ()
+    assert defaults.browser_lifecycle_timeout_seconds == 30.0
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"coordinator_wake_delivery": {"review_gpt": {"browser_start_command": ["browserctl", "start"]}}})
+    configured = BridgeSettings.model_validate({"coordinator_wake_delivery": {"review_gpt": {"browser_start_command": ["browserctl", "start"], "browser_stop_command": ["browserctl", "stop"], "browser_lifecycle_timeout_seconds": 45}}})
+    assert configured.coordinator_wake_delivery.review_gpt.browser_start_command == ("browserctl", "start")
+    assert configured.coordinator_wake_delivery.review_gpt.browser_stop_command == ("browserctl", "stop")

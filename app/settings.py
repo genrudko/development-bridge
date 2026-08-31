@@ -171,6 +171,15 @@ class ReviewGptWakeSettings(BaseModel):
     browser_endpoint: str | None = None
     receipt_directory: Path | None = None
     process_timeout_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
+    browser_start_command: tuple[str, ...] = ()
+    browser_stop_command: tuple[str, ...] = ()
+    browser_lifecycle_timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+
+    @model_validator(mode="after")
+    def validate_browser_lifecycle_commands(self) -> ReviewGptWakeSettings:
+        if bool(self.browser_start_command) != bool(self.browser_stop_command):
+            raise ValueError("review_gpt browser_start_command and browser_stop_command must be configured together")
+        return self
 
 
 class CoordinatorWakeDeliverySettings(BaseModel):

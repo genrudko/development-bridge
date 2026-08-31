@@ -379,6 +379,9 @@ def build_container(
                 browser_endpoint=rg.browser_endpoint,
                 receipt_dir=rg.receipt_directory,
                 timeout_seconds=rg.process_timeout_seconds,
+                browser_start_command=rg.browser_start_command,
+                browser_stop_command=rg.browser_stop_command,
+                browser_lifecycle_timeout_seconds=rg.browser_lifecycle_timeout_seconds,
             )
         coordinator_wake_delivery = CoordinatorWakeDeliveryService(
             coordinator,

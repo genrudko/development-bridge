@@ -183,7 +183,7 @@ async def test_probe_exact_conversation_success(tmp_path: Path):
     assert "--browser-endpoint" in argv
     assert argv[argv.index("--browser-endpoint") + 1] == "http://127.0.0.1:9222"
     assert "--chat-url" in argv
-    assert argv[argv.index("--chat-url") + 1] == canonical
+    assert argv[argv.index("--chat-url") + 1] == target.route_url
     assert "--send" not in argv
 
 
@@ -920,3 +920,127 @@ async def test_spawn_failure_is_not_submitted(tmp_path: Path):
     result = await transport.deliver(req)
     assert result.disposition == "not_submitted"
     assert "No such file or directory" in (result.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_on_demand_probe_starts_fresh_browser_uses_project_route_and_stops(tmp_path: Path):
+    target = WakeTarget(route_id="r1", channel_id="c1", conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3", route_url="https://chatgpt.com/g/g-p-123/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3")
+    canonical = canonical_chat_url(target.conversation_id)
+    state = {"browser": False}
+    def on_run(argv, timeout):
+        args = list(argv)
+        if args == ["browserctl", "start"]: state["browser"] = True; return
+        if args == ["browserctl", "stop"]: state["browser"] = False; return
+        assert state["browser"] is True
+        if args[2:4] == ["thread", "export"]:
+            Path(args[args.index("--output") + 1]).write_text(json.dumps({"chatUrl": canonical, "statusBusy": False, "stopVisible": False, "title": "Development Bridge Conversation", "bodyText": "Loaded current project branch"}), encoding="utf-8")
+    async def endpoint_probe(endpoint): return state["browser"]
+    runner = FakeProcessRunner(on_run=on_run)
+    transport = ReviewGptWakeTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=tmp_path / "receipts", process_runner=runner, browser_start_command=("browserctl", "start"), browser_stop_command=("browserctl", "stop"), browser_endpoint_probe=endpoint_probe)
+    result = await transport.probe(target)
+    assert result.ready is True
+    assert state["browser"] is False
+    assert list(runner.calls[0][0]) == ["browserctl", "start"]
+    export_argv = list(runner.calls[1][0])
+    assert export_argv[export_argv.index("--chat-url") + 1] == target.route_url
+    assert list(runner.calls[-1][0]) == ["browserctl", "stop"]
+
+@pytest.mark.asyncio
+async def test_on_demand_delivery_preflights_same_cold_browser_before_send_and_stops(tmp_path: Path):
+    target = WakeTarget(route_id="r1", channel_id="c1", conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3", route_url="https://chatgpt.com/g/g-p-123/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3")
+    request = WakeDeliveryRequest(target=target, continuation_id="cont_cold", prompt="DBRIDGE_CONTINUE cont_cold", delivery_key="cont_cold")
+    canonical = canonical_chat_url(target.conversation_id); receipt_dir = tmp_path / "receipts"; receipt = deterministic_receipt_path(receipt_dir, request.delivery_key)
+    state = {"browser": False}
+    def on_run(argv, timeout):
+        args = list(argv)
+        if args == ["browserctl", "start"]: state["browser"] = True; return
+        if args == ["browserctl", "stop"]: state["browser"] = False; return
+        assert state["browser"] is True
+        if args[2:4] == ["thread", "export"]:
+            Path(args[args.index("--output") + 1]).write_text(json.dumps({"chatUrl": canonical, "statusBusy": False, "stopVisible": False, "title": "Development Bridge Conversation", "bodyText": "Large conversation loaded"}), encoding="utf-8"); return
+        if "--send" in args:
+            receipt.parent.mkdir(parents=True, exist_ok=True); receipt.write_text(json.dumps(_make_valid_receipt_dict(chat_url=canonical)), encoding="utf-8")
+    async def endpoint_probe(endpoint): return state["browser"]
+    runner = FakeProcessRunner(on_run=on_run)
+    transport = ReviewGptWakeTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=receipt_dir, process_runner=runner, browser_start_command=("browserctl", "start"), browser_stop_command=("browserctl", "stop"), browser_endpoint_probe=endpoint_probe)
+    result = await transport.deliver(request)
+    assert result.disposition == "delivered"
+    assert state["browser"] is False
+    calls = [list(argv) for argv, _ in runner.calls]
+    export_call = next(args for args in calls if args[2:4] == ["thread", "export"]); send_call = next(args for args in calls if "--send" in args)
+    assert calls[0] == ["browserctl", "start"] and calls[-1] == ["browserctl", "stop"]
+    assert export_call[export_call.index("--chat-url") + 1] == target.route_url
+    assert send_call[send_call.index("--chat-url") + 1] == target.route_url
+    assert calls.index(export_call) < calls.index(send_call)
+
+@pytest.mark.asyncio
+async def test_on_demand_delivery_never_sends_when_cold_preflight_is_not_ready(tmp_path: Path):
+    target = WakeTarget(route_id="r1", channel_id="c1", conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3", route_url="https://chatgpt.com/g/g-p-123/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3")
+    request = WakeDeliveryRequest(target=target, continuation_id="cont_busy", prompt="DBRIDGE_CONTINUE cont_busy", delivery_key="cont_busy")
+    canonical = canonical_chat_url(target.conversation_id); state = {"browser": False}
+    def on_run(argv, timeout):
+        args = list(argv)
+        if args == ["browserctl", "start"]: state["browser"] = True; return
+        if args == ["browserctl", "stop"]: state["browser"] = False; return
+        if args[2:4] == ["thread", "export"]:
+            Path(args[args.index("--output") + 1]).write_text(json.dumps({"chatUrl": canonical, "statusBusy": True, "stopVisible": False, "title": "Development Bridge Conversation", "bodyText": "Still loading/generating"}), encoding="utf-8")
+    async def endpoint_probe(endpoint): return state["browser"]
+    runner = FakeProcessRunner(on_run=on_run)
+    transport = ReviewGptWakeTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=tmp_path / "receipts", process_runner=runner, browser_start_command=("browserctl", "start"), browser_stop_command=("browserctl", "stop"), browser_endpoint_probe=endpoint_probe)
+    result = await transport.deliver(request)
+    assert result.disposition == "not_submitted"
+    assert state["browser"] is False
+    assert all("--send" not in argv for argv, _ in runner.calls)
+
+
+@pytest.mark.asyncio
+async def test_on_demand_probe_exception_guarantees_browser_stop(tmp_path: Path):
+    state = {"browser": False}
+    class ExplodingTransport(ReviewGptWakeTransport):
+        async def _probe_connected(self, target):
+            raise RuntimeError("unexpected probe crash")
+    def on_run(argv, timeout):
+        args = list(argv)
+        if args == ["browserctl", "start"]: state["browser"] = True
+        elif args == ["browserctl", "stop"]: state["browser"] = False
+    async def endpoint_probe(endpoint): return state["browser"]
+    transport = ExplodingTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=tmp_path / "receipts", process_runner=FakeProcessRunner(on_run=on_run), browser_start_command=("browserctl", "start"), browser_stop_command=("browserctl", "stop"), browser_endpoint_probe=endpoint_probe)
+    target = WakeTarget(route_id="r1", channel_id="c1", conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3", route_url="https://chatgpt.com/g/g-p-123/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3")
+    with pytest.raises(RuntimeError, match="unexpected probe crash"):
+        await transport.probe(target)
+    assert state["browser"] is False
+
+@pytest.mark.asyncio
+async def test_on_demand_endpoint_probe_exception_is_bounded_and_cleanup_runs(tmp_path: Path):
+    state = {"browser": False}
+    def on_run(argv, timeout):
+        args = list(argv)
+        if args == ["browserctl", "start"]: state["browser"] = True
+        elif args == ["browserctl", "stop"]: state["browser"] = False
+    async def exploding_endpoint_probe(endpoint): raise RuntimeError("CDP probe exploded")
+    transport = ReviewGptWakeTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=tmp_path / "receipts", process_runner=FakeProcessRunner(on_run=on_run), browser_start_command=("browserctl", "start"), browser_stop_command=("browserctl", "stop"), browser_endpoint_probe=exploding_endpoint_probe)
+    target = WakeTarget(route_id="r1", channel_id="c1", conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3", route_url="https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3")
+    result = await transport.probe(target)
+    assert result.ready is False
+    assert result.owner_input_required is False
+    assert "CDP probe exploded" in (result.detail or "")
+    assert state["browser"] is False
+
+@pytest.mark.asyncio
+async def test_on_demand_cleanup_failure_does_not_promote_unsubmitted_to_owner_input(tmp_path: Path):
+    target = WakeTarget(route_id="r1", channel_id="c1", conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3", route_url="https://chatgpt.com/g/g-p-123/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3")
+    request = WakeDeliveryRequest(target=target, continuation_id="cont_cleanup", prompt="DBRIDGE_CONTINUE cont_cleanup", delivery_key="cont_cleanup")
+    canonical = canonical_chat_url(target.conversation_id); state = {"browser": False}
+    async def runner(argv, timeout):
+        args = list(argv)
+        if args == ["browserctl", "start"]: state["browser"] = True; return ProcessResult(0)
+        if args == ["browserctl", "stop"]: return ProcessResult(1, stderr="temporary systemd stop failure")
+        if args[2:4] == ["thread", "export"]:
+            Path(args[args.index("--output") + 1]).write_text(json.dumps({"chatUrl": canonical, "statusBusy": True, "stopVisible": False, "title": "Conversation", "bodyText": "Busy"}), encoding="utf-8")
+            return ProcessResult(0)
+        raise AssertionError(args)
+    async def endpoint_probe(endpoint): return state["browser"]
+    transport = ReviewGptWakeTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=tmp_path / "receipts", process_runner=runner, browser_start_command=("browserctl", "start"), browser_stop_command=("browserctl", "stop"), browser_endpoint_probe=endpoint_probe)
+    result = await transport.deliver(request)
+    assert result.disposition == "not_submitted"
+    assert "browser cleanup failed" in (result.detail or "").lower()

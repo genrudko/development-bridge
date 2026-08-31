@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import tempfile
+import urllib.request
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ class ProcessResult:
 
 
 AsyncProcessRunner = Callable[[Sequence[str], float], Awaitable[ProcessResult]]
+BrowserEndpointProbe = Callable[[str], Awaitable[bool]]
 
 
 async def default_process_runner(argv: Sequence[str], timeout: float) -> ProcessResult:
@@ -50,6 +52,22 @@ async def default_process_runner(argv: Sequence[str], timeout: float) -> Process
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
         stderr=stderr_bytes.decode("utf-8", errors="replace"),
     )
+
+
+async def default_browser_endpoint_probe(endpoint: str) -> bool:
+    url = endpoint.rstrip("/") + "/json/version"
+
+    def _probe() -> bool:
+        try:
+            with urllib.request.urlopen(url, timeout=1.0) as response:
+                if response.status != 200:
+                    return False
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+                return isinstance(payload, dict) and bool(payload.get("webSocketDebuggerUrl"))
+        except Exception:
+            return False
+
+    return await asyncio.to_thread(_probe)
 
 
 def canonical_chat_url(conversation_id: str) -> str:
@@ -148,7 +166,7 @@ def is_owner_input_required_error(text: str) -> bool:
 
 
 class ReviewGptWakeTransport:
-    """ Pluggable direct wake transport via external review-gpt CLI. """
+    """Pluggable direct wake transport via external review-gpt CLI."""
 
     name: str = "review-gpt"
 
@@ -162,6 +180,10 @@ class ReviewGptWakeTransport:
         receipt_dir: str | Path,
         timeout_seconds: float = 60.0,
         process_runner: AsyncProcessRunner | None = None,
+        browser_start_command: Sequence[str] | None = None,
+        browser_stop_command: Sequence[str] | None = None,
+        browser_lifecycle_timeout_seconds: float = 30.0,
+        browser_endpoint_probe: BrowserEndpointProbe | None = None,
     ) -> None:
         self._node_path = Path(node_path).expanduser()
         self._cli_path = Path(cli_path).expanduser()
@@ -170,9 +192,72 @@ class ReviewGptWakeTransport:
         self._receipt_dir = Path(receipt_dir).expanduser()
         self._timeout_seconds = float(timeout_seconds)
         self._runner = process_runner or default_process_runner
+        self._browser_start_command = tuple(str(part) for part in (browser_start_command or ()))
+        self._browser_stop_command = tuple(str(part) for part in (browser_stop_command or ()))
+        self._browser_lifecycle_timeout_seconds = float(browser_lifecycle_timeout_seconds)
+        self._browser_endpoint_probe = browser_endpoint_probe or default_browser_endpoint_probe
+        if bool(self._browser_start_command) != bool(self._browser_stop_command):
+            raise ValueError("browser_start_command and browser_stop_command must be configured together")
 
-    async def probe(self, target: WakeTarget) -> WakeProbeResult:
+    @property
+    def on_demand_browser(self) -> bool:
+        return bool(self._browser_start_command)
+
+    async def _wait_for_browser_endpoint(self, *, ready: bool) -> bool:
+        deadline = asyncio.get_running_loop().time() + self._browser_lifecycle_timeout_seconds
+        while True:
+            current = await self._browser_endpoint_probe(self._browser_endpoint)
+            if current is ready:
+                return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.2)
+
+    async def _start_browser(self) -> str | None:
+        if not self.on_demand_browser:
+            return None
+        try:
+            result = await self._runner(
+                self._browser_start_command, self._browser_lifecycle_timeout_seconds
+            )
+        except Exception as exc:
+            return f"Browser start process error: {_bound_detail(str(exc))}"
+        if result.exit_code != 0:
+            return (
+                f"Browser start failed with exit code {result.exit_code}: "
+                f"{_bound_detail(result.stderr or result.stdout)}"
+            )
+        try:
+            if not await self._wait_for_browser_endpoint(ready=True):
+                return "Browser start command completed but CDP endpoint did not become ready"
+        except Exception as exc:
+            return f"Browser endpoint readiness probe failed after start: {_bound_detail(str(exc))}"
+        return None
+
+    async def _stop_browser(self) -> str | None:
+        if not self.on_demand_browser:
+            return None
+        try:
+            result = await self._runner(
+                self._browser_stop_command, self._browser_lifecycle_timeout_seconds
+            )
+        except Exception as exc:
+            return f"Browser stop process error: {_bound_detail(str(exc))}"
+        if result.exit_code != 0:
+            return (
+                f"Browser stop failed with exit code {result.exit_code}: "
+                f"{_bound_detail(result.stderr or result.stdout)}"
+            )
+        try:
+            if not await self._wait_for_browser_endpoint(ready=False):
+                return "Browser stop command completed but CDP endpoint remained ready"
+        except Exception as exc:
+            return f"Browser endpoint readiness probe failed after stop: {_bound_detail(str(exc))}"
+        return None
+
+    async def _probe_connected(self, target: WakeTarget) -> WakeProbeResult:
         canonical_url = canonical_chat_url(target.conversation_id)
+        navigation_url = target.route_url.strip() or canonical_url
         temp_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         temp_path = Path(temp_file.name)
         temp_file.close()
@@ -186,7 +271,7 @@ class ReviewGptWakeTransport:
                 "--browser-endpoint",
                 self._browser_endpoint,
                 "--chat-url",
-                canonical_url,
+                navigation_url,
                 "--output",
                 str(temp_path),
             ]
@@ -232,8 +317,6 @@ class ReviewGptWakeTransport:
                 )
 
             title = str(export_data.get("title", ""))
-
-            # Check Cloudflare challenge or login requirement (page-level evidence only)
             if is_owner_input_required_error(title):
                 return WakeProbeResult(
                     ready=False,
@@ -258,39 +341,46 @@ class ReviewGptWakeTransport:
                     detail="ChatGPT target is actively generating (statusBusy or stopVisible)",
                 )
 
-            return WakeProbeResult(
-                ready=True,
-                owner_input_required=False,
-                detail=None,
-            )
+            return WakeProbeResult(ready=True, owner_input_required=False, detail=None)
         finally:
             try:
                 temp_path.unlink(missing_ok=True)
             except Exception:
                 pass
 
-    async def deliver(self, request: WakeDeliveryRequest) -> WakeDeliveryResult:
-        canonical_url = canonical_chat_url(request.target.conversation_id)
-        navigation_url = request.target.route_url.strip() or canonical_url
-        resp_path = deterministic_response_path(self._receipt_dir, request.delivery_key)
-        rec_path = deterministic_receipt_path(self._receipt_dir, request.delivery_key)
+    async def probe(self, target: WakeTarget) -> WakeProbeResult:
+        if not self.on_demand_browser:
+            return await self._probe_connected(target)
 
-        # Before any send: check deterministic receipt
-        if rec_path.is_file():
-            if validate_committed_receipt(rec_path, self._browser_endpoint, canonical_url):
-                return WakeDeliveryResult(
-                    disposition="delivered",
-                    detail="Existing valid committed turn receipt found",
-                    receipt_path=rec_path,
-                )
-            # Malformed or belongs to another target => fail-closed uncertain without sending
-            return WakeDeliveryResult(
-                disposition="uncertain",
-                detail="Existing receipt exists but is malformed or belongs to another target",
-                receipt_path=rec_path,
+        start_error = await self._start_browser()
+        if start_error is not None:
+            cleanup_error = await self._stop_browser()
+            detail = start_error
+            if cleanup_error:
+                detail += f"; cleanup also failed: {cleanup_error}"
+            return WakeProbeResult(ready=False, owner_input_required=False, detail=detail)
+
+        try:
+            result = await self._probe_connected(target)
+        finally:
+            cleanup_error = await self._stop_browser()
+        if cleanup_error:
+            return WakeProbeResult(
+                ready=False,
+                owner_input_required=False,
+                detail=f"Browser cleanup failed after probe: {cleanup_error}",
             )
+        return result
 
-        self._receipt_dir.mkdir(parents=True, exist_ok=True)
+    async def _deliver_connected(
+        self,
+        request: WakeDeliveryRequest,
+        *,
+        canonical_url: str,
+        navigation_url: str,
+        resp_path: Path,
+        rec_path: Path,
+    ) -> WakeDeliveryResult:
         argv = [
             str(self._node_path),
             str(self._cli_path),
@@ -331,7 +421,6 @@ class ReviewGptWakeTransport:
                 detail=f"Process execution error: {_bound_detail(str(e))}",
             )
 
-        # Post-execution: valid receipt always wins
         if rec_path.is_file() and validate_committed_receipt(
             rec_path, self._browser_endpoint, canonical_url
         ):
@@ -369,3 +458,79 @@ class ReviewGptWakeTransport:
             disposition="uncertain",
             detail=f"Process failed without proving delivery: {bounded_text}",
         )
+
+    @staticmethod
+    def _with_cleanup_detail(
+        result: WakeDeliveryResult, cleanup_error: str | None
+    ) -> WakeDeliveryResult:
+        if not cleanup_error:
+            return result
+        detail = f"{result.detail or result.disposition}; browser cleanup failed: {cleanup_error}"
+        return WakeDeliveryResult(
+            disposition=result.disposition,
+            detail=detail,
+            receipt_path=result.receipt_path,
+        )
+
+    async def deliver(self, request: WakeDeliveryRequest) -> WakeDeliveryResult:
+        canonical_url = canonical_chat_url(request.target.conversation_id)
+        navigation_url = request.target.route_url.strip() or canonical_url
+        resp_path = deterministic_response_path(self._receipt_dir, request.delivery_key)
+        rec_path = deterministic_receipt_path(self._receipt_dir, request.delivery_key)
+
+        if rec_path.is_file():
+            if validate_committed_receipt(rec_path, self._browser_endpoint, canonical_url):
+                return WakeDeliveryResult(
+                    disposition="delivered",
+                    detail="Existing valid committed turn receipt found",
+                    receipt_path=rec_path,
+                )
+            return WakeDeliveryResult(
+                disposition="uncertain",
+                detail="Existing receipt exists but is malformed or belongs to another target",
+                receipt_path=rec_path,
+            )
+
+        self._receipt_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.on_demand_browser:
+            return await self._deliver_connected(
+                request,
+                canonical_url=canonical_url,
+                navigation_url=navigation_url,
+                resp_path=resp_path,
+                rec_path=rec_path,
+            )
+
+        start_error = await self._start_browser()
+        if start_error is not None:
+            cleanup_error = await self._stop_browser()
+            detail = start_error
+            if cleanup_error:
+                detail += f"; cleanup also failed: {cleanup_error}"
+            return WakeDeliveryResult(disposition="not_submitted", detail=detail)
+
+        result: WakeDeliveryResult
+        try:
+            preflight = await self._probe_connected(request.target)
+            if not preflight.ready:
+                result = WakeDeliveryResult(
+                    disposition=(
+                        "owner_input_required"
+                        if preflight.owner_input_required
+                        else "not_submitted"
+                    ),
+                    detail=f"Cold browser preflight blocked send: {preflight.detail or 'not ready'}",
+                )
+            else:
+                result = await self._deliver_connected(
+                    request,
+                    canonical_url=canonical_url,
+                    navigation_url=navigation_url,
+                    resp_path=resp_path,
+                    rec_path=rec_path,
+                )
+        finally:
+            cleanup_error = await self._stop_browser()
+
+        return self._with_cleanup_detail(result, cleanup_error)
