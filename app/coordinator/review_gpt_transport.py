@@ -232,11 +232,9 @@ class ReviewGptWakeTransport:
                 )
 
             title = str(export_data.get("title", ""))
-            body_text = str(export_data.get("bodyText", ""))
-            combined = f"{title}\n{body_text}".lower()
 
-            # Check Cloudflare challenge or login requirement
-            if is_owner_input_required_error(combined):
+            # Check Cloudflare challenge or login requirement (page-level evidence only)
+            if is_owner_input_required_error(title):
                 return WakeProbeResult(
                     ready=False,
                     owner_input_required=True,

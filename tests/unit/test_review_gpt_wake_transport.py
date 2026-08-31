@@ -274,7 +274,7 @@ async def test_probe_classifies_cloudflare_and_login_as_owner_input_required(tmp
     cases = [
         {"title": "Just a moment...", "bodyText": "Checking your browser before accessing chatgpt.com."},
         {"title": "ChatGPT - Log in or Sign up", "bodyText": "Log in with your OpenAI account to continue"},
-        {"title": "ChatGPT", "bodyText": "Welcome to ChatGPT. Log in to get started."},
+        {"title": "Welcome to ChatGPT", "bodyText": "Log in to get started."},
     ]
 
     for case in cases:
@@ -303,6 +303,49 @@ async def test_probe_classifies_cloudflare_and_login_as_owner_input_required(tmp
         result = await transport.probe(target)
         assert result.ready is False
         assert result.owner_input_required is True
+
+
+@pytest.mark.asyncio
+async def test_probe_ignores_conversation_body_containing_auth_and_cloudflare_phrases(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+    canonical = "https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3"
+
+    body_with_auth_phrases = (
+        "In our previous discussion we analyzed the Cloudflare challenge and login flow. "
+        "The user was asked to log in or sign up when welcome to ChatGPT was displayed on screen."
+    )
+
+    def write_export_file(argv: Sequence[str], timeout: float):
+        output_idx = argv.index("--output") + 1
+        out_path = Path(argv[output_idx])
+        payload = {
+            "chatUrl": canonical,
+            "statusBusy": False,
+            "stopVisible": False,
+            "title": "Development Bridge Conversation",
+            "bodyText": body_with_auth_phrases,
+        }
+        out_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    runner = FakeProcessRunner(on_run=write_export_file)
+    transport = ReviewGptWakeTransport(
+        node_path="/usr/bin/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=tmp_path / "receipts",
+        process_runner=runner,
+    )
+
+    result = await transport.probe(target)
+    assert result.ready is True
+    assert result.owner_input_required is False
+    assert result.detail is None
 
 
 @pytest.mark.asyncio
