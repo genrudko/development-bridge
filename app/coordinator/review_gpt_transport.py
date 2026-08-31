@@ -271,6 +271,7 @@ class ReviewGptWakeTransport:
 
     async def deliver(self, request: WakeDeliveryRequest) -> WakeDeliveryResult:
         canonical_url = canonical_chat_url(request.target.conversation_id)
+        navigation_url = request.target.route_url.strip() or canonical_url
         resp_path = deterministic_response_path(self._receipt_dir, request.delivery_key)
         rec_path = deterministic_receipt_path(self._receipt_dir, request.delivery_key)
 
@@ -296,7 +297,7 @@ class ReviewGptWakeTransport:
             "--config",
             str(self._config_path),
             "--chat-url",
-            canonical_url,
+            navigation_url,
             "--prompt",
             request.prompt,
             "--no-artifacts",

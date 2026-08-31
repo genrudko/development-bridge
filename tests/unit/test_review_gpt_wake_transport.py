@@ -636,7 +636,7 @@ async def test_delivery_argv_structure(tmp_path: Path):
     assert "--config" in argv
     assert argv[argv.index("--config") + 1] == str(tmp_path / "review-gpt.config.json")
     assert "--chat-url" in argv
-    assert argv[argv.index("--chat-url") + 1] == canonical
+    assert argv[argv.index("--chat-url") + 1] == target.route_url
     assert "--prompt" in argv
     assert argv[argv.index("--prompt") + 1] == "DBRIDGE_CONTINUE cont_123 prompt text"
     assert "--no-artifacts" in argv
