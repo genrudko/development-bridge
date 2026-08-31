@@ -15,7 +15,13 @@ from app.chatgpt_share import (
     UrllibChatGPTShareTransport,
 )
 from app.commands import RepositoryCommandService
-from app.coordinator import CoordinatorService, RouteRegistry
+from app.coordinator import (
+    CoordinatorService,
+    CoordinatorWakeDeliveryService,
+    ReviewGptWakeTransport,
+    RouteRegistry,
+    WakeTransport,
+)
 from app.desktop_nodes import DesktopNodeService
 from app.files import FileService
 from app.executors import AntigravityExecutor, AsyncioProcessRunner, ExecutorSelector, ExecutorService
@@ -85,6 +91,7 @@ class ApplicationContainer:
     commands: RepositoryCommandService
     bridge_restart: BridgeRestartService
     desktop_nodes: DesktopNodeService
+    coordinator_wake_delivery: CoordinatorWakeDeliveryService | None
 
 
 def build_container(
@@ -96,6 +103,7 @@ def build_container(
     github_transport: GitHubTransport | None = None,
     github_fork_transport: GitHubTransport | None = None,
     chatgpt_share_transport: ChatGPTShareTransport | None = None,
+    review_gpt_transport: WakeTransport | None = None,
 ) -> ApplicationContainer:
     configured = settings or load_settings()
     projects = ProjectRegistry.from_settings(configured)
@@ -353,6 +361,32 @@ def build_container(
             coordinator=coordinator,
             route_registry=route_registry,
         )
+    wake_settings = configured.coordinator_wake_delivery
+    coordinator_wake_delivery = None
+    if wake_settings.enabled:
+        transport = review_gpt_transport
+        if transport is None and wake_settings.primary_transport == "review-gpt":
+            rg = wake_settings.review_gpt
+            assert rg.node_executable is not None
+            assert rg.cli_path is not None
+            assert rg.config_path is not None
+            assert rg.browser_endpoint is not None
+            assert rg.receipt_directory is not None
+            transport = ReviewGptWakeTransport(
+                node_path=rg.node_executable,
+                cli_path=rg.cli_path,
+                config_path=rg.config_path,
+                browser_endpoint=rg.browser_endpoint,
+                receipt_dir=rg.receipt_directory,
+                timeout_seconds=rg.process_timeout_seconds,
+            )
+        coordinator_wake_delivery = CoordinatorWakeDeliveryService(
+            coordinator,
+            route_registry,
+            transport=transport,
+            enabled=True,
+            poll_interval_seconds=wake_settings.poll_interval_seconds,
+        )
     commands = RepositoryCommandService(jobs, policy)
     return ApplicationContainer(
         settings=configured,
@@ -395,4 +429,5 @@ def build_container(
             str(configured.server.public_base_url) if configured.server.public_base_url else None,
             configured.server.endpoint,
         ),
+        coordinator_wake_delivery=coordinator_wake_delivery,
     )

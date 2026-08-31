@@ -245,3 +245,125 @@ def test_antigravity_quota_cache_defaults_and_bounds():
     assert settings.quota_cache_max_age_seconds == 120
     with pytest.raises(ValidationError):
         BridgeSettings.model_validate({"executors": {"antigravity": {"quota_cache_max_age_seconds": 0}}})
+
+
+def test_coordinator_wake_delivery_disabled_by_default():
+    settings = BridgeSettings()
+    wake = settings.coordinator_wake_delivery
+    assert wake.enabled is False
+    assert wake.primary_transport == "review-gpt"
+    assert wake.poll_interval_seconds == 5.0
+    assert wake.review_gpt.node_executable is None
+    assert wake.review_gpt.cli_path is None
+    assert wake.review_gpt.config_path is None
+    assert wake.review_gpt.browser_endpoint is None
+    assert wake.review_gpt.receipt_directory is None
+    assert wake.review_gpt.process_timeout_seconds == 60.0
+
+
+def test_coordinator_wake_delivery_enabled_requires_complete_review_gpt_settings(tmp_path):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({
+            "coordinator_wake_delivery": {
+                "enabled": True,
+                "review_gpt": {
+                    "node_executable": "/usr/bin/node",
+                    # missing cli_path, config_path, browser_endpoint, receipt_directory
+                },
+            }
+        })
+
+    valid = BridgeSettings.model_validate({
+        "coordinator_wake_delivery": {
+            "enabled": True,
+            "primary_transport": "review-gpt",
+            "poll_interval_seconds": 10.0,
+            "review_gpt": {
+                "node_executable": "/usr/bin/node",
+                "cli_path": "/opt/review-gpt/dist/cli.js",
+                "config_path": "/opt/review-gpt/config.json",
+                "browser_endpoint": "http://127.0.0.1:9222",
+                "receipt_directory": tmp_path / "receipts",
+                "process_timeout_seconds": 45.0,
+            },
+        }
+    })
+    assert valid.coordinator_wake_delivery.enabled is True
+    assert valid.coordinator_wake_delivery.poll_interval_seconds == 10.0
+    assert valid.coordinator_wake_delivery.review_gpt.browser_endpoint == "http://127.0.0.1:9222"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://example.com:9222",
+        "http://192.168.1.100:9222",
+        "https://chatgpt.com",
+        "ftp://localhost:9222",
+    ],
+)
+def test_coordinator_wake_delivery_rejects_remote_or_invalid_browser_endpoint(tmp_path, endpoint):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({
+            "coordinator_wake_delivery": {
+                "enabled": True,
+                "review_gpt": {
+                    "node_executable": "/usr/bin/node",
+                    "cli_path": "/opt/review-gpt/dist/cli.js",
+                    "config_path": "/opt/review-gpt/config.json",
+                    "browser_endpoint": endpoint,
+                    "receipt_directory": tmp_path / "receipts",
+                },
+            }
+        })
+
+
+@pytest.mark.parametrize("field,value", [
+    ("poll_interval_seconds", 0.5),
+    ("poll_interval_seconds", 301.0),
+])
+def test_coordinator_wake_delivery_rejects_out_of_bounds_poll_interval(field, value):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"coordinator_wake_delivery": {field: value}})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("process_timeout_seconds", 4.0),
+    ("process_timeout_seconds", 601.0),
+])
+def test_review_gpt_rejects_out_of_bounds_timeout(field, value):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({
+            "coordinator_wake_delivery": {
+                "review_gpt": {field: value}
+            }
+        })
+
+
+def test_loads_yaml_coordinator_wake_delivery_configuration(tmp_path):
+    config = tmp_path / "bridge.yaml"
+    config.write_text(
+        """version: 1
+coordinator_wake_delivery:
+  enabled: true
+  primary_transport: review-gpt
+  poll_interval_seconds: 7.5
+  review_gpt:
+    node_executable: /usr/local/bin/node
+    cli_path: /opt/review-gpt/cli.js
+    config_path: /opt/review-gpt/config.json
+    browser_endpoint: http://localhost:9222
+    receipt_directory: /var/lib/receipts
+    process_timeout_seconds: 90.0
+""",
+        encoding="utf-8",
+    )
+    settings = load_settings(config, environ={})
+    assert settings.coordinator_wake_delivery.enabled is True
+    assert settings.coordinator_wake_delivery.poll_interval_seconds == 7.5
+    assert settings.coordinator_wake_delivery.review_gpt.node_executable == Path("/usr/local/bin/node")
+    assert settings.coordinator_wake_delivery.review_gpt.cli_path == Path("/opt/review-gpt/cli.js")
+    assert settings.coordinator_wake_delivery.review_gpt.config_path == Path("/opt/review-gpt/config.json")
+    assert settings.coordinator_wake_delivery.review_gpt.browser_endpoint == "http://localhost:9222"
+    assert settings.coordinator_wake_delivery.review_gpt.receipt_directory == Path("/var/lib/receipts")
+    assert settings.coordinator_wake_delivery.review_gpt.process_timeout_seconds == 90.0

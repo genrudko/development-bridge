@@ -111,6 +111,9 @@ def test_rejects_x_trigger_token_in_yaml(tmp_path):
         load_settings(config, environ={})
 
 
+from pathlib import Path
+
+
 @pytest.mark.parametrize("field", ["token", "classic_token"])
 def test_rejects_github_tokens_in_yaml(tmp_path, field):
     config = tmp_path / "bridge.yaml"
@@ -118,3 +121,33 @@ def test_rejects_github_tokens_in_yaml(tmp_path, field):
 
     with pytest.raises(ValueError, match="GitHub tokens"):
         load_settings(config, environ={})
+
+
+def test_coordinator_wake_delivery_environment_overrides(tmp_path):
+    settings = load_settings(environ={
+        "DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED": "true",
+        "DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_PRIMARY_TRANSPORT": "review-gpt",
+        "DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_POLL_INTERVAL_SECONDS": "12.5",
+        "DEVELOPMENT_BRIDGE_REVIEW_GPT_NODE": "/custom/node",
+        "DEVELOPMENT_BRIDGE_REVIEW_GPT_CLI_PATH": "/custom/cli.js",
+        "DEVELOPMENT_BRIDGE_REVIEW_GPT_CONFIG_PATH": "/custom/config.json",
+        "DEVELOPMENT_BRIDGE_REVIEW_GPT_BROWSER_ENDPOINT": "http://127.0.0.1:9333",
+        "DEVELOPMENT_BRIDGE_REVIEW_GPT_RECEIPT_DIRECTORY": str(tmp_path / "custom-receipts"),
+        "DEVELOPMENT_BRIDGE_REVIEW_GPT_PROCESS_TIMEOUT_SECONDS": "42.0",
+    })
+
+    wake = settings.coordinator_wake_delivery
+    assert wake.enabled is True
+    assert wake.primary_transport == "review-gpt"
+    assert wake.poll_interval_seconds == 12.5
+    assert wake.review_gpt.node_executable == Path("/custom/node")
+    assert wake.review_gpt.cli_path == Path("/custom/cli.js")
+    assert wake.review_gpt.config_path == Path("/custom/config.json")
+    assert wake.review_gpt.browser_endpoint == "http://127.0.0.1:9333"
+    assert wake.review_gpt.receipt_directory == tmp_path / "custom-receipts"
+    assert wake.review_gpt.process_timeout_seconds == 42.0
+
+
+def test_coordinator_wake_delivery_rejects_invalid_boolean_environment():
+    with pytest.raises(ValueError, match="DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED must be a boolean"):
+        load_settings(environ={"DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED": "maybe"})

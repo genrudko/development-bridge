@@ -55,6 +55,18 @@ jobs:
 #   issuer_url: https://bridge.example
 #   resource_url: https://bridge.example/mcp
 #   database_path: /absolute/path/to/development-bridge-oauth.sqlite3
+# Direct coordinator wake delivery is disabled by default.
+# coordinator_wake_delivery:
+#   enabled: false
+#   primary_transport: review-gpt
+#   poll_interval_seconds: 5.0
+#   review_gpt:
+#     node_executable: /absolute/path/to/node
+#     cli_path: /absolute/path/to/review-gpt/dist/cli.js
+#     config_path: /absolute/path/to/review-gpt.config.json
+#     browser_endpoint: http://127.0.0.1:9222
+#     receipt_directory: /absolute/path/to/development-bridge-wake-receipts
+#     process_timeout_seconds: 60.0
 projects:
   - id: printer-stack
     name: Printer Stack

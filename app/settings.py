@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+from urllib.parse import urlsplit
 import yaml
 from pydantic import (
     AnyHttpUrl,
@@ -162,6 +163,58 @@ class CoordinatorRoutingSettings(BaseModel):
     route_registry_path: Path = Field(default_factory=_default_route_registry_path)
 
 
+class ReviewGptWakeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    node_executable: Path | None = None
+    cli_path: Path | None = None
+    config_path: Path | None = None
+    browser_endpoint: str | None = None
+    receipt_directory: Path | None = None
+    process_timeout_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
+
+
+class CoordinatorWakeDeliverySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    primary_transport: Literal["review-gpt"] = "review-gpt"
+    poll_interval_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
+    review_gpt: ReviewGptWakeSettings = Field(default_factory=ReviewGptWakeSettings)
+
+    @model_validator(mode="after")
+    def validate_coordinator_wake_delivery(self) -> CoordinatorWakeDeliverySettings:
+        if not self.enabled:
+            return self
+        if self.primary_transport == "review-gpt":
+            rg = self.review_gpt
+            missing = [
+                field
+                for field, val in [
+                    ("node_executable", rg.node_executable),
+                    ("cli_path", rg.cli_path),
+                    ("config_path", rg.config_path),
+                    ("browser_endpoint", rg.browser_endpoint),
+                    ("receipt_directory", rg.receipt_directory),
+                ]
+                if val is None
+            ]
+            if missing:
+                raise ValueError(
+                    "coordinator_wake_delivery enabled requires "
+                    + ", ".join(f"review_gpt.{f}" for f in missing)
+                )
+            assert rg.browser_endpoint is not None
+            parsed = urlsplit(rg.browser_endpoint)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or parsed.hostname not in {"127.0.0.1", "localhost", "::1", "[::1]"}
+            ):
+                raise ValueError(
+                    "coordinator_wake_delivery.review_gpt.browser_endpoint must be a local HTTP endpoint"
+                )
+        return self
+
+
+
 class TelegramSupervisorSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     enabled: bool = False
@@ -301,6 +354,9 @@ class BridgeSettings(BaseModel):
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
     telegram_supervisor: TelegramSupervisorSettings = Field(default_factory=TelegramSupervisorSettings)
     coordinator: CoordinatorRoutingSettings = Field(default_factory=CoordinatorRoutingSettings)
+    coordinator_wake_delivery: CoordinatorWakeDeliverySettings = Field(
+        default_factory=CoordinatorWakeDeliverySettings
+    )
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     desktop_nodes: DesktopNodeSettings = Field(default_factory=DesktopNodeSettings)
     eod_browser: EodBrowserSettings = Field(default_factory=EodBrowserSettings)
@@ -425,6 +481,43 @@ def load_settings(
         environment_updates["coordinator"] = CoordinatorRoutingSettings.model_validate(
             {**settings.coordinator.model_dump(), **coordinator_updates}
         )
+
+    wake_updates: dict[str, Any] = {}
+    review_gpt_updates: dict[str, Any] = {}
+    if raw_wake_enabled := environment.get("DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED"):
+        normalized_wake = raw_wake_enabled.strip().lower()
+        if normalized_wake not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise ValueError("DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED must be a boolean")
+        wake_updates["enabled"] = normalized_wake in {"1", "true", "yes", "on"}
+    if primary_transport := environment.get("DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_PRIMARY_TRANSPORT"):
+        wake_updates["primary_transport"] = primary_transport
+    if poll_interval := environment.get("DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_POLL_INTERVAL_SECONDS"):
+        wake_updates["poll_interval_seconds"] = float(poll_interval)
+
+    if node := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_NODE"):
+        review_gpt_updates["node_executable"] = Path(node)
+    if cli_path := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_CLI_PATH"):
+        review_gpt_updates["cli_path"] = Path(cli_path)
+    if config_path := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_CONFIG_PATH"):
+        review_gpt_updates["config_path"] = Path(config_path)
+    if browser_endpoint := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_BROWSER_ENDPOINT"):
+        review_gpt_updates["browser_endpoint"] = browser_endpoint
+    if receipt_dir := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_RECEIPT_DIRECTORY"):
+        review_gpt_updates["receipt_directory"] = Path(receipt_dir)
+    if timeout := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_PROCESS_TIMEOUT_SECONDS"):
+        review_gpt_updates["process_timeout_seconds"] = float(timeout)
+
+    if review_gpt_updates:
+        review_gpt = ReviewGptWakeSettings.model_validate(
+            {**settings.coordinator_wake_delivery.review_gpt.model_dump(), **review_gpt_updates}
+        )
+        wake_updates["review_gpt"] = review_gpt
+
+    if wake_updates:
+        environment_updates["coordinator_wake_delivery"] = CoordinatorWakeDeliverySettings.model_validate(
+            {**settings.coordinator_wake_delivery.model_dump(), **wake_updates}
+        )
+
 
     supervisor_updates: dict[str, Any] = {}
     if raw_enabled := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_ENABLED"):

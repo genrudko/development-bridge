@@ -33,9 +33,13 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
         await application.jobs.start()
         if application.telegram_supervisor is not None:
             await application.telegram_supervisor.start()
+        if application.coordinator_wake_delivery is not None:
+            await application.coordinator_wake_delivery.start()
         try:
             yield application
         finally:
+            if application.coordinator_wake_delivery is not None:
+                await application.coordinator_wake_delivery.stop()
             if application.telegram_supervisor is not None:
                 await application.telegram_supervisor.stop()
             await application.jobs.stop()
