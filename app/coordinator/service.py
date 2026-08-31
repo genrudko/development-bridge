@@ -30,6 +30,10 @@ class PendingWake:
     escalation_at: float | None = None
     transport_delivered: bool = False
     transport_delivered_at: float | None = None
+    last_transport_name: str | None = None
+    last_transport_disposition: str | None = None
+    last_transport_detail: str | None = None
+    owner_input_required: bool = False
     browser_preflight_authorized_at: float | None = None
     queued_messages: list[str] = field(default_factory=list)
     queued_escalation_messages: list[str] = field(default_factory=list)
@@ -50,6 +54,12 @@ class CoordinatorService:
     MAX_BATCH_MESSAGE_CHARS = 32000
     MAX_BATCH_EVENTS = 128
     MAX_ESCALATION_MESSAGE_CHARS = 3500
+    MAX_TRANSPORT_NAME_CHARS = 128
+    MAX_TRANSPORT_DETAIL_CHARS = 1000
+    DELIVERY_MODES = frozenset(("x", "direct"))
+    TRANSPORT_DISPOSITIONS = frozenset(
+        ("delivered", "not_submitted", "uncertain", "owner_input_required")
+    )
     BATCH_SEPARATOR = "\n--- bridge-batch ---\n"
     MIN_DELAY_SECONDS = 0.0
     MAX_DELAY_SECONDS = 300.0
@@ -269,6 +279,33 @@ class CoordinatorService:
         ):
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "continuation_id is invalid")
         return continuation_id
+
+    @classmethod
+    def _validate_delivery_mode(cls, delivery_mode: str) -> str:
+        if delivery_mode not in cls.DELIVERY_MODES:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "delivery_mode is invalid")
+        return delivery_mode
+
+    @classmethod
+    def _validate_transport_name(cls, transport_name: str) -> str:
+        if (
+            not isinstance(transport_name, str)
+            or not 1 <= len(transport_name) <= cls.MAX_TRANSPORT_NAME_CHARS
+        ):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "transport_name is invalid")
+        return transport_name
+
+    @classmethod
+    def _bounded_transport_detail(cls, detail: str | None) -> str | None:
+        if detail is None:
+            return None
+        if not isinstance(detail, str):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "detail is invalid")
+        return detail[: cls.MAX_TRANSPORT_DETAIL_CHARS]
+
+    @staticmethod
+    def _automatic_delivery_blocked(wake: PendingWake) -> bool:
+        return wake.last_transport_disposition in {"uncertain", "owner_input_required"}
 
     @classmethod
     def _validate_delay(cls, value: float, field_name: str) -> float:
@@ -520,9 +557,11 @@ class CoordinatorService:
         )
 
     async def status(
-        self, channel_id: str = DEFAULT_CHANNEL, *, delivery_lease: str | None = None
+        self, channel_id: str = DEFAULT_CHANNEL, *, delivery_lease: str | None = None,
+        delivery_mode: str = "x",
     ) -> dict:
         channel_id = self.validate_channel(channel_id)
+        delivery_mode = self._validate_delivery_mode(delivery_mode)
         if not self._delivery_lease_matches(channel_id, delivery_lease):
             return {
                 "channel_id": channel_id,
@@ -551,7 +590,8 @@ class CoordinatorService:
             cooldown_blocked = not wake.transport_delivered and max(web_cooldown_until, other_claim_until) > now
             browser_preflight_authorized = self._browser_preflight_authorized(wake, now)
             browser_preflight_blocked = (
-                not wake.transport_delivered
+                delivery_mode == "x"
+                and not wake.transport_delivered
                 and not claimed
                 and not exhausted
                 and not expired_undelivered
@@ -562,6 +602,7 @@ class CoordinatorService:
             )
             ready = (
                 not claimed
+                and not self._automatic_delivery_blocked(wake)
                 and not exhausted
                 and not expired_undelivered
                 and not wake.transport_delivered
@@ -572,6 +613,10 @@ class CoordinatorService:
             )
             if claimed:
                 state = "claimed"
+            elif wake.last_transport_disposition == "uncertain":
+                state = "transport_uncertain"
+            elif wake.owner_input_required:
+                state = "owner_input_required"
             elif expired_undelivered:
                 state = "escalation_due"
             elif wake.transport_delivered:
@@ -619,12 +664,23 @@ class CoordinatorService:
                         "browser_preflight_ttl_seconds": self.BROWSER_PREFLIGHT_TTL_SECONDS,
                     }
                 )
+            if wake.last_transport_name is not None:
+                data.update(
+                    {
+                        "last_transport_name": wake.last_transport_name,
+                        "last_transport_disposition": wake.last_transport_disposition,
+                        "last_transport_detail": wake.last_transport_detail,
+                        "owner_input_required": wake.owner_input_required,
+                    }
+                )
             return data
 
     async def claim(
-        self, channel_id: str = DEFAULT_CHANNEL, *, delivery_lease: str | None = None
+        self, channel_id: str = DEFAULT_CHANNEL, *, delivery_lease: str | None = None,
+        delivery_mode: str = "x",
     ) -> dict:
         channel_id = self.validate_channel(channel_id)
+        delivery_mode = self._validate_delivery_mode(delivery_mode)
         if not self._delivery_lease_matches(channel_id, delivery_lease):
             return {
                 "channel_id": channel_id,
@@ -644,8 +700,12 @@ class CoordinatorService:
                 or self._lease_active(wake, now)
                 or wake.transport_delivered
                 or wake.model_acknowledged
+                or self._automatic_delivery_blocked(wake)
                 or self._undelivered_expired(wake, now)
-                or not self._browser_preflight_authorized(wake, now)
+                or (
+                    delivery_mode == "x"
+                    and not self._browser_preflight_authorized(wake, now)
+                )
                 or (wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts)
             ):
                 return {"channel_id": channel_id, "claimed": False}
@@ -680,10 +740,78 @@ class CoordinatorService:
                 )
             return data
 
+    async def finalize_transport(
+        self,
+        channel_id: str,
+        claim_id: str,
+        transport_name: str,
+        disposition: str,
+        *,
+        detail: str | None = None,
+    ) -> dict:
+        """Finalize one claimed continuation after a direct transport attempt."""
+        channel_id = self.validate_channel(channel_id)
+        transport_name = self._validate_transport_name(transport_name)
+        if disposition not in self.TRANSPORT_DISPOSITIONS:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "disposition is invalid")
+        bounded_detail = self._bounded_transport_detail(detail)
+        now = time.time()
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if wake is None or wake.claim_id != claim_id or wake.continuation_id is None:
+                return {"channel_id": channel_id, "finalized": False}
+
+            wake.last_transport_name = transport_name
+            wake.last_transport_disposition = disposition
+            wake.last_transport_detail = bounded_detail
+            wake.owner_input_required = disposition == "owner_input_required"
+            wake.claim_id = None
+            wake.lease_expires_at = None
+
+            if disposition == "delivered":
+                cooldown_until = now + self.MIN_WEB_TURN_INTERVAL_SECONDS
+                self._global_cooldown_until = max(self._global_cooldown_until, cooldown_until)
+                self._cooldown_until[channel_id] = max(
+                    self._cooldown_until.get(channel_id, 0.0), cooldown_until
+                )
+                wake.transport_delivered = True
+                wake.transport_delivered_at = now
+                if wake.model_acknowledged:
+                    continuation_id = wake.continuation_id
+                    next_continuation_id = self._promote_queued_locked(channel_id, wake, now)
+                    self._save_state()
+                    return {
+                        "channel_id": channel_id,
+                        "continuation_id": continuation_id,
+                        "finalized": True,
+                        "transport_name": transport_name,
+                        "disposition": disposition,
+                        "transport_delivered": True,
+                        "model_acknowledged": True,
+                        "owner_input_required": False,
+                        "followup_pending": next_continuation_id is not None,
+                        "next_continuation_id": next_continuation_id,
+                    }
+                wake.available_at = now
+                wake.escalation_at = now + wake.escalation_delay_seconds
+            elif disposition in {"uncertain", "owner_input_required"}:
+                wake.escalation_at = now
+
+            self._save_state()
+            return {
+                "channel_id": channel_id,
+                "continuation_id": wake.continuation_id,
+                "finalized": True,
+                "transport_name": transport_name,
+                "disposition": disposition,
+                "transport_delivered": wake.transport_delivered,
+                "owner_input_required": wake.owner_input_required,
+            }
+
     async def authorize_browser_preflight(
         self, channel_id: str, continuation_id: str
     ) -> dict:
-        "Authorize one fresh Browser Host delivery attempt for a resilient continuation."
+        """Authorize one fresh Browser Host delivery attempt for a resilient continuation."""
         channel_id = self.validate_channel(channel_id)
         continuation_id = self.validate_continuation_id(continuation_id)
         now = time.time()
@@ -695,6 +823,7 @@ class CoordinatorService:
                 or not wake.model_ack_required
                 or wake.transport_delivered
                 or wake.model_acknowledged
+                or self._automatic_delivery_blocked(wake)
                 or self._undelivered_expired(wake, now)
                 or self._lease_active(wake, now)
             ):
@@ -853,12 +982,17 @@ class CoordinatorService:
                 if wake.continuation_id is None or wake.model_acknowledged:
                     continue
                 stale_undelivered = self._undelivered_expired(wake, now)
+                blocked_disposition = (
+                    wake.last_transport_disposition
+                    if self._automatic_delivery_blocked(wake)
+                    else None
+                )
                 normal_due = (
                     wake.escalation_at is not None
                     and wake.escalation_at <= now
                     and (wake.transport_delivered or wake.delivery_attempts >= wake.max_delivery_attempts)
                 )
-                if not stale_undelivered and not normal_due:
+                if not stale_undelivered and not normal_due and blocked_disposition is None:
                     continue
                 if stale_undelivered:
                     escalation_message = (
@@ -866,6 +1000,11 @@ class CoordinatorService:
                         f"Channel: {channel_id}\n"
                         f"Pending: {wake.message[:700]}\n"
                         "Please check ChatGPT / Browser Host and continue the work manually."
+                    )
+                elif blocked_disposition is not None:
+                    escalation_message = (
+                        f"Coordinator transport {blocked_disposition}: "
+                        f"{wake.last_transport_detail or 'no detail'}"
                     )
                 else:
                     escalation_message = self._bounded_escalation(
@@ -879,7 +1018,15 @@ class CoordinatorService:
                         "max_delivery_attempts": wake.max_delivery_attempts,
                         "escalation_message": escalation_message[: self.MAX_ESCALATION_MESSAGE_CHARS],
                         "queued_events": len(wake.queued_messages),
-                        "reason": "undelivered_timeout" if stale_undelivered else "delivery_exhausted",
+                        "reason": (
+                            "undelivered_timeout"
+                            if stale_undelivered
+                            else f"transport_{blocked_disposition}"
+                            if blocked_disposition == "uncertain"
+                            else blocked_disposition
+                            if blocked_disposition is not None
+                            else "delivery_exhausted"
+                        ),
                     }
                 )
             return due

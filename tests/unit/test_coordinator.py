@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -427,3 +428,189 @@ async def test_expired_undelivered_wake_cannot_reenter_browser_delivery(monkeypa
     assert (await service.claim("route-g10"))["claimed"] is False
     due = await service.escalations_due()
     assert due[0]["reason"] == "undelivered_timeout"
+
+
+@pytest.mark.asyncio
+async def test_direct_delivery_bypasses_only_browser_preflight():
+    service = CoordinatorService(browser_preflight_required=True)
+    await service.arm_resilient("resume", channel_id="route-direct", delay_seconds=0)
+
+    assert (await service.status("route-direct"))["state"] == "browser_preflight"
+    direct_status = await service.status("route-direct", delivery_mode="direct")
+    assert direct_status["state"] == "pending"
+    assert direct_status["ready"] is True
+    assert (await service.claim("route-direct"))["claimed"] is False
+    assert (await service.claim("route-direct", delivery_mode="direct"))["claimed"] is True
+
+
+@pytest.mark.asyncio
+async def test_direct_claim_still_respects_cooldown_backoff_and_active_lease(
+    tmp_path, monkeypatch
+):
+    clock = [7000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(tmp_path / "coordinator-wakes.json", browser_preflight_required=True)
+    service._global_cooldown_until = 7010.0
+    await service.arm_resilient("A", channel_id="route-a", delay_seconds=0)
+    assert (await service.claim("route-a", delivery_mode="direct"))["claimed"] is False
+
+    service._global_cooldown_until = 0
+    (tmp_path / "web-backoff.json").write_text('{"until":7020}', encoding="utf-8")
+    assert (await service.claim("route-a", delivery_mode="direct"))["claimed"] is False
+
+    (tmp_path / "web-backoff.json").write_text('{"until":0}', encoding="utf-8")
+    clock[0] = 7011.0
+    await service.arm_resilient("B", channel_id="route-b", delay_seconds=0)
+    assert (await service.claim("route-a", delivery_mode="direct"))["claimed"] is True
+    assert (await service.claim("route-b", delivery_mode="direct"))["claimed"] is False
+
+
+@pytest.mark.asyncio
+async def test_delivered_transport_finalization_waits_for_model_ack():
+    service = CoordinatorService(browser_preflight_required=True)
+    await service.arm_resilient("resume", channel_id="route-direct", delay_seconds=0)
+    claim = await service.claim("route-direct", delivery_mode="direct")
+
+    finalized = await service.finalize_transport(
+        "route-direct", claim["claim_id"], "review-gpt", "delivered"
+    )
+
+    assert finalized["finalized"] is True
+    assert finalized["transport_delivered"] is True
+    status = await service.status("route-direct", delivery_mode="direct")
+    assert status["state"] == "waiting_model_ack"
+    assert status["last_transport_name"] == "review-gpt"
+    assert status["last_transport_disposition"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_not_submitted_releases_claim_for_existing_retry_schedule(monkeypatch):
+    clock = [8000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(browser_preflight_required=True)
+    service.LEASE_SECONDS = 20.0
+    await service.arm_resilient(
+        "resume", channel_id="route-direct", delay_seconds=0, retry_delays_seconds=(10, 20)
+    )
+    claim = await service.claim("route-direct", delivery_mode="direct")
+    finalized = await service.finalize_transport(
+        "route-direct", claim["claim_id"], "review-gpt", "not_submitted", detail="probe failed"
+    )
+
+    assert finalized["finalized"] is True
+    assert finalized["transport_delivered"] is False
+    assert service._pending["route-direct"].claim_id is None
+    assert (await service.claim("route-direct", delivery_mode="direct"))["claimed"] is False
+    clock[0] = 8031.0
+    assert (await service.claim("route-direct", delivery_mode="direct"))["claimed"] is True
+
+
+@pytest.mark.asyncio
+async def test_uncertain_transport_blocks_claim_and_persists_diagnostics(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    service = CoordinatorService(path, browser_preflight_required=True)
+    await service.arm_resilient("resume", channel_id="route-direct", delay_seconds=0)
+    claim = await service.claim("route-direct", delivery_mode="direct")
+    await service.finalize_transport(
+        "route-direct", claim["claim_id"], "review-gpt", "uncertain", detail="x" * 5000
+    )
+
+    restored = CoordinatorService(path, browser_preflight_required=True)
+    status = await restored.status("route-direct", delivery_mode="direct")
+    assert status["state"] == "transport_uncertain"
+    assert status["last_transport_name"] == "review-gpt"
+    assert status["last_transport_disposition"] == "uncertain"
+    assert len(status["last_transport_detail"]) <= restored.MAX_TRANSPORT_DETAIL_CHARS
+    assert (await restored.claim("route-direct", delivery_mode="direct"))["claimed"] is False
+    assert (await restored.escalations_due())[0]["reason"] == "transport_uncertain"
+
+
+@pytest.mark.asyncio
+async def test_owner_input_required_blocks_claim_and_is_exposed_in_status():
+    service = CoordinatorService(browser_preflight_required=True)
+    await service.arm_resilient("resume", channel_id="route-direct", delay_seconds=0)
+    claim = await service.claim("route-direct", delivery_mode="direct")
+    await service.finalize_transport(
+        "route-direct", claim["claim_id"], "review-gpt", "owner_input_required",
+        detail="login required",
+    )
+
+    status = await service.status("route-direct", delivery_mode="direct")
+    assert status["state"] == "owner_input_required"
+    assert status["owner_input_required"] is True
+    assert status["last_transport_detail"] == "login required"
+    assert (await service.claim("route-direct", delivery_mode="direct"))["claimed"] is False
+    assert (await service.escalations_due())[0]["reason"] == "owner_input_required"
+
+
+@pytest.mark.asyncio
+async def test_older_pending_wake_json_without_transport_diagnostics_loads(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    path.write_text(
+        json.dumps({
+            "version": 1,
+            "pending": {
+                "route-old": {"message": "resume", "available_at": 0, "created_at": 1}
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    service = CoordinatorService(path)
+    status = await service.status("route-old")
+    assert status["state"] == "pending"
+    assert "last_transport_name" not in status
+
+
+@pytest.mark.asyncio
+async def test_direct_transport_delivered_finalization_after_model_ack_promotes_followup():
+    service = CoordinatorService(browser_preflight_required=True)
+    armed = await service.arm_resilient("A", channel_id="route-direct", delay_seconds=0)
+    claim = await service.claim("route-direct", delivery_mode="direct")
+    acked = await service.model_ack(armed["continuation_id"])
+    assert acked["acknowledged"] is True
+    queued = await service.arm_resilient("B", channel_id="route-direct", delay_seconds=0)
+    assert queued["queued_events"] == 1
+    finalized = await service.finalize_transport(
+        "route-direct", claim["claim_id"], "review-gpt", "delivered"
+    )
+    assert finalized["finalized"] is True
+    assert finalized["model_acknowledged"] is True
+    assert finalized["followup_pending"] is True
+    assert finalized["next_continuation_id"] is not None
+    status = await service.status("route-direct", delivery_mode="direct")
+    assert status["continuation_id"] == finalized["next_continuation_id"]
+    assert service._pending["route-direct"].message == "B"
+
+
+@pytest.mark.asyncio
+async def test_direct_transport_delivered_finalization_after_model_ack_without_followup():
+    service = CoordinatorService(browser_preflight_required=True)
+    armed = await service.arm_resilient("A", channel_id="route-direct", delay_seconds=0)
+    claim = await service.claim("route-direct", delivery_mode="direct")
+    acked = await service.model_ack(armed["continuation_id"])
+    assert acked["acknowledged"] is True
+    finalized = await service.finalize_transport(
+        "route-direct", claim["claim_id"], "review-gpt", "delivered"
+    )
+    assert finalized["finalized"] is True
+    assert finalized["model_acknowledged"] is True
+    assert finalized["followup_pending"] is False
+    assert finalized["next_continuation_id"] is None
+    status = await service.status("route-direct", delivery_mode="direct")
+    assert status["state"] == "idle"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["uncertain", "owner_input_required"])
+async def test_authorize_browser_preflight_refuses_blocked_wakes(disposition):
+    service = CoordinatorService(browser_preflight_required=True)
+    armed = await service.arm_resilient("A", channel_id="route-blocked", delay_seconds=0)
+    claim = await service.claim("route-blocked", delivery_mode="direct")
+    await service.finalize_transport(
+        "route-blocked", claim["claim_id"], "review-gpt", disposition
+    )
+    authorized = await service.authorize_browser_preflight(
+        "route-blocked", armed["continuation_id"]
+    )
+    assert authorized["authorized"] is False
