@@ -121,7 +121,12 @@ class CoordinatorWakeDeliveryService:
 
             channel_id = channel_id.strip()
             status = await self._coordinator.status(channel_id, delivery_mode="direct")
-            if not status.get("ready"):
+            continuation_id = status.get("continuation_id")
+            if (
+                not status.get("ready")
+                or not isinstance(continuation_id, str)
+                or not continuation_id.strip()
+            ):
                 continue
 
             target = WakeTarget(

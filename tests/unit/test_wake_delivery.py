@@ -543,3 +543,33 @@ async def test_runtime_lifespan_starts_and_stops_wake_delivery(
     assert not wake_service.is_running
 
 
+@pytest.mark.asyncio
+async def test_ready_legacy_wake_without_continuation_id_causes_zero_probe_and_zero_claim(
+    coordinator: CoordinatorService,
+    route_registry: RouteRegistry,
+):
+    await coordinator.arm("Legacy wake message", channel_id="coordinator", delay_seconds=0.0)
+
+    status_before = await coordinator.status("coordinator", delivery_mode="direct")
+    assert status_before["ready"] is True
+    assert status_before.get("continuation_id") is None
+
+    transport = MockWakeTransport()
+    service = CoordinatorWakeDeliveryService(
+        coordinator,
+        route_registry,
+        transport=transport,
+        enabled=True,
+    )
+
+    await service.run_once()
+
+    assert len(transport.probe_calls) == 0
+    assert len(transport.deliver_calls) == 0
+
+    status_after = await coordinator.status("coordinator", delivery_mode="direct")
+    assert status_after["ready"] is True
+    assert status_after["state"] == "pending"
+    assert status_after.get("continuation_id") is None
+    assert status_after.get("last_transport_name") is None
+    assert status_after.get("last_transport_disposition") is None
