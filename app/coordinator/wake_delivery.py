@@ -146,6 +146,14 @@ class CoordinatorWakeDeliveryService:
                 continue
 
             if probe_result.owner_input_required:
+                logger.warning(
+                    "Coordinator direct wake probe blocked route=%s channel=%s continuation=%s transport=%s detail=%s",
+                    target.route_id,
+                    channel_id,
+                    continuation_id.strip(),
+                    self._transport.name,
+                    probe_result.detail,
+                )
                 claim_result = await self._coordinator.claim(channel_id, delivery_mode="direct")
                 if claim_result.get("claimed"):
                     claim_id = str(claim_result["claim_id"])
@@ -177,6 +185,16 @@ class CoordinatorWakeDeliveryService:
 
             try:
                 delivery_result = await self._transport.deliver(request)
+                logger.warning(
+                    "Coordinator direct wake delivery result route=%s channel=%s continuation=%s transport=%s disposition=%s detail=%s receipt=%s",
+                    target.route_id,
+                    channel_id,
+                    continuation_id,
+                    self._transport.name,
+                    delivery_result.disposition,
+                    delivery_result.detail,
+                    delivery_result.receipt_path,
+                )
                 await self._coordinator.finalize_transport(
                     channel_id,
                     claim_id,
