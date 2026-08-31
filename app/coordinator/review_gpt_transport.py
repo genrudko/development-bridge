@@ -117,6 +117,36 @@ def _bound_detail(text: str, max_chars: int = MAX_DETAIL_CHARS) -> str:
     return clean[:max_chars] + "..."
 
 
+def is_owner_input_required_error(text: str) -> bool:
+    """Classifies whether probe/delivery error output indicates owner intervention is required.
+
+    Returns True ONLY when explicit evidence proves:
+    - CDP/browser endpoint is unreachable/refused;
+    - Cloudflare challenge page is active;
+    - Login / authentication / sign-up is required.
+
+    Transient errors (such as timeouts waiting for thread content, navigation timing,
+    or generic non-zero CLI failures) return False so the coordinator can safely retry.
+    """
+    lower = text.lower()
+    return any(
+        marker in lower
+        for marker in (
+            "just a moment",
+            "cloudflare",
+            "log in",
+            "login",
+            "sign up",
+            "welcome to chatgpt",
+            "econnrefused",
+            "unreachable",
+            "connection refused",
+            "failed to connect to browser endpoint",
+            "browser endpoint unavailable",
+        )
+    )
+
+
 class ReviewGptWakeTransport:
     """ Pluggable direct wake transport via external review-gpt CLI. """
 
@@ -163,16 +193,18 @@ class ReviewGptWakeTransport:
             try:
                 result = await self._runner(argv, self._timeout_seconds)
             except Exception as e:
+                err_text = str(e)
                 return WakeProbeResult(
                     ready=False,
-                    owner_input_required=True,
-                    detail=f"Probe process error: {_bound_detail(str(e))}",
+                    owner_input_required=is_owner_input_required_error(err_text),
+                    detail=f"Probe process error: {_bound_detail(err_text)}",
                 )
 
             if result.exit_code != 0:
+                error_output = f"{result.stderr}\n{result.stdout}".strip()
                 return WakeProbeResult(
                     ready=False,
-                    owner_input_required=True,
+                    owner_input_required=is_owner_input_required_error(error_output),
                     detail=f"Probe failed with exit code {result.exit_code}: {_bound_detail(result.stderr or result.stdout)}",
                 )
 
@@ -204,14 +236,7 @@ class ReviewGptWakeTransport:
             combined = f"{title}\n{body_text}".lower()
 
             # Check Cloudflare challenge or login requirement
-            if (
-                "just a moment" in combined
-                or "cloudflare" in combined
-                or "log in" in combined
-                or "login" in combined
-                or "sign up" in combined
-                or "welcome to chatgpt" in combined
-            ):
+            if is_owner_input_required_error(combined):
                 return WakeProbeResult(
                     ready=False,
                     owner_input_required=True,
@@ -335,14 +360,7 @@ class ReviewGptWakeTransport:
                 detail=f"Failure proven before auto-send: {bounded_text}",
             )
 
-        if (
-            "just a moment" in lower_out
-            or "cloudflare" in lower_out
-            or "log in" in lower_out
-            or "login" in lower_out
-            or "econnrefused" in lower_out
-            or "unreachable" in lower_out
-        ):
+        if is_owner_input_required_error(lower_out):
             return WakeDeliveryResult(
                 disposition="owner_input_required",
                 detail=f"Browser or login intervention required: {bounded_text}",

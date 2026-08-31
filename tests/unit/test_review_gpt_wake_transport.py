@@ -333,6 +333,158 @@ async def test_probe_process_failure_is_owner_input_required_and_never_sends(tmp
     assert "--send" not in runner.calls[0][0]
 
 
+@pytest.mark.asyncio
+async def test_probe_thread_content_timeout_is_transient_not_owner_input(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+
+    # Production-discovered failure case:
+    # exit code 1 with UNKNOWN and "Timed out waiting for ChatGPT thread content"
+    error_output = (
+        '{"code": "UNKNOWN", "message": '
+        '"Timed out waiting for ChatGPT thread content for https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3"}'
+    )
+    runner = FakeProcessRunner(
+        exit_code=1,
+        stderr=error_output,
+    )
+    transport = ReviewGptWakeTransport(
+        node_path="/usr/bin/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=tmp_path / "receipts",
+        process_runner=runner,
+    )
+
+    result = await transport.probe(target)
+    assert result.ready is False
+    assert result.owner_input_required is False
+    assert "Timed out waiting for ChatGPT thread content" in (result.detail or "")
+    assert "--send" not in runner.calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_probe_generic_nonzero_failure_is_transient_not_owner_input(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+
+    generic_errors = [
+        "Error: Navigation timeout of 30000 ms exceeded",
+        '{"code": "UNKNOWN", "message": "Unknown internal error"}',
+        "Process failed unexpectedly with code 1",
+    ]
+
+    for err in generic_errors:
+        runner = FakeProcessRunner(exit_code=1, stderr=err)
+        transport = ReviewGptWakeTransport(
+            node_path="/usr/bin/node",
+            cli_path="/opt/review-gpt/cli.js",
+            config_path=tmp_path / "config.json",
+            browser_endpoint="http://127.0.0.1:9222",
+            receipt_dir=tmp_path / "receipts",
+            process_runner=runner,
+        )
+        result = await transport.probe(target)
+        assert result.ready is False
+        assert result.owner_input_required is False
+        assert "--send" not in runner.calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_probe_explicit_endpoint_and_auth_nonzero_failure_requires_owner_input(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+
+    explicit_owner_errors = [
+        "connect ECONNREFUSED 127.0.0.1:9222",
+        "Failed to connect to browser endpoint http://127.0.0.1:9222",
+        "Browser endpoint unreachable",
+        "Cloudflare challenge detected: Just a moment...",
+        "Please log in or sign up to continue",
+        "Welcome to ChatGPT. Log in to get started.",
+    ]
+
+    for err in explicit_owner_errors:
+        runner = FakeProcessRunner(exit_code=1, stderr=err)
+        transport = ReviewGptWakeTransport(
+            node_path="/usr/bin/node",
+            cli_path="/opt/review-gpt/cli.js",
+            config_path=tmp_path / "config.json",
+            browser_endpoint="http://127.0.0.1:9222",
+            receipt_dir=tmp_path / "receipts",
+            process_runner=runner,
+        )
+        result = await transport.probe(target)
+        assert result.ready is False
+        assert result.owner_input_required is True
+        assert "--send" not in runner.calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_probe_runner_exception_classification(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+
+    # 1. Generic runner exception (e.g. timeout or spawn failure without endpoint evidence) -> transient
+    generic_exceptions = [
+        TimeoutError("Process timed out after 60.0s: /usr/bin/node"),
+        RuntimeError("Internal spawn error"),
+        OSError("Generic I/O error"),
+    ]
+    for exc in generic_exceptions:
+        runner = FakeProcessRunner(exc=exc)
+        transport = ReviewGptWakeTransport(
+            node_path="/usr/bin/node",
+            cli_path="/opt/review-gpt/cli.js",
+            config_path=tmp_path / "config.json",
+            browser_endpoint="http://127.0.0.1:9222",
+            receipt_dir=tmp_path / "receipts",
+            process_runner=runner,
+        )
+        result = await transport.probe(target)
+        assert result.ready is False
+        assert result.owner_input_required is False
+        assert "--send" not in runner.calls[0][0]
+
+    # 2. Runner exception proving endpoint/connection failure -> owner_input_required
+    owner_exceptions = [
+        ConnectionRefusedError("connect ECONNREFUSED 127.0.0.1:9222"),
+        RuntimeError("Browser endpoint unreachable at http://127.0.0.1:9222"),
+    ]
+    for exc in owner_exceptions:
+        runner = FakeProcessRunner(exc=exc)
+        transport = ReviewGptWakeTransport(
+            node_path="/usr/bin/node",
+            cli_path="/opt/review-gpt/cli.js",
+            config_path=tmp_path / "config.json",
+            browser_endpoint="http://127.0.0.1:9222",
+            receipt_dir=tmp_path / "receipts",
+            process_runner=runner,
+        )
+        result = await transport.probe(target)
+        assert result.ready is False
+        assert result.owner_input_required is True
+        assert "--send" not in runner.calls[0][0]
+
+
+
 def test_deterministic_response_and_receipt_paths(tmp_path: Path):
     receipt_dir = tmp_path / "receipts"
     key = "wake_cont_123-abc"
