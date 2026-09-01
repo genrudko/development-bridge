@@ -29,7 +29,7 @@ def test_bridge_guide_is_registry_derived_and_complete():
         for tools in data["tools_by_category"].values()
         for item in tools
     }
-    assert data["tool_count"] == 96
+    assert data["tool_count"] == 97
     assert catalog == {tool.name for tool in registry.definitions}
     assert "queued status is normal" in data["durable_jobs"]["rule"]
     assert any("batched_messages" in step for step in data["durable_jobs"]["preferred_event_flow"])
@@ -81,6 +81,48 @@ def test_bridge_guide_is_registry_derived_and_complete():
     assert "Do not use shell `git push`" in agent_rules
     assert "Do not mutate `origin`" in agent_rules
     assert "A blocker must be proven" in agent_rules
+
+
+def test_routing_and_no_owner_url_guidance_in_guide_agents_and_contract():
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    guide = registry.get("bridge_guide")
+    result = asyncio.run(
+        guide.handler(
+            None,
+            SimpleNamespace(arguments={}),
+            SimpleNamespace(request_id="guide-routing-test"),
+        )
+    )
+    data = json.loads(result.content[0].text)["data"]
+    coordinator_guidance = data["operator_guidance"]["coordinator"]
+    assert "coordinator_route_list" in coordinator_guidance
+    assert "coordinator_x_mount" in coordinator_guidance
+    assert "bridge" in coordinator_guidance
+    assert "eod" in coordinator_guidance
+    assert "ad5xwork" in coordinator_guidance
+    assert "never call" in coordinator_guidance.lower() and "takeover" in coordinator_guidance.lower()
+    assert "url" in coordinator_guidance.lower()
+
+    takeover_tool = registry.get("coordinator_route_takeover")
+    assert "takeover" in takeover_tool.definition.description.lower()
+    assert "mount" in takeover_tool.definition.description.lower()
+
+    agent_rules = (Path(__file__).parents[2] / "AGENTS.md").read_text(encoding="utf-8")
+    assert "coordinator_route_list" in agent_rules
+    assert "coordinator_x_mount" in agent_rules
+    assert "bridge" in agent_rules
+    assert "ad5xwork" in agent_rules
+    assert "eod" in agent_rules
+    assert "takeover" in agent_rules
+
+    contract = (Path(__file__).parents[2] / "docs/operations/executor-operating-contract.md").read_text(encoding="utf-8")
+    assert "coordinator_route_list" in contract
+    assert "coordinator_x_mount" in contract
+    assert "bridge" in contract
+    assert "ad5xwork" in contract
+    assert "eod" in contract
+    assert "takeover" in contract
+
 
 
 def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():

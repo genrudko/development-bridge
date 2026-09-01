@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.api.errors import BridgeError
+from app.api.errors import BridgeError, ErrorCode
 from app.coordinator.routes import RouteRegistry
 
 
@@ -105,3 +105,32 @@ def test_manual_takeover_is_rejected_while_rollover_pending(tmp_path: Path):
             "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-b"
         )
     assert registry.resolve("ad5x")["conversation_id"] == "conv-a"
+
+
+def test_takeover_rejects_different_project_and_preserves_old_route(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    original = registry.bootstrap(
+        "ad5x", "https://chatgpt.com/g/g-p-11111111111111111111111111111111-old-slug/c/conv-a",
+        "telegram-ad5x-g0", "AD5X Project A",
+    )
+    assert original["generation"] == 0
+    assert original["conversation_id"] == "conv-a"
+    assert original["project_id"] == "g-p-11111111111111111111111111111111-old-slug"
+
+    with pytest.raises(BridgeError) as exc_info:
+        registry.takeover("ad5x", "https://chatgpt.com/g/g-p-22222222222222222222222222222222-other/c/conv-b")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+    assert "different project" in str(exc_info.value)
+
+    # Prove the old route is preserved unchanged
+    preserved = registry.resolve("ad5x")
+    assert preserved["conversation_id"] == "conv-a"
+    assert preserved["project_id"] == "g-p-11111111111111111111111111111111-old-slug"
+    assert preserved["generation"] == 0
+    assert preserved["channel_id"] == "telegram-ad5x-g0"
+
+    # Prove same-project takeover is permitted
+    taken_over = registry.takeover("ad5x", "https://chatgpt.com/g/g-p-11111111111111111111111111111111-new-slug/c/conv-b")
+    assert taken_over["generation"] == 1
+    assert taken_over["conversation_id"] == "conv-b"
+    assert registry.resolve("ad5x")["conversation_id"] == "conv-b"

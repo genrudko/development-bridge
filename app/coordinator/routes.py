@@ -12,6 +12,16 @@ from app.api.errors import BridgeError, ErrorCode
 
 _ROUTE_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 
+_PROJECT_STABLE_ID_RE = re.compile(r"^(g-p-[0-9a-fA-F]{32})(?:-|$)")
+
+
+def project_identity(project_id: str | None) -> str | None:
+    if project_id is None:
+        return None
+    value = str(project_id).strip()
+    match = _PROJECT_STABLE_ID_RE.match(value)
+    return match.group(1).lower() if match else value
+
 
 def canonical_chat_url(value: str) -> str:
     parts = urlsplit(str(value).strip())
@@ -292,7 +302,16 @@ class RouteRegistry:
                 f"rollover already pending for route: {route_id}",
                 retryable=True,
             )
-        previous = data["routes"].get(route_id) or {}
+        previous = data["routes"].get(route_id)
+        if previous is not None:
+            previous_project = previous.get("project_id")
+            same_project = project_identity(project_id) == project_identity(previous_project)
+            if not same_project:
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "takeover candidate belongs to a different project",
+                )
+        previous = previous or {}
         generation = int(previous.get("generation", 0)) + 1
         channel_id = f"telegram-{route_id}-g{generation}"
         route = {

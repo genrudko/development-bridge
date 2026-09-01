@@ -39,6 +39,14 @@ Treat model/tool round-trips, coordinator chat context, and live ChatGPT Web tra
 - Executor output is evidence, not acceptance. The coordinator reviews the diff, verification evidence, and permissions before any privileged Bridge-native write.
 - Detailed executor guidance is in `docs/operations/executor-operating-contract.md`.
 
+### Coordinator routing and mount discipline
+
+- Normal workers never call `coordinator_route_takeover` to begin ordinary work.
+- Ordinary setup: discover registered routes via hidden `coordinator_route_list` (via `bridge_search -> bridge_schema -> bridge_call` in compact mode) and mount the existing route with `coordinator_x_mount(route_id=...)`.
+- Current route mapping: `development-bridge -> bridge`, `eod -> eod`, AD5X product work -> `ad5xwork`; if uncertain use `coordinator_route_list`.
+- Never ask the owner to copy a ChatGPT conversation URL for ordinary executor setup; URLs are only relevant for initial route bootstrap or exceptional manual takeover.
+- Automatic rollover remains the normal physical-chat successor path; manual takeover across different ChatGPT projects fails closed with `POLICY_VIOLATION`.
+
 ## Evidence-First Bridge Semantics
 
 Treat Development Bridge behavior as something to verify from its tools/runtime/code, not infer from shell symptoms or the compact surface.

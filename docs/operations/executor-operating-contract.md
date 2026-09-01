@@ -87,3 +87,15 @@ Return a compact evidence report containing:
 - any remaining blocker or operator action.
 
 Do not claim completion from intuition, agent self-report, or partial tests. The coordinator independently decides acceptance and whether any Bridge-native write is allowed.
+
+## 8. Coordinator route discovery and mount discipline
+
+- Normal workers must never call `coordinator_route_takeover` to start ordinary work.
+- Ordinary setup: discover registered routes with `coordinator_route_list` (hidden tool) -> mount the appropriate logical route with `coordinator_x_mount(route_id=...)`.
+- Current route mapping:
+  - `development-bridge` -> `bridge`
+  - `eod` -> `eod`
+  - AD5X product work -> `ad5xwork`
+  - If uncertain, call `coordinator_route_list` to inspect registered routes.
+- The owner must never be asked to copy a ChatGPT conversation URL for ordinary executor setup; URLs are only relevant during initial route bootstrap or exceptional manual takeover.
+- Automatic rollover remains the normal physical-chat successor path; manual takeover across different ChatGPT projects is rejected with `POLICY_VIOLATION`.

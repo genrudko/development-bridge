@@ -251,6 +251,20 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         )
         return to_mcp_result(success(request_context.request_id, data))
 
+    async def route_list(ctx, params, request_context):
+        routes = [
+            {
+                "route_id": item["route_id"],
+                "title": item.get("title") or item["route_id"],
+                "project_id": item.get("project_id"),
+                "channel_id": item.get("channel_id"),
+                "generation": int(item.get("generation", 0)),
+                "default": bool(item.get("default", False)),
+            }
+            for item in container.route_registry.list_routes()
+        ]
+        return to_mcp_result(success(request_context.request_id, {"routes": routes}))
+
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
         destination = _resolve_destination(container, ctx, arguments)
@@ -329,7 +343,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_x_mount",
-                description="Mount the coordinator X wake listener; cached clients may pass an exact cont_... ID as channel_id to ACK only that continuation",
+                description="Mount the coordinator X wake listener for an existing registered logical route (e.g. bridge, eod, ad5xwork) or channel; ordinary workers mount existing routes here without asking the owner for URLs; cached clients may pass an exact cont_... ID as channel_id to ACK only that continuation",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -349,7 +363,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_route_takeover",
-                description="Make this ChatGPT conversation the next generation of a logical route and mount its X listener",
+                description="Exceptional/manual route migration only: make this ChatGPT conversation the next generation of a logical route within the same project or bootstrap a new route; ordinary workers must mount existing routes with coordinator_x_mount and never call takeover to start ordinary work",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -364,6 +378,19 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 _meta=common_meta,
             ),
             takeover,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_list",
+                description="List registered coordinator logical routes and metadata without changing session binding or default route",
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            ),
+            route_list,
             "coordinator-x",
         ),
         RegisteredTool(
