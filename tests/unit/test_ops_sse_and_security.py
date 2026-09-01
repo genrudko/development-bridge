@@ -140,3 +140,49 @@ async def test_sse_emits_changed_output_on_job_progress(enabled_setup):
     assert "event: " in evt3
 
     state["disconnected"] = True
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sse_does_not_emit_on_pure_uptime_ticks_and_sends_heartbeat(enabled_setup, monkeypatch):
+    _, container, settings, _ = enabled_setup
+    sim_time = [100000.0]
+
+    def mock_time():
+        t = sim_time[0]
+        sim_time[0] += 5.0
+        return t
+
+    monkeypatch.setattr("app.ops.routes.time.time", mock_time)
+    monkeypatch.setattr("app.ops.service.time.time", mock_time)
+    monkeypatch.setattr("app.ops.metrics.time.time", mock_time)
+    monkeypatch.setattr("app.ops.session.time.time", mock_time)
+
+    cookie = create_session_cookie_value(settings.operator_dashboard.session_secret.get_secret_value())
+    routes = create_operator_dashboard_routes(container, settings)
+    events_route = [r for r in routes if r.name == "ops_api_events"][0]
+
+    state = {"disconnected": False}
+    request = MagicMock()
+    request.cookies = {COOKIE_NAME: cookie}
+    request.query_params = {}
+    async def fake_disconnected():
+        return state["disconnected"]
+    request.is_disconnected = fake_disconnected
+
+    response = await events_route.endpoint(request)
+    assert response.status_code == 200
+    gen = response.body_iterator
+
+    # 1. Initial snapshot & terminal
+    evt1 = await anext(gen)
+    assert evt1.startswith("event: snapshot")
+    evt2 = await anext(gen)
+    assert evt2.startswith("event: terminal")
+
+    # 2. Idle progression: next event should be a heartbeat comment after idle interval
+    evt_idle = await anext(gen)
+    assert evt_idle == ": heartbeat\n\n"
+
+    state["disconnected"] = True
+    await gen.aclose()

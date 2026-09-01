@@ -9,10 +9,10 @@ from app.executors.antigravity_quota import load_quota_snapshot
 from app.jobs.models import JobRecord, JobStatus
 from app.ops.git_snapshot import GitSnapshotProvider
 from app.ops.metrics import (
+    async_process_counts,
     disk_snapshot,
     load_snapshot,
     memory_snapshot,
-    process_counts,
     uptime_seconds,
 )
 
@@ -28,6 +28,11 @@ class OperatorDashboardService:
 
     def _progress_store(self) -> RouteProgressStore:
         return RouteProgressStore(self._container.route_registry.path.parent / "route-progress.json")
+
+    def _get_job_store(self) -> Any:
+        return getattr(self._container.jobs, "store", None) or getattr(
+            self._container.jobs, "_store", None
+        )
 
     async def snapshot(self, route_id: str | None = None) -> dict[str, Any]:
         settings = self._container.settings
@@ -50,16 +55,22 @@ class OperatorDashboardService:
         # 2. Route & Progress
         route = None
         if route_id:
-            resolved = self._container.route_registry.resolve(route_id)
-            if resolved is not None:
-                route = resolved
+            try:
+                resolved = self._container.route_registry.resolve(route_id)
+                if resolved is not None:
+                    route = resolved
+            except Exception:
+                route = None
         if route is None:
-            snapshot = self._container.route_registry.snapshot()
-            req = snapshot.get("requested_route")
-            if req:
-                route = self._container.route_registry.resolve(str(req))
-            if route is None and snapshot.get("default_route"):
-                route = self._container.route_registry.resolve(str(snapshot["default_route"]))
+            try:
+                snapshot = self._container.route_registry.snapshot()
+                req = snapshot.get("requested_route")
+                if req:
+                    route = self._container.route_registry.resolve(str(req))
+                if route is None and snapshot.get("default_route"):
+                    route = self._container.route_registry.resolve(str(snapshot["default_route"]))
+            except Exception:
+                route = None
 
         route_dict = None
         progress_dict = None
@@ -80,9 +91,7 @@ class OperatorDashboardService:
 
         # 3. Jobs
         recent_records: tuple[JobRecord, ...] = ()
-        job_store = getattr(self._container.jobs, "store", None) or getattr(
-            self._container.jobs, "_store", None
-        )
+        job_store = self._get_job_store()
         if job_store is not None:
             recent_records = job_store.recent(recent_limit)
 
@@ -138,12 +147,13 @@ class OperatorDashboardService:
 
         # 7. System state
         wake_delivery_settings = settings.coordinator_wake_delivery
+        procs = await async_process_counts()
         system_dict = {
             "memory": memory_snapshot(),
             "disk": disk_snapshot(),
             "load": load_snapshot(),
             "uptime_seconds": uptime_seconds(),
-            "process_counts": process_counts(),
+            "process_counts": procs,
             "wake_transport": {
                 "enabled": wake_delivery_settings.enabled,
                 "primary_transport": wake_delivery_settings.primary_transport,
@@ -169,7 +179,8 @@ class OperatorDashboardService:
 
     async def terminal_tail(self, job_id: str | None = None) -> dict[str, Any]:
         tail_bytes = self._container.settings.operator_dashboard.terminal_tail_bytes
-        store = getattr(self._container.jobs, "store", None)
+        recent_limit = self._container.settings.operator_dashboard.recent_jobs_limit
+        store = self._get_job_store()
         if store is None:
             return {
                 "job_id": None,
@@ -183,7 +194,7 @@ class OperatorDashboardService:
 
         target_id = job_id
         if target_id is None:
-            recent = store.recent(5)
+            recent = store.recent(recent_limit)
             for r in recent:
                 if r.status in (JobStatus.QUEUED, JobStatus.RUNNING):
                     target_id = r.job_id

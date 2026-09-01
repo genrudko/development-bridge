@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import mimetypes
 import time
@@ -19,6 +20,7 @@ from starlette.responses import (
 from starlette.routing import Route
 
 from app.container import ApplicationContainer
+from app.coordinator.routes import RouteRegistry
 from app.ops.auth import verify_password
 from app.ops.service import OperatorDashboardService
 from app.ops.session import (
@@ -49,6 +51,37 @@ def _apply_headers(response: Response) -> Response:
     for k, v in SECURITY_HEADERS.items():
         response.headers[k] = v
     return response
+
+
+def _snapshot_change_key(data: dict[str, Any]) -> str:
+    bridge_part = {k: v for k, v in data.get("bridge", {}).items() if k != "uptime_seconds"}
+    system_part = {
+        "wake_transport": data.get("system", {}).get("wake_transport"),
+        "process_counts": data.get("system", {}).get("process_counts"),
+    }
+    key_dict = {
+        "bridge": bridge_part,
+        "route": data.get("route"),
+        "progress": data.get("progress"),
+        "jobs": data.get("jobs"),
+        "executor": data.get("executor"),
+        "git": data.get("git"),
+        "wake": data.get("wake"),
+        "system": system_part,
+    }
+    return json.dumps(key_dict, sort_keys=True, separators=(",", ":"))
+
+
+def _terminal_change_key(data: dict[str, Any]) -> str:
+    key_dict = {
+        "job_id": data.get("job_id"),
+        "status": data.get("status"),
+        "stdout": data.get("stdout"),
+        "stderr": data.get("stderr"),
+        "stdout_truncated": data.get("stdout_truncated"),
+        "stderr_truncated": data.get("stderr_truncated"),
+    }
+    return json.dumps(key_dict, sort_keys=True, separators=(",", ":"))
 
 
 def create_operator_dashboard_routes(
@@ -86,11 +119,12 @@ def create_operator_dashboard_routes(
             return _apply_headers(
                 RedirectResponse(url=f"{base_path}/", status_code=303)
             )
-        html = (TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
+        html_content = (TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
         error_msg = request.query_params.get("error", "")
-        rendered = html.replace("{% if error %}", "").replace("{% endif %}", "")
+        rendered = html_content.replace("{{ base_path }}", base_path)
+        rendered = rendered.replace("{% if error %}", "").replace("{% endif %}", "")
         if error_msg:
-            rendered = rendered.replace("{{ error }}", error_msg)
+            rendered = rendered.replace("{{ error }}", html.escape(error_msg))
         else:
             rendered = rendered.replace('<div class="alert-danger">{{ error }}</div>', "")
         return _apply_headers(HTMLResponse(rendered))
@@ -104,9 +138,10 @@ def create_operator_dashboard_routes(
                 return _apply_headers(
                     JSONResponse({"error": "Too many failed attempts. Try again later."}, status_code=429)
                 )
-            html = (TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
-            rendered = html.replace("{% if error %}", "").replace("{% endif %}", "")
-            rendered = rendered.replace("{{ error }}", "Too many failed attempts. Try again later.")
+            html_content = (TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
+            rendered = html_content.replace("{{ base_path }}", base_path)
+            rendered = rendered.replace("{% if error %}", "").replace("{% endif %}", "")
+            rendered = rendered.replace("{{ error }}", html.escape("Too many failed attempts. Try again later."))
             return _apply_headers(HTMLResponse(rendered, status_code=429))
 
         password = ""
@@ -131,9 +166,10 @@ def create_operator_dashboard_routes(
                 return _apply_headers(
                     JSONResponse({"error": err}, status_code=401)
                 )
-            html = (TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
-            rendered = html.replace("{% if error %}", "").replace("{% endif %}", "")
-            rendered = rendered.replace("{{ error }}", err)
+            html_content = (TEMPLATES_DIR / "login.html").read_text(encoding="utf-8")
+            rendered = html_content.replace("{{ base_path }}", base_path)
+            rendered = rendered.replace("{% if error %}", "").replace("{% endif %}", "")
+            rendered = rendered.replace("{{ error }}", html.escape(err))
             return _apply_headers(HTMLResponse(rendered, status_code=401))
 
         rate_limiter.record_success(ip)
@@ -161,7 +197,13 @@ def create_operator_dashboard_routes(
         resp = _apply_headers(
             RedirectResponse(url=f"{base_path}/login", status_code=303)
         )
-        resp.delete_cookie(key=COOKIE_NAME, path="/")
+        resp.delete_cookie(
+            key=COOKIE_NAME,
+            path="/",
+            httponly=True,
+            secure=True,
+            samesite="strict",
+        )
         return resp
 
     async def dashboard_get(request: Request) -> Response:
@@ -169,8 +211,9 @@ def create_operator_dashboard_routes(
             return _apply_headers(
                 RedirectResponse(url=f"{base_path}/login", status_code=303)
             )
-        html = (TEMPLATES_DIR / "dashboard.html").read_text(encoding="utf-8")
-        return _apply_headers(HTMLResponse(html))
+        html_content = (TEMPLATES_DIR / "dashboard.html").read_text(encoding="utf-8")
+        rendered = html_content.replace("{{ base_path }}", base_path)
+        return _apply_headers(HTMLResponse(rendered))
 
     async def static_get(request: Request) -> Response:
         rel_path = request.path_params.get("path", "")
@@ -192,6 +235,11 @@ def create_operator_dashboard_routes(
         if not is_authenticated(request):
             return _apply_headers(JSONResponse({"error": "Unauthorized"}, status_code=401))
         route_id = request.query_params.get("route_id")
+        if route_id is not None:
+            try:
+                RouteRegistry.validate_route_id(route_id)
+            except Exception:
+                return _apply_headers(JSONResponse({"error": "Invalid route_id"}, status_code=400))
         data = await service.snapshot(route_id)
         return _apply_headers(JSONResponse(data))
 
@@ -200,15 +248,20 @@ def create_operator_dashboard_routes(
             return _apply_headers(JSONResponse({"error": "Unauthorized"}, status_code=401))
 
         route_id = request.query_params.get("route_id")
+        if route_id is not None:
+            try:
+                RouteRegistry.validate_route_id(route_id)
+            except Exception:
+                return _apply_headers(JSONResponse({"error": "Invalid route_id"}, status_code=400))
 
         async def event_generator():
             try:
                 initial_snap = await service.snapshot(route_id)
-                last_snap_str = json.dumps(initial_snap, separators=(",", ":"), sort_keys=True)
+                last_snap_key = _snapshot_change_key(initial_snap)
                 yield f"event: snapshot\ndata: {json.dumps(initial_snap, separators=(',', ':'))}\n\n"
 
                 initial_tail = await service.terminal_tail()
-                last_tail_str = json.dumps(initial_tail, separators=(",", ":"), sort_keys=True)
+                last_tail_key = _terminal_change_key(initial_tail)
                 yield f"event: terminal\ndata: {json.dumps(initial_tail, separators=(',', ':'))}\n\n"
 
                 last_emit = time.time()
@@ -220,16 +273,16 @@ def create_operator_dashboard_routes(
 
                     now = time.time()
                     new_snap = await service.snapshot(route_id)
-                    new_snap_str = json.dumps(new_snap, separators=(",", ":"), sort_keys=True)
-                    if new_snap_str != last_snap_str:
-                        last_snap_str = new_snap_str
+                    new_snap_key = _snapshot_change_key(new_snap)
+                    if new_snap_key != last_snap_key:
+                        last_snap_key = new_snap_key
                         last_emit = now
                         yield f"event: snapshot\ndata: {json.dumps(new_snap, separators=(',', ':'))}\n\n"
 
                     new_tail = await service.terminal_tail()
-                    new_tail_str = json.dumps(new_tail, separators=(",", ":"), sort_keys=True)
-                    if new_tail_str != last_tail_str:
-                        last_tail_str = new_tail_str
+                    new_tail_key = _terminal_change_key(new_tail)
+                    if new_tail_key != last_tail_key:
+                        last_tail_key = new_tail_key
                         last_emit = now
                         yield f"event: terminal\ndata: {json.dumps(new_tail, separators=(',', ':'))}\n\n"
 

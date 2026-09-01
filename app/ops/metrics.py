@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import time
 
 _START_TIME = time.time()
+_process_counts_cache: tuple[float, dict[str, int]] = (0.0, {"chromium": 0, "xvfb": 0})
 
 
 def memory_snapshot() -> dict[str, float]:
@@ -47,7 +49,7 @@ def load_snapshot() -> list[float]:
         return [0.0, 0.0, 0.0]
 
 
-def process_counts() -> dict[str, int]:
+def _scan_process_counts() -> dict[str, int]:
     counts = {"chromium": 0, "xvfb": 0}
     try:
         my_uid = os.getuid()
@@ -73,6 +75,28 @@ def process_counts() -> dict[str, int]:
     except OSError:
         pass
     return counts
+
+
+def process_counts(cache_ttl_seconds: float = 5.0) -> dict[str, int]:
+    global _process_counts_cache
+    now = time.monotonic()
+    last_time, cached = _process_counts_cache
+    if now - last_time < cache_ttl_seconds:
+        return dict(cached)
+    res = _scan_process_counts()
+    _process_counts_cache = (now, res)
+    return dict(res)
+
+
+async def async_process_counts(cache_ttl_seconds: float = 5.0) -> dict[str, int]:
+    global _process_counts_cache
+    now = time.monotonic()
+    last_time, cached = _process_counts_cache
+    if now - last_time < cache_ttl_seconds:
+        return dict(cached)
+    res = await asyncio.to_thread(_scan_process_counts)
+    _process_counts_cache = (now, res)
+    return dict(res)
 
 
 def uptime_seconds() -> int:

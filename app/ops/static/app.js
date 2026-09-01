@@ -3,6 +3,24 @@
   let autoScroll = true;
   let currentSnapshot = null;
 
+  function getBasePath() {
+    if (document.body && document.body.dataset && document.body.dataset.basePath) {
+      return document.body.dataset.basePath.replace(/\/$/, '');
+    }
+    const path = window.location.pathname.replace(/\/$/, '');
+    return path || '/ops';
+  }
+
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
   function initTabs() {
     const tabButtons = document.querySelectorAll('.tab-btn');
     const tabPanes = document.querySelectorAll('.tab-pane');
@@ -92,12 +110,13 @@
       elProgStatus.className = `badge badge-${st === 'completed' || st === 'succeeded' ? 'success' : st === 'working' || st === 'running' ? 'accent' : 'warning'}`;
     }
 
-    const percent = progress.percent !== undefined ? progress.percent : (jobs.current ? 50 : 0);
+    const hasSemanticPercent = progress.percent !== undefined && progress.percent !== null;
+    const percent = hasSemanticPercent ? progress.percent : 0;
     const elProgFill = document.getElementById('progFill');
     if (elProgFill) elProgFill.style.width = `${percent}%`;
 
     const elProgPercent = document.getElementById('progPercent');
-    if (elProgPercent) elProgPercent.textContent = `${percent}%`;
+    if (elProgPercent) elProgPercent.textContent = hasSemanticPercent ? `${percent}%` : '0%';
 
     const elProgPhase = document.getElementById('progPhase');
     if (elProgPhase) elProgPhase.textContent = progress.phase || '-';
@@ -153,17 +172,26 @@
       return;
     }
 
-    tbody.innerHTML = jobs.map(j => `
-      <tr>
-        <td style="font-family: var(--font-mono); font-size: 0.8rem;">${j.job_id}</td>
-        <td>${j.task_id}</td>
-        <td><span class="badge badge-${j.status === 'succeeded' ? 'success' : j.status === 'failed' ? 'danger' : j.status === 'running' ? 'accent' : 'warning'}">${j.status}</span></td>
-        <td>${j.project_id}/${j.repository_id}</td>
-        <td>${j.executor || '-'}${j.executor_model ? ` (${j.executor_model})` : ''}</td>
-        <td>${j.created_at || '-'}</td>
-        <td>${j.failure_reason || (j.exit_code !== undefined && j.exit_code !== null ? `Exit ${j.exit_code}` : '-')}</td>
-      </tr>
-    `).join('');
+    tbody.innerHTML = jobs.map(j => {
+      const statusClass = j.status === 'succeeded' ? 'success' : j.status === 'failed' ? 'danger' : j.status === 'running' ? 'accent' : 'warning';
+      const execModel = j.executor_model ? ` (${escapeHtml(j.executor_model)})` : '';
+      const executorText = j.executor ? `${escapeHtml(j.executor)}${execModel}` : '-';
+      const resultText = j.failure_reason
+        ? escapeHtml(j.failure_reason)
+        : (j.exit_code !== undefined && j.exit_code !== null ? `Exit ${escapeHtml(j.exit_code)}` : '-');
+
+      return `
+        <tr>
+          <td style="font-family: var(--font-mono); font-size: 0.8rem;">${escapeHtml(j.job_id)}</td>
+          <td>${escapeHtml(j.task_id)}</td>
+          <td><span class="badge badge-${escapeHtml(statusClass)}">${escapeHtml(j.status)}</span></td>
+          <td>${escapeHtml(j.project_id)}/${escapeHtml(j.repository_id)}</td>
+          <td>${executorText}</td>
+          <td>${escapeHtml(j.created_at || '-')}</td>
+          <td>${resultText}</td>
+        </tr>
+      `;
+    }).join('');
   }
 
   function updateGit(data) {
@@ -278,6 +306,8 @@
   }
 
   function connectSSE() {
+    const basePath = getBasePath();
+    const query = window.location.search || '';
     const elConn = document.getElementById('connStatus');
     if (eventSource) {
       eventSource.close();
@@ -288,7 +318,7 @@
       elConn.className = 'badge badge-warning';
     }
 
-    eventSource = new EventSource('/ops/api/events');
+    eventSource = new EventSource(`${basePath}/api/events${query}`);
 
     eventSource.onopen = () => {
       if (elConn) {
@@ -327,11 +357,14 @@
     initTabs();
     initTerminalScroll();
 
+    const basePath = getBasePath();
+    const query = window.location.search || '';
+
     // Initial fetch
-    fetch('/ops/api/snapshot')
+    fetch(`${basePath}/api/snapshot${query}`)
       .then(res => {
         if (res.status === 401) {
-          window.location.href = '/ops/login';
+          window.location.href = `${basePath}/login`;
           return;
         }
         return res.json();
