@@ -14,7 +14,6 @@ def container_mock(tmp_path):
     container = MagicMock(spec=ApplicationContainer)
     container.settings = BridgeSettings()
 
-    # projects
     repo = MagicMock()
     repo.project_id = "proj-1"
     repo.id = "repo-1"
@@ -24,7 +23,6 @@ def container_mock(tmp_path):
     container.projects.list.return_value = [project]
     container.projects.repositories.get.return_value = repo
 
-    # route_registry
     container.route_registry.path = tmp_path / "routes.json"
     container.route_registry.snapshot.return_value = {"requested_route": "bridge"}
     container.route_registry.resolve.return_value = {
@@ -33,8 +31,16 @@ def container_mock(tmp_path):
         "title": "Development Bridge",
         "generation": 1,
     }
+    container.route_registry.list_routes.return_value = [
+        {
+            "route_id": "bridge",
+            "channel_id": "coordinator",
+            "title": "Development Bridge",
+            "generation": 1,
+            "default": True,
+        }
+    ]
 
-    # coordinator
     container.coordinator.operator_snapshot = AsyncMock(return_value={
         "channel_id": "coordinator",
         "state": "idle",
@@ -56,7 +62,6 @@ def container_mock(tmp_path):
         "model_acknowledged": False,
     })
 
-    # jobs
     container.jobs.store = MagicMock()
     container.jobs.store.recent.return_value = ()
     container.jobs.store.get_by_id.return_value = None
@@ -77,10 +82,14 @@ async def test_operator_dashboard_service_snapshot_idle(container_mock):
 
     assert snap["route"]["route_id"] == "bridge"
     assert snap["route"]["channel_id"] == "coordinator"
+    assert [route["route_id"] for route in snap["routes"]] == ["bridge"]
 
     assert snap["jobs"]["recent"] == []
+    assert snap["jobs"]["active"] == []
+    assert snap["jobs"]["active_count"] == 0
     assert snap["jobs"]["current"] is None
     assert snap["jobs"]["last"] is None
+    assert snap["jobs"]["focused"] is None
 
     assert snap["wake"]["state"] == "idle"
 
@@ -119,9 +128,58 @@ async def test_operator_dashboard_service_resolves_active_and_last_jobs(containe
     snap = await service.snapshot()
 
     assert snap["jobs"]["current"]["job_id"] == "job_running"
+    assert [job["job_id"] for job in snap["jobs"]["active"]] == ["job_running"]
+    assert snap["jobs"]["active_count"] == 1
     assert snap["jobs"]["last"] is None
     assert snap["executor"]["executor"] == "antigravity"
     assert snap["executor"]["model"] == "gemini-3.1-pro"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_exposes_all_active_jobs_and_routes_with_independent_focus(container_mock):
+    running_job = JobRecord(
+        job_id="job_running",
+        project_id="proj-1",
+        repository_id="repo-1",
+        task_id="build",
+        request_id="req-1",
+        status=JobStatus.RUNNING,
+        created_at="2026-09-01T12:00:00Z",
+        executor="antigravity",
+        executor_model="gemini-3.1-pro",
+    )
+    queued_job = JobRecord(
+        job_id="job_queued",
+        project_id="proj-1",
+        repository_id="repo-1",
+        task_id="review",
+        request_id="req-2",
+        status=JobStatus.QUEUED,
+        created_at="2026-09-01T12:01:00Z",
+        executor="codex",
+        executor_model="gpt-5.6-sol",
+    )
+    container_mock.jobs.store.recent.return_value = (running_job, queued_job)
+    container_mock.jobs.store.get_by_id.return_value = queued_job
+    container_mock.route_registry.list_routes.return_value = [
+        {"route_id": "bridge", "channel_id": "telegram-bridge-g4", "title": "Bridge", "generation": 4, "default": True},
+        {"route_id": "eod", "channel_id": "telegram-eod-g1", "title": "EOD", "generation": 1, "default": False},
+        {"route_id": "ad5xwork", "channel_id": "telegram-ad5xwork-g1", "title": "AD5X", "generation": 1, "default": False},
+    ]
+    route_map = {item["route_id"]: item for item in container_mock.route_registry.list_routes.return_value}
+    container_mock.route_registry.resolve.side_effect = lambda route_id=None: route_map.get(route_id or "bridge")
+
+    service = OperatorDashboardService(container_mock)
+    snap = await service.snapshot(route_id="eod", job_id="job_queued")
+
+    assert [route["route_id"] for route in snap["routes"]] == ["bridge", "eod", "ad5xwork"]
+    assert snap["route"]["route_id"] == "eod"
+    assert [job["job_id"] for job in snap["jobs"]["active"]] == ["job_running", "job_queued"]
+    assert snap["jobs"]["active_count"] == 2
+    assert snap["jobs"]["focused"]["job_id"] == "job_queued"
+    assert snap["executor"]["executor"] == "codex"
+    container_mock.coordinator.operator_snapshot.assert_awaited_with("telegram-eod-g1")
+    container_mock.projects.repositories.get.assert_called_with("proj-1", "repo-1")
 
 
 @pytest.mark.asyncio
@@ -154,7 +212,6 @@ async def test_operator_dashboard_service_terminal_tail(container_mock):
 
 @pytest.mark.asyncio
 async def test_terminal_tail_uses_underscore_store_and_configured_limits(container_mock):
-    # Test M3: support _store and configured recent_jobs_limit and terminal_tail_bytes
     mock_store = MagicMock()
     container_mock.jobs.store = None
     container_mock.jobs._store = mock_store
@@ -174,7 +231,7 @@ async def test_terminal_tail_uses_underscore_store_and_configured_limits(contain
         request_id="req-1",
         status=JobStatus.RUNNING,
         created_at="2026-09-01T12:00:00Z",
-        stdout=b"A" * 2048,  # 2048 bytes
+        stdout=b"A" * 2048,
         stderr=b"",
         stdout_truncated=False,
         stderr_truncated=False,
@@ -229,4 +286,4 @@ def test_process_counts_caches_results(monkeypatch):
     res1 = metrics.process_counts(cache_ttl_seconds=5.0)
     res2 = metrics.process_counts(cache_ttl_seconds=5.0)
     assert res1 == res2
-    assert scandir_calls[0] == 1  # Called only once due to cache
+    assert scandir_calls[0] == 1

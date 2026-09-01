@@ -46,22 +46,18 @@ def test_static_assets_security(enabled_setup):
     app, _, _, cookie = enabled_setup
     client = TestClient(app)
 
-    # Valid static CSS
     resp_css = client.get("/ops/static/style.css")
     assert resp_css.status_code == 200
     assert "text/css" in resp_css.headers["content-type"]
     assert resp_css.headers["cache-control"] == "private, no-store"
 
-    # Valid static JS
     resp_js = client.get("/ops/static/app.js")
     assert resp_js.status_code == 200
     assert "javascript" in resp_js.headers["content-type"]
 
-    # Nonexistent static file -> 404
     resp_404 = client.get("/ops/static/nonexistent.png")
     assert resp_404.status_code == 404
 
-    # Directory traversal attempt -> 403 or 404
     resp_traversal = client.get("/ops/static/../../etc/passwd")
     assert resp_traversal.status_code in (403, 404)
 
@@ -86,25 +82,59 @@ async def test_sse_initial_events_and_disconnect(enabled_setup):
     assert response.headers["Cache-Control"] == "private, no-store"
 
     gen = response.body_iterator
-    # 1. Initial snapshot event
     evt1 = await anext(gen)
     assert evt1.startswith("event: snapshot\ndata: ")
     snap_data = json.loads(evt1.split("data: ", 1)[1].strip())
     assert snap_data["bridge"]["name"] == "development-bridge"
 
-    # 2. Initial terminal event
     evt2 = await anext(gen)
     assert evt2.startswith("event: terminal\ndata: ")
     tail_data = json.loads(evt2.split("data: ", 1)[1].strip())
     assert tail_data["status"] == "idle"
 
-    # 3. Disconnect
     state["disconnected"] = True
     try:
         await anext(gen)
         pytest.fail("Generator did not stop on disconnect")
     except StopAsyncIteration:
         pass
+
+
+@pytest.mark.asyncio
+async def test_sse_terminal_follows_explicit_job_focus(enabled_setup):
+    _, container, settings, cookie = enabled_setup
+    first, _ = container.jobs.store.create(
+        project_id="p", repository_id="r", task_id="first", request_id="req-1", idempotency_key=None
+    )
+    second, _ = container.jobs.store.create(
+        project_id="p", repository_id="r", task_id="second", request_id="req-2", idempotency_key=None
+    )
+    container.jobs.store.start(first.job_id)
+    container.jobs.store.start(second.job_id)
+    container.jobs.store.append_output(first.job_id, "stdout", b"first output\n", 1024)
+    container.jobs.store.append_output(second.job_id, "stdout", b"second output\n", 1024)
+
+    routes = create_operator_dashboard_routes(container, settings)
+    events_route = [r for r in routes if r.name == "ops_api_events"][0]
+    request = MagicMock()
+    request.cookies = {COOKIE_NAME: cookie}
+    request.query_params = {"job_id": first.job_id}
+
+    async def not_disconnected():
+        return False
+    request.is_disconnected = not_disconnected
+
+    response = await events_route.endpoint(request)
+    gen = response.body_iterator
+    snap_event = await anext(gen)
+    snap_data = json.loads(snap_event.split("data: ", 1)[1].strip())
+    assert snap_data["jobs"]["focused"]["job_id"] == first.job_id
+
+    terminal_event = await anext(gen)
+    tail_data = json.loads(terminal_event.split("data: ", 1)[1].strip())
+    assert tail_data["job_id"] == first.job_id
+    assert "first output" in tail_data["stdout"]
+    await gen.aclose()
 
 
 @pytest.mark.asyncio
@@ -123,19 +153,15 @@ async def test_sse_emits_changed_output_on_job_progress(enabled_setup):
 
     response = await events_route.endpoint(request)
     gen = response.body_iterator
-
-    # Consume initial snapshot & terminal
     await anext(gen)
     await anext(gen)
 
-    # Now create a running job and append output in store
     job, _ = container.jobs.store.create(
         project_id="p", repository_id="r", task_id="t", request_id="req", idempotency_key=None
     )
     container.jobs.store.start(job.job_id)
     container.jobs.store.append_output(job.job_id, "stdout", b"step 1 done\n", 1024)
 
-    # Next iteration in SSE will detect changed snapshot and changed terminal
     evt3 = await anext(gen)
     assert "event: " in evt3
 
@@ -174,13 +200,11 @@ async def test_sse_does_not_emit_on_pure_uptime_ticks_and_sends_heartbeat(enable
     assert response.status_code == 200
     gen = response.body_iterator
 
-    # 1. Initial snapshot & terminal
     evt1 = await anext(gen)
     assert evt1.startswith("event: snapshot")
     evt2 = await anext(gen)
     assert evt2.startswith("event: terminal")
 
-    # 2. Idle progression: next event should be a heartbeat comment after idle interval
     evt_idle = await anext(gen)
     assert evt_idle == ": heartbeat\n\n"
 
