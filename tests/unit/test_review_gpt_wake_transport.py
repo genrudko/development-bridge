@@ -147,13 +147,11 @@ async def test_probe_exact_conversation_success(tmp_path: Path):
         conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
         route_url="https://chatgpt.com/g/g-p-123/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
     )
-    canonical = "https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3"
-
     def write_export_file(argv: Sequence[str], timeout: float):
         output_idx = argv.index("--output") + 1
         out_path = Path(argv[output_idx])
         payload = {
-            "chatUrl": canonical,
+            "chatUrl": target.route_url,
             "statusBusy": False,
             "stopVisible": False,
             "title": "Development Bridge Conversation",
@@ -183,7 +181,7 @@ async def test_probe_exact_conversation_success(tmp_path: Path):
     assert "--browser-endpoint" in argv
     assert argv[argv.index("--browser-endpoint") + 1] == "http://127.0.0.1:9222"
     assert "--chat-url" in argv
-    assert argv[argv.index("--chat-url") + 1] == canonical
+    assert argv[argv.index("--chat-url") + 1] == target.route_url
     assert "--send" not in argv
 
 
@@ -933,7 +931,7 @@ async def test_on_demand_probe_starts_fresh_browser_uses_project_route_and_stops
         if args == ["browserctl", "stop"]: state["browser"] = False; return
         assert state["browser"] is True
         if args[2:4] == ["thread", "export"]:
-            Path(args[args.index("--output") + 1]).write_text(json.dumps({"chatUrl": canonical, "statusBusy": False, "stopVisible": False, "title": "Development Bridge Conversation", "bodyText": "Loaded current project branch"}), encoding="utf-8")
+            Path(args[args.index("--output") + 1]).write_text(json.dumps({"chatUrl": target.route_url, "statusBusy": False, "stopVisible": False, "title": "Development Bridge Conversation", "bodyText": "Loaded current project branch"}), encoding="utf-8")
     async def endpoint_probe(endpoint): return state["browser"]
     runner = FakeProcessRunner(on_run=on_run)
     transport = ReviewGptWakeTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=tmp_path / "receipts", process_runner=runner, browser_start_command=("browserctl", "start"), browser_stop_command=("browserctl", "stop"), browser_endpoint_probe=endpoint_probe)
@@ -942,7 +940,7 @@ async def test_on_demand_probe_starts_fresh_browser_uses_project_route_and_stops
     assert state["browser"] is False
     assert list(runner.calls[0][0]) == ["browserctl", "start"]
     export_argv = list(runner.calls[1][0])
-    assert export_argv[export_argv.index("--chat-url") + 1] == canonical
+    assert export_argv[export_argv.index("--chat-url") + 1] == target.route_url
     assert list(runner.calls[-1][0]) == ["browserctl", "stop"]
 
 @pytest.mark.asyncio
@@ -957,7 +955,7 @@ async def test_on_demand_delivery_preflights_same_cold_browser_before_send_and_s
         if args == ["browserctl", "stop"]: state["browser"] = False; return
         assert state["browser"] is True
         if args[2:4] == ["thread", "export"]:
-            Path(args[args.index("--output") + 1]).write_text(json.dumps({"chatUrl": canonical, "statusBusy": False, "stopVisible": False, "title": "Development Bridge Conversation", "bodyText": "Large conversation loaded"}), encoding="utf-8"); return
+            Path(args[args.index("--output") + 1]).write_text(json.dumps({"chatUrl": target.route_url, "statusBusy": False, "stopVisible": False, "title": "Development Bridge Conversation", "bodyText": "Large conversation loaded"}), encoding="utf-8"); return
         if "--send" in args:
             receipt.parent.mkdir(parents=True, exist_ok=True); receipt.write_text(json.dumps(_make_valid_receipt_dict(chat_url=canonical)), encoding="utf-8")
     async def endpoint_probe(endpoint): return state["browser"]
@@ -969,7 +967,7 @@ async def test_on_demand_delivery_preflights_same_cold_browser_before_send_and_s
     calls = [list(argv) for argv, _ in runner.calls]
     export_call = next(args for args in calls if args[2:4] == ["thread", "export"]); send_call = next(args for args in calls if "--send" in args)
     assert calls[0] == ["browserctl", "start"] and calls[-1] == ["browserctl", "stop"]
-    assert export_call[export_call.index("--chat-url") + 1] == canonical
+    assert export_call[export_call.index("--chat-url") + 1] == target.route_url
     assert send_call[send_call.index("--chat-url") + 1] == target.route_url
     assert calls.index(export_call) < calls.index(send_call)
 

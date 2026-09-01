@@ -256,7 +256,7 @@ class ReviewGptWakeTransport:
         return None
 
     async def _probe_connected(self, target: WakeTarget) -> WakeProbeResult:
-        canonical_url = canonical_chat_url(target.conversation_id)
+        probe_url = target.route_url.strip() or canonical_chat_url(target.conversation_id)
         temp_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         temp_path = Path(temp_file.name)
         temp_file.close()
@@ -270,7 +270,7 @@ class ReviewGptWakeTransport:
                 "--browser-endpoint",
                 self._browser_endpoint,
                 "--chat-url",
-                canonical_url,
+                probe_url,
                 "--output",
                 str(temp_path),
             ]
@@ -324,11 +324,11 @@ class ReviewGptWakeTransport:
                 )
 
             chat_url = str(export_data.get("chatUrl", "")).strip()
-            if chat_url != canonical_url:
+            if chat_url != probe_url:
                 return WakeProbeResult(
                     ready=False,
                     owner_input_required=False,
-                    detail=f"Target chat URL mismatch (expected: {canonical_url}, found: {chat_url})",
+                    detail=f"Target chat URL mismatch (expected: {probe_url}, found: {chat_url})",
                 )
 
             status_busy = bool(export_data.get("statusBusy", False))
