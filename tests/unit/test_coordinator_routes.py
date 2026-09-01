@@ -52,6 +52,42 @@ def test_coordinator_route_context_update_returns_updated_payload(tmp_path: Path
     assert data["revision"] == 1
 
 
+def test_coordinator_route_context_get_returns_content_without_bootstrap_duplication(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge", "https://chatgpt.com/g/g-p-infra/c/conv-bridge",
+        "telegram-bridge-g0", "Development Bridge Infra",
+    )
+    registry = build_tool_registry(container)
+    content = "Canonical checkpoint\nNext bounded task"
+
+    update = registry.get("coordinator_route_context_update")
+    asyncio.run(update.handler(
+        SimpleNamespace(session=SimpleNamespace(_connection=SimpleNamespace(session_id="test-session"))),
+        SimpleNamespace(arguments={"route_id": "bridge", "content": content}),
+        SimpleNamespace(request_id="req-context-update"),
+    ))
+
+    get_tool = registry.get("coordinator_route_context_get")
+    result = asyncio.run(get_tool.handler(
+        SimpleNamespace(session=SimpleNamespace(_connection=SimpleNamespace(session_id="test-session"))),
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-context-get"),
+    ))
+    data = json.loads(result.content[0].text)["data"]
+
+    assert data["context"]["content"] == content
+    assert data["context"]["revision"] == 1
+    assert data["bootstrap_message"] == (
+        "Canonical Route Context loaded for route bridge. "
+        "Current state is available in context.content, revision 1."
+    )
+    assert content not in data["bootstrap_message"]
+
+
 def test_coordinator_route_list_returns_bounded_metadata_without_mutating_state(tmp_path: Path):
     settings = BridgeSettings.model_validate({
         "coordinator": {"route_registry_path": tmp_path / "routes.json"},

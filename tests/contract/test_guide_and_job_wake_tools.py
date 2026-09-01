@@ -12,10 +12,10 @@ from app.tools.registry import build_tool_registry
 from tests.fixtures.repositories import create_git_repository
 
 
-def test_bridge_guide_is_registry_derived_and_complete():
-    registry = build_tool_registry(build_container(BridgeSettings()))
+def test_bridge_guide_is_short_structured_runtime_summary():
+    settings = BridgeSettings.model_validate({"server": {"tool_surface": "compact"}})
+    registry = build_tool_registry(build_container(settings))
     guide = registry.get("bridge_guide")
-    assert "START HERE" in guide.definition.description
     result = asyncio.run(
         guide.handler(
             None,
@@ -24,105 +24,61 @@ def test_bridge_guide_is_registry_derived_and_complete():
         )
     )
     data = json.loads(result.content[0].text)["data"]
-    catalog = {
-        item["name"]
-        for tools in data["tools_by_category"].values()
-        for item in tools
-    }
-    assert data["tool_count"] == 97
-    assert catalog == {tool.name for tool in registry.definitions}
-    assert "queued status is normal" in data["durable_jobs"]["rule"]
-    assert any("batched_messages" in step for step in data["durable_jobs"]["preferred_event_flow"])
-    assert any("final MCP App-bearing tool" in step for step in data["durable_jobs"]["preferred_event_flow"])
+
+    assert data["version"] == "1.0.0"
+    assert data["api_version"] == "1.0"
+    assert data["tool_surface"] == "compact"
+    assert 0 < data["tool_count"] < data["internal_tool_count"]
+
+    durable = data["durable_jobs"]
+    assert "repository_exec" in durable["summary"]
+    assert "queued" in durable["summary"]
+    assert "job_status" in durable["summary"]
+    assert "job_output" in durable["summary"]
+
+    discovery = data["discovery"]["summary"]
+    assert "bridge_search" in discovery
+    assert "bridge_schema" in discovery
+    assert "bridge_call" in discovery
+
+    coordinator = data["coordinator"]
+    assert coordinator["available"] is True
+    assert "route" in coordinator["summary"].lower()
+    assert "ack" in coordinator["summary"].lower()
+
     economy = data["economy_mode"]
-    assert "scarce resource" in economy["objective"]
-    assert any("Do not poll durable jobs" in rule for rule in economy["rules"])
-    assert any("ChatGPT Web/Browser Host" in rule for rule in economy["rules"])
-    assert any("Do not repeat discovery" in rule for rule in economy["rules"])
-    assert any(
-        "bridge_dashboard once" in rule and "progress payload" in rule
-        for rule in economy["rules"]
-    )
-    assert any(
-        "work_progress_update" in rule
-        and "meaningful milestones" in rule
-        and "operation_id" in rule
-        for rule in economy["rules"]
-    )
-    assert any(
-        "never call bridge_dashboard repeatedly" in rule
-        for rule in economy["rules"]
-    )
-    assert "check -> change -> targeted tests" in economy["rules"][0]
-    assert "inspect exact state" in economy["executor_job_shape"]
-    delegation = data["executor_delegation"]
-    assert "mandatory" in delegation["rule"]
-    assert "AGENTS.md" in delegation["rule"]
-    assert "ECONOMY MODE" in delegation["prompt_suffix"]
-    assert "do not poll durable jobs frequently" in delegation["prompt_suffix"]
-    assert "compact tool surface does not mean a capability is unavailable" in delegation["prompt_suffix"].lower()
-    assert "bridge_search -> bridge_schema -> bridge_call" in delegation["prompt_suffix"]
-    assert "shell credentials" in delegation["prompt_suffix"].lower()
-    assert "do not use shell git push" in delegation["prompt_suffix"].lower()
-    assert "do not mutate origin" in delegation["prompt_suffix"].lower()
-    assert "exact tool" in delegation["prompt_suffix"].lower() and "error code" in delegation["prompt_suffix"].lower()
-    evidence = delegation["evidence_first"]
-    assert any("compact tool surface" in rule.lower() for rule in evidence)
-    assert any("shell credentials" in rule.lower() for rule in evidence)
-    assert any("origin" in rule.lower() and "git_push" in rule for rule in evidence)
-    assert any("blocker" in rule.lower() and "exact tool" in rule.lower() for rule in evidence)
-    agent_rules = (Path(__file__).parents[2] / "AGENTS.md").read_text(encoding="utf-8")
+    assert economy["enabled"] is True
+    assert "bounded" in economy["summary"].lower()
+
+    serialized = json.dumps(data, ensure_ascii=False)
+    assert len(serialized) <= 2500
+    lowered = serialized.lower()
+    for instruction_fragment in (
+        "start here",
+        "you must",
+        "never ",
+        "do not ",
+        "treat it as authoritative",
+    ):
+        assert instruction_fragment not in lowered
+    assert "operator_guidance" not in data
+    assert "executor_delegation" not in data
+    assert "tools_by_category" not in data
+
+
+def test_full_operator_guidance_remains_in_repository_sources():
+    root = Path(__file__).parents[2]
+    agent_rules = (root / "AGENTS.md").read_text(encoding="utf-8")
+    contract = (root / "docs/operations/executor-operating-contract.md").read_text(encoding="utf-8")
+
     assert "## Economy Mode" in agent_rules
-    assert "one bounded work cycle" in agent_rules
-    assert "Never retry live UI actions during rate-limit/backoff" in agent_rules
     assert "## Evidence-First Bridge Semantics" in agent_rules
-    assert "bridge_search -> bridge_schema -> bridge_call" in agent_rules
-    assert "Shell credentials are not evidence" in agent_rules
-    assert "Do not use shell `git push`" in agent_rules
-    assert "Do not mutate `origin`" in agent_rules
-    assert "A blocker must be proven" in agent_rules
-
-
-def test_routing_and_no_owner_url_guidance_in_guide_agents_and_contract():
-    registry = build_tool_registry(build_container(BridgeSettings()))
-    guide = registry.get("bridge_guide")
-    result = asyncio.run(
-        guide.handler(
-            None,
-            SimpleNamespace(arguments={}),
-            SimpleNamespace(request_id="guide-routing-test"),
-        )
-    )
-    data = json.loads(result.content[0].text)["data"]
-    coordinator_guidance = data["operator_guidance"]["coordinator"]
-    assert "coordinator_route_list" in coordinator_guidance
-    assert "coordinator_x_mount" in coordinator_guidance
-    assert "bridge" in coordinator_guidance
-    assert "eod" in coordinator_guidance
-    assert "ad5xwork" in coordinator_guidance
-    assert "never call" in coordinator_guidance.lower() and "takeover" in coordinator_guidance.lower()
-    assert "url" in coordinator_guidance.lower()
-
-    takeover_tool = registry.get("coordinator_route_takeover")
-    assert "takeover" in takeover_tool.definition.description.lower()
-    assert "mount" in takeover_tool.definition.description.lower()
-
-    agent_rules = (Path(__file__).parents[2] / "AGENTS.md").read_text(encoding="utf-8")
-    assert "coordinator_route_list" in agent_rules
     assert "coordinator_x_mount" in agent_rules
-    assert "bridge" in agent_rules
-    assert "ad5xwork" in agent_rules
-    assert "eod" in agent_rules
-    assert "takeover" in agent_rules
-
-    contract = (Path(__file__).parents[2] / "docs/operations/executor-operating-contract.md").read_text(encoding="utf-8")
+    assert "Do not use shell `git push`" in agent_rules
     assert "coordinator_route_list" in contract
     assert "coordinator_x_mount" in contract
-    assert "bridge" in contract
     assert "ad5xwork" in contract
-    assert "eod" in contract
     assert "takeover" in contract
-
 
 
 def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():
