@@ -70,12 +70,12 @@ def test_resolve_client_ip_direct_non_loopback():
 def test_login_rate_limiter():
     limiter = LoginRateLimiter(max_attempts=5, window_seconds=600.0)
     ip = "203.0.113.10"
-    
+
     assert limiter.is_rate_limited(ip) is False
     for _ in range(4):
         limiter.record_failure(ip)
         assert limiter.is_rate_limited(ip) is False
-    
+
     limiter.record_failure(ip) # 5th attempt
     assert limiter.is_rate_limited(ip) is True
 
