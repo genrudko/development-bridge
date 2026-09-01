@@ -1,5 +1,7 @@
 # Coordinator Wake Transports Implementation Plan
 
+**Status:** implemented and live-accepted on 2026-09-01. This file is retained as implementation history; unchecked boxes below are historical plan notation, not current TODOs. Current operations are documented in `docs/operations/review-gpt-coordinator-wake.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Development Bridge coordinator wake delivery transport-neutral and add a fail-closed `review-gpt` direct transport without replacing the existing durable continuation state machine.
@@ -107,3 +109,13 @@
 - [ ] **Step 3: Verify health without sending a ChatGPT message**.
 - [ ] **Step 4: Run exactly one deliberate exact-current-chat continuation E2E**.
 - [ ] **Step 5: If successful, keep X as fallback and begin soak; if uncertain/owner-input-required, do not retry automatically**.
+
+## Post-implementation acceptance record
+
+- ReviewGPT Project-route regression fixed in both ReviewGPT and Development Bridge.
+- Read-only exact-Project preflight passed after operator re-authentication.
+- Sequential production soak: 5/5 real terminal jobs, more than 70 minutes first-to-fifth committed wake, no observed duplicates or reordering.
+- Separate failure-terminal job (`exit 7`) delivered correctly.
+- Checked wake attempts left Chromium/Xvfb inactive with zero owned processes.
+- Work / Cloud Browser independently passed 5/5 but remains fallback because it consumes Work quota.
+- Executor/debug discipline for future changes is defined in `AGENTS.md` and `docs/operations/executor-operating-contract.md`.

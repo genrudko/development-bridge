@@ -1,5 +1,7 @@
 # Antigravity Executor Operator Runbook
 
+All Antigravity coding/review jobs also follow `docs/operations/executor-operating-contract.md`, including VPS-first execution, no redundant tool calls, no automatic retry, and the mandatory pre-handoff debug sweep.
+
 ## 1. Offline release verification
 
 Run inside the Development Bridge checkout:

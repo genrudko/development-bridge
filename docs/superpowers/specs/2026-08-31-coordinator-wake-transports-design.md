@@ -1,5 +1,7 @@
 # Coordinator Wake Transports Design
 
+**Implementation status:** accepted in production on 2026-09-01. ReviewGPT is the primary direct wake transport; Work / Cloud Browser is a proven independent fallback. Operational rules live in `docs/operations/review-gpt-coordinator-wake.md`.
+
 ## Context
 
 Development Bridge already has the durable continuation machinery we need: `CoordinatorService` persists `PendingWake` records, continuation IDs, batching, leases, retries, transport ACK state, model ACK state, cooldowns, and escalation. The current delivery path is tightly coupled to Coordinator X / Browser Host. We have now proven a second browser transport (`review-gpt`) that can create a new user turn in the exact current ChatGPT Project conversation from the VPS while the owner PC is off.
@@ -23,7 +25,7 @@ The goal is therefore **not** to build a second outbox. The goal is to make deli
 - Do not use OpenAI private ChatGPT APIs, `/backend-api`, auth-token replay, or Cloudflare bypass.
 - Do not replace `CoordinatorService` persistence with a new database/outbox.
 - Do not remove X / Browser Host in this change.
-- Do not integrate Work / Cloud Browser before its E2E is proven.
+- Work / Cloud Browser was outside the original implementation scope; its later E2E proof does not change the durable coordinator state model.
 - Do not run repeated live ChatGPT acceptance tests while implementing.
 
 ## Architecture
@@ -163,16 +165,11 @@ If the CLI exits non-zero after `--send` and no durable proof establishes a clea
 
 Browser endpoint failure or explicit Cloudflare/login evidence detected before the CLI send path returns `owner_input_required`.
 
-## Future Work transport
+## Work / Cloud Browser fallback
 
-A future `WorkCloudBrowserWakeTransport` must implement the same `WakeTransport` contract. If Work proves better, configuration changes transport priority only:
+Work / Cloud Browser has been independently proven end-to-end through Bridge terminal event -> GitHub PR comment -> Work webhook -> Cloud Browser -> exact Project chat. Its 5/5 soak also covered a failure-terminal event.
 
-```text
-primary = work_cloud_browser
-fallback = review_gpt
-```
-
-Coordinator/job code does not change.
+It remains a fallback/independent recovery path because routine wakes consume Work quota, while ReviewGPT's accepted on-demand VPS path does not. Adding a first-class `WorkCloudBrowserWakeTransport` later should still implement the same `WakeTransport` contract rather than changing coordinator/job state.
 
 No automatic cross-transport fallback is allowed after an `uncertain` result from the primary transport, because that can duplicate a user turn.
 
@@ -212,3 +209,11 @@ No live ChatGPT send is part of the normal test suite.
 4. Run one deliberate exact-current-chat acceptance E2E.
 5. Keep X as fallback during soak.
 6. Test Work when healthy; change priority only if it proves better.
+
+## Accepted live validation
+
+After fixing ReviewGPT and Bridge to accept/use authoritative Project conversation URLs, the production route completed a 5/5 sequential soak over more than 70 minutes. Every observed wake produced a committed receipt, arrived in the same physical Project conversation in order, and used one delivery attempt. Checked browser/Xvfb lifecycle returned to inactive with zero owned processes after delivery.
+
+A separate intentional non-zero job (`exit 7`, `failure_reason=nonzero_exit`) also woke the same Project conversation successfully, proving that terminal failure delivery is not success-only.
+
+The production operating contract is therefore ReviewGPT primary, authoritative Project URL preflight, on-demand browser lifecycle, receipt-gated idempotency, immediate model ACK, no automatic resend after uncertain submission, and Work as fallback.
