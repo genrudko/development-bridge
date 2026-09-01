@@ -257,7 +257,6 @@ class ReviewGptWakeTransport:
 
     async def _probe_connected(self, target: WakeTarget) -> WakeProbeResult:
         canonical_url = canonical_chat_url(target.conversation_id)
-        navigation_url = target.route_url.strip() or canonical_url
         temp_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         temp_path = Path(temp_file.name)
         temp_file.close()
@@ -271,7 +270,7 @@ class ReviewGptWakeTransport:
                 "--browser-endpoint",
                 self._browser_endpoint,
                 "--chat-url",
-                navigation_url,
+                canonical_url,
                 "--output",
                 str(temp_path),
             ]

@@ -183,7 +183,7 @@ async def test_probe_exact_conversation_success(tmp_path: Path):
     assert "--browser-endpoint" in argv
     assert argv[argv.index("--browser-endpoint") + 1] == "http://127.0.0.1:9222"
     assert "--chat-url" in argv
-    assert argv[argv.index("--chat-url") + 1] == target.route_url
+    assert argv[argv.index("--chat-url") + 1] == canonical
     assert "--send" not in argv
 
 
@@ -942,7 +942,7 @@ async def test_on_demand_probe_starts_fresh_browser_uses_project_route_and_stops
     assert state["browser"] is False
     assert list(runner.calls[0][0]) == ["browserctl", "start"]
     export_argv = list(runner.calls[1][0])
-    assert export_argv[export_argv.index("--chat-url") + 1] == target.route_url
+    assert export_argv[export_argv.index("--chat-url") + 1] == canonical
     assert list(runner.calls[-1][0]) == ["browserctl", "stop"]
 
 @pytest.mark.asyncio
@@ -969,7 +969,7 @@ async def test_on_demand_delivery_preflights_same_cold_browser_before_send_and_s
     calls = [list(argv) for argv, _ in runner.calls]
     export_call = next(args for args in calls if args[2:4] == ["thread", "export"]); send_call = next(args for args in calls if "--send" in args)
     assert calls[0] == ["browserctl", "start"] and calls[-1] == ["browserctl", "stop"]
-    assert export_call[export_call.index("--chat-url") + 1] == target.route_url
+    assert export_call[export_call.index("--chat-url") + 1] == canonical
     assert send_call[send_call.index("--chat-url") + 1] == target.route_url
     assert calls.index(export_call) < calls.index(send_call)
 
