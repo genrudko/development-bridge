@@ -321,6 +321,34 @@ class EodBrowserSettings(BaseModel):
         return self
 
 
+class OperatorDashboardSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    path: str = Field(default="/ops", pattern=r"^/[a-zA-Z0-9_\-\./]*$")
+    password_hash: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    session_secret: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    session_ttl_seconds: int = Field(default=43200, ge=60, le=604800)
+    event_interval_seconds: float = Field(default=1.0, ge=0.1, le=60.0)
+    recent_jobs_limit: int = Field(default=25, ge=1, le=200)
+    terminal_tail_bytes: int = Field(default=32768, ge=1024, le=1048576)
+
+    @model_validator(mode="after")
+    def validate_operator_dashboard(self) -> OperatorDashboardSettings:
+        if not self.enabled:
+            return self
+        missing = []
+        if self.password_hash is None:
+            missing.append("password_hash")
+        if self.session_secret is None:
+            missing.append("session_secret")
+        if missing:
+            raise ValueError(
+                "enabled operator_dashboard requires "
+                + ", ".join(f"operator_dashboard.{m}" for m in missing)
+            )
+        return self
+
+
 class RepositorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(pattern=IDENTIFIER_PATTERN)
@@ -369,6 +397,9 @@ class BridgeSettings(BaseModel):
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     desktop_nodes: DesktopNodeSettings = Field(default_factory=DesktopNodeSettings)
     eod_browser: EodBrowserSettings = Field(default_factory=EodBrowserSettings)
+    operator_dashboard: OperatorDashboardSettings = Field(
+        default_factory=OperatorDashboardSettings
+    )
     projects: tuple[ProjectSettings, ...] = ()
 
     @model_validator(mode="after")
@@ -444,6 +475,13 @@ def load_settings(
             )
         if isinstance(raw.get("desktop_nodes"), dict) and "token" in raw["desktop_nodes"]:
             raise ValueError("Desktop node token must be supplied through the deployment environment")
+        if isinstance(raw.get("operator_dashboard"), dict) and (
+            "password_hash" in raw["operator_dashboard"]
+            or "session_secret" in raw["operator_dashboard"]
+        ):
+            raise ValueError(
+                "Operator dashboard secrets must be supplied through the deployment environment"
+            )
         settings = BridgeSettings.model_validate(raw)
 
     server_updates: dict[str, Any] = {}
@@ -581,6 +619,45 @@ def load_settings(
         environment_updates["desktop_nodes"] = DesktopNodeSettings.model_validate(
             {**settings.desktop_nodes.model_dump(), **desktop_updates}
         )
+
+    operator_dashboard_updates: dict[str, Any] = {}
+    if raw_ops_enabled := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_ENABLED"):
+        normalized = raw_ops_enabled.strip().lower()
+        if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise ValueError("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_ENABLED must be a boolean")
+        operator_dashboard_updates["enabled"] = normalized in {"1", "true", "yes", "on"}
+    if ops_path := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_PATH"):
+        operator_dashboard_updates["path"] = ops_path
+    if password_hash := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_PASSWORD_HASH"):
+        operator_dashboard_updates["password_hash"] = password_hash
+    if session_secret := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_SESSION_SECRET"):
+        operator_dashboard_updates["session_secret"] = session_secret
+    if session_ttl := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_SESSION_TTL_SECONDS"):
+        operator_dashboard_updates["session_ttl_seconds"] = int(session_ttl)
+    if event_interval := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_EVENT_INTERVAL_SECONDS"):
+        operator_dashboard_updates["event_interval_seconds"] = float(event_interval)
+    if recent_jobs_limit := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_RECENT_JOBS_LIMIT"):
+        operator_dashboard_updates["recent_jobs_limit"] = int(recent_jobs_limit)
+    if terminal_tail_bytes := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_TERMINAL_TAIL_BYTES"):
+        operator_dashboard_updates["terminal_tail_bytes"] = int(terminal_tail_bytes)
+
+    if operator_dashboard_updates:
+        current_ops = settings.operator_dashboard
+        full_ops = {
+            **current_ops.model_dump(),
+            **(
+                {"password_hash": current_ops.password_hash}
+                if current_ops.password_hash is not None
+                else {}
+            ),
+            **(
+                {"session_secret": current_ops.session_secret}
+                if current_ops.session_secret is not None
+                else {}
+            ),
+            **operator_dashboard_updates,
+        }
+        environment_updates["operator_dashboard"] = OperatorDashboardSettings.model_validate(full_ops)
 
     if environment_updates:
         settings = settings.model_copy(update=environment_updates)

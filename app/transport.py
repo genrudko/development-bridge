@@ -34,6 +34,7 @@ from app.auth import (
     approval_route,
 )
 from app.container import ApplicationContainer
+from app.ops.routes import create_operator_dashboard_routes
 from app.settings import BridgeSettings
 
 
@@ -597,6 +598,7 @@ def create_streamable_http_app(
             name="knowledge_attachment_export_download",
         )
     )
+    custom_routes.extend(create_operator_dashboard_routes(container, settings))
     app = server.streamable_http_app(
         streamable_http_path=settings.server.endpoint,
         transport_security=TransportSecuritySettings(

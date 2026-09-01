@@ -75,6 +75,10 @@ class JobService:
         self._terminal_waiters: dict[str, TerminalWaiter] = {}
         self._durable_terminal_handlers: dict[str, DurableTerminalHandler] = {}
 
+    @property
+    def store(self) -> JobStore | None:
+        return self._store
+
     def register_durable_terminal_handler(self, name: str, handler: DurableTerminalHandler) -> None:
         if not isinstance(name, str) or not 1 <= len(name) <= 64 or any(not (char.isalnum() or char in "-_") for char in name):
             raise ValueError("durable terminal handler name is invalid")

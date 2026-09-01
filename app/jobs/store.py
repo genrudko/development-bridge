@@ -132,6 +132,62 @@ class JobStore:
                 ).fetchall()
             )
 
+    def recent(
+        self,
+        limit: int,
+        *,
+        project_id: str | None = None,
+        repository_id: str | None = None,
+    ) -> tuple[JobRecord, ...]:
+        query = """
+            SELECT job_id, project_id, repository_id, task_id, request_id,
+                   status, created_at, started_at, finished_at, exit_code,
+                   failure_reason, stdout_truncated, stderr_truncated,
+                   executor, executor_model, executor_quota_state
+            FROM jobs
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if repository_id is not None:
+            clauses.append("repository_id = ?")
+            params.append(repository_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(max(1, limit))
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(query, params).fetchall()
+        except sqlite3.OperationalError:
+            return ()
+        return tuple(
+            JobRecord(
+                job_id=row["job_id"],
+                project_id=row["project_id"],
+                repository_id=row["repository_id"],
+                task_id=row["task_id"],
+                request_id=row["request_id"],
+                status=JobStatus(row["status"]),
+                created_at=row["created_at"],
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+                exit_code=row["exit_code"],
+                failure_reason=row["failure_reason"],
+                stdout=b"",
+                stderr=b"",
+                stdout_truncated=bool(row["stdout_truncated"]),
+                stderr_truncated=bool(row["stderr_truncated"]),
+                executor=row["executor"],
+                executor_model=row["executor_model"],
+                executor_quota_state=row["executor_quota_state"],
+            )
+            for row in rows
+        )
+
     def has_active(self) -> bool:
         with self._connect() as connection:
             row = connection.execute(

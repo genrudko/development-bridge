@@ -675,6 +675,104 @@ class CoordinatorService:
                 )
             return data
 
+    async def operator_snapshot(self, channel_id: str = DEFAULT_CHANNEL) -> dict:
+        """Return a strictly read-only snapshot of coordinator wake state for the given channel."""
+        channel_id = self.validate_channel(channel_id)
+        now = time.time()
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if wake is None:
+                return {
+                    "channel_id": channel_id,
+                    "state": "idle",
+                    "continuation_id": None,
+                    "delivery_attempts": 0,
+                    "max_delivery_attempts": 1,
+                    "transport_delivered": False,
+                    "transport_delivered_at": None,
+                    "last_transport_name": None,
+                    "last_transport_disposition": None,
+                    "last_transport_detail": None,
+                    "owner_input_required": False,
+                    "batch_size": 0,
+                    "queued_events": 0,
+                    "retry_after_seconds": 0.0,
+                    "web_backoff_seconds": 0.0,
+                    "web_turn_cooldown_seconds": 0.0,
+                    "lease_remaining_seconds": 0.0,
+                    "model_acknowledged": False,
+                }
+            claimed = self._lease_active(wake, now)
+            exhausted = wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts
+            expired_undelivered = self._undelivered_expired(wake, now)
+            web_backoff_until = self._web_backoff_until(now)
+            web_cooldown_until = self._web_turn_cooldown_until(channel_id)
+            other_claim_until = self._other_claim_until(channel_id, now)
+            web_blocked = not wake.transport_delivered and web_backoff_until > now
+            cooldown_blocked = not wake.transport_delivered and max(web_cooldown_until, other_claim_until) > now
+
+            if claimed:
+                state = "claimed"
+            elif wake.last_transport_disposition == "uncertain":
+                state = "transport_uncertain"
+            elif wake.owner_input_required:
+                state = "owner_input_required"
+            elif expired_undelivered:
+                state = "escalation_due"
+            elif wake.transport_delivered:
+                state = ("escalation_due" if (wake.escalation_at or float("inf")) <= now else "waiting_model_ack")
+            elif exhausted:
+                state = (
+                    "escalation_due"
+                    if (wake.escalation_at or float("inf")) <= now
+                    else "waiting_model_ack"
+                )
+            elif web_blocked:
+                state = "web_backoff"
+            elif cooldown_blocked:
+                state = "web_cooldown"
+            elif (
+                not self._browser_preflight_authorized(wake, now)
+                and self._browser_preflight_required
+                and wake.model_ack_required
+            ):
+                state = "browser_preflight"
+            elif wake.model_ack_required and wake.delivery_attempts > 0:
+                state = "waiting_model_ack"
+            else:
+                state = "pending"
+
+            return {
+                "channel_id": channel_id,
+                "state": state,
+                "continuation_id": wake.continuation_id,
+                "delivery_attempts": wake.delivery_attempts,
+                "max_delivery_attempts": wake.max_delivery_attempts,
+                "transport_delivered": wake.transport_delivered,
+                "transport_delivered_at": wake.transport_delivered_at,
+                "last_transport_name": wake.last_transport_name,
+                "last_transport_disposition": wake.last_transport_disposition,
+                "last_transport_detail": wake.last_transport_detail,
+                "owner_input_required": wake.owner_input_required,
+                "batch_size": len(self._batch_parts(wake.message)),
+                "queued_events": len(wake.queued_messages),
+                "retry_after_seconds": (
+                    max(
+                        0.0,
+                        max(wake.available_at, web_backoff_until, web_cooldown_until, other_claim_until)
+                        - now,
+                    )
+                    if not exhausted and not expired_undelivered
+                    else 0.0
+                ),
+                "web_backoff_seconds": max(0.0, web_backoff_until - now),
+                "web_turn_cooldown_seconds": max(0.0, max(web_cooldown_until, other_claim_until) - now),
+                "lease_remaining_seconds": (
+                    max(0.0, (wake.lease_expires_at or now) - now) if claimed else 0.0
+                ),
+                "model_acknowledged": wake.model_acknowledged,
+            }
+
     async def claim(
         self, channel_id: str = DEFAULT_CHANNEL, *, delivery_lease: str | None = None,
         delivery_mode: str = "x",

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Development Bridge - Operator Dashboard</title>
+  <link rel="stylesheet" href="/ops/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1 id="bridgeName">Development Bridge</h1>
+      <span class="badge badge-success">Online</span>
+    </div>
+    <div class="header-meta">
+      <div>Route: <strong id="headerRoute">-</strong></div>
+      <div>Executor: <strong id="headerExecutor">-</strong></div>
+      <div>Uptime: <span id="headerUptime">-</span></div>
+      <form method="POST" action="/ops/logout" style="display: inline;">
+        <button type="submit" class="btn">Logout</button>
+      </form>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="overview">Overview</button>
+    <button class="tab-btn" data-tab="terminal">Terminal</button>
+    <button class="tab-btn" data-tab="jobs">Jobs</button>
+    <button class="tab-btn" data-tab="git">Git</button>
+    <button class="tab-btn" data-tab="wake">Wake</button>
+    <button class="tab-btn" data-tab="system">System</button>
+  </nav>
+
+  <main>
+    <!-- 1. Overview Tab -->
+    <div id="tab-overview" class="tab-pane active">
+      <div class="grid">
+        <div class="card" style="grid-column: 1 / -1;">
+          <div class="card-header">
+            <span>Durable Work Progress</span>
+            <span id="progStatus" class="badge badge-warning">idle</span>
+          </div>
+          <div class="card-body">
+            <h2 id="progTitle" style="font-size: 1.1rem; margin-bottom: 0.5rem;">No active progress</h2>
+            <div class="progress-container">
+              <div class="progress-header">
+                <span>Completion</span>
+                <span id="progPercent">0%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div id="progFill" class="progress-bar-fill"></div>
+              </div>
+            </div>
+            <div class="detail-list">
+              <div class="detail-label">Phase:</div>
+              <div id="progPhase" class="detail-val">-</div>
+              <div class="detail-label">Current:</div>
+              <div id="progCurrent" class="detail-val">-</div>
+              <div class="detail-label">Next:</div>
+              <div id="progNext" class="detail-val">-</div>
+              <div class="detail-label">Detail:</div>
+              <div id="progDetail" class="detail-val">-</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">Active Execution</div>
+          <div class="card-body">
+            <div class="detail-list">
+              <div class="detail-label">Job ID:</div>
+              <div id="overviewJobId" class="detail-val" style="font-family: var(--font-mono); font-size: 0.8rem;">None</div>
+              <div class="detail-label">Status:</div>
+              <div id="overviewJobStatus" class="detail-val">-</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Terminal Tab -->
+    <div id="tab-terminal" class="tab-pane">
+      <div class="terminal-container">
+        <div class="terminal-header">
+          <div>
+            <span>Job: <strong id="terminalJobId">None</strong></span>
+            <span id="terminalJobStatus" class="badge" style="margin-left: 0.5rem;">idle</span>
+            <span id="terminalTruncated" class="badge badge-warning" style="display: none; margin-left: 0.5rem;">Truncated</span>
+          </div>
+          <div>
+            <label style="font-size: 0.8rem; cursor: pointer; color: var(--text-secondary);">
+              <input type="checkbox" id="autoScrollCheckbox" checked> Auto-scroll
+            </label>
+          </div>
+        </div>
+        <div id="terminalContent" class="terminal-content">(no output recorded)</div>
+      </div>
+    </div>
+
+    <!-- 3. Jobs Tab -->
+    <div id="tab-jobs" class="tab-pane">
+      <div class="card">
+        <div class="card-header">Recent Jobs</div>
+        <div class="card-body" style="padding: 0; overflow-x: auto;">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Job ID</th>
+                <th>Task</th>
+                <th>Status</th>
+                <th>Repository</th>
+                <th>Executor</th>
+                <th>Created</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody id="jobsTableBody">
+              <tr><td colspan="7" style="text-align: center; color: var(--text-muted);">Loading jobs...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. Git Tab -->
+    <div id="tab-git" class="tab-pane">
+      <div class="card">
+        <div class="card-header">Active Repository Status</div>
+        <div class="card-body">
+          <div class="detail-list">
+            <div class="detail-label">Branch:</div>
+            <div id="gitBranch" class="detail-val">-</div>
+            <div class="detail-label">HEAD:</div>
+            <div id="gitHead" class="detail-val" style="font-family: var(--font-mono); font-size: 0.8rem;">-</div>
+            <div class="detail-label">Working Tree:</div>
+            <div class="detail-val"><span id="gitCleanStatus" class="badge">-</span> (<span id="gitChangedFiles">-</span>)</div>
+            <div class="detail-label">Upstream:</div>
+            <div id="gitUpstream" class="detail-val">-</div>
+            <div class="detail-label">Ahead / Behind:</div>
+            <div id="gitAheadBehind" class="detail-val">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5. Wake Tab -->
+    <div id="tab-wake" class="tab-pane">
+      <div class="card">
+        <div class="card-header">Coordinator Wake State</div>
+        <div class="card-body">
+          <div id="wakeOwnerAlert" class="alert-danger" style="display: none; margin-bottom: 1rem;">
+            ⚠️ <strong>Owner Action Required:</strong> Browser Host reported login / manual intervention needed.
+          </div>
+          <div class="detail-list">
+            <div class="detail-label">Channel:</div>
+            <div id="wakeChannel" class="detail-val">-</div>
+            <div class="detail-label">State:</div>
+            <div class="detail-val"><span id="wakeState" class="badge">-</span></div>
+            <div class="detail-label">Continuation ID:</div>
+            <div id="wakeContinuation" class="detail-val" style="font-family: var(--font-mono); font-size: 0.8rem;">-</div>
+            <div class="detail-label">Delivery Attempts:</div>
+            <div id="wakeAttempts" class="detail-val">-</div>
+            <div class="detail-label">Delivered:</div>
+            <div id="wakeDelivered" class="detail-val">-</div>
+            <div class="detail-label">Last Transport:</div>
+            <div id="wakeTransport" class="detail-val">-</div>
+            <div class="detail-label">Cooldown / Backoff:</div>
+            <div id="wakeCooldown" class="detail-val">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 6. System Tab -->
+    <div id="tab-system" class="tab-pane">
+      <div class="card">
+        <div class="card-header">VPS System Metrics</div>
+        <div class="card-body">
+          <div class="detail-list">
+            <div class="detail-label">Memory:</div>
+            <div id="sysMem" class="detail-val">-</div>
+            <div class="detail-label">Disk:</div>
+            <div id="sysDisk" class="detail-val">-</div>
+            <div class="detail-label">Load Average:</div>
+            <div id="sysLoad" class="detail-val">-</div>
+            <div class="detail-label">Browser Processes:</div>
+            <div id="sysProcs" class="detail-val">-</div>
+            <div class="detail-label">Bridge Uptime:</div>
+            <div id="sysUptime" class="detail-val">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div>Status: <span id="connStatus" class="badge badge-warning">Connecting...</span></div>
+    <div>Last updated: <span id="lastUpdated">-</span></div>
+  </footer>
+
+  <script src="/ops/static/app.js"></script>
+</body>
+</html>
