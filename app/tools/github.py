@@ -90,6 +90,21 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         a = params.arguments
         return result(rc, await container.github.pull_comment(repository(a), a["pull_number"], a["body"]))
 
+    async def pull_comment_on_jobs(ctx, params, rc):
+        a = params.arguments
+        return result(
+            rc,
+            await container.github_job_comments.arm(
+                repository=repository(a),
+                project_id=a["project_id"],
+                repository_id=a["repository_id"],
+                job_ids=tuple(a["job_ids"]),
+                policy=a.get("policy", "all_terminal"),
+                pull_number=a["pull_number"],
+                body=a["body"],
+            ),
+        )
+
     async def pull_reviews(ctx, params, rc):
         a = params.arguments
         return result(rc, await container.github.pull_reviews(repository(a), a["pull_number"], a.get("limit", 50)))
@@ -201,6 +216,7 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         ("github_pull_request_create", "Create a GitHub pull request", {"title": issue_fields["title"], "body": TEXT, "head": NAME, "base": NAME, "draft": {"type": "boolean", "default": True}}, ["title", "head", "base"], pull_create),
         ("github_pull_request_update", "Update a GitHub pull request including draft state", {**pull_number, "title": issue_fields["title"], "body": TEXT, "state": {"type": "string", "enum": ["open", "closed"]}, "base": NAME, "draft": {"type": "boolean"}}, ["pull_number"], pull_update),
         ("github_pull_request_comment", "Comment on a GitHub pull request", {**pull_number, "body": NONEMPTY_TEXT}, ["pull_number", "body"], pull_comment),
+        ("github_pull_request_comment_on_jobs", "Comment on a GitHub pull request when durable jobs become terminal", {**pull_number, "job_ids": {"type": "array", "items": {"type": "string", "pattern": "^job_[0-9a-f]{32}$"}, "minItems": 1, "maxItems": 64, "uniqueItems": True}, "policy": {"type": "string", "enum": ["all_terminal", "failure_or_all_terminal"], "default": "all_terminal"}, "body": NONEMPTY_TEXT}, ["pull_number", "job_ids", "body"], pull_comment_on_jobs),
         ("github_pull_request_reviews", "List bounded pull request reviews", {**pull_number, **limit}, ["pull_number"], pull_reviews),
         ("github_pull_request_review_comments", "List bounded inline pull request review comments", {**pull_number, **limit}, ["pull_number"], pull_review_comments),
         ("github_pull_request_files", "List bounded pull request file and patch evidence", {**pull_number, **limit}, ["pull_number"], pull_files),

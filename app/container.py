@@ -40,6 +40,7 @@ from app.jobs import (
     JobService,
     JobStore,
 )
+from app.jobs.github_comment_waiter import GitHubJobCommentDelivery
 from app.knowledge import (
     AttachmentExportRegistry,
     AttachmentStorage,
@@ -78,6 +79,7 @@ class ApplicationContainer:
     executors: ExecutorService
     job_artifact_exports: JobArtifactExportService
     github: GitHubHostService
+    github_job_comments: GitHubJobCommentDelivery
     github_artifact_exports: GitHubActionsArtifactExportService
     oauth: BridgeOAuthProvider | None
     knowledge: KnowledgeService | None
@@ -312,6 +314,7 @@ def build_container(
         runner, policy, github_transport, managed_repositories,
         fork_transport=github_fork_transport,
     )
+    github_job_comments = GitHubJobCommentDelivery(jobs, projects, github)
     github_artifact_exports = GitHubActionsArtifactExportService(
         github,
         CapabilityExportRegistry[GitHubArtifactSnapshot](
@@ -409,6 +412,7 @@ def build_container(
         executors=executors,
         job_artifact_exports=job_artifact_exports,
         github=github,
+        github_job_comments=github_job_comments,
         github_artifact_exports=github_artifact_exports,
         oauth=oauth,
         knowledge=(

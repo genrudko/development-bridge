@@ -57,6 +57,7 @@ SUPPORTED_TOOLS = {
     "github_pull_request_create",
     "github_pull_request_update",
     "github_pull_request_comment",
+    "github_pull_request_comment_on_jobs",
     "github_pull_request_reviews",
     "github_pull_request_review_comments",
     "github_pull_request_files",
@@ -105,7 +106,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 95
+    assert len(registry.definitions) == 96
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",

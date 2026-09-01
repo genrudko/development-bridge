@@ -520,6 +520,7 @@ async def test_runtime_lifespan_starts_and_stops_wake_delivery(
         executors=container.executors,
         job_artifact_exports=container.job_artifact_exports,
         github=container.github,
+        github_job_comments=container.github_job_comments,
         github_artifact_exports=container.github_artifact_exports,
         oauth=container.oauth,
         knowledge=container.knowledge,
