@@ -76,16 +76,14 @@ class RouteContextStore:
                 "route": route,
                 "context": None,
                 "bootstrap_message": (
-                    f"Logical route {route['route_id']} is active, but no canonical Route Context exists yet. "
-                    "Create/update it after restoring the topic state."
+                    f"No canonical Route Context is stored for route {route['route_id']}."
                 ),
             }
         return {
             "route": route,
             "context": context,
             "bootstrap_message": (
-                f"Resume logical route {route['route_id']} using this canonical Route Context as the working checkpoint. "
-                "Treat it as authoritative over stale transcript details unless live repository/runtime evidence supersedes it.\n\n"
-                + context["content"]
+                f"Canonical Route Context loaded for route {route['route_id']}. "
+                f"Current state is available in context.content, revision {context['revision']}."
             ),
         }
