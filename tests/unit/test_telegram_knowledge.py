@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -113,6 +114,22 @@ async def test_telethon_adapter_requests_forward_order_only_for_incremental(monk
 
 
 @pytest.mark.asyncio
+async def test_telethon_adapter_normalizes_session_database_lock(monkeypatch, tmp_path):
+    class LockedClient:
+        async def connect(self):
+            raise sqlite3.OperationalError("database is locked")
+
+        async def disconnect(self):
+            pass
+
+    adapter = TelethonTelegramAdapter(12345, "0" * 32, tmp_path / "telegram.session")
+    monkeypatch.setattr(adapter, "_client", lambda: LockedClient())
+
+    with pytest.raises(TelegramRequestFailed):
+        await adapter.fetch_messages(SOURCE, limit=1)
+
+
+@pytest.mark.asyncio
 async def test_add_is_stable_idempotent_and_syncs_history_in_batches(tmp_path):
     store = KnowledgeStore(tmp_path / "knowledge.sqlite3")
     adapter = FakeTelegramAdapter([message(value) for value in range(1, 6)])
@@ -134,6 +151,35 @@ async def test_add_is_stable_idempotent_and_syncs_history_in_batches(tmp_path):
     assert completed["history_complete"] is True
     assert completed["has_more"] is False
     assert KnowledgeService(store).source_list()[0]["message_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_incomplete_history_sync_prioritizes_new_messages_then_backfills(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge.sqlite3")
+    adapter = FakeTelegramAdapter([message(value) for value in range(1, 6)])
+    service = TelegramKnowledgeService(
+        store, adapter, default_batch_size=2, recent_window_size=2
+    )
+
+    added = await service.source_add("@ad5x_community")
+    source_id = added["source_id"]
+    assert added["sync"]["history_complete"] is False
+    assert added["sync"]["oldest_message_id"] == "4"
+    assert added["sync"]["newest_message_id"] == "5"
+
+    adapter.messages[6] = message(6, "fresh Telegram message")
+    synced = await service.source_sync(source_id, limit=3)
+
+    assert adapter.fetch_calls[-2:] == [
+        {"limit": 3, "before_id": None, "after_id": 5},
+        {"limit": 2, "before_id": 4, "after_id": None},
+    ]
+    assert synced["fetched"] == 3
+    assert synced["history_complete"] is False
+    assert synced["oldest_message_id"] == "2"
+    assert synced["newest_message_id"] == "6"
+    corpus = KnowledgeService(store)
+    assert corpus.message(source_id, "6")["text"] == "fresh Telegram message"
 
 
 @pytest.mark.asyncio

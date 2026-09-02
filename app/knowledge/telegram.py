@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from contextlib import suppress
 import os
 import re
 from dataclasses import dataclass
@@ -180,10 +182,11 @@ class TelethonTelegramAdapter:
                 raise
             except TelegramSourceNotFound:
                 raise
-            except (RPCError, OSError, asyncio.TimeoutError) as error:
+            except (RPCError, OSError, asyncio.TimeoutError, sqlite3.OperationalError) as error:
                 raise TelegramRequestFailed("Telegram request failed") from error
             finally:
-                await client.disconnect()
+                with suppress(sqlite3.OperationalError):
+                    await client.disconnect()
 
     async def fetch_messages(
         self,
@@ -215,10 +218,11 @@ class TelethonTelegramAdapter:
                 raise TelegramFloodWait(int(error.seconds)) from error
             except TelegramAuthorizationRequired:
                 raise
-            except (RPCError, OSError, asyncio.TimeoutError) as error:
+            except (RPCError, OSError, asyncio.TimeoutError, sqlite3.OperationalError) as error:
                 raise TelegramRequestFailed("Telegram request failed") from error
             finally:
-                await client.disconnect()
+                with suppress(sqlite3.OperationalError):
+                    await client.disconnect()
 
     async def download_attachment(
         self,
@@ -284,10 +288,11 @@ class TelethonTelegramAdapter:
                 TelegramRequestFailed, TelegramAttachmentTooLarge,
             ):
                 raise
-            except (RPCError, OSError, asyncio.TimeoutError) as error:
+            except (RPCError, OSError, asyncio.TimeoutError, sqlite3.OperationalError) as error:
                 raise TelegramRequestFailed("Telegram request failed") from error
             finally:
-                await client.disconnect()
+                with suppress(sqlite3.OperationalError):
+                    await client.disconnect()
 
     @staticmethod
     async def _require_authorized(client: TelegramClient) -> None:
