@@ -200,6 +200,11 @@ main {
   min-width: 0;
 }
 
+.card-body.table-scroll {
+  padding: 0;
+  overflow-x: auto;
+}
+
 #routeSelect {
   max-width: min(100%, 640px);
 }

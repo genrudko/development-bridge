@@ -18,7 +18,9 @@ def test_operator_dashboard_tables_scroll_instead_of_crushing_columns():
     dashboard = DASHBOARD.read_text(encoding="utf-8")
 
     assert "min-width: 960px" in css
-    assert "overflow-x: auto" in dashboard
+    assert 'class="card-body table-scroll"' in dashboard
+    assert ".card-body.table-scroll" in css
+    assert "overflow-x: auto" in css
     assert "white-space: nowrap" in css
     assert "overflow-wrap: anywhere" in css
 
