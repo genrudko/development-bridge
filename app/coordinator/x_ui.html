@@ -1,0 +1,283 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Development Bridge Coordinator</title>
+<style>
+:root { color-scheme: light dark; }
+html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+body { font: 13px/1.25 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: CanvasText; }
+#bridge { box-sizing: border-box; width: 100%; min-height: 38px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid color-mix(in srgb, CanvasText 14%, transparent); border-radius: 12px; background: color-mix(in srgb, Canvas 94%, CanvasText 6%); }
+#icon { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 7px; background: color-mix(in srgb, AccentColor 14%, transparent); font-size: 14px; }
+#copy { min-width: 0; }
+#name { font-weight: 650; }
+#detail { margin-top: 2px; color: GrayText; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#state { color: GrayText; font-size: 12px; white-space: nowrap; }
+#bridge[data-kind="working"] #state { color: AccentColor; }
+#bridge[data-kind="error"] { border-color: color-mix(in srgb, #d97706 45%, transparent); }
+#bridge[data-kind="error"] #state { color: #d97706; }
+</style>
+<div id="bridge" data-kind="working" role="status" aria-live="polite">
+  <div id="icon">⚡</div>
+  <div id="copy"><div id="name">Bridge</div><div id="detail">Подключаюсь…</div></div>
+  <div id="state">…</div>
+</div>
+<script type="module">
+import { App } from "https://unpkg.com/@modelcontextprotocol/ext-apps@1.7.5/dist/src/app-with-deps.js";
+
+const widget = document.getElementById("bridge");
+const detailEl = document.getElementById("detail");
+const stateEl = document.getElementById("state");
+const app = new App({ name: "Development Bridge Coordinator", version: "1.1.0" }, { autoResize: true });
+let channelId = "coordinator";
+let deliveryLease = null;
+let observerOnly = false;
+let busy = false;
+let modelContextContinuation = null;
+let modelContextSupported = true;
+let appConnected = false;
+let pollDelayMs = 1000;
+let pollTimer = null;
+const pollInstanceId = (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+const POLL_LEASE_TTL_MS = 7000;
+const CONTROL_OPS_KEY = "development-bridge/control-ops-v1";
+function loadHandledControlOperations() {
+  try {
+    const rows = JSON.parse(localStorage.getItem(CONTROL_OPS_KEY) || "[]");
+    return new Set(Array.isArray(rows) ? rows.filter(x => typeof x === "string").slice(-32) : []);
+  } catch (_) { return new Set(); }
+}
+const handledControlOperations = loadHandledControlOperations();
+function rememberControlOperation(operationId) {
+  handledControlOperations.add(operationId);
+  while (handledControlOperations.size > 32) {
+    handledControlOperations.delete(handledControlOperations.values().next().value);
+  }
+  try { localStorage.setItem(CONTROL_OPS_KEY, JSON.stringify([...handledControlOperations])); } catch (_) {}
+}
+// Rendered by the server. In public deployments this is an absolute URL; the
+// relative value is only the local-development fallback.
+let endpoint = new URL(__COORDINATOR_ENDPOINT__, window.location.href);
+function resizeWidget() {
+  requestAnimationFrame(() => {
+    const height = Math.max(38, Math.ceil(widget.getBoundingClientRect().height));
+    try { app.sendSizeChanged({ height }); } catch (_) {}
+  });
+}
+function render(kind, state, detail = "") {
+  widget.dataset.kind = kind;
+  stateEl.textContent = state;
+  detailEl.textContent = detail;
+  detailEl.hidden = !detail;
+  resizeWidget();
+}
+
+app.ontoolresult = (result) => {
+  const routed = result?.structuredContent?.channel_id;
+  if (typeof routed === "string" && routed.length) channelId = routed;
+  const lease = result?.structuredContent?.delivery_lease;
+  if (typeof lease === "string" && lease.length) deliveryLease = lease;
+  const triggerUrl = result?.structuredContent?.trigger_url;
+  if (typeof triggerUrl === "string" && triggerUrl.length) {
+    endpoint = new URL(triggerUrl, window.location.href);
+  }
+};
+
+async function request(name, init = {}) {
+  const url = new URL(name, endpoint);
+  url.searchParams.set("channel_id", channelId);
+  if (deliveryLease) url.searchParams.set("delivery_lease", deliveryLease);
+  const response = await fetch(url, { cache: "no-store", ...init });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+async function setProtocolContext(text) {
+  if (!modelContextSupported) return false;
+  try {
+    await app.updateModelContext({ content: [{ type: "text", text }] });
+    return true;
+  } catch (error) {
+    modelContextSupported = false;
+    console.warn("Model context updates unavailable", error);
+    return false;
+  }
+}
+
+async function clearProtocolContext() {
+  if (!modelContextSupported || modelContextContinuation === null) return;
+  try { await app.updateModelContext({ content: [] }); } catch (_) {}
+  modelContextContinuation = null;
+}
+
+async function handleControl(data) {
+  if (
+    !data ||
+    data.type !== "development-bridge/control-v1" ||
+    typeof data.nonce !== "string" ||
+    data.nonce.length < 8 || data.nonce.length > 128
+  ) return { nonce: String(data?.nonce || ""), ok: false, error: "invalid_control" };
+  const action = String(data.action || "");
+  if (action === "ping") {
+    return { nonce: data.nonce, action, ok: appConnected, channel_id: channelId, observer_only: observerOnly, control_version: 2 };
+  }
+  if (!appConnected) {
+    return { nonce: data.nonce, action, ok: false, error: "app_not_connected" };
+  }
+  const requestedChannel = String(data.channel_id || "");
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(requestedChannel)) {
+    return { nonce: data.nonce, action, ok: false, error: "invalid_channel" };
+  }
+  channelId = requestedChannel;
+  if (action === "bind") {
+    deliveryLease = null;
+    observerOnly = data.observer_only === true;
+    await clearProtocolContext();
+    return { nonce: data.nonce, action, ok: true, channel_id: channelId, observer_only: observerOnly, control_version: 2 };
+  }
+  if (action === "bootstrap") {
+    const operationId = String(data.operation_id || "");
+    const message = String(data.message || "").trim();
+    if (!operationId || operationId.length > 128 || !message || message.length > 4000) {
+      return { nonce: data.nonce, action, ok: false, error: "invalid_bootstrap" };
+    }
+    if (handledControlOperations.has(operationId)) {
+      return { nonce: data.nonce, action, ok: true, duplicate: true, channel_id: channelId };
+    }
+    const context = String(data.context || "").trim();
+    if (context && context.length <= 8000) await setProtocolContext(context);
+    await app.sendMessage({ role: "user", content: [{ type: "text", text: message }] });
+    rememberControlOperation(operationId);
+    return { nonce: data.nonce, action, ok: true, channel_id: channelId };
+  }
+  return { nonce: data.nonce, action, ok: false, error: "unknown_action" };
+}
+
+// Browser Host owns a localhost-only CDP endpoint and uses this deliberately narrow
+// function to control the inner MCP App execution context through the sandbox shell.
+window.__developmentBridgeControlV1 = async (data) => handleControl(data);
+
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (
+    event.origin !== "https://chatgpt.com" ||
+    event.source !== window.parent ||
+    !data ||
+    data.type !== "development-bridge/control-v1"
+  ) return;
+  void handleControl(data).then((payload) => {
+    try {
+      event.source?.postMessage(
+        { type: "development-bridge/control-ack-v1", ...payload },
+        event.origin,
+      );
+    } catch (_) {}
+  }).catch((error) => {
+    console.error("Coordinator control error", error);
+  });
+});
+
+function acquirePollLease() {
+  const key = `development-bridge/poll-leader-v1/${channelId}`;
+  const now = Date.now();
+  try {
+    const current = JSON.parse(localStorage.getItem(key) || "null");
+    if (current && current.id !== pollInstanceId && Number(current.until || 0) > now) return false;
+    localStorage.setItem(key, JSON.stringify({ id: pollInstanceId, until: now + POLL_LEASE_TTL_MS }));
+    const confirmed = JSON.parse(localStorage.getItem(key) || "null");
+    return confirmed?.id === pollInstanceId;
+  } catch (_) {
+    return true;
+  }
+}
+
+function schedulePoll(delay = pollDelayMs) {
+  if (pollTimer !== null) clearTimeout(pollTimer);
+  pollTimer = setTimeout(runPoll, Math.max(250, delay));
+}
+
+async function runPoll() {
+  if (!acquirePollLease()) { schedulePoll(2500); return; }
+  await poll();
+  schedulePoll();
+}
+
+async function poll() {
+  if (busy) return;
+  try {
+    const state = await request("status");
+    if (observerOnly) {
+      pollDelayMs = 5000;
+      render("ready", "Наблюдаю"); return;
+    }
+    if (!state.ready) {
+      pollDelayMs = 5000;
+      if (state.state === "idle" && modelContextContinuation !== null) await clearProtocolContext();
+      render("ready", "Готов"); return;
+    }
+    pollDelayMs = 1000;
+    render("working", "Продолжаю", "Передаю завершённую задачу в чат");
+    busy = true;
+    const claim = await request("claim", { method: "POST" });
+    if (!claim.claimed) return;
+    const rawMessage = String(claim.message);
+    let deliveredMessage = rawMessage;
+    if (typeof claim.continuation_id === "string" && claim.continuation_id.length) {
+      const batchSeparator = "\n--- bridge-batch ---\n";
+      const marker = "; message=";
+      const rawParts = rawMessage.split(batchSeparator);
+      const humanMessages = rawParts.map((part) => {
+        const markerAt = part.indexOf(marker);
+        return (markerAt >= 0 ? part.slice(markerAt + marker.length) : "").trim();
+      }).filter(Boolean);
+      const humanMessage = humanMessages.length > 1
+        ? humanMessages.map((item) => `- ${item}`).join("\n")
+        : (humanMessages[0] || "Фоновая задача завершена. Продолжаю автоматически.");
+      const attempt = Number(claim.delivery_attempt) || 1;
+      const maxAttempts = Number(claim.max_delivery_attempts) || 1;
+      const retry = attempt > 1 ? `\n\n> ♻️ Повторная доставка · ${attempt}/${maxAttempts}` : "";
+      const batch = humanMessages.length > 1 ? `\n\n> 📦 Пакет завершений · ${humanMessages.length}` : "";
+      const payloadJson = JSON.stringify(rawParts);
+      const protocolContext =
+        `Development Bridge continuation protocol.\n` +
+        `continuation_id=${claim.continuation_id}\n` +
+        `payload_json=${payloadJson}\n` +
+        `Before other work, call coordinator_ack with continuation_id=${claim.continuation_id}. ` +
+        `If its response contains batched_messages, process those terminal groups in this same turn.`;
+      const contextInjected = await setProtocolContext(protocolContext);
+      if (contextInjected) modelContextContinuation = claim.continuation_id;
+      const fallback = contextInjected
+        ? ""
+        : `\n\n> Bridge ref: \`${claim.continuation_id}\` — acknowledge with coordinator_ack before other work.`;
+      deliveredMessage = `### ⚡ Bridge · задача завершена\n\n${humanMessage}${batch}${retry}${fallback}`;
+    }
+    await app.sendMessage({
+      role: "user",
+      content: [{ type: "text", text: deliveredMessage }],
+    });
+    const ackUrl = new URL("ack", endpoint);
+    ackUrl.searchParams.set("channel_id", channelId);
+    ackUrl.searchParams.set("claim_id", claim.claim_id);
+    if (deliveryLease) ackUrl.searchParams.set("delivery_lease", deliveryLease);
+    const ackResponse = await fetch(ackUrl, { method: "POST", cache: "no-store" });
+    if (!ackResponse.ok) throw new Error(`ACK HTTP ${ackResponse.status}`);
+    const ack = await ackResponse.json();
+    if (!ack.acknowledged) throw new Error("ACK was rejected");
+    render("ready", "Готов");
+  } catch (error) {
+    pollDelayMs = 5000;
+    console.error("Coordinator error", error);
+    render("error", "Нужна проверка", "Связь с Bridge временно недоступна");
+  } finally {
+    busy = false;
+  }
+}
+
+try {
+  await app.connect();
+  appConnected = true;
+  render("ready", "Готов");
+  schedulePoll(250);
+} catch (error) {
+  console.error("Coordinator connect error", error);
+  render("error", "Не подключён", "Обновите инструменты Bridge");
+}
+</script>

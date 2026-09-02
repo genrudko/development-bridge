@@ -2,13 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.api.errors import BridgeError, ErrorCode
 from app.api.capability_exports import CapabilityExportRegistry
-from app.auth import BridgeOAuthProvider, OAuthStore
+from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditSink, LoggingAuditSink
+from app.auth import BridgeOAuthProvider, OAuthStore
+from app.bridge_restart import BridgeRestartService
 from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
+from app.chatgpt_share import (
+    ChatGPTShareService,
+    ChatGPTShareTransport,
+    UrllibChatGPTShareTransport,
+)
+from app.commands import RepositoryCommandService
+from app.coordinator import (
+    CoordinatorService,
+    CoordinatorWakeDeliveryService,
+    ReviewGptWakeTransport,
+    RouteRegistry,
+    WakeTransport,
+)
+from app.desktop_nodes import DesktopNodeService
 from app.files import FileService
+from app.executors import AntigravityExecutor, AsyncioProcessRunner, ExecutorSelector, ExecutorService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
     GitHubActionsArtifactExportService,
@@ -24,11 +40,12 @@ from app.jobs import (
     JobService,
     JobStore,
 )
+from app.jobs.github_comment_waiter import GitHubJobCommentDelivery
 from app.knowledge import (
-    AttachmentStorage,
     AttachmentExportRegistry,
-    KnowledgeAttachmentService,
+    AttachmentStorage,
     KnowledgeAttachmentExportService,
+    KnowledgeAttachmentService,
     KnowledgeService,
     KnowledgeStore,
     TelegramKnowledgeService,
@@ -42,6 +59,7 @@ from app.projects import (
 )
 from app.settings import BridgeSettings, load_settings
 from app.tasks import TaskRegistry
+from app.telegram_supervisor import TelegramSupervisorService
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,14 +76,24 @@ class ApplicationContainer:
     changes: ChangeService
     tasks: TaskRegistry
     jobs: JobService
+    executors: ExecutorService
     job_artifact_exports: JobArtifactExportService
     github: GitHubHostService
+    github_job_comments: GitHubJobCommentDelivery
     github_artifact_exports: GitHubActionsArtifactExportService
     oauth: BridgeOAuthProvider | None
     knowledge: KnowledgeService | None
     telegram_knowledge: TelegramKnowledgeService | None
+    telegram_supervisor: TelegramSupervisorService | None
     knowledge_attachments: KnowledgeAttachmentService | None
     knowledge_attachment_exports: KnowledgeAttachmentExportService | None
+    chatgpt_share: ChatGPTShareService
+    coordinator: CoordinatorService
+    route_registry: RouteRegistry
+    commands: RepositoryCommandService
+    bridge_restart: BridgeRestartService
+    desktop_nodes: DesktopNodeService
+    coordinator_wake_delivery: CoordinatorWakeDeliveryService | None
 
 
 def build_container(
@@ -75,6 +103,9 @@ def build_container(
     telegram_adapter: TelegramAdapter | None = None,
     managed_clone_runner: ManagedCloneRunner | None = None,
     github_transport: GitHubTransport | None = None,
+    github_fork_transport: GitHubTransport | None = None,
+    chatgpt_share_transport: ChatGPTShareTransport | None = None,
+    review_gpt_transport: WakeTransport | None = None,
 ) -> ApplicationContainer:
     configured = settings or load_settings()
     projects = ProjectRegistry.from_settings(configured)
@@ -114,6 +145,14 @@ def build_container(
         if configured.knowledge.attachment_directory is not None
         else None
     )
+    desktop_journal_path = (
+        configured.desktop_nodes.journal_path.expanduser().resolve()
+        if configured.desktop_nodes.journal_path is not None
+        else None
+    )
+    desktop_result_directory = (
+        configured.desktop_nodes.result_artifact_directory.expanduser().resolve()
+    )
     managed_repository_root = configured.managed_repositories.root.expanduser().resolve()
     github_artifact_directory = configured.github.artifact_directory.expanduser().resolve()
     for state_path, label in (
@@ -123,6 +162,8 @@ def build_container(
         (knowledge_database_path, "Knowledge database"),
         (telegram_session_path, "Telegram session"),
         (knowledge_attachment_directory, "Knowledge attachment directory"),
+        (desktop_journal_path, "Desktop operation journal"),
+        (desktop_result_directory, "Desktop result artifact directory"),
         (managed_repository_root, "Managed repository root"),
         (github_artifact_directory, "GitHub artifact directory"),
     ):
@@ -227,6 +268,12 @@ def build_container(
         ArtifactStorage(artifact_directory)
         if artifact_directory is not None
         else None,
+        max_concurrency=configured.jobs.max_concurrency,
+    )
+    executors = ExecutorService(
+        jobs,
+        AntigravityExecutor(configured.executors.antigravity, AsyncioProcessRunner()),
+        ExecutorSelector(),
     )
     job_artifact_exports = JobArtifactExportService(
         jobs,
@@ -246,13 +293,28 @@ def build_container(
         if configured.github.token is not None
         else None
     )
+    github_classic_token = (
+        configured.github.classic_token.get_secret_value()
+        if configured.github.classic_token is not None
+        else None
+    )
     if github_transport is None and github_token is not None:
         github_transport = UrllibGitHubTransport(
             github_token,
             timeout_seconds=configured.github.timeout_seconds,
             response_limit_bytes=configured.github.response_limit_bytes,
         )
-    github = GitHubHostService(runner, policy, github_transport)
+    if github_fork_transport is None and github_classic_token is not None:
+        github_fork_transport = UrllibGitHubTransport(
+            github_classic_token,
+            timeout_seconds=configured.github.timeout_seconds,
+            response_limit_bytes=configured.github.response_limit_bytes,
+        )
+    github = GitHubHostService(
+        runner, policy, github_transport, managed_repositories,
+        fork_transport=github_fork_transport,
+    )
+    github_job_comments = GitHubJobCommentDelivery(jobs, projects, github)
     github_artifact_exports = GitHubActionsArtifactExportService(
         github,
         CapabilityExportRegistry[GitHubArtifactSnapshot](
@@ -263,6 +325,75 @@ def build_container(
         configured.server.endpoint,
         configured.github.artifact_max_bytes,
     )
+    route_registry = RouteRegistry(configured.coordinator.route_registry_path)
+    coordinator = CoordinatorService(
+        route_registry.path.parent / "coordinator-wakes.json",
+        browser_preflight_required=True,
+    )
+
+    async def resume_coordinator_waiter(payload, records, reason):
+        route_id = payload.get("route_id")
+        if route_id is not None:
+            route = route_registry.resolve(str(route_id))
+            if route is None:
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    f"durable coordinator waiter route no longer exists: {route_id}",
+                    retryable=True,
+                )
+            channel_id = str(route["channel_id"])
+        else:
+            channel_id = str(payload["channel_id"])
+        await coordinator.arm_job_continuation(
+            records, reason, channel_id=channel_id,
+            message=(str(payload["message"]) if payload.get("message") is not None else None),
+        )
+
+    jobs.register_durable_terminal_handler("coordinator", resume_coordinator_waiter)
+    supervisor_settings = configured.telegram_supervisor
+    telegram_supervisor = None
+    if supervisor_settings.enabled:
+        telegram_supervisor = TelegramSupervisorService(
+            enabled=True,
+            api_id=telegram.api_id,
+            api_hash=(telegram.api_hash.get_secret_value() if telegram.api_hash is not None else None),
+            session_path=telegram_session_path,
+            chat_id=supervisor_settings.chat_id,
+            topic_id=supervisor_settings.topic_id,
+            channel_id=supervisor_settings.channel_id,
+            coordinator=coordinator,
+            route_registry=route_registry,
+        )
+    wake_settings = configured.coordinator_wake_delivery
+    coordinator_wake_delivery = None
+    if wake_settings.enabled:
+        transport = review_gpt_transport
+        if transport is None and wake_settings.primary_transport == "review-gpt":
+            rg = wake_settings.review_gpt
+            assert rg.node_executable is not None
+            assert rg.cli_path is not None
+            assert rg.config_path is not None
+            assert rg.browser_endpoint is not None
+            assert rg.receipt_directory is not None
+            transport = ReviewGptWakeTransport(
+                node_path=rg.node_executable,
+                cli_path=rg.cli_path,
+                config_path=rg.config_path,
+                browser_endpoint=rg.browser_endpoint,
+                receipt_dir=rg.receipt_directory,
+                timeout_seconds=rg.process_timeout_seconds,
+                browser_start_command=rg.browser_start_command,
+                browser_stop_command=rg.browser_stop_command,
+                browser_lifecycle_timeout_seconds=rg.browser_lifecycle_timeout_seconds,
+            )
+        coordinator_wake_delivery = CoordinatorWakeDeliveryService(
+            coordinator,
+            route_registry,
+            transport=transport,
+            enabled=True,
+            poll_interval_seconds=wake_settings.poll_interval_seconds,
+        )
+    commands = RepositoryCommandService(jobs, policy)
     return ApplicationContainer(
         settings=configured,
         projects=projects,
@@ -278,8 +409,10 @@ def build_container(
         changes=ChangeService(policy, revisions, mutations),
         tasks=tasks,
         jobs=jobs,
+        executors=executors,
         job_artifact_exports=job_artifact_exports,
         github=github,
+        github_job_comments=github_job_comments,
         github_artifact_exports=github_artifact_exports,
         oauth=oauth,
         knowledge=(
@@ -288,6 +421,20 @@ def build_container(
             else None
         ),
         telegram_knowledge=telegram_knowledge,
+        telegram_supervisor=telegram_supervisor,
         knowledge_attachments=knowledge_attachments,
         knowledge_attachment_exports=knowledge_attachment_exports,
+        chatgpt_share=ChatGPTShareService(
+            chatgpt_share_transport or UrllibChatGPTShareTransport()
+        ),
+        coordinator=coordinator,
+        route_registry=route_registry,
+        commands=commands,
+        bridge_restart=BridgeRestartService(jobs),
+        desktop_nodes=DesktopNodeService(
+            configured.desktop_nodes,
+            str(configured.server.public_base_url) if configured.server.public_base_url else None,
+            configured.server.endpoint,
+        ),
+        coordinator_wake_delivery=coordinator_wake_delivery,
     )

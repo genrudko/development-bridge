@@ -12,6 +12,7 @@ class Capability(StrEnum):
     WRITE = "write"
     GIT_READ = "git_read"
     GIT_WRITE = "git_write"
+    GITHUB_CONTRIBUTE = "github_contribute"
     EXECUTE = "execute"
 
 

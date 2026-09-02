@@ -30,6 +30,9 @@ class JobRecord:
     stderr: bytes = b""
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+    executor: str | None = None
+    executor_model: str | None = None
+    executor_quota_state: str | None = None
 
     def status_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -45,18 +48,26 @@ class JobRecord:
             ("finished_at", self.finished_at),
             ("exit_code", self.exit_code),
             ("failure_reason", self.failure_reason),
+            ("executor", self.executor),
+            ("executor_model", self.executor_model),
+            ("executor_quota_state", self.executor_quota_state),
         ):
             if value is not None:
                 result[key] = value
         return result
 
-    def output_dict(self) -> dict[str, str | bool]:
-        return {
+    def output_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
             "stdout": self.stdout.decode("utf-8", errors="replace"),
             "stderr": self.stderr.decode("utf-8", errors="replace"),
             "stdout_truncated": self.stdout_truncated,
             "stderr_truncated": self.stderr_truncated,
         }
+        for key, value in (("executor", self.executor), ("executor_model", self.executor_model),
+                           ("executor_quota_state", self.executor_quota_state)):
+            if value is not None:
+                result[key] = value
+        return result
 
 
 @dataclass(frozen=True, slots=True)

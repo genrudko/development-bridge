@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal
 
+from urllib.parse import urlsplit
 import yaml
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, model_validator
-
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    model_validator,
+)
 
 IDENTIFIER_PATTERN = r"^[a-z][a-z0-9-]{0,62}$"
 
@@ -17,8 +25,10 @@ class ServerSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8789, ge=1, le=65535)
     endpoint: str = "/mcp"
+    tool_surface: Literal["full", "compact"] = "full"
     public_base_url: AnyHttpUrl | None = None
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*")
+    x_trigger_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
 
     @model_validator(mode="after")
     def public_base_url_is_canonical_https_origin(self) -> ServerSettings:
@@ -83,6 +93,26 @@ class JobSettings(BaseModel):
     database_path: Path | None = None
     artifact_directory: Path | None = None
     artifact_export_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    max_concurrency: int = Field(default=8, ge=1, le=32)
+
+
+class AntigravityExecutorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    executable: Path = Path("~/.local/bin/agy")
+    probe_timeout_seconds: float = Field(default=20, gt=0, le=60)
+    task_timeout_seconds: float = Field(default=900, gt=0, le=3600)
+    output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    quota_cache_path: Path = Path("~/.local/state/development-bridge/antigravity-quota.json")
+    quota_cache_max_age_seconds: float = Field(default=120, gt=0, le=3600)
+
+
+class ExecutorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    antigravity: AntigravityExecutorSettings = Field(
+        default_factory=AntigravityExecutorSettings
+    )
 
 
 def _default_managed_repository_root() -> Path:
@@ -105,6 +135,7 @@ def _default_github_artifact_root() -> Path:
 class GitHubSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     token: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    classic_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
     timeout_seconds: float = Field(default=20, gt=0, le=120)
     response_limit_bytes: int = Field(default=2_097_152, ge=65_536, le=16_777_216)
     artifact_directory: Path = Field(default_factory=_default_github_artifact_root)
@@ -119,6 +150,86 @@ class TelegramKnowledgeSettings(BaseModel):
     session_path: Path | None = None
     sync_batch_size: int = Field(default=2000, ge=1, le=5000)
     recent_window_size: int = Field(default=100, ge=0, le=500)
+
+
+def _default_route_registry_path() -> Path:
+    state_home = os.environ.get("XDG_STATE_HOME")
+    base = Path(state_home) if state_home else Path.home() / ".local" / "state"
+    return base / "development-bridge" / "routes.json"
+
+
+class CoordinatorRoutingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    route_registry_path: Path = Field(default_factory=_default_route_registry_path)
+
+
+class ReviewGptWakeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    node_executable: Path | None = None
+    cli_path: Path | None = None
+    config_path: Path | None = None
+    browser_endpoint: str | None = None
+    receipt_directory: Path | None = None
+    process_timeout_seconds: float = Field(default=60.0, ge=5.0, le=600.0)
+    browser_start_command: tuple[str, ...] = ()
+    browser_stop_command: tuple[str, ...] = ()
+    browser_lifecycle_timeout_seconds: float = Field(default=30.0, ge=5.0, le=120.0)
+
+    @model_validator(mode="after")
+    def validate_browser_lifecycle_commands(self) -> ReviewGptWakeSettings:
+        if bool(self.browser_start_command) != bool(self.browser_stop_command):
+            raise ValueError("review_gpt browser_start_command and browser_stop_command must be configured together")
+        return self
+
+
+class CoordinatorWakeDeliverySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    primary_transport: Literal["review-gpt"] = "review-gpt"
+    poll_interval_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
+    review_gpt: ReviewGptWakeSettings = Field(default_factory=ReviewGptWakeSettings)
+
+    @model_validator(mode="after")
+    def validate_coordinator_wake_delivery(self) -> CoordinatorWakeDeliverySettings:
+        if not self.enabled:
+            return self
+        if self.primary_transport == "review-gpt":
+            rg = self.review_gpt
+            missing = [
+                field
+                for field, val in [
+                    ("node_executable", rg.node_executable),
+                    ("cli_path", rg.cli_path),
+                    ("config_path", rg.config_path),
+                    ("browser_endpoint", rg.browser_endpoint),
+                    ("receipt_directory", rg.receipt_directory),
+                ]
+                if val is None
+            ]
+            if missing:
+                raise ValueError(
+                    "coordinator_wake_delivery enabled requires "
+                    + ", ".join(f"review_gpt.{f}" for f in missing)
+                )
+            assert rg.browser_endpoint is not None
+            parsed = urlsplit(rg.browser_endpoint)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or parsed.hostname not in {"127.0.0.1", "localhost", "::1", "[::1]"}
+            ):
+                raise ValueError(
+                    "coordinator_wake_delivery.review_gpt.browser_endpoint must be a local HTTP endpoint"
+                )
+        return self
+
+
+
+class TelegramSupervisorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    chat_id: int | None = None
+    topic_id: int | None = Field(default=None, gt=0)
+    channel_id: str = Field(default="telegram-supervisor", min_length=1, max_length=64)
 
 
 class KnowledgeSettings(BaseModel):
@@ -166,6 +277,78 @@ class OAuthSettings(BaseModel):
         return self
 
 
+class DesktopNodeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    token: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    offline_after_seconds: float = Field(default=45, gt=1, le=300)
+    claim_timeout_seconds: float = Field(default=25, gt=0, le=60)
+    call_timeout_seconds: float = Field(default=300, gt=0, le=300)
+    max_pending_commands: int = Field(default=32, ge=1, le=256)
+    max_request_bytes: int = Field(default=262_144, ge=4096, le=2_097_152)
+    max_arguments_bytes: int = Field(default=131_072, ge=1024, le=1_048_576)
+    max_result_bytes: int = Field(default=1_048_576, ge=4096, le=8_388_608)
+    result_artifact_directory: Path = Field(
+        default_factory=lambda: Path.home() / ".local" / "state" / "development-bridge" / "desktop-results"
+    )
+    result_artifact_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
+    max_result_upload_bytes: int = Field(default=67_108_864, ge=1_048_576, le=268_435_456)
+    journal_path: Path | None = None
+    journal_history_limit: int = Field(default=200, ge=20, le=5000)
+    journal_max_bytes: int = Field(default=5_242_880, ge=65_536, le=67_108_864)
+
+
+class EodBrowserSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+    enabled: bool = False
+    url: AnyHttpUrl = "http://127.0.0.1:8931/sse"
+    allowed_origin: AnyHttpUrl = "http://127.0.0.1:8766"
+    launcher: Path | None = None
+    output_dir: Path | None = None
+
+    @model_validator(mode="after")
+    def endpoints_are_local_and_bounded(self) -> EodBrowserSettings:
+        for name, value in (("url", self.url), ("allowed_origin", self.allowed_origin)):
+            if value.host not in {"127.0.0.1", "localhost"}:
+                raise ValueError(f"eod_browser.{name} must stay on localhost")
+            if value.username is not None or value.password is not None:
+                raise ValueError(f"eod_browser.{name} must not contain credentials")
+        if self.allowed_origin.path not in {None, "", "/"}:
+            raise ValueError("eod_browser.allowed_origin must be an origin without a path")
+        if self.allowed_origin.query is not None or self.allowed_origin.fragment is not None:
+            raise ValueError("eod_browser.allowed_origin must not contain query or fragment")
+        if self.output_dir is not None and not self.output_dir.is_absolute():
+            raise ValueError("eod_browser.output_dir must be absolute")
+        return self
+
+
+class OperatorDashboardSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    path: str = Field(default="/ops", pattern=r"^/[a-zA-Z0-9_\-\./]*$")
+    password_hash: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    session_secret: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    session_ttl_seconds: int = Field(default=43200, ge=60, le=604800)
+    event_interval_seconds: float = Field(default=1.0, ge=0.1, le=60.0)
+    recent_jobs_limit: int = Field(default=25, ge=1, le=200)
+    terminal_tail_bytes: int = Field(default=32768, ge=1024, le=1048576)
+
+    @model_validator(mode="after")
+    def validate_operator_dashboard(self) -> OperatorDashboardSettings:
+        if not self.enabled:
+            return self
+        missing = []
+        if self.password_hash is None:
+            missing.append("password_hash")
+        if self.session_secret is None:
+            missing.append("session_secret")
+        if missing:
+            raise ValueError(
+                "enabled operator_dashboard requires "
+                + ", ".join(f"operator_dashboard.{m}" for m in missing)
+            )
+        return self
+
+
 class RepositorySettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(pattern=IDENTIFIER_PATTERN)
@@ -200,12 +383,23 @@ class BridgeSettings(BaseModel):
     version: int = Field(default=1, ge=1, le=1)
     server: ServerSettings = Field(default_factory=ServerSettings)
     jobs: JobSettings = Field(default_factory=JobSettings)
+    executors: ExecutorSettings = Field(default_factory=ExecutorSettings)
     managed_repositories: ManagedRepositorySettings = Field(
         default_factory=ManagedRepositorySettings
     )
     github: GitHubSettings = Field(default_factory=GitHubSettings)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
+    telegram_supervisor: TelegramSupervisorSettings = Field(default_factory=TelegramSupervisorSettings)
+    coordinator: CoordinatorRoutingSettings = Field(default_factory=CoordinatorRoutingSettings)
+    coordinator_wake_delivery: CoordinatorWakeDeliverySettings = Field(
+        default_factory=CoordinatorWakeDeliverySettings
+    )
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
+    desktop_nodes: DesktopNodeSettings = Field(default_factory=DesktopNodeSettings)
+    eod_browser: EodBrowserSettings = Field(default_factory=EodBrowserSettings)
+    operator_dashboard: OperatorDashboardSettings = Field(
+        default_factory=OperatorDashboardSettings
+    )
     projects: tuple[ProjectSettings, ...] = ()
 
     @model_validator(mode="after")
@@ -271,8 +465,23 @@ def load_settings(
             raise ValueError(
                 "OAuth owner verifier must be supplied through the deployment environment"
             )
-        if isinstance(raw.get("github"), dict) and "token" in raw["github"]:
-            raise ValueError("GitHub token must be supplied through the deployment environment")
+        if isinstance(raw.get("github"), dict) and (
+            "token" in raw["github"] or "classic_token" in raw["github"]
+        ):
+            raise ValueError("GitHub tokens must be supplied through the deployment environment")
+        if isinstance(raw.get("server"), dict) and "x_trigger_token" in raw["server"]:
+            raise ValueError(
+                "X trigger token must be supplied through the deployment environment"
+            )
+        if isinstance(raw.get("desktop_nodes"), dict) and "token" in raw["desktop_nodes"]:
+            raise ValueError("Desktop node token must be supplied through the deployment environment")
+        if isinstance(raw.get("operator_dashboard"), dict) and (
+            "password_hash" in raw["operator_dashboard"]
+            or "session_secret" in raw["operator_dashboard"]
+        ):
+            raise ValueError(
+                "Operator dashboard secrets must be supplied through the deployment environment"
+            )
         settings = BridgeSettings.model_validate(raw)
 
     server_updates: dict[str, Any] = {}
@@ -280,13 +489,21 @@ def load_settings(
         server_updates["host"] = host
     if port := environment.get("DEVELOPMENT_BRIDGE_PORT"):
         server_updates["port"] = int(port)
+    if token := environment.get("DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN"):
+        server_updates["x_trigger_token"] = token
     if server_updates:
         validated_server = ServerSettings.model_validate(
-            {**settings.server.model_dump(), **server_updates}
+            {
+                **settings.server.model_dump(),
+                **(
+                    {"x_trigger_token": settings.server.x_trigger_token}
+                    if settings.server.x_trigger_token is not None
+                    else {}
+                ),
+                **server_updates,
+            }
         )
-        settings = BridgeSettings.model_validate(
-            {**settings.model_dump(), "server": validated_server}
-        )
+        settings = settings.model_copy(update={"server": validated_server})
     environment_updates: dict[str, Any] = {}
 
     telegram_updates: dict[str, Any] = {}
@@ -304,18 +521,144 @@ def load_settings(
             {**settings.knowledge.model_dump(), "telegram": telegram}
         )
 
+    coordinator_updates: dict[str, Any] = {}
+    if route_path := environment.get("DEVELOPMENT_BRIDGE_ROUTE_REGISTRY_PATH"):
+        coordinator_updates["route_registry_path"] = Path(route_path)
+    if coordinator_updates:
+        environment_updates["coordinator"] = CoordinatorRoutingSettings.model_validate(
+            {**settings.coordinator.model_dump(), **coordinator_updates}
+        )
+
+    wake_updates: dict[str, Any] = {}
+    review_gpt_updates: dict[str, Any] = {}
+    if raw_wake_enabled := environment.get("DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED"):
+        normalized_wake = raw_wake_enabled.strip().lower()
+        if normalized_wake not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise ValueError("DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED must be a boolean")
+        wake_updates["enabled"] = normalized_wake in {"1", "true", "yes", "on"}
+    if primary_transport := environment.get("DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_PRIMARY_TRANSPORT"):
+        wake_updates["primary_transport"] = primary_transport
+    if poll_interval := environment.get("DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_POLL_INTERVAL_SECONDS"):
+        wake_updates["poll_interval_seconds"] = float(poll_interval)
+
+    if node := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_NODE"):
+        review_gpt_updates["node_executable"] = Path(node)
+    if cli_path := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_CLI_PATH"):
+        review_gpt_updates["cli_path"] = Path(cli_path)
+    if config_path := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_CONFIG_PATH"):
+        review_gpt_updates["config_path"] = Path(config_path)
+    if browser_endpoint := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_BROWSER_ENDPOINT"):
+        review_gpt_updates["browser_endpoint"] = browser_endpoint
+    if receipt_dir := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_RECEIPT_DIRECTORY"):
+        review_gpt_updates["receipt_directory"] = Path(receipt_dir)
+    if timeout := environment.get("DEVELOPMENT_BRIDGE_REVIEW_GPT_PROCESS_TIMEOUT_SECONDS"):
+        review_gpt_updates["process_timeout_seconds"] = float(timeout)
+
+    if review_gpt_updates:
+        review_gpt = ReviewGptWakeSettings.model_validate(
+            {**settings.coordinator_wake_delivery.review_gpt.model_dump(), **review_gpt_updates}
+        )
+        wake_updates["review_gpt"] = review_gpt
+
+    if wake_updates:
+        environment_updates["coordinator_wake_delivery"] = CoordinatorWakeDeliverySettings.model_validate(
+            {**settings.coordinator_wake_delivery.model_dump(), **wake_updates}
+        )
+
+
+    supervisor_updates: dict[str, Any] = {}
+    if raw_enabled := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_ENABLED"):
+        normalized = raw_enabled.strip().lower()
+        if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise ValueError("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_ENABLED must be a boolean")
+        supervisor_updates["enabled"] = normalized in {"1", "true", "yes", "on"}
+    if chat_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_CHAT_ID"):
+        supervisor_updates["chat_id"] = int(chat_id)
+    if topic_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_TOPIC_ID"):
+        supervisor_updates["topic_id"] = int(topic_id)
+    if channel_id := environment.get("DEVELOPMENT_BRIDGE_TELEGRAM_SUPERVISOR_CHANNEL_ID"):
+        supervisor_updates["channel_id"] = channel_id
+    if supervisor_updates:
+        environment_updates["telegram_supervisor"] = TelegramSupervisorSettings.model_validate(
+            {**settings.telegram_supervisor.model_dump(), **supervisor_updates}
+        )
+
     if owner_verifier := environment.get("DEVELOPMENT_BRIDGE_OWNER_VERIFIER"):
         environment_updates["oauth"] = OAuthSettings.model_validate(
             {**settings.oauth.model_dump(), "owner_verifier": owner_verifier}
         )
 
+    github_updates: dict[str, Any] = {}
     if github_token := environment.get("DEVELOPMENT_BRIDGE_GITHUB_TOKEN"):
+        github_updates["token"] = github_token
+    if github_classic_token := environment.get("DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN"):
+        github_updates["classic_token"] = github_classic_token
+    if github_updates:
         environment_updates["github"] = GitHubSettings.model_validate(
-            {**settings.github.model_dump(), "token": github_token}
+            {
+                **settings.github.model_dump(),
+                **(
+                    {"token": settings.github.token}
+                    if settings.github.token is not None
+                    else {}
+                ),
+                **(
+                    {"classic_token": settings.github.classic_token}
+                    if settings.github.classic_token is not None
+                    else {}
+                ),
+                **github_updates,
+            }
+        )
+    desktop_updates: dict[str, Any] = {}
+    if desktop_token := environment.get("DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN"):
+        desktop_updates["token"] = desktop_token
+    if desktop_journal := environment.get("DEVELOPMENT_BRIDGE_DESKTOP_NODE_JOURNAL_PATH"):
+        desktop_updates["journal_path"] = Path(desktop_journal)
+    if desktop_updates:
+        environment_updates["desktop_nodes"] = DesktopNodeSettings.model_validate(
+            {**settings.desktop_nodes.model_dump(), **desktop_updates}
         )
 
+    operator_dashboard_updates: dict[str, Any] = {}
+    if raw_ops_enabled := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_ENABLED"):
+        normalized = raw_ops_enabled.strip().lower()
+        if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise ValueError("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_ENABLED must be a boolean")
+        operator_dashboard_updates["enabled"] = normalized in {"1", "true", "yes", "on"}
+    if ops_path := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_PATH"):
+        operator_dashboard_updates["path"] = ops_path
+    if password_hash := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_PASSWORD_HASH"):
+        operator_dashboard_updates["password_hash"] = password_hash
+    if session_secret := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_SESSION_SECRET"):
+        operator_dashboard_updates["session_secret"] = session_secret
+    if session_ttl := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_SESSION_TTL_SECONDS"):
+        operator_dashboard_updates["session_ttl_seconds"] = int(session_ttl)
+    if event_interval := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_EVENT_INTERVAL_SECONDS"):
+        operator_dashboard_updates["event_interval_seconds"] = float(event_interval)
+    if recent_jobs_limit := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_RECENT_JOBS_LIMIT"):
+        operator_dashboard_updates["recent_jobs_limit"] = int(recent_jobs_limit)
+    if terminal_tail_bytes := environment.get("DEVELOPMENT_BRIDGE_OPERATOR_DASHBOARD_TERMINAL_TAIL_BYTES"):
+        operator_dashboard_updates["terminal_tail_bytes"] = int(terminal_tail_bytes)
+
+    if operator_dashboard_updates:
+        current_ops = settings.operator_dashboard
+        full_ops = {
+            **current_ops.model_dump(),
+            **(
+                {"password_hash": current_ops.password_hash}
+                if current_ops.password_hash is not None
+                else {}
+            ),
+            **(
+                {"session_secret": current_ops.session_secret}
+                if current_ops.session_secret is not None
+                else {}
+            ),
+            **operator_dashboard_updates,
+        }
+        environment_updates["operator_dashboard"] = OperatorDashboardSettings.model_validate(full_ops)
+
     if environment_updates:
-        settings = BridgeSettings.model_validate(
-            {**settings.model_dump(), **environment_updates}
-        )
+        settings = settings.model_copy(update=environment_updates)
     return settings

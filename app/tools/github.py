@@ -30,6 +30,12 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     async def repository_status(ctx, params, rc):
         return result(rc, await container.github.repository_status(repository(params.arguments)))
 
+    async def repository_fork(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.repository_fork(
+            repository(a), a["project_id"], a["fork_repository_id"], a.get("depth", 50)
+        ))
+
     async def commit_checks(ctx, params, rc):
         a = params.arguments
         return result(rc, await container.github.commit_checks(repository(a), a["sha"]))
@@ -83,6 +89,21 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     async def pull_comment(ctx, params, rc):
         a = params.arguments
         return result(rc, await container.github.pull_comment(repository(a), a["pull_number"], a["body"]))
+
+    async def pull_comment_on_jobs(ctx, params, rc):
+        a = params.arguments
+        return result(
+            rc,
+            await container.github_job_comments.arm(
+                repository=repository(a),
+                project_id=a["project_id"],
+                repository_id=a["repository_id"],
+                job_ids=tuple(a["job_ids"]),
+                policy=a.get("policy", "all_terminal"),
+                pull_number=a["pull_number"],
+                body=a["body"],
+            ),
+        )
 
     async def pull_reviews(ctx, params, rc):
         a = params.arguments
@@ -153,6 +174,26 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         a = params.arguments
         return result(rc, await container.github.actions_cancel(repository(a), a["run_id"]))
 
+    async def release_list(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.release_list(repository(a), a.get("limit", 50)))
+
+    async def release_get(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.release_get(repository(a), a["tag_name"]))
+
+    async def release_plan(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.release_plan(
+            repository(a), tag_name=a["tag_name"], target_sha=a["target_sha"],
+            name=a["name"], body=a.get("body", ""), draft=a.get("draft", False),
+            prerelease=a.get("prerelease", False), make_latest=a.get("make_latest", "true")
+        ))
+
+    async def release_apply(ctx, params, rc):
+        a = params.arguments
+        return result(rc, await container.github.release_apply(repository(a), a["plan_id"]))
+
     scope = {"project_id": IDENTIFIER_SCHEMA, "repository_id": IDENTIFIER_SCHEMA}
     issue_number = {"issue_number": NUMBER}
     pull_number = {"pull_number": NUMBER}
@@ -162,6 +203,7 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
 
     definitions = (
         ("github_repository_status", "Show GitHub repository identity and host status", {}, [], repository_status),
+        ("github_repository_fork", "Fork an upstream GitHub repository and register a writable managed workspace", {"fork_repository_id": IDENTIFIER_SCHEMA, "depth": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 50}}, ["fork_repository_id"], repository_fork),
         ("github_commit_checks", "Show check runs and commit status contexts", {"sha": SHA}, ["sha"], commit_checks),
         ("github_issue_list", "List bounded GitHub issues", {**state, "labels": NAMES, **limit}, [], issue_list),
         ("github_issue_get", "Get one GitHub issue", issue_number, ["issue_number"], issue_get),
@@ -174,6 +216,7 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         ("github_pull_request_create", "Create a GitHub pull request", {"title": issue_fields["title"], "body": TEXT, "head": NAME, "base": NAME, "draft": {"type": "boolean", "default": True}}, ["title", "head", "base"], pull_create),
         ("github_pull_request_update", "Update a GitHub pull request including draft state", {**pull_number, "title": issue_fields["title"], "body": TEXT, "state": {"type": "string", "enum": ["open", "closed"]}, "base": NAME, "draft": {"type": "boolean"}}, ["pull_number"], pull_update),
         ("github_pull_request_comment", "Comment on a GitHub pull request", {**pull_number, "body": NONEMPTY_TEXT}, ["pull_number", "body"], pull_comment),
+        ("github_pull_request_comment_on_jobs", "Comment on a GitHub pull request when durable jobs become terminal", {**pull_number, "job_ids": {"type": "array", "items": {"type": "string", "pattern": "^job_[0-9a-f]{32}$"}, "minItems": 1, "maxItems": 64, "uniqueItems": True}, "policy": {"type": "string", "enum": ["all_terminal", "failure_or_all_terminal"], "default": "all_terminal"}, "body": NONEMPTY_TEXT}, ["pull_number", "job_ids", "body"], pull_comment_on_jobs),
         ("github_pull_request_reviews", "List bounded pull request reviews", {**pull_number, **limit}, ["pull_number"], pull_reviews),
         ("github_pull_request_review_comments", "List bounded inline pull request review comments", {**pull_number, **limit}, ["pull_number"], pull_review_comments),
         ("github_pull_request_files", "List bounded pull request file and patch evidence", {**pull_number, **limit}, ["pull_number"], pull_files),
@@ -189,6 +232,10 @@ def github_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         ("github_actions_dispatch", "Dispatch a GitHub Actions workflow", {"workflow": NAME, "ref": NAME, "inputs": {"type": "object", "maxProperties": 100, "additionalProperties": {"type": "string", "maxLength": 4096}}}, ["workflow", "ref"], actions_dispatch),
         ("github_actions_rerun", "Rerun all or failed GitHub Actions jobs", {"run_id": NUMBER, "failed_only": {"type": "boolean", "default": False}}, ["run_id"], actions_rerun),
         ("github_actions_cancel", "Cancel a GitHub Actions run", {"run_id": NUMBER}, ["run_id"], actions_cancel),
+        ("github_release_list", "List bounded GitHub releases", {**limit}, [], release_list),
+        ("github_release_get", "Get one GitHub release by tag", {"tag_name": NAME}, ["tag_name"], release_get),
+        ("github_release_plan", "Plan a fail-closed GitHub release at an exact commit SHA", {"tag_name": NAME, "target_sha": SHA, "name": NAME, "body": TEXT, "draft": {"type": "boolean", "default": False}, "prerelease": {"type": "boolean", "default": False}, "make_latest": {"type": "string", "enum": ["true", "false", "legacy"], "default": "true"}}, ["tag_name", "target_sha", "name"], release_plan),
+        ("github_release_apply", "Apply an unchanged GitHub release plan without moving existing tags", {"plan_id": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"}}, ["plan_id"], release_apply),
     )
     return tuple(
         RegisteredTool(types.Tool(name=name, description=description, inputSchema={"type": "object", "properties": {**scope, **properties}, "required": ["project_id", "repository_id", *required], "additionalProperties": False}), handler, "github-host")

@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import sqlite3
 import json
+import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 from app.api.errors import BridgeError, ErrorCode
-
-from .models import JobArtifact, JobRecord, JobStatus
 from app.tasks import ArtifactDeclaration, TaskProfile
 
+from .models import JobArtifact, JobRecord, JobStatus
 
 REPOSITORY_EXEC_TASK_ID = "__repository_exec__"
 
@@ -46,6 +45,9 @@ class JobStore:
                     stderr BLOB NOT NULL DEFAULT X'',
                     stdout_truncated INTEGER NOT NULL DEFAULT 0,
                     stderr_truncated INTEGER NOT NULL DEFAULT 0,
+                    executor TEXT,
+                    executor_model TEXT,
+                    executor_quota_state TEXT,
                     UNIQUE(project_id, repository_id, task_id, idempotency_key)
                 );
                 CREATE INDEX IF NOT EXISTS jobs_queue
@@ -70,8 +72,24 @@ class JobStore:
                     payload_digest TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id)
                 );
+                CREATE TABLE IF NOT EXISTS job_terminal_waiters (
+                    waiter_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    repository_id TEXT NOT NULL,
+                    job_ids_json TEXT NOT NULL,
+                    policy TEXT NOT NULL,
+                    handler_name TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS job_terminal_waiters_scope
+                ON job_terminal_waiters(project_id, repository_id, created_at);
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+            for name in ("executor", "executor_model", "executor_quota_state"):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT")
             interrupted = self._rows(
                 connection.execute(
                     "SELECT * FROM jobs WHERE status = ?", (JobStatus.RUNNING.value,)
@@ -92,6 +110,19 @@ class JobStore:
             )
             return interrupted
 
+    def save_terminal_waiter(self, *, waiter_id: str, project_id: str, repository_id: str, job_ids: tuple[str, ...], policy: str, handler_name: str, payload: dict[str, object]) -> None:
+        with self._connect() as connection:
+            connection.execute("INSERT INTO job_terminal_waiters (waiter_id, project_id, repository_id, job_ids_json, policy, handler_name, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (waiter_id, project_id, repository_id, json.dumps(list(job_ids), separators=(",", ":")), policy, handler_name, json.dumps(payload, sort_keys=True, separators=(",", ":")), _now()))
+
+    def delete_terminal_waiter(self, waiter_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM job_terminal_waiters WHERE waiter_id = ?", (waiter_id,))
+
+    def terminal_waiters(self) -> tuple[dict[str, object], ...]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM job_terminal_waiters ORDER BY created_at, waiter_id").fetchall()
+        return tuple({"waiter_id": row["waiter_id"], "project_id": row["project_id"], "repository_id": row["repository_id"], "job_ids": tuple(json.loads(row["job_ids_json"])), "policy": row["policy"], "handler_name": row["handler_name"], "payload": json.loads(row["payload_json"])} for row in rows)
+
     def queued(self) -> tuple[JobRecord, ...]:
         with self._connect() as connection:
             return self._rows(
@@ -100,6 +131,91 @@ class JobStore:
                     (JobStatus.QUEUED.value,),
                 ).fetchall()
             )
+
+    def recent(
+        self,
+        limit: int,
+        *,
+        project_id: str | None = None,
+        repository_id: str | None = None,
+    ) -> tuple[JobRecord, ...]:
+        query = """
+            SELECT job_id, project_id, repository_id, task_id, request_id,
+                   status, created_at, started_at, finished_at, exit_code,
+                   failure_reason, stdout_truncated, stderr_truncated,
+                   executor, executor_model, executor_quota_state
+            FROM jobs
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if repository_id is not None:
+            clauses.append("repository_id = ?")
+            params.append(repository_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(max(1, limit))
+
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(query, params).fetchall()
+        except sqlite3.OperationalError:
+            return ()
+        return tuple(
+            JobRecord(
+                job_id=row["job_id"],
+                project_id=row["project_id"],
+                repository_id=row["repository_id"],
+                task_id=row["task_id"],
+                request_id=row["request_id"],
+                status=JobStatus(row["status"]),
+                created_at=row["created_at"],
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+                exit_code=row["exit_code"],
+                failure_reason=row["failure_reason"],
+                stdout=b"",
+                stderr=b"",
+                stdout_truncated=bool(row["stdout_truncated"]),
+                stderr_truncated=bool(row["stderr_truncated"]),
+                executor=row["executor"],
+                executor_model=row["executor_model"],
+                executor_quota_state=row["executor_quota_state"],
+            )
+            for row in rows
+        )
+
+    def has_active(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM jobs WHERE status IN (?, ?) LIMIT 1",
+                (JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+            ).fetchone()
+        return row is not None
+
+    def has_active_for_repository(self, project_id: str, repository_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT 1 FROM jobs
+                   WHERE project_id = ? AND repository_id = ?
+                     AND status IN (?, ?) LIMIT 1""",
+                (project_id, repository_id, JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+            ).fetchone()
+        return row is not None
+
+    def execution_by_idempotency(
+        self, project_id: str, repository_id: str, idempotency_key: str
+    ) -> JobRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM jobs WHERE project_id=? AND repository_id=?
+                   AND task_id=? AND idempotency_key=?""",
+                (project_id, repository_id, REPOSITORY_EXEC_TASK_ID, idempotency_key),
+            ).fetchone()
+        return None if row is None else self._row(row)
 
     def create(
         self,
@@ -156,21 +272,50 @@ class JobStore:
         idempotency_key: str | None,
         payload_json: str,
         payload_digest: str,
+        executor: str | None = None,
+        executor_model: str | None = None,
+        executor_quota_state: str | None = None,
+        require_repository_idle: bool = False,
     ) -> tuple[JobRecord, bool]:
         job_id = "job_" + uuid4().hex
         created_at = _now()
         with self._connect() as connection:
+            if idempotency_key is not None:
+                existing = connection.execute(
+                    """SELECT j.*, s.payload_digest FROM jobs j
+                       LEFT JOIN job_execution_specs s ON s.job_id=j.job_id
+                       WHERE j.project_id=? AND j.repository_id=?
+                         AND j.task_id=? AND j.idempotency_key=?""",
+                    (project_id, repository_id, REPOSITORY_EXEC_TASK_ID, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["payload_digest"] != payload_digest:
+                        raise BridgeError(ErrorCode.IDEMPOTENCY_CONFLICT,
+                            "idempotency_key is already bound to another execution specification")
+                    return self._row(existing), False
+            if require_repository_idle:
+                active = connection.execute(
+                    """SELECT 1 FROM jobs WHERE project_id=? AND repository_id=?
+                       AND status IN (?, ?) LIMIT 1""",
+                    (project_id, repository_id, JobStatus.QUEUED.value, JobStatus.RUNNING.value),
+                ).fetchone()
+                if active is not None:
+                    raise BridgeError(ErrorCode.JOB_BUSY,
+                        "Executor submission is unavailable while this repository has an active job",
+                        retryable=True)
             try:
                 connection.execute(
                     """
                     INSERT INTO jobs (
                         job_id, project_id, repository_id, task_id, request_id,
-                        idempotency_key, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        idempotency_key, status, created_at, executor,
+                        executor_model, executor_quota_state
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         job_id, project_id, repository_id, REPOSITORY_EXEC_TASK_ID,
                         request_id, idempotency_key, JobStatus.QUEUED.value, created_at,
+                        executor, executor_model, executor_quota_state,
                     ),
                 )
                 connection.execute(
@@ -222,7 +367,18 @@ class JobStore:
                 )
                 for item in payload["artifacts"]
             ),
+            payload.get("stdin"),
         )
+
+    def execution_environment_keys(self, job_id: str) -> tuple[str, ...]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM job_execution_specs WHERE job_id=?", (job_id,)
+            ).fetchone()
+        if row is None:
+            return ()
+        payload = json.loads(row["payload_json"])
+        return tuple(payload.get("environment_keys", ()))
 
     def get(self, project_id: str, repository_id: str, job_id: str) -> JobRecord:
         with self._connect() as connection:
@@ -415,4 +571,7 @@ class JobStore:
             stderr=bytes(row["stderr"]),
             stdout_truncated=bool(row["stdout_truncated"]),
             stderr_truncated=bool(row["stderr_truncated"]),
+            executor=row["executor"],
+            executor_model=row["executor_model"],
+            executor_quota_state=row["executor_quota_state"],
         )

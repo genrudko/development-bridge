@@ -1,0 +1,22 @@
+[Unit]
+Description=ChatGPT Browser Host for Development Bridge
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/development-bridge/browser-host.env
+ExecStart=%h/.local/chrome-cft/venv/bin/python %h/.local/lib/development-bridge/browser-host/browser_host.py supervise
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=mixed
+MemoryHigh=1800M
+MemoryMax=2600M
+TasksMax=256
+UMask=0077
+
+[Install]
+WantedBy=default.target

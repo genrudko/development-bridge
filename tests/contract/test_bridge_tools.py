@@ -2,9 +2,10 @@ from app.container import build_container
 from app.settings import BridgeSettings
 from app.tools.registry import build_tool_registry
 
-
 V1_TOOLS = {
     "bridge_info",
+    "bridge_guide",
+    "bridge_restart",
     "project_list",
     "project_describe",
     "repository_status",
@@ -22,6 +23,9 @@ BRIDGE_CAPABILITIES = {
     "git-write",
     "github-host",
     "community-knowledge",
+    "chatgpt-share",
+    "coordinator-x",
+    "structured-command",
 }
 
 
@@ -33,10 +37,26 @@ def test_v1_tool_surface_is_registered():
 
 def test_v1_schemas_are_closed_objects():
     registry = build_tool_registry(build_container(BridgeSettings()))
-    tools = {
-        tool.name: tool for tool in registry.definitions if tool.name in V1_TOOLS
+    tools = {tool.name: tool for tool in registry.definitions if tool.name in V1_TOOLS}
+    assert all(
+        tool.input_schema["additionalProperties"] is False for tool in tools.values()
+    )
+    assert tools["bridge_restart"].input_schema == {
+        "type": "object",
+        "properties": {
+            "route_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,30}$",
+            },
+            "channel_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            },
+        },
+        "additionalProperties": False,
     }
-    assert all(tool.input_schema["additionalProperties"] is False for tool in tools.values())
     assert tools["repository_status"].input_schema["required"] == [
         "project_id",
         "repository_id",
@@ -74,3 +94,4 @@ def test_bridge_info_reports_only_current_capabilities():
     )
     payload = json.loads(result.content[0].text)
     assert set(payload["data"]["capabilities"]) == BRIDGE_CAPABILITIES
+    assert payload["data"]["recommended_first_tool"] == "bridge_guide"

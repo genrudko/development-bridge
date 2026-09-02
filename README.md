@@ -16,10 +16,16 @@ default for local development.
 
 ## Current APIs
 
+Start each new coordinator chat with `bridge_guide`; it returns bounded
+operating guidance and the complete live tool catalog grouped by category.
+
 The Bridge exposes:
 
 - Core: `bridge_info`, `project_list`, `project_describe`, `repository_status`,
   and `repository_clone`;
+- Fusion desktop relay: `fusion_node_status`, `fusion_tools`, and `fusion_call`
+  use an authenticated outbound Windows agent; see
+  [the Milestone 1 runbook](docs/FUSION_DESKTOP_POC.md);
 - Files: `file_list`, `file_read`, and `file_search`;
 - Git read: `git_log`, `git_show`, `git_diff`, and `git_refs`;
 - Git workspace: `git_fetch`, `git_branch_create`, `git_branch_switch`, and
@@ -30,6 +36,11 @@ The Bridge exposes:
   `job_artifact_export`;
 - Ad-hoc execution: `repository_exec` for structured executable/argv runs in
   repositories with `execute`, using the same durable jobs and artifacts;
+- Event-driven completion: mount `coordinator_x_mount`, register
+  `coordinator_wake_on_jobs`, and end the model turn. X wakes a fresh turn when
+  the selected jobs meet the policy; read terminal `job_status` and
+  `job_output` once. Initial `queued` is normal. Waiter registrations are
+  process-local and do not survive a Bridge restart;
 - Git write: `git_stage`, `git_commit`, `git_push_plan`, and `git_push`.
 - GitHub host: repository status, checks, issues, pull requests, reviews,
   issue/PR discussion, inline review comments, bounded PR file patches,
@@ -40,6 +51,24 @@ The Bridge exposes:
   corpus-validated attachment, while `knowledge_attachment_export` issues a
   short-lived external URL plus standard MCP file resource blocks for the same
   immutable snapshot.
+- Public ChatGPT shares: `chatgpt_share_read` reads a cookie-free public
+  `https://chatgpt.com/share/<id>` in bounded `recent`, `search`, or `full`
+  mode and returns only visible user/assistant text.
+- Coordinator X routes live under `/mcp/x/coordinator/`. The mounted app polls
+  the reliable default `coordinator` channel without depending on dynamic
+  tool-result routing; an optional channel from `coordinator_x_mount` is an
+  optimization. External arming uses `POST .../trigger` with an Authorization
+  bearer token (or `X-Development-Bridge-Trigger-Token`) and JSON fields
+  `message`, `channel_id`, `delay`, and `conflict`.
+- `run_command` executes one structured executable/argv call in the selected
+  repository when the global durable job store is idle. Its admission check
+  and process start are serialized against bridge job admissions, but external
+  database writers remain a documented check-then-start race.
+- `bridge_restart` schedules a fixed, delayed restart of
+  `development-bridge.service` only when the global durable job store is idle.
+  The service keeps `NoNewPrivileges=true`; restart is delegated to a transient
+  per-user systemd unit, which invokes only the exact sudoers-authorized restart
+  command outside the service sandbox. No broad sudo or polkit grant is needed.
 
 ## Managed external repositories
 
@@ -185,9 +214,14 @@ does not use a shell, and accepts no cwd, environment, stdin, or privilege
 override. Its execution specification and idempotency digest are stored in the
 job database, so queued runs retain their meaning across restart.
 
-GitHub host integration is optional and reads
-`DEVELOPMENT_BRIDGE_GITHUB_TOKEN` only from the runtime environment. Repository
-identity is derived from the registered Git `origin`; tools cannot supply an
+GitHub host integration is optional and reads its credentials only from the
+runtime environment. `DEVELOPMENT_BRIDGE_GITHUB_TOKEN` is the primary credential.
+External public contribution workflows may separately use
+`DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN`. When set, repositories that have
+`github_contribute` but not `git_write` use that credential for GitHub host writes
+(issue/PR collaboration) and fork creation. Own writable repositories, Git pushes,
+releases, and Actions continue using the primary token. Repository identity is derived from
+the registered Git `origin`; tools cannot supply an
 owner, repository, or arbitrary API URL. Managed external repositories retain
 GitHub read access through `git_read` but cannot mutate host state because they
 lack `git_write`. Git push remains `git_push`; the GitHub service owns issues,

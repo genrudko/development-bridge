@@ -56,6 +56,41 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
             arguments["url"],
             arguments.get("depth", 50),
             arguments.get("ref"),
+            retention=arguments.get("retention"),
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
+
+    async def repository_retention_set(ctx, params, request_context):
+        arguments = params.arguments
+        data = await container.managed_repositories.set_retention(
+            arguments["project_id"], arguments["repository_id"], arguments["retention"]
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
+    async def repository_gc_plan(ctx, params, request_context):
+        arguments = params.arguments or {}
+        data = await container.managed_repositories.gc_plan(
+            arguments.get("project_id"),
+            cache_days=arguments.get("cache_days", 30),
+            ephemeral_days=arguments.get("ephemeral_days", 14),
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
+    async def repository_gc_apply(ctx, params, request_context):
+        arguments = params.arguments or {}
+
+        async def apply_gc():
+            return await container.managed_repositories.gc_apply(
+                arguments.get("project_id"),
+                cache_days=arguments.get("cache_days", 30),
+                ephemeral_days=arguments.get("ephemeral_days", 14),
+                max_groups=arguments.get("max_groups", 4),
+                confirm=arguments.get("confirm", False),
+            )
+
+        data = await container.jobs.run_when_globally_idle(
+            apply_gc, operation_name="repository_gc_apply"
         )
         return to_mcp_result(success(request_context.request_id, data))
 
@@ -116,12 +151,90 @@ def project_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
                             "maximum": 10000,
                             "default": 50,
                         },
+                        "retention": {
+                            "type": "string",
+                            "enum": ["pinned", "cache", "ephemeral"],
+                            "default": "cache",
+                        },
                     },
                     "required": ["project_id", "repository_id", "url"],
                     "additionalProperties": False,
                 },
             ),
             repository_clone,
+            "v1",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="repository_retention_set",
+                description="Set retention policy for one managed repository",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "project_id": IDENTIFIER_SCHEMA,
+                        "repository_id": IDENTIFIER_SCHEMA,
+                        "retention": {
+                            "type": "string",
+                            "enum": ["pinned", "cache", "ephemeral"],
+                        },
+                    },
+                    "required": ["project_id", "repository_id", "retention"],
+                    "additionalProperties": False,
+                },
+            ),
+            repository_retention_set,
+            "v1",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="repository_gc_plan",
+                description=(
+                    "Plan conservative managed-reference garbage collection without deleting data"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "project_id": IDENTIFIER_SCHEMA,
+                        "cache_days": {
+                            "type": "integer", "minimum": 1, "maximum": 3650, "default": 30
+                        },
+                        "ephemeral_days": {
+                            "type": "integer", "minimum": 1, "maximum": 3650, "default": 14
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            ),
+            repository_gc_plan,
+            "v1",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="repository_gc_apply",
+                description=(
+                    "Delete a bounded set of stale clean managed-reference storage groups; "
+                    "requires confirm=true and global durable-job idleness"
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "project_id": IDENTIFIER_SCHEMA,
+                        "cache_days": {
+                            "type": "integer", "minimum": 1, "maximum": 3650, "default": 30
+                        },
+                        "ephemeral_days": {
+                            "type": "integer", "minimum": 1, "maximum": 3650, "default": 14
+                        },
+                        "max_groups": {
+                            "type": "integer", "minimum": 1, "maximum": 32, "default": 4
+                        },
+                        "confirm": {"type": "boolean"},
+                    },
+                    "required": ["confirm"],
+                    "additionalProperties": False,
+                },
+            ),
+            repository_gc_apply,
             "v1",
         ),
         RegisteredTool(

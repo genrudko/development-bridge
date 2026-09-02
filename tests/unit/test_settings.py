@@ -1,8 +1,34 @@
 import pytest
 from pydantic import ValidationError
+from pathlib import Path
 
 from app.auth import create_owner_verifier
 from app.settings import BridgeSettings, load_settings
+
+
+def test_antigravity_executor_is_disabled_by_default():
+    settings = BridgeSettings()
+    assert settings.executors.antigravity.enabled is False
+    assert settings.executors.antigravity.executable == Path("~/.local/bin/agy")
+
+
+def test_antigravity_executor_settings_are_bounded():
+    settings = BridgeSettings.model_validate({"executors": {"antigravity": {
+        "enabled": True, "executable": "/opt/agy/bin/agy",
+        "probe_timeout_seconds": 12, "task_timeout_seconds": 600,
+        "output_limit_bytes": 131072, "model": "gemini-3.1-pro",
+    }}})
+    assert settings.executors.antigravity.executable == Path("/opt/agy/bin/agy")
+    assert settings.executors.antigravity.model == "gemini-3.1-pro"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("probe_timeout_seconds", 0), ("task_timeout_seconds", 3601),
+    ("output_limit_bytes", 1023), ("output_limit_bytes", 1048577),
+])
+def test_antigravity_executor_rejects_out_of_bounds_values(field, value):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"executors": {"antigravity": {field: value}}})
 
 
 def test_defaults_allow_startup_without_registered_projects():
@@ -211,3 +237,144 @@ def test_loads_optional_knowledge_database_path(tmp_path):
         {"knowledge": {"database_path": tmp_path / "knowledge.sqlite3"}}
     )
     assert settings.knowledge.database_path == tmp_path / "knowledge.sqlite3"
+
+
+def test_antigravity_quota_cache_defaults_and_bounds():
+    settings = BridgeSettings().executors.antigravity
+    assert settings.quota_cache_path == Path("~/.local/state/development-bridge/antigravity-quota.json")
+    assert settings.quota_cache_max_age_seconds == 120
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"executors": {"antigravity": {"quota_cache_max_age_seconds": 0}}})
+
+
+def test_coordinator_wake_delivery_disabled_by_default():
+    settings = BridgeSettings()
+    wake = settings.coordinator_wake_delivery
+    assert wake.enabled is False
+    assert wake.primary_transport == "review-gpt"
+    assert wake.poll_interval_seconds == 5.0
+    assert wake.review_gpt.node_executable is None
+    assert wake.review_gpt.cli_path is None
+    assert wake.review_gpt.config_path is None
+    assert wake.review_gpt.browser_endpoint is None
+    assert wake.review_gpt.receipt_directory is None
+    assert wake.review_gpt.process_timeout_seconds == 60.0
+
+
+def test_coordinator_wake_delivery_enabled_requires_complete_review_gpt_settings(tmp_path):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({
+            "coordinator_wake_delivery": {
+                "enabled": True,
+                "review_gpt": {
+                    "node_executable": "/usr/bin/node",
+                    # missing cli_path, config_path, browser_endpoint, receipt_directory
+                },
+            }
+        })
+
+    valid = BridgeSettings.model_validate({
+        "coordinator_wake_delivery": {
+            "enabled": True,
+            "primary_transport": "review-gpt",
+            "poll_interval_seconds": 10.0,
+            "review_gpt": {
+                "node_executable": "/usr/bin/node",
+                "cli_path": "/opt/review-gpt/dist/cli.js",
+                "config_path": "/opt/review-gpt/config.json",
+                "browser_endpoint": "http://127.0.0.1:9222",
+                "receipt_directory": tmp_path / "receipts",
+                "process_timeout_seconds": 45.0,
+            },
+        }
+    })
+    assert valid.coordinator_wake_delivery.enabled is True
+    assert valid.coordinator_wake_delivery.poll_interval_seconds == 10.0
+    assert valid.coordinator_wake_delivery.review_gpt.browser_endpoint == "http://127.0.0.1:9222"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://example.com:9222",
+        "http://192.168.1.100:9222",
+        "https://chatgpt.com",
+        "ftp://localhost:9222",
+    ],
+)
+def test_coordinator_wake_delivery_rejects_remote_or_invalid_browser_endpoint(tmp_path, endpoint):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({
+            "coordinator_wake_delivery": {
+                "enabled": True,
+                "review_gpt": {
+                    "node_executable": "/usr/bin/node",
+                    "cli_path": "/opt/review-gpt/dist/cli.js",
+                    "config_path": "/opt/review-gpt/config.json",
+                    "browser_endpoint": endpoint,
+                    "receipt_directory": tmp_path / "receipts",
+                },
+            }
+        })
+
+
+@pytest.mark.parametrize("field,value", [
+    ("poll_interval_seconds", 0.5),
+    ("poll_interval_seconds", 301.0),
+])
+def test_coordinator_wake_delivery_rejects_out_of_bounds_poll_interval(field, value):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"coordinator_wake_delivery": {field: value}})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("process_timeout_seconds", 4.0),
+    ("process_timeout_seconds", 601.0),
+])
+def test_review_gpt_rejects_out_of_bounds_timeout(field, value):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({
+            "coordinator_wake_delivery": {
+                "review_gpt": {field: value}
+            }
+        })
+
+
+def test_loads_yaml_coordinator_wake_delivery_configuration(tmp_path):
+    config = tmp_path / "bridge.yaml"
+    config.write_text(
+        """version: 1
+coordinator_wake_delivery:
+  enabled: true
+  primary_transport: review-gpt
+  poll_interval_seconds: 7.5
+  review_gpt:
+    node_executable: /usr/local/bin/node
+    cli_path: /opt/review-gpt/cli.js
+    config_path: /opt/review-gpt/config.json
+    browser_endpoint: http://localhost:9222
+    receipt_directory: /var/lib/receipts
+    process_timeout_seconds: 90.0
+""",
+        encoding="utf-8",
+    )
+    settings = load_settings(config, environ={})
+    assert settings.coordinator_wake_delivery.enabled is True
+    assert settings.coordinator_wake_delivery.poll_interval_seconds == 7.5
+    assert settings.coordinator_wake_delivery.review_gpt.node_executable == Path("/usr/local/bin/node")
+    assert settings.coordinator_wake_delivery.review_gpt.cli_path == Path("/opt/review-gpt/cli.js")
+    assert settings.coordinator_wake_delivery.review_gpt.config_path == Path("/opt/review-gpt/config.json")
+    assert settings.coordinator_wake_delivery.review_gpt.browser_endpoint == "http://localhost:9222"
+    assert settings.coordinator_wake_delivery.review_gpt.receipt_directory == Path("/var/lib/receipts")
+    assert settings.coordinator_wake_delivery.review_gpt.process_timeout_seconds == 90.0
+
+def test_review_gpt_on_demand_browser_lifecycle_settings_require_a_pair():
+    defaults = BridgeSettings().coordinator_wake_delivery.review_gpt
+    assert defaults.browser_start_command == ()
+    assert defaults.browser_stop_command == ()
+    assert defaults.browser_lifecycle_timeout_seconds == 30.0
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"coordinator_wake_delivery": {"review_gpt": {"browser_start_command": ["browserctl", "start"]}}})
+    configured = BridgeSettings.model_validate({"coordinator_wake_delivery": {"review_gpt": {"browser_start_command": ["browserctl", "start"], "browser_stop_command": ["browserctl", "stop"], "browser_lifecycle_timeout_seconds": 45}}})
+    assert configured.coordinator_wake_delivery.review_gpt.browser_start_command == ("browserctl", "start")
+    assert configured.coordinator_wake_delivery.review_gpt.browser_stop_command == ("browserctl", "stop")

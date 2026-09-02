@@ -9,8 +9,27 @@ server:
   allowed_hosts: [127.0.0.1, "127.0.0.1:*", localhost, "localhost:*"]
 jobs:
   database_path: /absolute/path/to/development-bridge-jobs.sqlite3
+# executors:
+#   antigravity:
+#     enabled: false
+#     executable: ~/.local/bin/agy
+#     probe_timeout_seconds: 20
+#     task_timeout_seconds: 900
+#     output_limit_bytes: 262144
+#     model: gemini-3.1-pro
+#     quota_cache_path: ~/.local/state/development-bridge/antigravity-quota.json
+#     quota_cache_max_age_seconds: 120
+# desktop_nodes:
+#   offline_after_seconds: 45
+#   claim_timeout_seconds: 25
+#   call_timeout_seconds: 60
+#   max_pending_commands: 32
+#   result_artifact_directory: /var/lib/development-bridge/desktop-results
+#   result_artifact_ttl_seconds: 3600
+#   max_result_upload_bytes: 67108864
 # GitHub host workflows are optional. The token is supplied only through
-# DEVELOPMENT_BRIDGE_GITHUB_TOKEN, never in this file.
+# DEVELOPMENT_BRIDGE_GITHUB_TOKEN and the optional external-contribution
+# DEVELOPMENT_BRIDGE_GITHUB_CLASSIC_TOKEN, never in this file.
 # github:
 #   timeout_seconds: 20
 #   response_limit_bytes: 2097152
@@ -36,6 +55,18 @@ jobs:
 #   issuer_url: https://bridge.example
 #   resource_url: https://bridge.example/mcp
 #   database_path: /absolute/path/to/development-bridge-oauth.sqlite3
+# Direct coordinator wake delivery is disabled by default.
+# coordinator_wake_delivery:
+#   enabled: false
+#   primary_transport: review-gpt
+#   poll_interval_seconds: 5.0
+#   review_gpt:
+#     node_executable: /absolute/path/to/node
+#     cli_path: /absolute/path/to/review-gpt/dist/cli.js
+#     config_path: /absolute/path/to/review-gpt.config.json
+#     browser_endpoint: http://127.0.0.1:9222
+#     receipt_directory: /absolute/path/to/development-bridge-wake-receipts
+#     process_timeout_seconds: 60.0
 projects:
   - id: printer-stack
     name: Printer Stack

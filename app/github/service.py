@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import re
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
@@ -8,7 +13,7 @@ from urllib.parse import quote, urlencode, urlparse
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import Capability, CapabilityPolicy
 from app.git import GitRunner
-from app.projects import Repository
+from app.projects import ManagedRepositoryService, Repository
 
 from .client import GitHubTransport, _http_error
 
@@ -32,10 +37,26 @@ class GitHubHostService:
         runner: GitRunner,
         policy: CapabilityPolicy,
         transport: GitHubTransport | None,
+        managed_repositories: ManagedRepositoryService | None = None,
+        *,
+        fork_transport: GitHubTransport | None = None,
+        fork_poll_attempts: int = 5,
+        fork_poll_delay_seconds: float = 1.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.runner = runner
         self.policy = policy
         self.transport = transport
+        # A classic PAT is optional and intentionally scoped to external public
+        # contribution workflows. Own writable repositories continue using the
+        # primary (normally fine-grained) credential.
+        self._contribution_transport = fork_transport if fork_transport is not None else transport
+        self.managed_repositories = managed_repositories
+        self._fork_poll_attempts = fork_poll_attempts
+        self._fork_poll_delay_seconds = fork_poll_delay_seconds
+        self._sleep = sleep
+        self._release_plans: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._release_apply_lock = asyncio.Lock()
 
     async def identity(self, repository: Repository) -> GitHubRepositoryIdentity:
         self._require(repository, Capability.GIT_READ)
@@ -65,6 +86,7 @@ class GitHubHostService:
             "archived": data.get("archived"),
             "url": data.get("html_url"),
             "rate_limit": self._rate(headers),
+            "github_permissions": self._permission_metadata(headers, private=bool(data.get("private"))),
         }
 
     async def commit_checks(self, repository: Repository, sha: str) -> dict:
@@ -103,13 +125,13 @@ class GitHubHostService:
         return {"comments": [self._comment(item) for item in data[:bounded_limit]]}
 
     async def issue_create(self, repository, payload):
-        return await self._repo_request(repository, "POST", "/issues", payload, True, self._issue)
+        return await self._repo_request(repository, "POST", "/issues", payload, True, self._issue, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def issue_update(self, repository, number, payload):
-        return await self._repo_request(repository, "PATCH", f"/issues/{number}", payload, True, self._issue)
+        return await self._repo_request(repository, "PATCH", f"/issues/{number}", payload, True, self._issue, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def issue_comment(self, repository, number, body):
-        return await self._repo_request(repository, "POST", f"/issues/{number}/comments", {"body": body}, True, self._comment)
+        return await self._repo_request(repository, "POST", f"/issues/{number}/comments", {"body": body}, True, self._comment, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def pull_list(self, repository, filters):
         identity = await self.identity(repository)
@@ -122,20 +144,88 @@ class GitHubHostService:
         return await self._repo_request(repository, "GET", f"/pulls/{number}", None, False, self._pull)
 
     async def pull_create(self, repository, payload):
-        if ":" in payload["head"]:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "fork-style PR heads are not supported")
-        return await self._repo_request(repository, "POST", "/pulls", payload, True, self._pull)
+        head = payload["head"]
+        capability = Capability.GIT_WRITE
+        if ":" in head:
+            if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}):[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,253}[A-Za-z0-9._-])?", head) is None or ".." in head or "//" in head or "@{" in head:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "fork-style PR head is invalid")
+            capability = (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE)
+        return await self._repo_request(repository, "POST", "/pulls", payload, True, self._pull, capability)
+
+    async def repository_fork(self, repository, project_id, repository_id, depth=50):
+        identity = await self.identity(repository)
+        self._require(repository, Capability.GITHUB_CONTRIBUTE)
+        if self._contribution_transport is None or self.managed_repositories is None:
+            raise BridgeError(ErrorCode.GITHUB_NOT_CONFIGURED, "GitHub contribution is not configured")
+        response = await self._contribution_transport.request("GET", "/user")
+        if response.status != 200:
+            raise _http_error(response.status, response.headers)
+        user = response.json()
+        login = user.get("login")
+        if not isinstance(login, str) or re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})", login) is None:
+            raise BridgeError(ErrorCode.GITHUB_API_ERROR, "GitHub authenticated user is invalid")
+        full_name = f"{login}/{identity.repository}"
+        fork_path = f"/repos/{full_name}"
+        response = await self._contribution_transport.request("GET", fork_path)
+        if response.status == 200:
+            data = response.json()
+            clone_url = self._validate_fork(data, full_name, identity.slug)
+        elif response.status == 404:
+            response = await self._contribution_transport.request("POST", f"{self._repo(identity)}/forks", payload={})
+            if response.status not in {201, 202}:
+                raise _http_error(response.status, response.headers)
+            if response.body:
+                response_data = response.json()
+                if response_data:
+                    self._validate_fork(response_data, full_name, identity.slug)
+            clone_url = await self._wait_for_fork(fork_path, full_name, identity.slug)
+        else:
+            raise _http_error(response.status, response.headers)
+        return await self.managed_repositories.clone(
+            project_id, repository_id, clone_url, depth, kind="fork",
+            push_url=f"git@github.com:{full_name}.git",
+            upstream_url=f"https://github.com/{identity.slug}.git",
+        )
+
+    async def _wait_for_fork(self, path: str, full_name: str, upstream: str) -> str:
+        for attempt in range(self._fork_poll_attempts):
+            if attempt:
+                await self._sleep(self._fork_poll_delay_seconds)
+            assert self._contribution_transport is not None
+            response = await self._contribution_transport.request("GET", path)
+            if response.status == 200:
+                return self._validate_fork(response.json(), full_name, upstream)
+            if response.status != 404:
+                raise _http_error(response.status, response.headers)
+        raise BridgeError(
+            ErrorCode.GITHUB_REPOSITORY_UNAVAILABLE,
+            "GitHub fork is not ready; retry the request",
+            retryable=True,
+        )
+
+    @staticmethod
+    def _validate_fork(data: Any, full_name: str, upstream: str) -> str:
+        if not isinstance(data, dict):
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork relationship")
+        parent = data.get("parent") or data.get("source") or {}
+        if data.get("full_name") != full_name or parent.get("full_name") != upstream or data.get("fork") is not True:
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork relationship")
+        clone_url = data.get("clone_url")
+        expected_clone = f"https://github.com/{full_name}.git"
+        if clone_url != expected_clone:
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub returned an unexpected fork clone URL")
+        return clone_url
 
     async def pull_update(self, repository, number, payload):
         draft = payload.pop("draft", None)
         current = await self.pull_get(repository, number) if draft is not None else None
-        data = await self._repo_request(repository, "PATCH", f"/pulls/{number}", payload, True, self._pull) if payload else current
+        data = await self._repo_request(repository, "PATCH", f"/pulls/{number}", payload, True, self._pull, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE)) if payload else current
         if draft is not None and bool(current["draft"]) != draft:
             mutation = "convertPullRequestToDraft" if draft else "markPullRequestReadyForReview"
             graphql, _ = await self._request(repository, "POST", "/graphql", {
                 "query": f"mutation($id:ID!){{{mutation}(input:{{pullRequestId:$id}}){{pullRequest{{id}}}}}}",
                 "variables": {"id": current["node_id"]},
-            }, write=True)
+            }, write=True, capability=(Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
             if graphql.get("errors"):
                 raise BridgeError(
                     ErrorCode.GITHUB_CONFLICT,
@@ -183,12 +273,13 @@ class GitHubHostService:
         return {"files": [self._pull_file(item) for item in data[:bounded_limit]]}
 
     async def pull_review(self, repository, number, payload):
-        return await self._repo_request(repository, "POST", f"/pulls/{number}/reviews", payload, True, self._review)
+        return await self._repo_request(repository, "POST", f"/pulls/{number}/reviews", payload, True, self._review, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def request_reviewers(self, repository, number, payload):
-        return await self._repo_request(repository, "POST", f"/pulls/{number}/requested_reviewers", payload, True, self._pull)
+        return await self._repo_request(repository, "POST", f"/pulls/{number}/requested_reviewers", payload, True, self._pull, (Capability.GITHUB_CONTRIBUTE, Capability.GIT_WRITE))
 
     async def pull_merge(self, repository, number, expected_head, method):
+        self._require(repository, Capability.GIT_WRITE)
         current = await self.pull_get(repository, number)
         if current["head_sha"] != expected_head:
             raise BridgeError(ErrorCode.GITHUB_CONFLICT, "Pull request head changed")
@@ -237,24 +328,307 @@ class GitHubHostService:
         await self._repo_request(repository, "POST", f"/actions/runs/{run_id}/cancel", {}, True, None)
         return {"status": "cancel_requested", "run_id": run_id}
 
-    async def _repo_request(self, repository, method, suffix, payload, write, normalize):
+    async def release_list(self, repository, limit=50):
+        data = await self._repo_request(
+            repository, "GET", f"/releases?per_page={self._limit(limit)}", None, False, None
+        )
+        return {"releases": [self._release(item) for item in data[:limit]]}
+
+    async def release_get(self, repository, tag_name):
+        await self._validate_tag_name(repository, tag_name)
+        return await self._repo_request(
+            repository, "GET", f"/releases/tags/{quote(tag_name, safe='')}", None, False, self._release
+        )
+
+    async def release_plan(
+        self, repository, *, tag_name, target_sha, name, body="",
+        draft=False, prerelease=False, make_latest="true"
+    ):
+        await self._validate_tag_name(repository, tag_name)
+        self._validate_release_request(target_sha, name, body, draft, prerelease, make_latest)
         identity = await self.identity(repository)
-        data, _ = await self._request(repository, method, self._repo(identity) + suffix, payload, write=write)
+        repo_path = self._repo(identity)
+        commit, _ = await self._request(repository, "GET", f"{repo_path}/commits/{target_sha}", write=False)
+        if str(commit.get("sha", "")).lower() != target_sha.lower():
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "GitHub did not resolve the exact target commit")
+        repository_data, _ = await self._request(repository, "GET", repo_path, write=False)
+        default_branch = repository_data.get("default_branch")
+        if not isinstance(default_branch, str) or not default_branch:
+            raise BridgeError(ErrorCode.GITHUB_REPOSITORY_UNAVAILABLE, "GitHub default branch is unavailable")
+        default_commit, _ = await self._request(
+            repository, "GET", f"{repo_path}/commits/{quote(default_branch, safe='')}", write=False
+        )
+        default_sha = default_commit.get("sha")
+        if not isinstance(default_sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", default_sha) is None:
+            raise BridgeError(ErrorCode.GITHUB_REPOSITORY_UNAVAILABLE, "GitHub default branch head is unavailable")
+        comparison, _ = await self._request(
+            repository, "GET", f"{repo_path}/compare/{target_sha}...{default_sha}?per_page=1", write=False
+        )
+        reachable = comparison.get("status") in {"ahead", "identical"}
+        tag = await self._tag_state(repository, identity, tag_name)
+        release = await self._release_state(repository, identity, tag_name)
+        release_matches = release is None or self._release_matches(
+            release, name=name, body=body, draft=draft, prerelease=prerelease
+        )
+        reasons = []
+        if not reachable:
+            reasons.append("target_not_reachable_from_default_branch")
+        if tag is not None and tag["target_sha"].lower() != target_sha.lower():
+            reasons.append("tag_target_conflict")
+        if release is not None and tag is None:
+            reasons.append("release_exists_without_resolvable_tag")
+        if release is not None and not release_matches:
+            reasons.append("release_state_conflict")
+        if reasons:
+            action = "rejected"
+        elif tag is not None and release is not None:
+            action = "already_applied"
+        elif tag is not None:
+            action = "create_release"
+        else:
+            action = "create_tag_and_release"
+        request = {
+            "tag_name": tag_name, "target_sha": target_sha.lower(), "name": name, "body": body,
+            "draft": draft, "prerelease": prerelease, "make_latest": make_latest,
+        }
+        state = {
+            "default_branch": default_branch, "default_sha": default_sha.lower(),
+            "target_reachable": reachable, "tag": tag, "release": release,
+        }
+        plan_id = self._release_plan_id(repository, request, state)
+        result = {
+            "plan_id": plan_id, "applicable": not reasons, "action": action, "reasons": reasons,
+            **request, **state,
+        }
+        self._remember_release_plan(
+            plan_id, {
+                "repository": (repository.project_id, repository.id),
+                "request": request,
+                "planned_action": action,
+            }
+        )
+        return result
+
+    async def release_apply(self, repository, plan_id):
+        if not isinstance(plan_id, str) or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", plan_id) is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Release plan id is invalid")
+        stored = self._release_plans.get(plan_id)
+        if stored is None or stored.get("repository") != (repository.project_id, repository.id):
+            raise BridgeError(ErrorCode.GITHUB_CONFLICT, "Release plan is unknown or expired; create a fresh plan")
+        request = dict(stored["request"])
+        async with self._release_apply_lock:
+            fresh = await self.release_plan(repository, **request)
+            if fresh["applicable"] and fresh["action"] == "already_applied":
+                return {
+                    "status": "already_applied", "plan_id": plan_id,
+                    "tag_name": request["tag_name"], "target_sha": request["target_sha"],
+                    "tag_created": False, "release_created": False, "release": fresh["release"],
+                }
+            safe_partial_continuation = (
+                stored.get("planned_action") == "create_tag_and_release"
+                and fresh["applicable"]
+                and fresh["action"] == "create_release"
+                and fresh.get("tag") is not None
+                and fresh["tag"]["target_sha"].lower() == request["target_sha"]
+            )
+            if fresh["plan_id"] != plan_id and not safe_partial_continuation:
+                raise BridgeError(
+                    ErrorCode.GITHUB_CONFLICT, "GitHub release state changed after the plan was created",
+                    details={"expected_plan_id": plan_id, "actual_plan_id": fresh["plan_id"]},
+                )
+            if not fresh["applicable"]:
+                raise BridgeError(
+                    ErrorCode.GITHUB_CONFLICT, "Release plan is not applicable",
+                    details={"plan_id": plan_id, "reasons": fresh["reasons"]},
+                )
+            identity = await self.identity(repository)
+            tag_created = False
+            if fresh["action"] == "create_tag_and_release":
+                await self._repo_request(
+                    repository, "POST", "/git/refs",
+                    {"ref": f"refs/tags/{request['tag_name']}", "sha": request["target_sha"]},
+                    True, None,
+                )
+                tag_created = True
+            payload = {
+                "tag_name": request["tag_name"], "target_commitish": request["target_sha"],
+                "name": request["name"], "body": request["body"], "draft": request["draft"],
+                "prerelease": request["prerelease"], "make_latest": request["make_latest"],
+            }
+            try:
+                created = await self._repo_request(
+                    repository, "POST", "/releases", payload, True, self._release
+                )
+            except BridgeError as exc:
+                raise BridgeError(
+                    exc.code, exc.message, retryable=exc.retryable,
+                    details={**exc.details, "status": "partial" if tag_created else "not_applied",
+                             "plan_id": plan_id, "tag_created": tag_created, "release_created": False},
+                ) from exc
+            tag = await self._tag_state(repository, identity, request["tag_name"])
+            if tag is None or tag["target_sha"].lower() != request["target_sha"]:
+                raise BridgeError(
+                    ErrorCode.GITHUB_CONFLICT,
+                    "Release tag does not resolve to the planned target after creation",
+                    details={"plan_id": plan_id, "tag": tag},
+                )
+            return {
+                "status": "applied", "plan_id": plan_id, "tag_name": request["tag_name"],
+                "target_sha": request["target_sha"], "tag_created": tag_created,
+                "release_created": True, "release": created,
+            }
+
+    async def _tag_state(self, repository, identity, tag_name):
+        path = f"{self._repo(identity)}/git/ref/tags/{quote(tag_name, safe='')}"
+        response = await self._raw(repository, "GET", path, write=False)
+        if response.status == 404:
+            return None
+        if not 200 <= response.status < 300:
+            raise _http_error(response.status, response.headers)
+        data = response.json()
+        obj = data.get("object") or {}
+        object_type = obj.get("type")
+        object_sha = obj.get("sha")
+        if not isinstance(object_sha, str):
+            raise BridgeError(ErrorCode.GITHUB_API_ERROR, "GitHub tag reference is malformed")
+        target_sha = await self._resolve_tag_target(repository, identity, object_type, object_sha)
+        return {
+            "ref": data.get("ref"), "object_type": object_type,
+            "object_sha": object_sha, "target_sha": target_sha,
+        }
+
+    async def _resolve_tag_target(self, repository, identity, object_type, object_sha):
+        current_type, current_sha = object_type, object_sha
+        for _ in range(5):
+            if current_type == "commit":
+                return current_sha.lower()
+            if current_type != "tag":
+                raise BridgeError(ErrorCode.GITHUB_CONFLICT, "Tag does not resolve to a commit")
+            data, _ = await self._request(
+                repository, "GET", f"{self._repo(identity)}/git/tags/{current_sha}", write=False
+            )
+            obj = data.get("object") or {}
+            current_type, current_sha = obj.get("type"), obj.get("sha")
+            if not isinstance(current_sha, str):
+                raise BridgeError(ErrorCode.GITHUB_API_ERROR, "Annotated tag object is malformed")
+        raise BridgeError(ErrorCode.GITHUB_CONFLICT, "Annotated tag nesting exceeds the safety limit")
+
+    async def _release_state(self, repository, identity, tag_name):
+        response = await self._raw(
+            repository, "GET", f"{self._repo(identity)}/releases/tags/{quote(tag_name, safe='')}", write=False
+        )
+        if response.status == 404:
+            return None
+        if not 200 <= response.status < 300:
+            raise _http_error(response.status, response.headers)
+        return self._release(response.json())
+
+    async def _validate_tag_name(self, repository, tag_name):
+        if not isinstance(tag_name, str) or not tag_name or len(tag_name) > 255:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Release tag name is invalid")
+        checked = await self.runner.run(
+            repository, ["check-ref-format", f"refs/tags/{tag_name}"], check=False
+        )
+        if checked.returncode != 0:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Release tag name is invalid")
+
+    @staticmethod
+    def _validate_release_request(target_sha, name, body, draft, prerelease, make_latest):
+        if not isinstance(target_sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}", target_sha) is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Release target_sha must be an exact 40-character commit SHA")
+        if not isinstance(name, str) or not name.strip() or len(name) > 255:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Release name is invalid")
+        if not isinstance(body, str) or len(body.encode("utf-8")) > 65536:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Release body exceeds the size limit")
+        if not isinstance(draft, bool) or not isinstance(prerelease, bool):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Release flags must be boolean")
+        if make_latest not in {"true", "false", "legacy"}:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "make_latest must be true, false, or legacy")
+
+    @staticmethod
+    def _release_matches(release, *, name, body, draft, prerelease):
+        return (
+            release.get("name") == name
+            and (release.get("body") or "") == body
+            and bool(release.get("draft")) == draft
+            and bool(release.get("prerelease")) == prerelease
+        )
+
+    @staticmethod
+    def _release_plan_id(repository, request, state):
+        canonical = json.dumps(
+            [repository.project_id, repository.id, request, state], sort_keys=True, separators=(",", ":")
+        )
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _remember_release_plan(self, plan_id, payload):
+        self._release_plans.pop(plan_id, None)
+        self._release_plans[plan_id] = payload
+        while len(self._release_plans) > 128:
+            self._release_plans.popitem(last=False)
+
+    @staticmethod
+    def _release(x):
+        return {
+            "id": x.get("id"), "tag_name": x.get("tag_name"),
+            "target_commitish": x.get("target_commitish"), "name": x.get("name"),
+            "body": x.get("body"), "draft": bool(x.get("draft", False)),
+            "prerelease": bool(x.get("prerelease", False)), "created_at": x.get("created_at"),
+            "published_at": x.get("published_at"), "url": x.get("html_url"),
+        }
+
+    @staticmethod
+    def _permission_metadata(headers, *, private=False):
+        raw_scopes = headers.get("x-oauth-scopes") or headers.get("X-OAuth-Scopes")
+        scopes = None
+        if raw_scopes is not None:
+            scopes = sorted({scope.strip() for scope in raw_scopes.split(",") if scope.strip()})
+        classic = scopes is not None and bool(scopes)
+        repo_write = ("repo" in scopes or (not private and "public_repo" in scopes)) if classic else None
+        workflow_write = ("workflow" in scopes) if classic else None
+        def permission(value):
+            return "allowed" if value is True else "denied" if value is False else "unknown"
+        return {
+            "oauth_scopes": scopes, "executor_credentials_exposed": False,
+            "contents_write": {"bridge_support": "git_push", "credential_permission": permission(repo_write)},
+            "workflow_write": {"bridge_support": "git_push", "credential_permission": permission(workflow_write)},
+            "releases_read": {"bridge_support": True, "credential_permission": "read_endpoint_available"},
+            "releases_write": {"bridge_support": True, "credential_permission": permission(repo_write)},
+            "tags_write": {"bridge_support": True, "credential_permission": permission(repo_write)},
+            "release_assets_write": {"bridge_support": False, "credential_permission": "not_exposed"},
+        }
+
+    async def _repo_request(self, repository, method, suffix, payload, write, normalize, capability=None):
+        identity = await self.identity(repository)
+        data, _ = await self._request(repository, method, self._repo(identity) + suffix, payload, write=write, capability=capability)
         return normalize(data) if normalize else data
 
-    async def _request(self, repository, method, path, payload=None, *, write):
-        response = await self._raw(repository, method, path, payload, write=write)
+    async def _request(self, repository, method, path, payload=None, *, write, capability=None):
+        response = await self._raw(repository, method, path, payload, write=write, capability=capability)
         if not 200 <= response.status < 300:
             raise _http_error(response.status, response.headers)
         if not response.body:
             return {}, response.headers
         return response.json(), response.headers
 
-    async def _raw(self, repository, method, path, payload=None, *, write):
-        self._require(repository, Capability.GIT_WRITE if write else Capability.GIT_READ)
-        if self.transport is None:
+    async def _raw(self, repository, method, path, payload=None, *, write, capability=None):
+        required = capability or (Capability.GIT_WRITE if write else Capability.GIT_READ)
+        if isinstance(required, tuple):
+            if not any(repository.capabilities.allows(item) for item in required):
+                self._require(repository, required[0])
+        else:
+            self._require(repository, required)
+        transport = self.transport
+        if (
+            write
+            and self._contribution_transport is not None
+            and repository.capabilities.allows(Capability.GITHUB_CONTRIBUTE)
+            and not repository.capabilities.allows(Capability.GIT_WRITE)
+        ):
+            transport = self._contribution_transport
+        if transport is None:
             raise BridgeError(ErrorCode.GITHUB_NOT_CONFIGURED, "GitHub token is not configured")
-        return await self.transport.request(method, path, payload=payload)
+        return await transport.request(method, path, payload=payload)
 
     def _require(self, repository, capability):
         self.policy.require(repository.capabilities, capability, project_id=repository.project_id, repository_id=repository.id)

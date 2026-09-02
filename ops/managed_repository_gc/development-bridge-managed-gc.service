@@ -1,0 +1,16 @@
+[Unit]
+Description=Development Bridge managed repository garbage collection
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/codex-workspace/development-bridge
+Environment=HOME=%h
+ExecStart=%h/codex-workspace/development-bridge/.venv/bin/python %h/codex-workspace/development-bridge/ops/managed_repository_gc/run.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/development-bridge/repositories
+MemoryMax=256M
+TasksMax=64

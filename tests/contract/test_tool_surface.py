@@ -2,13 +2,17 @@ from app.container import build_container
 from app.settings import BridgeSettings
 from app.tools.registry import build_tool_registry
 
-
 SUPPORTED_TOOLS = {
     "bridge_info",
+    "bridge_guide",
+    "bridge_restart",
     "project_list",
     "project_describe",
     "repository_status",
     "repository_clone",
+    "repository_retention_set",
+    "repository_gc_plan",
+    "repository_gc_apply",
     "file_list",
     "file_read",
     "file_search",
@@ -36,7 +40,12 @@ SUPPORTED_TOOLS = {
     "job_artifact_export",
     "repository_exec",
     "github_repository_status",
+    "github_repository_fork",
     "github_commit_checks",
+    "github_release_list",
+    "github_release_get",
+    "github_release_plan",
+    "github_release_apply",
     "github_issue_list",
     "github_issue_get",
     "github_issue_comments",
@@ -48,6 +57,7 @@ SUPPORTED_TOOLS = {
     "github_pull_request_create",
     "github_pull_request_update",
     "github_pull_request_comment",
+    "github_pull_request_comment_on_jobs",
     "github_pull_request_reviews",
     "github_pull_request_review_comments",
     "github_pull_request_files",
@@ -71,6 +81,25 @@ SUPPORTED_TOOLS = {
     "knowledge_source_sync",
     "knowledge_attachment_open",
     "knowledge_attachment_export",
+    "chatgpt_share_read",
+    "coordinator_x_mount",
+    "coordinator_route_takeover",
+    "coordinator_route_list",
+    "coordinator_route_rollover_prepare",
+    "coordinator_route_context_get",
+    "coordinator_route_context_update",
+    "coordinator_continue",
+    "coordinator_ack",
+    "coordinator_wake_on_jobs",
+    "coordinator_exec_and_wake",
+    "run_command",
+    "telegram_supervisor_status",
+    "telegram_send",
+    "fusion_node_status",
+    "fusion_tools",
+    "fusion_call",
+    "executor_status",
+    "executor_start",
 }
 
 
@@ -78,12 +107,25 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 67
+    assert len(registry.definitions) == 97
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",
         "github-host",
+        "chatgpt-share",
+        "coordinator-x",
+        "telegram-supervisor",
+        "fusion-desktop",
     }
+
+    fork_schema = registry.get("github_repository_fork").definition.input_schema
+    assert fork_schema["required"] == [
+        "project_id", "repository_id", "fork_repository_id",
+    ]
+    assert fork_schema["properties"]["fork_repository_id"]["pattern"] == (
+        "^[a-z][a-z0-9-]{0,62}$"
+    )
+    assert fork_schema["additionalProperties"] is False
 
 
 def test_legacy_global_workspace_names_are_absent():

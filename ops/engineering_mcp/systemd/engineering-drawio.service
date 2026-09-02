@@ -1,0 +1,30 @@
+[Unit]
+Description=Engineering Draw.io MCP over Streamable HTTP (lazy backend)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mcp-workspaces/drawio-engineering
+Environment=HOME=%h
+Environment=TMPDIR=%h/mcp-workspaces/drawio/tmp
+Environment=PATH=%h/opt/node-v22/bin:%h/.local/bin:/usr/bin:/bin
+Environment=PUPPETEER_EXECUTABLE_PATH=%h/opt/puppeteer-browsers/chrome/linux-152.0.7977.64/chrome-linux64/chrome
+Environment=LD_LIBRARY_PATH=%h/opt/chrome-libs/usr/lib/x86_64-linux-gnu:%h/opt/cairo/usr/lib/x86_64-linux-gnu
+ExecStart=%h/services/engineering-mcp/gateway/node_modules/.bin/supergateway --stdio "%h/opt/node-v22/bin/node %h/services/engineering-mcp/drawio-engineering/src/index.js" --outputTransport streamableHttp --stateful --sessionTimeout 180000 --port 8792 --streamableHttpPath /mcp --healthEndpoint /healthz --protocolVersion 2025-11-25 --logLevel info
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+MemoryHigh=768M
+MemoryMax=1536M
+TasksMax=192
+ReadWritePaths=%h/mcp-workspaces/drawio-engineering
+ReadWritePaths=%h/mcp-workspaces/drawio

@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditOutcome
 from app.capabilities import CapabilityPolicy
 from app.jobs import ArtifactStorage, JobService, JobStatus, JobStore
@@ -81,6 +82,66 @@ async def wait_for_status(jobs, repository, job_id, statuses):
             return job
         await asyncio.sleep(0.01)
     raise AssertionError(f"job did not reach {statuses}")
+
+
+@pytest.mark.asyncio
+async def test_terminal_waiters_are_event_driven_race_safe_and_one_shot(tmp_path):
+    jobs, repository, _ = configured(tmp_path, "print('secret-output')")
+    jobs._store.initialize()
+    first = await jobs.start_task(repository, "task", "req_1")
+    second = await jobs.start_task(repository, "task", "req_2")
+    wakes = []
+
+    async def wake(records, reason):
+        wakes.append(([record.job_id for record in records], reason))
+
+    waiting = await jobs.wake_on_jobs(
+        repository, (first.job_id, second.job_id), "all_terminal", wake
+    )
+    assert waiting["state"] == "waiting"
+    assert jobs._store.start(first.job_id)
+    await jobs._finish_job(first.job_id, JobStatus.SUCCEEDED)
+    assert wakes == []
+    assert jobs._store.start(second.job_id)
+    await jobs._finish_job(second.job_id, JobStatus.SUCCEEDED)
+    assert wakes == [([first.job_id, second.job_id], "all_terminal")]
+    await jobs._finish_job(second.job_id, JobStatus.SUCCEEDED)
+    assert len(wakes) == 1
+
+    immediate = await jobs.wake_on_jobs(
+        repository, (first.job_id,), "all_terminal", wake
+    )
+    assert immediate["state"] == "fired"
+    assert wakes[-1] == ([first.job_id], "all_terminal")
+
+    third = await jobs.start_task(repository, "task", "req_3")
+    fourth = await jobs.start_task(repository, "task", "req_4")
+    await jobs.wake_on_jobs(
+        repository,
+        (third.job_id, fourth.job_id),
+        "failure_or_all_terminal",
+        wake,
+    )
+    assert jobs._store.start(third.job_id)
+    await jobs._finish_job(third.job_id, JobStatus.FAILED)
+    assert wakes[-1] == ([third.job_id, fourth.job_id], "failure")
+
+    with pytest.raises(BridgeError) as unknown:
+        await jobs.wake_on_jobs(
+            repository, ("job_" + "0" * 32,), "all_terminal", wake
+        )
+    assert unknown.value.code is ErrorCode.JOB_NOT_FOUND
+
+    foreign, _ = jobs._store.create(
+        project_id="other-project",
+        repository_id="other-repository",
+        task_id="task",
+        request_id="foreign",
+        idempotency_key=None,
+    )
+    with pytest.raises(BridgeError) as scoped:
+        await jobs.wake_on_jobs(repository, (foreign.job_id,), "all_terminal", wake)
+    assert scoped.value.code is ErrorCode.JOB_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -164,6 +225,45 @@ async def test_failed_job_emits_failure_audit(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_antigravity_canceled_json_fails_even_when_cli_exits_zero(tmp_path):
+    jobs, repository, audit = configured(tmp_path, "print('unused')")
+    await jobs.start()
+    try:
+        script = 'print(\'{"status":"CANCELED","response":""}\')'
+        started = await jobs.start_execution(
+            repository, sys.executable, ["-c", script], "req_antigravity_canceled",
+            executor="antigravity", executor_quota_state="unknown",
+        )
+        failed = await wait_for_status(jobs, repository, started.job_id, {JobStatus.FAILED})
+        assert failed.exit_code == 0
+        assert failed.failure_reason == "executor_result_canceled"
+        assert audit.events[-1].event == "fail"
+    finally:
+        await jobs.stop()
+
+
+@pytest.mark.asyncio
+async def test_antigravity_soft_denied_tool_fails_even_with_success_json(tmp_path):
+    jobs, repository, audit = configured(tmp_path, "print('unused')")
+    await jobs.start()
+    try:
+        script = (
+            'import sys; print(\'{"status":"SUCCESS","response":""}\'); '
+            'print(\'tool permission cannot prompt; auto-denied\', file=sys.stderr)'
+        )
+        started = await jobs.start_execution(
+            repository, sys.executable, ["-c", script], "req_antigravity_denied",
+            executor="antigravity", executor_quota_state="unknown",
+        )
+        failed = await wait_for_status(jobs, repository, started.job_id, {JobStatus.FAILED})
+        assert failed.exit_code == 0
+        assert failed.failure_reason == "executor_permission_denied"
+        assert audit.events[-1].event == "fail"
+    finally:
+        await jobs.stop()
+
+
+@pytest.mark.asyncio
 async def test_idempotent_start_returns_same_job(tmp_path):
     jobs, repository, _ = configured(tmp_path, "print('done')")
     await jobs.start()
@@ -178,6 +278,35 @@ async def test_idempotent_start_returns_same_job(tmp_path):
     finally:
         await wait_for_status(jobs, repository, first.job_id, {JobStatus.SUCCEEDED})
         await jobs.stop()
+
+
+@pytest.mark.asyncio
+async def test_repository_busy_tracks_active_execution(tmp_path):
+    jobs, repository, _ = configured(tmp_path, "print('done')")
+    jobs._store.initialize()
+    assert jobs.repository_busy(repository) is False
+    started = await jobs.start_execution(repository, sys.executable, ["-c", "print('done')"],
+        "req", executor="antigravity", executor_model="gemini", executor_quota_state="unknown",
+        environment_keys=("HOME",))
+    assert jobs.repository_busy(repository) is True
+    assert jobs._store.start(started.job_id)
+    jobs._store.finish(started.job_id, JobStatus.SUCCEEDED, exit_code=0)
+    assert jobs.repository_busy(repository) is False
+
+
+@pytest.mark.asyncio
+async def test_executor_idle_admission_is_atomic_and_idempotent(tmp_path):
+    jobs, repository, _ = configured(tmp_path, "print('done')")
+    jobs._store.initialize()
+    kwargs = dict(idempotency_key="same", executor="antigravity",
+        executor_quota_state="unknown", require_repository_idle=True)
+    first = await jobs.start_execution(repository, sys.executable, ["-c", "print('one')"], "one", **kwargs)
+    repeated = await jobs.start_execution(repository, sys.executable, ["-c", "print('one')"], "two", **kwargs)
+    assert repeated.job_id == first.job_id
+    with pytest.raises(BridgeError) as busy:
+        await jobs.start_execution(repository, sys.executable, ["-c", "print('two')"], "three",
+            executor="antigravity", executor_quota_state="unknown", require_repository_idle=True)
+    assert busy.value.code is ErrorCode.JOB_BUSY
 
 
 @pytest.mark.asyncio

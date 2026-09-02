@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import CapabilitySet
@@ -14,6 +14,8 @@ class RepositoryRegistry:
     def __init__(self, repositories: Mapping[tuple[str, str], Repository]) -> None:
         self._repositories = MappingProxyType(dict(repositories))
         self._configured = frozenset(repositories)
+        self._managed_access_callback: Callable[[str, str], None] | None = None
+        self._managed_maintenance = False
 
     @classmethod
     def from_settings(cls, settings: BridgeSettings) -> RepositoryRegistry:
@@ -60,6 +62,17 @@ class RepositoryRegistry:
                     "repository_id": repository_id,
                 },
             )
+        key = (project_id, repository_id)
+        if key not in self._configured:
+            if self._managed_maintenance:
+                raise BridgeError(
+                    ErrorCode.JOB_BUSY,
+                    "Managed repository maintenance is in progress",
+                    retryable=True,
+                    details={"project_id": project_id, "repository_id": repository_id},
+                )
+            if self._managed_access_callback is not None:
+                self._managed_access_callback(project_id, repository_id)
         return repository
 
     def for_project(self, project_id: str) -> tuple[Repository, ...]:
@@ -71,6 +84,33 @@ class RepositoryRegistry:
 
     def is_configured(self, project_id: str, repository_id: str) -> bool:
         return (project_id, repository_id) in self._configured
+
+    def set_managed_access_callback(
+        self, callback: Callable[[str, str], None] | None
+    ) -> None:
+        self._managed_access_callback = callback
+
+    def begin_managed_maintenance(self) -> None:
+        self._managed_maintenance = True
+
+    def end_managed_maintenance(self) -> None:
+        self._managed_maintenance = False
+
+    def unregister_managed(self, project_id: str, repository_id: str) -> bool:
+        key = (project_id, repository_id)
+        if key in self._configured:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "Configured repositories cannot be removed by managed GC",
+            )
+        if key not in self._repositories:
+            return False
+        self._repositories = MappingProxyType({
+            existing_key: repository
+            for existing_key, repository in self._repositories.items()
+            if existing_key != key
+        })
+        return True
 
     def register_managed(self, repository: Repository) -> None:
         key = (repository.project_id, repository.id)

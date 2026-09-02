@@ -6,12 +6,14 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from app.api.errors import BridgeError, ErrorCode
 from app.capabilities import CapabilitySet
@@ -23,7 +25,15 @@ from .registry import ProjectRegistry
 MANIFEST_MAX_BYTES = 1_048_576
 MANIFEST_MAX_REPOSITORIES = 4096
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-REFERENCE_CAPABILITIES = CapabilitySet.from_mapping({"read": True, "git_read": True})
+REFERENCE_CAPABILITIES = CapabilitySet.from_mapping(
+    {"read": True, "git_read": True, "github_contribute": True}
+)
+FORK_CAPABILITIES = CapabilitySet.from_mapping(
+    {"read": True, "write": True, "git_read": True, "git_write": True, "execute": True}
+)
+MANAGED_KINDS = {"reference": REFERENCE_CAPABILITIES, "fork": FORK_CAPABILITIES}
+RETENTION_POLICIES = {"pinned", "cache", "ephemeral"}
+ACCESS_TOUCH_INTERVAL_SECONDS = 60.0
 
 
 class ManagedCloneRunner(Protocol):
@@ -32,6 +42,12 @@ class ManagedCloneRunner(Protocol):
     ) -> None: ...
 
     async def inspect(self, repository: Path) -> tuple[str, str]: ...
+
+    async def is_clean(self, repository: Path) -> bool: ...
+
+    async def configure_fork(
+        self, repository: Path, push_url: str, upstream_url: str
+    ) -> None: ...
 
 
 class SubprocessManagedCloneRunner:
@@ -63,6 +79,16 @@ class SubprocessManagedCloneRunner:
             "git", "-C", str(repository), "rev-parse", "HEAD"
         )).strip()
         return branch, head
+
+    async def is_clean(self, repository: Path) -> bool:
+        status = await self._run("git", "-C", str(repository), "status", "--porcelain")
+        return not status.strip()
+
+    async def configure_fork(
+        self, repository: Path, push_url: str, upstream_url: str
+    ) -> None:
+        await self._run("git", "-C", str(repository), "remote", "set-url", "--push", "origin", push_url)
+        await self._run("git", "-C", str(repository), "remote", "add", "upstream", upstream_url)
 
     async def _run(self, *arguments: str) -> str:
         process = await asyncio.create_subprocess_exec(
@@ -105,6 +131,10 @@ class ManagedRepositoryRecord:
     depth: int
     created_at: str
     requested_ref: str | None = None
+    kind: str = "reference"
+    storage_repository_id: str | None = None
+    retention: str = "cache"
+    last_used_at: str | None = None
 
     def as_dict(self) -> dict[str, str | int | None]:
         return {
@@ -114,6 +144,10 @@ class ManagedRepositoryRecord:
             "depth": self.depth,
             "created_at": self.created_at,
             "requested_ref": self.requested_ref,
+            "kind": self.kind,
+            "storage_repository_id": self.storage_repository_id,
+            "retention": self.retention,
+            "last_used_at": self.last_used_at,
         }
 
 
@@ -129,8 +163,10 @@ class ManagedRepositoryService:
         self.projects = projects
         self.runner = runner or SubprocessManagedCloneRunner()
         self._records: dict[tuple[str, str], ManagedRepositoryRecord] = {}
+        self._last_access_touch: dict[tuple[str, str], float] = {}
         self._lock = asyncio.Lock()
         self._load()
+        self.projects.repositories.set_managed_access_callback(self._touch_access)
 
     async def clone(
         self,
@@ -139,6 +175,11 @@ class ManagedRepositoryService:
         url: str,
         depth: int = 50,
         requested_ref: str | None = None,
+        *,
+        kind: str = "reference",
+        push_url: str | None = None,
+        upstream_url: str | None = None,
+        retention: str | None = None,
     ) -> dict:
         self.projects.get(project_id)
         origin_url = self._validate_url(url)
@@ -147,6 +188,21 @@ class ManagedRepositoryService:
                 ErrorCode.INVALID_ARGUMENT, "Clone depth must be between 1 and 10000"
             )
         requested_ref = self._validate_ref(requested_ref)
+        if kind not in MANAGED_KINDS:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Managed repository kind is invalid")
+        retention = self._validate_retention(
+            retention if retention is not None else ("pinned" if kind == "fork" else "cache")
+        )
+        if kind == "fork" and retention != "pinned":
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT, "Writable managed forks must use pinned retention"
+            )
+        if kind == "fork":
+            if not isinstance(push_url, str) or re.fullmatch(r"git@github\.com:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git", push_url) is None:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fork push URL is invalid")
+            upstream_url = self._validate_url(upstream_url or "")
+        elif push_url is not None or upstream_url is not None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Reference clones cannot configure fork remotes")
         async with self._lock:
             key = (project_id, repository_id)
             if self.projects.repositories.is_configured(*key):
@@ -156,9 +212,10 @@ class ManagedRepositoryService:
                 if (
                     existing.origin_url != origin_url
                     or existing.requested_ref != requested_ref
+                    or existing.kind != kind
                 ):
                     raise self._conflict(project_id, repository_id)
-                if not self._valid_managed_target(self._target(*key)):
+                if not self._valid_managed_target(self._record_target(existing)):
                     raise BridgeError(
                         ErrorCode.MANAGED_REPOSITORY_STATE_CORRUPT,
                         "Managed repository directory is invalid",
@@ -189,15 +246,35 @@ class ManagedRepositoryService:
                         "Clone did not produce a Git repository",
                     )
                 branch, head = await self.runner.inspect(clone_path)
+                if kind == "reference":
+                    alias = await self._alias_candidate(project_id, origin_url, branch, head)
+                    if alias is not None:
+                        storage_id = alias.storage_repository_id or alias.repository_id
+                        now = datetime.now(UTC).isoformat()
+                        record = ManagedRepositoryRecord(
+                            project_id=project_id, repository_id=repository_id,
+                            origin_url=origin_url, depth=depth, created_at=now,
+                            requested_ref=requested_ref, kind=kind,
+                            storage_repository_id=storage_id, retention=retention,
+                            last_used_at=now,
+                        )
+                        updated = {**self._records, key: record}
+                        self._write_manifest(updated)
+                        self.projects.repositories.register_managed(self._repository(record))
+                        self._records = updated
+                        return self._metadata_dict(record, "aliased", branch, head)
+                if kind == "fork":
+                    assert push_url is not None and upstream_url is not None
+                    await self.runner.configure_fork(clone_path, push_url, upstream_url)
                 os.replace(clone_path, target)
                 installed = True
+                now = datetime.now(UTC).isoformat()
                 record = ManagedRepositoryRecord(
-                    project_id,
-                    repository_id,
-                    origin_url,
-                    depth,
-                    datetime.now(UTC).isoformat(),
-                    requested_ref,
+                    project_id=project_id, repository_id=repository_id,
+                    origin_url=origin_url, depth=depth, created_at=now,
+                    requested_ref=requested_ref, kind=kind,
+                    storage_repository_id=None, retention=retention,
+                    last_used_at=now,
                 )
                 updated = {**self._records, key: record}
                 self._write_manifest(updated)
@@ -235,22 +312,44 @@ class ManagedRepositoryService:
                 old_keys = {
                     "project_id", "repository_id", "origin_url", "depth", "created_at"
                 }
-                if not isinstance(entry, dict) or frozenset(entry) not in {
-                    frozenset(old_keys), frozenset({*old_keys, "requested_ref"})
-                }:
+                allowed = {
+                    *old_keys, "requested_ref", "kind", "storage_repository_id",
+                    "retention", "last_used_at",
+                }
+                if not isinstance(entry, dict) or not old_keys <= set(entry) or not set(entry) <= allowed:
                     raise ValueError("invalid entry shape")
                 record = ManagedRepositoryRecord(
                     **entry,
                     **({"requested_ref": None} if "requested_ref" not in entry else {}),
+                    **({"kind": "reference"} if "kind" not in entry else {}),
+                    **({"storage_repository_id": None} if "storage_repository_id" not in entry else {}),
+                    **({
+                        "retention": (
+                            "pinned" if entry.get("kind", "reference") == "fork" else "cache"
+                        )
+                    } if "retention" not in entry else {}),
+                    **({"last_used_at": entry.get("created_at")} if "last_used_at" not in entry else {}),
                 )
                 self._validate_record(record)
                 key = (record.project_id, record.repository_id)
                 if key in records or self.projects.repositories.is_configured(*key):
                     raise ValueError("repository collision")
-                target = self._target(*key)
-                if not self._valid_managed_target(target):
-                    raise ValueError("repository directory missing")
                 records[key] = record
+            for key, record in records.items():
+                storage_id = record.storage_repository_id
+                if storage_id is not None:
+                    target_record = records.get((record.project_id, storage_id))
+                    if (
+                        storage_id == record.repository_id
+                        or target_record is None
+                        or target_record.storage_repository_id is not None
+                        or target_record.kind != "reference"
+                        or record.kind != "reference"
+                        or target_record.origin_url != record.origin_url
+                    ):
+                        raise ValueError("invalid managed repository storage alias")
+                if not self._valid_managed_target(self._record_target(record)):
+                    raise ValueError("repository directory missing")
         except (BridgeError, OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise BridgeError(
                 ErrorCode.MANAGED_REPOSITORY_STATE_CORRUPT,
@@ -276,6 +375,269 @@ class ManagedRepositoryService:
         if not isinstance(record.created_at, str) or len(record.created_at) > 100:
             raise ValueError("invalid timestamp")
         self._validate_ref(record.requested_ref)
+        if record.kind not in MANAGED_KINDS:
+            raise ValueError("invalid managed repository kind")
+        if record.storage_repository_id is not None and not IDENTIFIER.fullmatch(record.storage_repository_id):
+            raise ValueError("invalid storage repository identifier")
+        if record.retention not in RETENTION_POLICIES:
+            raise ValueError("invalid managed repository retention")
+        if record.kind == "fork" and record.retention != "pinned":
+            raise ValueError("managed fork retention must be pinned")
+        if record.last_used_at is not None:
+            self._parse_timestamp(record.last_used_at)
+
+    async def gc_apply(
+        self,
+        project_id: str | None = None,
+        *,
+        cache_days: int = 30,
+        ephemeral_days: int = 14,
+        max_groups: int = 4,
+        confirm: bool = False,
+    ) -> dict:
+        if confirm is not True:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "Managed repository GC apply requires confirm=true",
+            )
+        if isinstance(max_groups, bool) or not 1 <= max_groups <= 32:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "max_groups must be 1..32")
+
+        moved: list[tuple[Path, Path]] = []
+        removed_keys: set[tuple[str, str]] = set()
+        selected: list[dict] = []
+        self.projects.repositories.begin_managed_maintenance()
+        try:
+            async with self._lock:
+                plan = await self.gc_plan(
+                    project_id, cache_days=cache_days, ephemeral_days=ephemeral_days
+                )
+                selected = list(plan["candidate_storage_groups"][:max_groups])
+                if not selected:
+                    return {
+                        "applied": True,
+                        "deleted_storage_groups": 0,
+                        "deleted_logical_repositories": 0,
+                        "trash_cleanup_errors": [],
+                        "remaining_candidate_groups": plan["candidate_count"],
+                    }
+
+                trash_root = self.root / ".gc-trash"
+                trash_root.mkdir(parents=True, exist_ok=True)
+                for row in selected:
+                    group_project = str(row["project_id"])
+                    storage_id = str(row["storage_repository_id"])
+                    physical = self._records.get((group_project, storage_id))
+                    if physical is None:
+                        raise BridgeError(
+                            ErrorCode.MANAGED_REPOSITORY_STATE_CORRUPT,
+                            "GC storage owner disappeared during apply",
+                        )
+                    target = self._record_target(physical)
+                    quarantine = trash_root / (
+                        f"{group_project}-{storage_id}-{uuid4().hex}"
+                    )
+                    os.replace(target, quarantine)
+                    moved.append((target, quarantine))
+                    for logical in row["logical_repositories"]:
+                        removed_keys.add((group_project, str(logical["repository_id"])))
+
+                updated = {
+                    key: record for key, record in self._records.items()
+                    if key not in removed_keys
+                }
+                self._write_manifest(updated)
+                for key in sorted(removed_keys):
+                    self.projects.repositories.unregister_managed(*key)
+                    self._last_access_touch.pop(key, None)
+                self._records = updated
+        except Exception:
+            for target, quarantine in reversed(moved):
+                try:
+                    if quarantine.exists() and not target.exists():
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(quarantine, target)
+                except OSError:
+                    pass
+            raise
+        finally:
+            self.projects.repositories.end_managed_maintenance()
+
+        cleanup_errors = []
+        for _target, quarantine in moved:
+            try:
+                shutil.rmtree(quarantine)
+            except OSError as exc:
+                cleanup_errors.append({
+                    "path": str(quarantine),
+                    "error": type(exc).__name__,
+                })
+        try:
+            trash_root = self.root / ".gc-trash"
+            if trash_root.is_dir() and not any(trash_root.iterdir()):
+                trash_root.rmdir()
+        except OSError:
+            pass
+        return {
+            "applied": True,
+            "deleted_storage_groups": len(moved),
+            "deleted_logical_repositories": len(removed_keys),
+            "trash_cleanup_errors": cleanup_errors,
+            "remaining_candidate_groups": max(0, plan["candidate_count"] - len(selected)),
+        }
+
+    @staticmethod
+    def _validate_retention(value: str) -> str:
+        if value not in RETENTION_POLICIES:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "retention must be one of: pinned, cache, ephemeral",
+            )
+        return value
+
+    @staticmethod
+    def _parse_timestamp(value: str) -> datetime:
+        if not isinstance(value, str) or not 1 <= len(value) <= 100:
+            raise ValueError("invalid timestamp")
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return parsed.astimezone(UTC)
+
+    def _touch_access(self, project_id: str, repository_id: str) -> None:
+        key = (project_id, repository_id)
+        record = self._records.get(key)
+        if record is None:
+            return
+        now_mono = time.monotonic()
+        previous = self._last_access_touch.get(key, 0.0)
+        if now_mono - previous < ACCESS_TOUCH_INTERVAL_SECONDS:
+            return
+        now = datetime.now(UTC).isoformat()
+        updated_record = replace(record, last_used_at=now)
+        updated = {**self._records, key: updated_record}
+        self._write_manifest(updated)
+        self._records = updated
+        self._last_access_touch[key] = now_mono
+
+    async def set_retention(
+        self, project_id: str, repository_id: str, retention: str
+    ) -> dict:
+        retention = self._validate_retention(retention)
+        async with self._lock:
+            key = (project_id, repository_id)
+            record = self._records.get(key)
+            if record is None:
+                raise BridgeError(
+                    ErrorCode.REPOSITORY_NOT_FOUND,
+                    "Managed repository is not registered",
+                    details={"project_id": project_id, "repository_id": repository_id},
+                )
+            if record.kind == "fork" and retention != "pinned":
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Writable managed forks cannot be made collectable",
+                )
+            updated_record = replace(record, retention=retention)
+            updated = {**self._records, key: updated_record}
+            self._write_manifest(updated)
+            self._records = updated
+            return {
+                "project_id": project_id,
+                "repository_id": repository_id,
+                "retention": retention,
+                "last_used_at": updated_record.last_used_at,
+                "storage_repository_id": (
+                    updated_record.storage_repository_id or updated_record.repository_id
+                ),
+            }
+
+    async def gc_plan(
+        self,
+        project_id: str | None = None,
+        *,
+        cache_days: int = 30,
+        ephemeral_days: int = 14,
+    ) -> dict:
+        if isinstance(cache_days, bool) or not 1 <= cache_days <= 3650:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "cache_days must be 1..3650")
+        if isinstance(ephemeral_days, bool) or not 1 <= ephemeral_days <= 3650:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "ephemeral_days must be 1..3650")
+        if project_id is not None:
+            self.projects.get(project_id)
+        now = datetime.now(UTC)
+        groups: dict[tuple[str, str], list[ManagedRepositoryRecord]] = {}
+        records_snapshot = tuple(self._records.values())
+        for record in records_snapshot:
+            if project_id is not None and record.project_id != project_id:
+                continue
+            storage_id = record.storage_repository_id or record.repository_id
+            groups.setdefault((record.project_id, storage_id), []).append(record)
+
+        candidates = []
+        blocked = []
+        for (group_project, storage_id), records in sorted(groups.items()):
+            physical = next((r for r in records if r.repository_id == storage_id), None)
+            if physical is None:
+                blocked.append({
+                    "project_id": group_project, "storage_repository_id": storage_id,
+                    "reason": "storage_owner_missing",
+                })
+                continue
+            reasons = []
+            logical = []
+            all_eligible = True
+            for record in records:
+                used = self._parse_timestamp(record.last_used_at or record.created_at)
+                age_days = max(0.0, (now - used).total_seconds() / 86400.0)
+                threshold = ephemeral_days if record.retention == "ephemeral" else cache_days
+                eligible = (
+                    record.kind == "reference"
+                    and record.retention != "pinned"
+                    and age_days >= threshold
+                )
+                logical.append({
+                    "repository_id": record.repository_id,
+                    "retention": record.retention,
+                    "last_used_at": record.last_used_at or record.created_at,
+                    "age_days": round(age_days, 1),
+                    "eligible": eligible,
+                })
+                if not eligible:
+                    all_eligible = False
+                    if record.kind != "reference": reasons.append(f"{record.repository_id}:writable")
+                    elif record.retention == "pinned": reasons.append(f"{record.repository_id}:pinned")
+                    else: reasons.append(f"{record.repository_id}:recent")
+            target = self._record_target(physical)
+            clean = False
+            if all_eligible:
+                try:
+                    clean = await self.runner.is_clean(target)
+                except (BridgeError, OSError, ValueError):
+                    clean = False
+                if not clean:
+                    reasons.append("storage_dirty_or_unreadable")
+                    all_eligible = False
+            row = {
+                "project_id": group_project,
+                "storage_repository_id": storage_id,
+                "logical_repositories": logical,
+                "reclaimable": all_eligible and clean,
+            }
+            if reasons:
+                row["blocked_by"] = sorted(set(reasons))
+            (candidates if row["reclaimable"] else blocked).append(row)
+        return {
+            "cache_days": cache_days,
+            "ephemeral_days": ephemeral_days,
+            "candidate_storage_groups": candidates,
+            "candidate_count": len(candidates),
+            "blocked_storage_groups": blocked,
+            "note": (
+                "Plan only: no repository is deleted. A storage group is reclaimable only "
+                "when every logical alias sharing it is old enough, read-only, unpinned, and clean."
+            ),
+        }
 
     @staticmethod
     def _validate_url(url: str) -> str:
@@ -352,18 +714,54 @@ class ManagedRepositoryService:
         except OSError:
             return False
 
+    def _record_target(self, record: ManagedRepositoryRecord) -> Path:
+        return self._target(
+            record.project_id, record.storage_repository_id or record.repository_id
+        )
+
+    async def _alias_candidate(
+        self, project_id: str, origin_url: str, branch: str, head: str
+    ) -> ManagedRepositoryRecord | None:
+        candidates = sorted(
+            (
+                record for record in self._records.values()
+                if (
+                    record.project_id == project_id
+                    and record.kind == "reference"
+                    and record.origin_url == origin_url
+                )
+            ),
+            key=lambda record: (record.depth, record.created_at),
+            reverse=True,
+        )
+        seen_targets: set[Path] = set()
+        for record in candidates:
+            target = self._record_target(record)
+            if target in seen_targets:
+                continue
+            seen_targets.add(target)
+            try:
+                existing_branch, existing_head = await self.runner.inspect(target)
+                if (
+                    existing_branch == branch
+                    and existing_head == head
+                    and await self.runner.is_clean(target)
+                ):
+                    return record
+            except (BridgeError, OSError, ValueError):
+                continue
+        return None
+
     def _repository(self, record: ManagedRepositoryRecord) -> Repository:
         return Repository(
             record.project_id,
             record.repository_id,
-            self._target(record.project_id, record.repository_id),
-            REFERENCE_CAPABILITIES,
+            self._record_target(record),
+            MANAGED_KINDS[record.kind],
         )
 
     async def _metadata(self, record: ManagedRepositoryRecord, status: str) -> dict:
-        branch, head = await self.runner.inspect(
-            self._target(record.project_id, record.repository_id)
-        )
+        branch, head = await self.runner.inspect(self._record_target(record))
         return self._metadata_dict(record, status, branch, head)
 
     @staticmethod
@@ -379,7 +777,12 @@ class ManagedRepositoryService:
             "branch": branch,
             "head": head,
             "depth": record.depth,
-            "capabilities": REFERENCE_CAPABILITIES.as_dict(),
+            "kind": record.kind,
+            "storage_repository_id": record.storage_repository_id or record.repository_id,
+            "storage_shared": record.storage_repository_id is not None,
+            "retention": record.retention,
+            "last_used_at": record.last_used_at,
+            "capabilities": MANAGED_KINDS[record.kind].as_dict(),
         }
 
     def _write_manifest(

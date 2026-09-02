@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Development Bridge — Панель оператора</title>
+  <link rel="stylesheet" href="{{ base_path }}/static/style.css">
+</head>
+<body data-base-path="{{ base_path }}">
+  <header>
+    <div class="brand">
+      <h1 id="bridgeName">Development Bridge</h1>
+      <span class="badge badge-success">Онлайн</span>
+    </div>
+    <div class="header-meta">
+      <div>Активных задач: <strong id="headerActiveJobs">0</strong></div>
+      <div>Маршрутов: <strong id="headerRoutes">0</strong></div>
+      <div>Исполнители: <strong id="headerExecutors">нет</strong></div>
+      <div>Аптайм: <span id="headerUptime">-</span></div>
+      <form method="POST" action="{{ base_path }}/logout" style="display: inline;">
+        <button type="submit" class="btn">Выйти</button>
+      </form>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="overview">Обзор</button>
+    <button class="tab-btn" data-tab="terminal">Терминал</button>
+    <button class="tab-btn" data-tab="jobs">Задачи</button>
+    <button class="tab-btn" data-tab="git">Git</button>
+    <button class="tab-btn" data-tab="wake">Пробуждение</button>
+    <button class="tab-btn" data-tab="system">Система</button>
+  </nav>
+
+  <main>
+    <div id="tab-overview" class="tab-pane active">
+      <div class="grid">
+        <div class="card" style="grid-column: 1 / -1;">
+          <div class="card-header">
+            <span>Активные задачи</span>
+            <span id="activeJobsBadge" class="badge badge-secondary">0</span>
+          </div>
+          <div class="card-body table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Задача</th>
+                  <th>Проект / репозиторий</th>
+                  <th>Статус</th>
+                  <th>Исполнитель</th>
+                  <th>Модель</th>
+                  <th>Запущена</th>
+                </tr>
+              </thead>
+              <tbody id="activeJobsTableBody">
+                <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Загрузка...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column: 1 / -1;">
+          <div class="card-header">
+            <span>Маршруты координатора</span>
+            <span id="routesBadge" class="badge badge-secondary">0</span>
+          </div>
+          <div class="card-body table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Маршрут</th>
+                  <th>Канал</th>
+                  <th>Состояние</th>
+                  <th>Текущая работа</th>
+                  <th>Прогресс</th>
+                </tr>
+              </thead>
+              <tbody id="routesTableBody">
+                <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Загрузка...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column: 1 / -1;">
+          <div class="card-header">
+            <span>Фокус маршрута</span>
+            <select id="routeSelect" class="form-control" style="width: auto; min-width: 220px;"></select>
+          </div>
+          <div class="card-body">
+            <h2 id="progTitle" style="font-size: 1.1rem; margin-bottom: 0.5rem;">Нет активной работы</h2>
+            <div class="progress-container">
+              <div class="progress-header">
+                <span>Выполнено</span>
+                <span id="progPercent">0%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div id="progFill" class="progress-bar-fill"></div>
+              </div>
+            </div>
+            <div class="detail-list">
+              <div class="detail-label">Статус:</div>
+              <div class="detail-val"><span id="progStatus" class="badge badge-warning">ожидание</span></div>
+              <div class="detail-label">Этап:</div>
+              <div id="progPhase" class="detail-val">-</div>
+              <div class="detail-label">Сейчас:</div>
+              <div id="progCurrent" class="detail-val">-</div>
+              <div class="detail-label">Дальше:</div>
+              <div id="progNext" class="detail-val">-</div>
+              <div class="detail-label">Подробности:</div>
+              <div id="progDetail" class="detail-val">-</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-terminal" class="tab-pane">
+      <div class="terminal-container">
+        <div class="terminal-header">
+          <div>
+            <label for="terminalJobSelect">Задача:</label>
+            <select id="terminalJobSelect" class="form-control" style="display: inline-block; width: auto; min-width: 320px;"></select>
+            <span id="terminalJobStatus" class="badge" style="margin-left: 0.5rem;">ожидание</span>
+            <span id="terminalTruncated" class="badge badge-warning" style="display: none; margin-left: 0.5rem;">Вывод обрезан</span>
+          </div>
+          <div>
+            <label style="font-size: 0.8rem; cursor: pointer; color: var(--text-secondary);">
+              <input type="checkbox" id="autoScrollCheckbox" checked> Автопрокрутка
+            </label>
+          </div>
+        </div>
+        <div class="detail-list" style="padding: 0.5rem 0;">
+          <div class="detail-label">Job ID:</div>
+          <div id="terminalJobId" class="detail-val" style="font-family: var(--font-mono); font-size: 0.8rem;">нет</div>
+        </div>
+        <div id="terminalContent" class="terminal-content">(вывод пока отсутствует)</div>
+      </div>
+    </div>
+
+    <div id="tab-jobs" class="tab-pane">
+      <div class="card">
+        <div class="card-header">Последние задачи</div>
+        <div class="card-body table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Job ID</th>
+                <th>Задача</th>
+                <th>Статус</th>
+                <th>Репозиторий</th>
+                <th>Исполнитель</th>
+                <th>Создана</th>
+                <th>Результат</th>
+              </tr>
+            </thead>
+            <tbody id="jobsTableBody">
+              <tr><td colspan="7" style="text-align: center; color: var(--text-muted);">Загрузка...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-git" class="tab-pane">
+      <div class="card">
+        <div class="card-header">Git-состояние задачи в фокусе</div>
+        <div class="card-body">
+          <div class="detail-list">
+            <div class="detail-label">Ветка:</div>
+            <div id="gitBranch" class="detail-val">-</div>
+            <div class="detail-label">HEAD:</div>
+            <div id="gitHead" class="detail-val" style="font-family: var(--font-mono); font-size: 0.8rem;">-</div>
+            <div class="detail-label">Рабочее дерево:</div>
+            <div class="detail-val"><span id="gitCleanStatus" class="badge">-</span> (<span id="gitChangedFiles">-</span>)</div>
+            <div class="detail-label">Upstream:</div>
+            <div id="gitUpstream" class="detail-val">-</div>
+            <div class="detail-label">Впереди / позади:</div>
+            <div id="gitAheadBehind" class="detail-val">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-wake" class="tab-pane">
+      <div class="card">
+        <div class="card-header">Пробуждение выбранного маршрута</div>
+        <div class="card-body">
+          <div id="wakeOwnerAlert" class="alert-danger" style="display: none; margin-bottom: 1rem;">
+            ⚠️ <strong>Нужно действие владельца:</strong> требуется вход или ручное вмешательство в Browser Host.
+          </div>
+          <div class="detail-list">
+            <div class="detail-label">Канал:</div>
+            <div id="wakeChannel" class="detail-val">-</div>
+            <div class="detail-label">Состояние:</div>
+            <div class="detail-val"><span id="wakeState" class="badge">-</span></div>
+            <div class="detail-label">Continuation ID:</div>
+            <div id="wakeContinuation" class="detail-val" style="font-family: var(--font-mono); font-size: 0.8rem;">-</div>
+            <div class="detail-label">Попытки доставки:</div>
+            <div id="wakeAttempts" class="detail-val">-</div>
+            <div class="detail-label">Доставлено:</div>
+            <div id="wakeDelivered" class="detail-val">-</div>
+            <div class="detail-label">Последний транспорт:</div>
+            <div id="wakeTransport" class="detail-val">-</div>
+            <div class="detail-label">Cooldown / backoff:</div>
+            <div id="wakeCooldown" class="detail-val">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-system" class="tab-pane">
+      <div class="card">
+        <div class="card-header">Состояние VPS</div>
+        <div class="card-body">
+          <div class="detail-list">
+            <div class="detail-label">Память:</div>
+            <div id="sysMem" class="detail-val">-</div>
+            <div class="detail-label">Диск:</div>
+            <div id="sysDisk" class="detail-val">-</div>
+            <div class="detail-label">Средняя нагрузка:</div>
+            <div id="sysLoad" class="detail-val">-</div>
+            <div class="detail-label">Процессы браузера:</div>
+            <div id="sysProcs" class="detail-val">-</div>
+            <div class="detail-label">Аптайм Bridge:</div>
+            <div id="sysUptime" class="detail-val">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div>Соединение: <span id="connStatus" class="badge badge-warning">Подключение...</span></div>
+    <div>Обновлено: <span id="lastUpdated">-</span></div>
+  </footer>
+
+  <script src="{{ base_path }}/static/app.js"></script>
+</body>
+</html>
