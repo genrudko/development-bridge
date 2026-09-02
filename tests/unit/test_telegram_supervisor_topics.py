@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.coordinator import RouteRegistry
-from app.telegram_supervisor import TelegramSupervisorService
+from app.telegram_supervisor import TelegramSupervisorService, prepare_supervisor_session
 
 
 class FakeCoordinator:
@@ -99,3 +99,16 @@ async def test_supervisor_replies_to_configured_topic(tmp_path):
     assert client.calls == [
         (-1004377708839, "⚡ Bridge: ok", {"reply_to": 56})
     ]
+
+
+def test_supervisor_session_isolated_copy(tmp_path):
+    source = tmp_path / "telegram.session"
+    source.write_bytes(b"authorized-session")
+    source.chmod(0o600)
+
+    isolated = prepare_supervisor_session(source)
+
+    assert isolated != source
+    assert isolated.name == "telegram.supervisor.session"
+    assert isolated.read_bytes() == source.read_bytes()
+    assert isolated.stat().st_mode & 0o777 == 0o600

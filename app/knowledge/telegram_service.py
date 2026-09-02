@@ -77,10 +77,18 @@ class TelegramKnowledgeService:
                 history_complete = len(messages) < limit
             elif not history_complete:
                 phase = "history"
-                messages = await self.adapter.fetch_messages(
-                    source, limit=limit, before_id=int(oldest)
+                new_messages = await self.adapter.fetch_messages(
+                    source, limit=limit, after_id=int(newest)
                 )
-                history_complete = len(messages) < limit
+                new_count = len(new_messages)
+                remaining = limit - new_count
+                history_messages = ()
+                if remaining > 0:
+                    history_messages = await self.adapter.fetch_messages(
+                        source, limit=remaining, before_id=int(oldest)
+                    )
+                    history_complete = len(history_messages) < remaining
+                messages = tuple(new_messages) + tuple(history_messages)
             else:
                 phase = "incremental"
                 new_messages = await self.adapter.fetch_messages(

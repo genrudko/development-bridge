@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +13,14 @@ from telethon.errors import RPCError
 from app.api.errors import BridgeError, ErrorCode
 from app.coordinator import CoordinatorService, RouteRegistry
 from app.knowledge.telegram import ensure_session_file
+
+
+def prepare_supervisor_session(session_path: Path) -> Path:
+    source = ensure_session_file(session_path)
+    isolated = source.with_name(f"{source.stem}.supervisor{source.suffix}")
+    shutil.copy2(source, isolated)
+    os.chmod(isolated, 0o600)
+    return isolated
 
 
 class TelegramSupervisorService:
@@ -66,9 +76,9 @@ class TelegramSupervisorService:
                 ErrorCode.TELEGRAM_NOT_CONFIGURED,
                 "Telegram supervisor configuration is incomplete",
             )
-        ensure_session_file(self.session_path)
+        supervisor_session = prepare_supervisor_session(self.session_path)
         client = TelegramClient(
-            str(self.session_path), self.api_id, self.api_hash, flood_sleep_threshold=0
+            str(supervisor_session), self.api_id, self.api_hash, flood_sleep_threshold=0
         )
         await client.connect()
         if not await client.is_user_authorized():
