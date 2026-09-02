@@ -101,3 +101,38 @@ def test_coordinator_route_list_returns_bounded_metadata_without_mutating_state(
 
     # Check session binding was not created/changed
     assert container.coordinator.session_binding("test-session") is None
+
+
+def test_bind_current_allows_sessionless_modern_mcp_request(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old",
+        "telegram-bridge-g4",
+    )
+    registry = build_tool_registry(container)
+    tool = registry.get("coordinator_route_bind_current")
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-bind-current-sessionless"),
+    ))
+    data = json.loads(result.content[0].text)["data"]
+    assert data["state"] == "discovery_prepared"
+    pending = container.route_registry.pending_current_bind("bridge")
+    assert pending is not None
+    assert pending["session_id"] is None
+    assert result.structured_content["route_discovery"]["route_id"] == "bridge"
+
+
+def test_bind_current_schema_requires_explicit_boolean_for_project_change(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    registry = build_tool_registry(build_container(settings))
+    schema = registry.get("coordinator_route_bind_current").definition.input_schema
+    assert schema["properties"]["allow_project_change"]["type"] == "boolean"
+    assert schema["properties"]["allow_project_change"]["default"] is False

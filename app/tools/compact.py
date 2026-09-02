@@ -38,6 +38,7 @@ COMPACT_VISIBLE_TOOLS = (
     "job_output",
     "bridge_restart",
     "coordinator_x_mount",
+    "coordinator_route_bind_current",
     "coordinator_ack",
     "coordinator_exec_and_wake",
     "coordinator_wake_on_jobs",

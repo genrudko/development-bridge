@@ -15,6 +15,18 @@ Every direct wake must use both:
 
 Do not replace the Project URL with a guessed canonical `/c/<conversation-id>` route. Preflight must navigate the authoritative route and verify the exact conversation identity. ReviewGPT accepts both plain and Project conversation URL forms for same-thread identity, but Bridge production targeting remains authoritative-Project-URL first.
 
+### Current-chat autodiscovery
+
+When an existing logical route must be rebound to the exact physical ChatGPT conversation that invoked Bridge, use `coordinator_route_bind_current`; do not ask the owner to copy the browser URL. The flow is deliberately fail-closed:
+
+1. Bridge prepares a durable one-time `DBRIDGE_ROUTE_BIND_*` marker bound to the route generation and, when the transport provides one, the MCP session. Modern sessionless MCP requests remain safe because the marker itself is committed by the mounted app in the invoking physical conversation and is then verified through authenticated ChatGPT history search.
+2. The mounted MCP App commits that marker once in the current physical conversation.
+3. ReviewGPT opens its authenticated ChatGPT profile and uses Global Search for the exact marker.
+4. Discovery requires exactly one result, reopens it through the expected Project route shape, and verifies the marker in that conversation.
+5. Bridge verifies same-project identity and atomically updates the route/session binding. A same-chat result is a no-op; ambiguity, cross-project results, missing indexing, or authentication problems do not change the route.
+
+Marker emission and discovery completion are idempotent in the MCP App so retries do not create duplicate marker turns. ReviewGPT browser operations are serialized to prevent current-chat discovery from racing a normal wake probe or delivery.
+
 ## On-demand browser lifecycle
 
 The ReviewGPT Chromium/Xvfb runtime is on-demand:
