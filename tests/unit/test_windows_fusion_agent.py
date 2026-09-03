@@ -79,6 +79,34 @@ async def test_large_result_uploads_safe_chunks_then_small_reference(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_small_inline_image_is_externalized_before_result_delivery(tmp_path):
+    calls, uploaded = [], bytearray()
+
+    class UploadBridge:
+        async def post(self, action, body=None, query=""):
+            calls.append((action, body))
+            if action == "result-upload-start":
+                return {"upload_id": "u-small-image", "offset": 0}
+            if action == "result-upload-chunk":
+                chunk = base64.b64decode(body["data"])
+                uploaded.extend(chunk)
+                return {"offset": len(uploaded)}
+            if action == "result-upload-finalize":
+                return {"external_result": {"result_id": "r-small-image", "size_bytes": len(uploaded), "sha256": "b" * 64}}
+            return {"accepted": True}
+
+    result = {
+        "content": [{"type": "image", "data": base64.b64encode(b"tiny-image").decode("ascii"), "mimeType": "image/png"}],
+        "isError": False,
+    }
+    assert len(json.dumps(result).encode()) < INLINE_RESULT_BYTES
+    assert await submit_result_safely(UploadBridge(), "cmd-small-image", result, outbox=ResultOutbox(tmp_path / "outbox"))
+    assert json.loads(uploaded) == result
+    assert calls[-1][0] == "result"
+    assert "content" not in json.dumps(calls[-1][1])
+
+
+@pytest.mark.asyncio
 async def test_outbox_flush_precedes_next_claim(tmp_path):
     outbox = ResultOutbox(tmp_path / "outbox")
     outbox.save("old", {"ok": True})
