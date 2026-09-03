@@ -638,6 +638,8 @@ async def test_delivery_argv_structure(tmp_path: Path):
     assert argv[argv.index("--chat-url") + 1] == target.route_url
     assert "--prompt" in argv
     assert argv[argv.index("--prompt") + 1] == "DBRIDGE_CONTINUE cont_123 prompt text"
+    assert argv[argv.index("--model") + 1] == "current"
+    assert argv[argv.index("--thinking") + 1] == "current"
     assert "--no-artifacts" in argv
     assert "--no-zip" in argv
     assert "--send" in argv
