@@ -187,6 +187,35 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         result.meta = dict(COORDINATOR_UI_META)
         return result
 
+    async def bind_current(ctx, params, request_context):
+        from app.api.errors import BridgeError, ErrorCode
+
+        arguments = params.arguments or {}
+        route_id = container.route_registry.validate_route_id(arguments["route_id"])
+        session_id = _session_id(ctx)
+        route = container.route_registry.resolve(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        if session_id is not None:
+            container.coordinator.unbind_session(session_id)
+        binding = _route_binding(container, route, route_state="discovery")
+        pending = container.route_registry.prepare_current_bind(
+            route_id,
+            session_id=session_id,
+            allow_project_change=bool(arguments.get("allow_project_change", False)),
+        )
+        result = to_mcp_result(success(request_context.request_id, {
+            "route_id": route_id,
+            "state": "discovery_prepared",
+        }))
+        result = attach_coordinator_ui(result, ctx, binding)
+        result.structured_content["route_discovery"] = {
+            "route_id": route_id,
+            "token": pending["token"],
+            "marker": pending["marker"],
+        }
+        return result
+
     async def takeover(ctx, params, request_context):
         arguments = params.arguments or {}
         route = container.route_registry.takeover(
@@ -358,6 +387,24 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 _meta=common_meta,
             ),
             mount,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_bind_current",
+                description="Bind an existing logical route to this exact physical ChatGPT conversation without asking the owner for a URL; by default it fails closed across projects, while explicit allow_project_change=true authorizes this one marker-verified route migration",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
+                        "allow_project_change": {"type": "boolean", "default": False},
+                    },
+                    "required": ["route_id"],
+                    "additionalProperties": False,
+                },
+                _meta=common_meta,
+            ),
+            bind_current,
             "coordinator-x",
         ),
         RegisteredTool(

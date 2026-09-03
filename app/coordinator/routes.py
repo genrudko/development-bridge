@@ -3,16 +3,17 @@ from __future__ import annotations
 import json
 import os
 import re
-from secrets import token_urlsafe
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from secrets import token_urlsafe
 
 from app.api.errors import BridgeError, ErrorCode
+from app.coordinator.chatgpt_target import parse_chatgpt_target
 
 _ROUTE_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
 
 _PROJECT_STABLE_ID_RE = re.compile(r"^(g-p-[0-9a-fA-F]{32})(?:-|$)")
+_CURRENT_BIND_TTL_SECONDS = 10 * 60
 
 
 def project_identity(project_id: str | None) -> str | None:
@@ -24,22 +25,12 @@ def project_identity(project_id: str | None) -> str | None:
 
 
 def canonical_chat_url(value: str) -> str:
-    parts = urlsplit(str(value).strip())
-    if parts.scheme != "https" or parts.netloc != "chatgpt.com" or "/c/" not in parts.path:
-        raise BridgeError(ErrorCode.INVALID_ARGUMENT, "url must point to an https://chatgpt.com conversation")
-    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+    return parse_chatgpt_target(value).route_url
 
 
 def conversation_parts(url: str) -> tuple[str | None, str]:
-    canonical = canonical_chat_url(url)
-    path = urlsplit(canonical).path
-    conversation_id = path.rsplit("/c/", 1)[1].split("/", 1)[0]
-    project_id = None
-    for part in path.split("/"):
-        if part.startswith("g-p-"):
-            project_id = part
-            break
-    return project_id, conversation_id
+    target = parse_chatgpt_target(url)
+    return target.project_id, target.conversation_id
 
 
 def default_route_registry_path() -> Path:
@@ -168,6 +159,95 @@ class RouteRegistry:
                 data["requested_route"] = route_id
             self._save(data)
         return {**data["routes"][route_id], "route_id": route_id}
+
+    def pending_current_bind(self, route_id: str) -> dict | None:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        pending = (data.get("current_binds") or {}).get(route_id)
+        return {**pending, "route_id": route_id} if isinstance(pending, dict) else None
+
+    def prepare_current_bind(self, route_id: str, *, session_id: str | None, allow_project_change: bool = False) -> dict:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        route = data["routes"].get(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        binds = data.setdefault("current_binds", {})
+        existing = binds.get(route_id)
+        if isinstance(existing, dict):
+            try:
+                created_at = datetime.fromisoformat(str(existing.get("created_at") or ""))
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=UTC)
+                stale = (datetime.now(UTC) - created_at.astimezone(UTC)).total_seconds() > _CURRENT_BIND_TTL_SECONDS
+            except (TypeError, ValueError):
+                stale = True
+            if stale:
+                del binds[route_id]
+                existing = None
+            elif (
+                int(existing.get("source_generation", -1)) == int(route.get("generation", 0))
+                and existing.get("session_id") == session_id
+                and bool(existing.get("allow_project_change", False)) is bool(allow_project_change)
+                and existing.get("state") == "prepared"
+            ):
+                return {**existing, "route_id": route_id}
+            else:
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    f"current-chat bind already pending for route: {route_id}",
+                    retryable=True,
+                )
+        token = f"bind_{token_urlsafe(24)}"
+        marker = "DBRIDGE_ROUTE_BIND_" + token.removeprefix("bind_")
+        pending = {
+            "token": token,
+            "marker": marker,
+            "state": "prepared",
+            "source_generation": int(route.get("generation", 0)),
+            "channel_id": route["channel_id"],
+            "session_id": session_id,
+            "allow_project_change": bool(allow_project_change),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        binds[route_id] = pending
+        self._save(data)
+        return {**pending, "route_id": route_id}
+
+    def complete_current_bind(self, route_id: str, token: str, url: str) -> dict:
+        route_id = self.validate_route_id(route_id)
+        canonical = canonical_chat_url(url)
+        project_id, conversation_id = conversation_parts(canonical)
+        data = self._load()
+        route = data["routes"].get(route_id)
+        pending = (data.get("current_binds") or {}).get(route_id)
+        if route is None or not isinstance(pending, dict) or pending.get("token") != token:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+        if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
+        if (
+            project_identity(project_id) != project_identity(route.get("project_id"))
+            and not bool(pending.get("allow_project_change", False))
+        ):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate belongs to a different project")
+        changed = conversation_id != route.get("conversation_id")
+        if changed:
+            generation = int(route.get("generation", 0)) + 1
+            route = {
+                "title": route.get("title") or route_id,
+                "url": canonical,
+                "project_id": project_id,
+                "conversation_id": conversation_id,
+                "channel_id": f"telegram-{route_id}-g{generation}",
+                "generation": generation,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+            data["routes"][route_id] = route
+            data["requested_route"] = route_id
+            data["requested_at"] = datetime.now(UTC).isoformat()
+        del data["current_binds"][route_id]
+        self._save(data)
+        return {**route, "route_id": route_id, "changed": changed, "session_id": pending.get("session_id")}
 
     def pending_rollover(self, route_id: str) -> dict | None:
         route_id = self.validate_route_id(route_id)

@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
 import pytest
 
 from app.coordinator.routes import RouteRegistry
@@ -69,7 +70,7 @@ def route_registry(tmp_path: Path) -> RouteRegistry:
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "main",
-        "https://chatgpt.com/g-p-test-proj/c/67890-uuid",
+        "https://chatgpt.com/g/g-p-test-proj/c/67890-uuid",
         "coordinator",
         "Main Route",
     )
@@ -116,7 +117,7 @@ async def test_exact_route_mapping_passes_route_url_and_conversation_id(
     assert transport.probe_calls[0].route_id == "main"
     assert transport.probe_calls[0].channel_id == "coordinator"
     assert transport.probe_calls[0].conversation_id == "67890-uuid"
-    assert transport.probe_calls[0].route_url == "https://chatgpt.com/g-p-test-proj/c/67890-uuid"
+    assert transport.probe_calls[0].route_url == "https://chatgpt.com/g/g-p-test-proj/c/67890-uuid"
 
     assert len(transport.deliver_calls) == 1
     assert transport.deliver_calls[0].target == transport.probe_calls[0]
@@ -337,7 +338,7 @@ async def test_strictly_single_lane_one_delivery_per_cycle(
     monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
     route_registry.bootstrap(
         "second",
-        "https://chatgpt.com/g-p-second-proj/c/11111-uuid",
+        "https://chatgpt.com/g/g-p-second-proj/c/11111-uuid",
         "channel-two",
         "Second Route",
     )
@@ -574,3 +575,28 @@ async def test_ready_legacy_wake_without_continuation_id_causes_zero_probe_and_z
     assert status_after.get("continuation_id") is None
     assert status_after.get("last_transport_name") is None
     assert status_after.get("last_transport_disposition") is None
+
+@pytest.mark.asyncio
+async def test_observed_model_turn_completes_direct_continuation_without_waiting_for_model_ack(
+    coordinator: CoordinatorService,
+    route_registry: RouteRegistry,
+):
+    await coordinator.arm_resilient("Job done", channel_id="coordinator")
+    transport = MockWakeTransport(
+        deliver_results=[WakeDeliveryResult(
+            disposition="delivered",
+            detail="Committed user turn; exact model turn observed",
+            model_turn_observed=True,
+        )]
+    )
+    service = CoordinatorWakeDeliveryService(
+        coordinator,
+        route_registry,
+        transport=transport,
+        enabled=True,
+    )
+
+    await service.run_once()
+
+    status = await coordinator.status("coordinator", delivery_mode="direct")
+    assert status == {"channel_id": "coordinator", "state": "idle", "ready": False}
