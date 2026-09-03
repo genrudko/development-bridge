@@ -10,7 +10,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from secrets import token_urlsafe
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import quote
 
 from app.api.capability_exports import CapabilityExportRegistry
@@ -64,8 +64,8 @@ class DesktopNodeService:
     _OPERATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
     _MAX_TOOL_NAME_LENGTH = 200
     _MAX_JOURNAL_METADATA_BYTES = 8192
-    _MUTATING_TOOLS = {"fusion_mcp_execute", "fusion_mcp_update"}
-    _TERMINAL_OPERATION_STATES = {"succeeded", "failed", "late_succeeded", "late_failed"}
+    _MUTATING_TOOLS: ClassVar[frozenset[str]] = frozenset({"fusion_mcp_execute", "fusion_mcp_update"})
+    _TERMINAL_OPERATION_STATES: ClassVar[frozenset[str]] = frozenset({"succeeded", "failed", "late_succeeded", "late_failed"})
 
     def __init__(self, settings: DesktopNodeSettings, public_base_url: str | None = None, endpoint: str = "/mcp") -> None:
         self.settings = settings

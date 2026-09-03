@@ -237,12 +237,19 @@ async def submit_result_safely(
     if outbox is not None:
         outbox.save(command_id, result)
     serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    content = result.get("content")
+    contains_inline_image = isinstance(content, list) and any(
+        isinstance(item, dict)
+        and item.get("type") == "image"
+        and isinstance(item.get("data"), str)
+        for item in content
+    )
     attempt = 0
     started = time.monotonic()
     while attempt < max_attempts and time.monotonic() - started <= max_elapsed_seconds:
         try:
             delivered_result = result
-            if len(serialized) > INLINE_RESULT_BYTES:
+            if contains_inline_image or len(serialized) > INLINE_RESULT_BYTES:
                 digest = hashlib.sha256(serialized).hexdigest()
                 upload = await bridge.post("result-upload-start", {"command_id": command_id, "size_bytes": len(serialized), "sha256": digest})
                 upload_id = upload["upload_id"]
