@@ -149,6 +149,11 @@ def test_stale_pending_current_bind_is_replaced(tmp_path: Path):
     assert second["session_id"] == "mcp-session-2"
 
 
+def test_discovery_helper_allows_plain_chat_source_when_project_change_is_authorized():
+    helper = (Path(__file__).parents[2] / "app/coordinator/review_gpt_discovery.mjs").read_text(encoding="utf-8")
+    assert "if (!expectedProject && !allowProjectChange) throw new Error('route-url-has-no-project');" in helper
+
+
 def test_discovery_helper_uses_observed_project_route_not_synthetic_expected_prefix():
     helper = (Path(__file__).parents[2] / "app/coordinator/review_gpt_discovery.mjs").read_text(encoding="utf-8")
     assert "candidateUrl(" not in helper

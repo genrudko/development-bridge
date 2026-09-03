@@ -50,7 +50,7 @@ function canonicalObservedRoute(value) {
 async function main() {
   if (!endpoint || !/^DBRIDGE_ROUTE_BIND_[A-Za-z0-9_-]{20,120}$/.test(marker) || !routeUrl || !output) throw new Error('invalid-arguments');
   const expectedProject = projectIdentityFromUrl(routeUrl);
-  if (!expectedProject) throw new Error('route-url-has-no-project');
+  if (!expectedProject && !allowProjectChange) throw new Error('route-url-has-no-project');
 
   const pages = await (await fetch(endpoint + '/json/list')).json();
   const page = pages.find((x) => x.type === 'page' && String(x.url || '').includes('chatgpt.com')) || pages.find((x) => x.type === 'page');
