@@ -506,7 +506,11 @@ class DesktopNodeService:
             if not isinstance(content, dict) or content.get("type") != "image":
                 continue
             data = content.get("data")
+            if not isinstance(data, str):
+                data = content.get("base64Data")
             mime_type = content.get("mimeType")
+            if not isinstance(mime_type, str):
+                mime_type = content.get("mime_type")
             if not isinstance(data, str) or not isinstance(mime_type, str):
                 continue
             try:

@@ -205,3 +205,69 @@ def test_expired_recovered_result_removes_orphaned_image_files(tmp_path):
         service.external_result({"result_id": result_id})
     assert not result_path.exists()
     assert not image_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_external_result_exposes_live_relay_snake_case_image_resource(tmp_path):
+    service = DesktopNodeService(
+        configured(call_timeout_seconds=1, result_artifact_directory=tmp_path),
+        public_base_url="https://bridge.example",
+        endpoint="/mcp",
+    )
+    await service.register("desk-1", [{"name": "fusion_mcp_read"}], True)
+    call = asyncio.create_task(service.call("desk-1", "fusion_mcp_read", {"queryType": "screenshot"}))
+    command = await service.claim("desk-1", 0.2)
+    png = b"\x89PNG\r\n\x1a\nlive-relay-image"
+    value = {
+        "content": [{
+            "type": "image",
+            "data": base64.b64encode(png).decode("ascii"),
+            "mime_type": "image/png",
+        }],
+        "is_error": False,
+        "result_type": "complete",
+    }
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    upload = service.begin_result_upload(
+        "desk-1", command["command_id"], len(raw), hashlib.sha256(raw).hexdigest()
+    )
+    service.append_result_upload(
+        "desk-1", upload["upload_id"], 0, base64.b64encode(raw).decode("ascii")
+    )
+    completed = service.finalize_result_upload("desk-1", upload["upload_id"])
+    await service.submit_result("desk-1", command["command_id"], completed)
+    reference = await call
+
+    _, metadata = service.external_result(reference["external_result"])
+    assert len(metadata["resources"]) == 1
+    resource = metadata["resources"][0]
+    assert resource["mime_type"] == "image/png"
+    token = resource["uri"].rsplit("/", 1)[-1]
+    path, _ = service.resolve_external_export(token)
+    assert path.read_bytes() == png
+
+
+def test_external_result_accepts_documented_base64_data_image_shape(tmp_path):
+    service = DesktopNodeService(
+        configured(result_artifact_directory=tmp_path),
+        public_base_url="https://bridge.example",
+        endpoint="/mcp",
+    )
+    png = b"\x89PNG\r\n\x1a\ndocumented-shape"
+    value = {
+        "content": [{
+            "type": "image",
+            "base64Data": base64.b64encode(png).decode("ascii"),
+            "mimeType": "image/png",
+        }],
+        "isError": False,
+    }
+    result_id = service._store_result_value("desk-1", "command-1", value)
+
+    _, metadata = service.external_result({"result_id": result_id})
+    assert len(metadata["resources"]) == 1
+    resource = metadata["resources"][0]
+    token = resource["uri"].rsplit("/", 1)[-1]
+    path, item = service.resolve_external_export(token)
+    assert path.read_bytes() == png
+    assert item["mime_type"] == "image/png"
