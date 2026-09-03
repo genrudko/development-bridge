@@ -93,7 +93,7 @@ class ApplicationContainer:
     commands: RepositoryCommandService
     bridge_restart: BridgeRestartService
     desktop_nodes: DesktopNodeService
-    coordinator_wake_delivery: CoordinatorWakeDeliveryService | None
+    coordinator_wake_delivery: CoordinatorWakeDeliveryService | None = None
 
 
 def build_container(

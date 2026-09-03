@@ -45,6 +45,7 @@ Treat model/tool round-trips, coordinator chat context, and live ChatGPT Web tra
 - Ordinary setup: discover registered routes via hidden `coordinator_route_list` (via `bridge_search -> bridge_schema -> bridge_call` in compact mode) and mount the existing route with `coordinator_x_mount(route_id=...)`.
 - Current route mapping: `development-bridge -> bridge`, `eod -> eod`, AD5X product work -> `ad5xwork`; if uncertain use `coordinator_route_list`.
 - Never ask the owner to copy a ChatGPT conversation URL for ordinary executor setup; URLs are only relevant for initial route bootstrap or exceptional manual takeover.
+- If the mounted logical route is stale or points at another physical chat, use hidden `coordinator_route_bind_current`: its MCP App emits one nonce marker, ReviewGPT resolves exactly one marker-verified same-project conversation from authenticated ChatGPT history, and the bind fails closed on ambiguity.
 - Automatic rollover remains the normal physical-chat successor path; manual takeover across different ChatGPT projects fails closed with `POLICY_VIOLATION`.
 
 ## Evidence-First Bridge Semantics
