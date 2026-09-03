@@ -86,3 +86,41 @@ async def test_operator_call_roundtrip_with_fake_agent():
         response = await operator_call
         assert response.status_code == 200
         assert response.json() == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_operator_call_preserves_unicode_arguments_and_result():
+    app = app_with("secret")
+    headers = {"Authorization": "Bearer secret"}
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        await client.post(
+            "/mcp/desktop-nodes/desk/register",
+            headers=headers,
+            json={"fusion_available": True, "tools": [{"name": "fusion_mcp_execute"}]},
+        )
+        arguments = {
+            "script": "print('Привет, Fusion — расписание пыток 😈')",
+            "label": "РАСПИСАНИЕ ПЫТОК",
+        }
+        operator_call = asyncio.create_task(client.post(
+            "/mcp/desktop-nodes/desk/operator/call",
+            headers=headers,
+            json={"tool_name": "fusion_mcp_execute", "arguments": arguments},
+        ))
+        claimed = await client.post("/mcp/desktop-nodes/desk/claim?wait=1", headers=headers)
+        command = claimed.json()["command"]
+        assert command["arguments"] == arguments
+
+        result = {
+            "content": [{"type": "text", "text": "Готово: кириллица не повреждена ✅"}],
+            "isError": False,
+        }
+        await client.post(
+            "/mcp/desktop-nodes/desk/result",
+            headers=headers,
+            json={"command_id": command["command_id"], "result": result},
+        )
+        response = await operator_call
+        assert response.status_code == 200
+        assert response.json() == result

@@ -166,7 +166,98 @@ async def test_bridge_restart_marks_unclaimed_queue_orphaned(tmp_path):
     assert status["last_operation"]["status"] == "orphaned"
     assert status["last_operation"]["recovery_reason"] == "bridge_restarted_before_claim"
     assert status["uncertain_operations"] == []
+    with pytest.raises(BridgeError) as orphaned_result:
+        restarted.operation_result("desk-1", "op-queued-restart-01")
+    assert orphaned_result.value.code is ErrorCode.INVALID_ARGUMENT
+    assert orphaned_result.value.retryable is False
 
     call.cancel()
     with pytest.raises(asyncio.CancelledError):
         await call
+
+
+@pytest.mark.asyncio
+async def test_async_submit_status_and_result_roundtrip(tmp_path):
+    service = DesktopNodeService(configured(
+        tmp_path,
+        call_timeout_seconds=1,
+        result_artifact_directory=tmp_path / "results",
+    ))
+    await service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+
+    submitted = await service.submit(
+        "desk-1",
+        "fusion_mcp_execute",
+        {"script": "print('длинная операция')"},
+        {"operation_id": "op-async-01", "mutation": True},
+    )
+    assert submitted["operation_id"] == "op-async-01"
+    assert submitted["status"] == "queued"
+
+    command = await service.claim("desk-1", 0.2)
+    assert command is not None
+    assert service.operation_status("desk-1", "op-async-01")["status"] == "running"
+
+    result = {
+        "content": [{"type": "text", "text": "готово"}],
+        "isError": False,
+    }
+    await service.submit_result("desk-1", command["command_id"], result)
+
+    status = service.operation_status("desk-1", "op-async-01")
+    assert status["status"] == "succeeded"
+    assert status["result_sha256"]
+    assert service.operation_result("desk-1", "op-async-01")[0] == result
+
+
+@pytest.mark.asyncio
+async def test_async_submit_survives_synchronous_call_timeout(tmp_path):
+    service = DesktopNodeService(configured(
+        tmp_path,
+        call_timeout_seconds=0.01,
+        result_artifact_directory=tmp_path / "results",
+    ))
+    await service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    submitted = await service.submit(
+        "desk-1", "fusion_mcp_execute", {},
+        {"operation_id": "op-long-running-01", "mutation": True},
+    )
+    assert submitted == {"operation_id": "op-long-running-01", "status": "queued"}
+    command = await service.claim("desk-1", 0.2)
+    assert command is not None
+
+    await asyncio.sleep(0.03)
+    assert service.operation_status("desk-1", "op-long-running-01")["status"] == "running"
+
+    await service.submit_result(
+        "desk-1", command["command_id"],
+        {"content": [{"type": "text", "text": "done"}], "isError": False},
+    )
+    assert service.operation_status("desk-1", "op-long-running-01")["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_completed_async_operation_status_and_result_survive_bridge_restart(tmp_path):
+    settings = configured(
+        tmp_path,
+        call_timeout_seconds=0.01,
+        result_artifact_directory=tmp_path / "results",
+    )
+    first = DesktopNodeService(settings)
+    await first.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    await first.submit(
+        "desk-1", "fusion_mcp_execute", {},
+        {"operation_id": "op-durable-result-01", "mutation": True},
+    )
+    command = await first.claim("desk-1", 0.2)
+    assert command is not None
+    result = {
+        "content": [{"type": "text", "text": "результат пережил рестарт"}],
+        "isError": False,
+    }
+    await first.submit_result("desk-1", command["command_id"], result)
+    assert first.operation_status("desk-1", "op-durable-result-01")["status"] == "succeeded"
+
+    restarted = DesktopNodeService(settings)
+    assert restarted.operation_status("desk-1", "op-durable-result-01")["status"] == "succeeded"
+    assert restarted.operation_result("desk-1", "op-durable-result-01")[0] == result

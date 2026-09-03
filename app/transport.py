@@ -184,8 +184,8 @@ def create_streamable_http_app(
         path, item = resolved
         return FileResponse(
             path,
-            media_type="application/json",
-            filename=path.name,
+            media_type=item.get("mime_type", "application/json"),
+            filename=item.get("file_name", path.name),
             headers={
                 "Cache-Control": "private, no-store",
                 "ETag": f'"sha256:{item["sha256"]}"',
