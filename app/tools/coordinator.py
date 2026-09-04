@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import suppress
+
 from mcp import types
 
 from app.api.errors import BridgeError, ErrorCode
@@ -517,10 +519,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             async with container.route_registry.route_lock(route_id_str):
                 route = container.route_registry.resolve(route_id_str)
                 if route is None or not container.route_registry.is_bound(route):
-                    try:
+                    with suppress(Exception):
                         await container.jobs.cancel(repository, job.job_id)
-                    except Exception:
-                        pass
                     raise BridgeError(
                         ErrorCode.POLICY_VIOLATION,
                         "This logical route is unbound; cannot register job waiter",
@@ -530,10 +530,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     int(route.get("generation", -1)) != int(destination.get("generation", 0))
                     or str(route.get("channel_id")) != str(destination.get("channel_id"))
                 ):
-                    try:
+                    with suppress(Exception):
                         await container.jobs.cancel(repository, job.job_id)
-                    except Exception:
-                        pass
                     raise BridgeError(
                         ErrorCode.POLICY_VIOLATION,
                         "Route generation or channel is stale; cannot register job waiter",
@@ -553,10 +551,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                         repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
                     )
                 except Exception:
-                    try:
+                    with suppress(Exception):
                         await container.jobs.cancel(repository, job.job_id)
-                    except Exception:
-                        pass
                     raise
                 response = {**job.status_dict(), **waiter, "channel_id": chan, "route_id": route_id_str}
         else:
@@ -568,10 +564,8 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
                 )
             except Exception:
-                try:
+                with suppress(Exception):
                     await container.jobs.cancel(repository, job.job_id)
-                except Exception:
-                    pass
                 raise
             response = {**job.status_dict(), **waiter, "channel_id": channel_id}
         result = to_mcp_result(success(request_context.request_id, response))

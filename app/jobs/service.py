@@ -290,7 +290,7 @@ class JobService:
         for waiter, jobs, reason in ready:
             try:
                 await waiter.callback(jobs, reason)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- callback boundary must restore waiter on arbitrary failure
                 async with self._terminal_lock:
                     self._firing_terminal_waiters.pop(waiter.waiter_id, None)
                     if waiter.durable:
