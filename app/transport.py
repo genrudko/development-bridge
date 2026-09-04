@@ -718,6 +718,150 @@ def create_streamable_http_app(
             headers=route_control_redirect_headers,
         )
 
+    def _extract_route_control_auth(request: Request, body_data: dict | None = None) -> str | None:
+        auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            return auth_header[7:].strip()
+        custom_header = request.headers.get("X-Route-Control-Token") or request.headers.get("x-route-control-token")
+        if custom_header:
+            return custom_header.strip()
+        if request.query_params.get("token"):
+            return request.query_params.get("token")
+        if request.query_params.get("control_token"):
+            return request.query_params.get("control_token")
+        if body_data and isinstance(body_data, dict):
+            return body_data.get("token") or body_data.get("control_token")
+        return None
+
+    async def _parse_json_safely(request: Request) -> dict:
+        try:
+            body = await request.json()
+            return body if isinstance(body, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    async def route_control_status(request: Request):
+        service = container.route_control
+        if service is None:
+            return JSONResponse({"ok": False, "error": "Route control is not configured"}, status_code=500, headers=route_control_headers)
+
+        body_data = await _parse_json_safely(request) if request.method == "POST" else {}
+        token = _extract_route_control_auth(request, body_data)
+        route_id = request.path_params.get("route_id") or request.query_params.get("route_id") or body_data.get("route_id")
+
+        try:
+            token_rec = service.verify_control_token(token, route_id=route_id)
+            target_route = route_id or token_rec["route_id"]
+            safe_st = service.safe_status(target_route)
+            return JSONResponse(
+                {"ok": True, "status": safe_st, **safe_st},
+                status_code=200,
+                headers=route_control_headers,
+            )
+        except BridgeError as error:
+            status_code = 401 if error.code is ErrorCode.PERMISSION_DENIED else (409 if error.code is ErrorCode.POLICY_VIOLATION else 400)
+            return JSONResponse(
+                {"ok": False, "error": error.message, "code": error.code.value},
+                status_code=status_code,
+                headers=route_control_headers,
+            )
+
+    async def route_control_cancel_wakes(request: Request):
+        service = container.route_control
+        if service is None:
+            return JSONResponse({"ok": False, "error": "Route control is not configured"}, status_code=500, headers=route_control_headers)
+
+        body_data = await _parse_json_safely(request)
+        token = _extract_route_control_auth(request, body_data)
+        route_id = request.path_params.get("route_id") or request.query_params.get("route_id") or body_data.get("route_id")
+
+        try:
+            token_rec = service.verify_control_token(token, route_id=route_id)
+            target_route = route_id or token_rec["route_id"]
+            res = await service.cancel_wakes(target_route)
+            safe_st = service.safe_status(target_route)
+            return JSONResponse(
+                {"ok": True, "action": "cancel_wakes", **res, "safe_status": safe_st},
+                status_code=200,
+                headers=route_control_headers,
+            )
+        except BridgeError as error:
+            status_code = 401 if error.code is ErrorCode.PERMISSION_DENIED else (409 if error.code is ErrorCode.POLICY_VIOLATION else 400)
+            payload = {"ok": False, "error": error.message, "code": error.code.value}
+            if error.details:
+                payload["details"] = error.details
+            target_route = route_id
+            if target_route:
+                try:
+                    payload["safe_status"] = service.safe_status(target_route)
+                except BridgeError:
+                    pass
+            return JSONResponse(payload, status_code=status_code, headers=route_control_headers)
+
+    async def route_control_unbind(request: Request):
+        service = container.route_control
+        if service is None:
+            return JSONResponse({"ok": False, "error": "Route control is not configured"}, status_code=500, headers=route_control_headers)
+
+        body_data = await _parse_json_safely(request)
+        token = _extract_route_control_auth(request, body_data)
+        route_id = request.path_params.get("route_id") or request.query_params.get("route_id") or body_data.get("route_id")
+
+        try:
+            token_rec = service.verify_control_token(token, route_id=route_id)
+            target_route = route_id or token_rec["route_id"]
+            res = await service.unbind(target_route, expected_generation=token_rec["generation"])
+            safe_st = service.safe_status(target_route)
+            return JSONResponse(
+                {"ok": True, "action": "unbind", **res, "safe_status": safe_st},
+                status_code=200,
+                headers=route_control_headers,
+            )
+        except BridgeError as error:
+            status_code = 401 if error.code is ErrorCode.PERMISSION_DENIED else (409 if error.code is ErrorCode.POLICY_VIOLATION else 400)
+            payload = {"ok": False, "error": error.message, "code": error.code.value}
+            if error.details:
+                payload["details"] = error.details
+            target_route = route_id
+            if target_route:
+                try:
+                    payload["safe_status"] = service.safe_status(target_route)
+                except BridgeError:
+                    pass
+            return JSONResponse(payload, status_code=status_code, headers=route_control_headers)
+
+    async def route_control_unbind_and_cancel(request: Request):
+        service = container.route_control
+        if service is None:
+            return JSONResponse({"ok": False, "error": "Route control is not configured"}, status_code=500, headers=route_control_headers)
+
+        body_data = await _parse_json_safely(request)
+        token = _extract_route_control_auth(request, body_data)
+        route_id = request.path_params.get("route_id") or request.query_params.get("route_id") or body_data.get("route_id")
+
+        try:
+            token_rec = service.verify_control_token(token, route_id=route_id)
+            target_route = route_id or token_rec["route_id"]
+            res = await service.unbind_and_cancel(target_route, expected_generation=token_rec["generation"])
+            safe_st = service.safe_status(target_route)
+            return JSONResponse(
+                {"ok": True, "action": "unbind_and_cancel", **res, "safe_status": safe_st},
+                status_code=200,
+                headers=route_control_headers,
+            )
+        except BridgeError as error:
+            status_code = 401 if error.code is ErrorCode.PERMISSION_DENIED else (409 if error.code is ErrorCode.POLICY_VIOLATION else 400)
+            payload = {"ok": False, "error": error.message, "code": error.code.value}
+            if error.details:
+                payload["details"] = error.details
+            target_route = route_id
+            if target_route:
+                try:
+                    payload["safe_status"] = service.safe_status(target_route)
+                except BridgeError:
+                    pass
+            return JSONResponse(payload, status_code=status_code, headers=route_control_headers)
+
     artifact_endpoint = artifact_download
     auth_settings = None
     token_verifier = None
@@ -892,6 +1036,86 @@ def create_streamable_http_app(
             route_control_return,
             methods=["GET"],
             name="route_control_return",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/status",
+            route_control_status,
+            methods=["GET", "POST"],
+            name="route_control_status",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/unbind",
+            route_control_unbind,
+            methods=["POST"],
+            name="route_control_unbind",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/cancel-wakes",
+            route_control_cancel_wakes,
+            methods=["POST"],
+            name="route_control_cancel_wakes",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/cancel_wakes",
+            route_control_cancel_wakes,
+            methods=["POST"],
+            name="route_control_cancel_wakes_alias",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/unbind-and-cancel",
+            route_control_unbind_and_cancel,
+            methods=["POST"],
+            name="route_control_unbind_and_cancel",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/unbind_and_cancel",
+            route_control_unbind_and_cancel,
+            methods=["POST"],
+            name="route_control_unbind_and_cancel_alias",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/{route_id}/status",
+            route_control_status,
+            methods=["GET", "POST"],
+            name="route_control_route_status",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/{route_id}/unbind",
+            route_control_unbind,
+            methods=["POST"],
+            name="route_control_route_unbind",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/{route_id}/cancel-wakes",
+            route_control_cancel_wakes,
+            methods=["POST"],
+            name="route_control_route_cancel_wakes",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/{route_id}/unbind-and-cancel",
+            route_control_unbind_and_cancel,
+            methods=["POST"],
+            name="route_control_route_unbind_and_cancel",
         )
     )
     custom_routes.extend(create_operator_dashboard_routes(container, settings))

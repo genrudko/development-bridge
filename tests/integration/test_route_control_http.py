@@ -426,3 +426,240 @@ async def test_widget_meta_contains_redirect_domains(tmp_path):
         assert dash_meta is not None
         assert "redirectDomains" not in dash_meta["ui"]["csp"]
         assert "redirect_domains" not in dash_meta["openai/widgetCSP"]
+
+
+def create_test_app_with_jobs(tmp_path):
+    from tests.fixtures.repositories import create_git_repository
+
+    repo_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "server": {"public_base_url": "https://bridge.example.com"},
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "projects": [
+                {
+                    "id": "project",
+                    "name": "Test Project",
+                    "repositories": [
+                        {
+                            "id": "repository",
+                            "path": repo_path,
+                            "capabilities": {"execute": True},
+                            "tasks": [
+                                {
+                                    "id": "task",
+                                    "name": "Task",
+                                    "executable": "/bin/echo",
+                                    "arguments": ["done"],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    container = build_container(settings)
+    if container.jobs and container.jobs.store:
+        container.jobs.store.initialize()
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-initial",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    return app, container, settings
+
+
+@pytest.mark.asyncio
+async def test_route_control_endpoints_require_component_authorization(tmp_path):
+    app, container, _settings = create_test_app(tmp_path)
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        # 1. Missing authorization
+        r1 = await client.get("/mcp/x/route-control/status?route_id=bridge")
+        assert r1.status_code == 401
+
+        r2 = await client.post("/mcp/x/route-control/unbind", json={"route_id": "bridge"})
+        assert r2.status_code == 401
+
+        r3 = await client.post("/mcp/x/route-control/cancel-wakes", json={"route_id": "bridge"})
+        assert r3.status_code == 401
+
+        r4 = await client.post("/mcp/x/route-control/unbind-and-cancel", json={"route_id": "bridge"})
+        assert r4.status_code == 401
+
+        # 2. Forged / invalid token
+        headers_forged = {"Authorization": "Bearer forged_control_token_123"}
+        r_forged = await client.get("/mcp/x/route-control/status?route_id=bridge", headers=headers_forged)
+        assert r_forged.status_code == 401
+
+        # 3. Valid token issued by service
+        descriptor = container.route_control.issue_control_descriptor("bridge")
+        valid_token = descriptor["control_token"]
+        headers_valid = {"Authorization": f"Bearer {valid_token}"}
+
+        r_valid = await client.get("/mcp/x/route-control/status?route_id=bridge", headers=headers_valid)
+        assert r_valid.status_code == 200
+        assert r_valid.json()["ok"] is True
+        assert r_valid.json()["route_id"] == "bridge"
+
+        # 4. Stale token after route generation changes
+        container.route_registry.takeover(
+            "bridge", "https://chatgpt.com/g/g-p-infra/c/conv-gen1", "Bridge Gen 1"
+        )
+        r_stale = await client.get("/mcp/x/route-control/status?route_id=bridge", headers=headers_valid)
+        assert r_stale.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_route_control_status_endpoint_returns_safe_counts_and_no_leakage(tmp_path):
+    app, container, _settings = create_test_app_with_jobs(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        r = await client.get("/mcp/x/route-control/status?route_id=bridge", headers=headers)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["route_id"] == "bridge"
+        assert data["state"] == "bound"
+        assert data["pending_coordinator_wakes"] == 0
+        assert data["pending_durable_waiters"] == 0
+
+        # Arm coordinator wake
+        await container.coordinator.arm("wake 1", channel_id="telegram-bridge-g0", delay_seconds=10)
+
+        # Register durable waiter
+        repo = container.projects.repositories.get("project", "repository")
+        job = await container.jobs.start_task(repo, "task", "req-1")
+        await container.jobs.wake_on_jobs_durable(
+            repo,
+            (job.job_id,),
+            "all_terminal",
+            "coordinator",
+            {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+        )
+
+        # Status now reflects pending counts
+        r_armed = await client.get("/mcp/x/route-control/status?route_id=bridge", headers=headers)
+        data_armed = r_armed.json()
+        assert data_armed["pending_coordinator_wakes"] == 1
+        assert data_armed["pending_durable_waiters"] == 1
+
+        # Body must NOT leak physical chat target, conv id, project id
+        body_text = r_armed.text
+        assert "conv-initial" not in body_text
+        assert "g-p-infra" not in body_text
+        assert "https://chatgpt.com" not in body_text
+
+
+@pytest.mark.asyncio
+async def test_route_control_cancel_wakes_endpoint(tmp_path):
+    app, container, _settings = create_test_app_with_jobs(tmp_path)
+    await container.coordinator.arm("wake 1", channel_id="telegram-bridge-g0", delay_seconds=10)
+    repo = container.projects.repositories.get("project", "repository")
+    job = await container.jobs.start_task(repo, "task", "req-1")
+    await container.jobs.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+    )
+
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        r = await client.post("/mcp/x/route-control/cancel-wakes", json={"route_id": "bridge"}, headers=headers)
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["cancelled_coordinator_wakes"] == 1
+        assert data["cancelled_durable_waiters"] == 1
+        assert data["safe_status"]["pending_coordinator_wakes"] == 0
+        assert data["safe_status"]["pending_durable_waiters"] == 0
+
+
+@pytest.mark.asyncio
+async def test_route_control_unbind_endpoint_refuses_when_wakes_pending(tmp_path):
+    app, container, _settings = create_test_app_with_jobs(tmp_path)
+    await container.coordinator.arm("wake 1", channel_id="telegram-bridge-g0", delay_seconds=10)
+
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        # Unbind must refuse with 409 and PENDING_WAKES
+        r = await client.post("/mcp/x/route-control/unbind", json={"route_id": "bridge"}, headers=headers)
+        assert r.status_code == 409
+        data = r.json()
+        assert data["ok"] is False
+        assert data["code"] == "POLICY_VIOLATION"
+        assert data["details"]["error_code"] == "PENDING_WAKES"
+        assert data["safe_status"]["state"] == "bound"
+
+
+@pytest.mark.asyncio
+async def test_route_control_unbind_and_cancel_endpoint(tmp_path):
+    app, container, _settings = create_test_app_with_jobs(tmp_path)
+    await container.coordinator.arm("wake 1", channel_id="telegram-bridge-g0", delay_seconds=10)
+    repo = container.projects.repositories.get("project", "repository")
+    job = await container.jobs.start_task(repo, "task", "req-1")
+    await container.jobs.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+    )
+
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        r = await client.post(
+            "/mcp/x/route-control/unbind-and-cancel", json={"route_id": "bridge"}, headers=headers
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["state"] == "unbound"
+        assert data["cancelled_coordinator_wakes"] == 1
+        assert data["cancelled_durable_waiters"] == 1
+        assert data["safe_status"]["state"] == "unbound"
+        assert data["safe_status"]["pending_coordinator_wakes"] == 0
+        assert data["safe_status"]["pending_durable_waiters"] == 0
+
+
+@pytest.mark.asyncio
+async def test_route_control_endpoints_leakage_scan(tmp_path):
+    app, container, _settings = create_test_app_with_jobs(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        r_status = await client.get("/mcp/x/route-control/status?route_id=bridge", headers=headers)
+        r_cancel = await client.post("/mcp/x/route-control/cancel-wakes", json={"route_id": "bridge"}, headers=headers)
+        r_unbind = await client.post("/mcp/x/route-control/unbind", json={"route_id": "bridge"}, headers=headers)
+
+        for resp in (r_status, r_cancel, r_unbind):
+            text = resp.text
+            assert "conv-initial" not in text
+            assert "g-p-infra" not in text
+            assert "https://chatgpt.com" not in text
+            assert token not in text

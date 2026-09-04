@@ -86,6 +86,8 @@ SUPPORTED_TOOLS = {
     "coordinator_route_bind_current",
     "coordinator_route_takeover",
     "coordinator_route_list",
+    "coordinator_route_control_status",
+    "coordinator_route_control_diagnostic",
     "coordinator_route_rollover_prepare",
     "coordinator_route_context_get",
     "coordinator_route_context_update",
@@ -111,7 +113,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 101
+    assert len(registry.definitions) == 103
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",

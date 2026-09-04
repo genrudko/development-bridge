@@ -267,6 +267,11 @@ class CoordinatorService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "channel_id is invalid")
         return channel_id
 
+    def pending_wake_count(self, channel_id: str) -> int:
+        channel_id = self.validate_channel(channel_id)
+        wake = self._pending.get(channel_id)
+        return 1 if wake is not None else 0
+
     @classmethod
     def validate_message(cls, message: str) -> str:
         if not isinstance(message, str) or not 1 <= len(message) <= cls.MAX_MESSAGE_CHARS:

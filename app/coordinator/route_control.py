@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import time
+from secrets import token_urlsafe
 from typing import TYPE_CHECKING
 
 from app.api.errors import BridgeError, ErrorCode
 from app.coordinator.chatgpt_target import parse_chatgpt_target
 from app.coordinator.route_control_diagnostics import RouteControlTraceStore
 from app.coordinator.routes import RouteRegistry
+
 if TYPE_CHECKING:
     from app.coordinator.service import CoordinatorService
-
     from app.jobs.service import JobService
 
 
@@ -29,6 +31,60 @@ class RouteControlService:
         self.jobs = jobs
         self.public_base_url = public_base_url.rstrip("/") if public_base_url else None
         self.endpoint_prefix = endpoint_prefix.rstrip("/")
+        self._control_tokens: dict[str, dict] = {}
+
+    def issue_control_token(self, route_id: str) -> dict:
+        route_id = self.route_registry.validate_route_id(route_id)
+        route = self.route_registry.resolve(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        token = f"rc_{token_urlsafe(32)}"
+        generation = int(route.get("generation", 0))
+        now = time.time()
+        record = {
+            "token": token,
+            "route_id": route_id,
+            "generation": generation,
+            "created_at": now,
+            "expires_at": now + 3600.0,
+        }
+        self._control_tokens[token] = record
+        return record
+
+    def verify_control_token(self, token: str | None, route_id: str | None = None) -> dict:
+        if not token or not isinstance(token, str):
+            raise BridgeError(ErrorCode.PERMISSION_DENIED, "missing route control authorization")
+        record = self._control_tokens.get(token)
+        if record is None:
+            raise BridgeError(ErrorCode.PERMISSION_DENIED, "invalid or forged route control authorization")
+        if time.time() > record["expires_at"]:
+            raise BridgeError(ErrorCode.PERMISSION_DENIED, "expired route control authorization")
+        target_route_id = route_id or record["route_id"]
+        if target_route_id != record["route_id"]:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "route control token mismatch")
+        route = self.route_registry.resolve(target_route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {target_route_id}")
+        current_gen = int(route.get("generation", 0))
+        if record["generation"] != current_gen:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "stale route control authorization for previous generation")
+        return record
+
+    def issue_control_descriptor(self, route_id: str) -> dict:
+        record = self.issue_control_token(route_id)
+        base = self.public_base_url.rstrip("/") if self.public_base_url else ""
+        ep = self.endpoint_prefix
+        return {
+            "route_id": route_id,
+            "control_token": record["token"],
+            "generation": record["generation"],
+            "endpoints": {
+                "status": f"{base}{ep}/status",
+                "unbind": f"{base}{ep}/unbind",
+                "cancel_wakes": f"{base}{ep}/cancel-wakes",
+                "unbind_and_cancel": f"{base}{ep}/unbind-and-cancel",
+            },
+        }
 
 
     def _find_route_id_for_token(self, token: str) -> str | None:
@@ -253,14 +309,33 @@ class RouteControlService:
                     "error_code": st.get("error_code"),
                 }
 
+        generation = int(route.get("generation", 0))
+        channel_id = route.get("channel_id") or f"telegram-{route_id}-g{generation}"
+
+        pending_coord: int | str = "not_checked"
+        if self.coordinator is not None:
+            pending_coord = self.coordinator.pending_wake_count(channel_id)
+
+        pending_waiters: int | str = "not_checked"
+        if self.jobs is not None and getattr(self.jobs, "store", None) is not None:
+            waiters = [
+                w
+                for w in self.jobs.store.terminal_waiters()
+                if w.get("handler_name") == "coordinator"
+                and isinstance(w.get("payload"), dict)
+                and w["payload"].get("route_id") == route_id
+                and int(w["payload"].get("generation", -1)) == generation
+            ]
+            pending_waiters = len(waiters)
+
         return {
             "route_id": route_id,
             "title": route.get("title") or route_id,
             "state": state,
-            "generation": int(route.get("generation", 0)),
-            "channel_id": route.get("channel_id") or f"telegram-{route_id}-g{int(route.get('generation', 0))}",
-            "pending_coordinator_wakes": "not_checked",
-            "pending_durable_waiters": "not_checked",
+            "generation": generation,
+            "channel_id": channel_id,
+            "pending_coordinator_wakes": pending_coord,
+            "pending_durable_waiters": pending_waiters,
             "target_probe": "not_checked",
             "last_operation": last_op,
         }

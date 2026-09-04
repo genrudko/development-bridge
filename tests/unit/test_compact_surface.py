@@ -1,17 +1,16 @@
 from types import SimpleNamespace
 
 import pytest
+from mcp import types
 
 from app.api.errors import BridgeError
+from app.api.registry import RegisteredTool, ToolRegistry
 from app.tools.compact import (
     BRIDGE_DASHBOARD_UI_META,
     COMPACT_VISIBLE_TOOLS,
     compact_tools,
     exposed_tool_definitions,
 )
-from app.api.registry import ToolRegistry
-from app.api.registry import RegisteredTool
-from mcp import types
 
 
 async def _handler(ctx, params, request_context):
@@ -270,3 +269,29 @@ async def test_work_progress_update_has_no_dashboard_ui_metadata(tmp_path):
 
     assert update.structured_content is None
     assert update.meta is None
+
+
+@pytest.mark.asyncio
+async def test_route_control_tools_are_hidden_and_discoverable():
+    assert "coordinator_route_control_status" not in COMPACT_VISIBLE_TOOLS
+    assert "coordinator_route_control_diagnostic" not in COMPACT_VISIBLE_TOOLS
+
+    from app.container import build_container
+    from app.settings import BridgeSettings
+    from app.tools.registry import build_tool_registry
+
+    container = build_container(BridgeSettings())
+    registry = build_tool_registry(container)
+    tools = {tool.definition.name: tool for tool in compact_tools(container, registry)}
+    registry.register_many(tools.values())
+    request_context = SimpleNamespace(request_id="req_rc_search")
+
+    search_res = await tools["bridge_search"].handler(
+        None, SimpleNamespace(arguments={"query": "route control status"}), request_context
+    )
+    assert "coordinator_route_control_status" in search_res.content[0].text
+
+    schema_res = await tools["bridge_schema"].handler(
+        None, SimpleNamespace(arguments={"tool_name": "coordinator_route_control_status"}), request_context
+    )
+    assert "route_id" in schema_res.content[0].text

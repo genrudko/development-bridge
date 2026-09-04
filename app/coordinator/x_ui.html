@@ -18,10 +18,26 @@ body { font: 13px/1.25 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
 #bridge[data-kind="working"] #state { color: AccentColor; }
 #bridge[data-kind="error"] { border-color: color-mix(in srgb, #d97706 45%, transparent); }
 #bridge[data-kind="error"] #state { color: #d97706; }
+#route-controls { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+#route-controls[hidden] { display: none !important; }
+.rc-btn { display: inline-flex; align-items: center; justify-content: center; font: inherit; font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: 6px; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); background: color-mix(in srgb, CanvasText 6%, transparent); color: CanvasText; cursor: pointer; white-space: nowrap; }
+.rc-btn:hover:not(:disabled) { background: color-mix(in srgb, CanvasText 14%, transparent); }
+.rc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.rc-btn-danger { color: #dc2626; border-color: color-mix(in srgb, #dc2626 35%, transparent); }
+.rc-btn-danger:hover:not(:disabled) { background: color-mix(in srgb, #dc2626 15%, transparent); }
 </style>
 <div id="bridge" data-kind="working" role="status" aria-live="polite">
   <div id="icon">⚡</div>
-  <div id="copy"><div id="name">Bridge</div><div id="detail">Подключаюсь…</div></div>
+  <div id="copy">
+    <div id="name">Bridge</div>
+    <div id="detail">Подключаюсь…</div>
+    <div id="route-controls" hidden>
+      <button id="rc-status" data-action="status" class="rc-btn" type="button" title="Status">Статус</button>
+      <button id="rc-cancel-wake" data-action="cancel_wakes" class="rc-btn" type="button" title="Cancel wake">Отмена wake</button>
+      <button id="rc-unbind" data-action="unbind" class="rc-btn rc-btn-danger" type="button" title="Unbind">Отвязать</button>
+      <button id="rc-unbind-cancel" data-action="unbind_and_cancel" class="rc-btn rc-btn-danger" type="button" title="Unbind + cancel wakes">Отвязать + отмена</button>
+    </div>
+  </div>
   <button id="action" hidden type="button">Привязать этот чат</button>
   <div id="state">…</div>
 </div>
@@ -32,6 +48,12 @@ const widget = document.getElementById("bridge");
 const detailEl = document.getElementById("detail");
 const stateEl = document.getElementById("state");
 const actionBtn = document.getElementById("action");
+const routeControlsEl = document.getElementById("route-controls");
+const btnStatus = document.getElementById("rc-status");
+const btnCancelWake = document.getElementById("rc-cancel-wake");
+const btnUnbind = document.getElementById("rc-unbind");
+const btnUnbindCancel = document.getElementById("rc-unbind-cancel");
+let currentRouteControl = null;
 const app = new App({ name: "Development Bridge Coordinator", version: "1.1.0" }, { autoResize: true });
 let channelId = "coordinator";
 let deliveryLease = null;
@@ -76,8 +98,141 @@ function render(kind, state, detail = "") {
   resizeWidget();
 }
 
+async function confirmDestructiveAction(promptText, button, confirmLabel) {
+  if (button?.dataset?.confirming === "true") {
+    button.dataset.confirming = "false";
+    return true;
+  }
+  let confirmed = false;
+  try {
+    if (typeof window.confirm === "function") {
+      confirmed = window.confirm(promptText);
+    }
+  } catch (_) {}
+  if (confirmed) return true;
+
+  if (button) {
+    button.dataset.confirming = "true";
+    const origText = button.textContent;
+    button.textContent = confirmLabel || "Подтвердить?";
+    setTimeout(() => {
+      button.dataset.confirming = "false";
+      button.textContent = origText;
+    }, 4000);
+  }
+  return false;
+}
+
+function setRouteControlButtonsDisabled(disabled) {
+  if (btnStatus) btnStatus.disabled = disabled;
+  if (btnCancelWake) btnCancelWake.disabled = disabled;
+  if (btnUnbind) btnUnbind.disabled = disabled;
+  if (btnUnbindCancel) btnUnbindCancel.disabled = disabled;
+}
+
+function applySafeStatus(st) {
+  if (!st || typeof st !== "object") return;
+  const isBound = st.state === "bound" || st.binding_state === "bound";
+  const stateLabel = isBound ? "Привязан" : "Отвязан";
+  const genLabel = st.generation !== undefined ? `g${st.generation}` : "";
+  const pendingCoord = Number(st.pending_coordinator_wakes || 0);
+  const pendingWaiters = Number(st.pending_durable_waiters || 0);
+  const totalPending = pendingCoord + pendingWaiters;
+  let detail = `${st.route_id || "Маршрут"} (${genLabel})`;
+  if (totalPending > 0) {
+    detail += ` · wakes: ${totalPending}`;
+  }
+  const diag = st.last_diagnostic_id || st.diagnostic_id || st.last_operation?.diagnostic_id;
+  if (diag) {
+    detail += ` · diag: ${diag}`;
+  }
+  render(isBound ? "ready" : "working", stateLabel, detail);
+}
+
+async function refreshRouteControlStatus() {
+  if (!currentRouteControl || !currentRouteControl.control_token || !currentRouteControl.endpoints?.status) return;
+  const token = currentRouteControl.control_token;
+  const url = new URL(currentRouteControl.endpoints.status, window.location.href);
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+      },
+      cache: "no-store",
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) {
+      applySafeStatus(data.status || data);
+      return data;
+    }
+  } catch (err) {
+    console.error("Route status error", err);
+  }
+}
+
+async function executeRouteControlAction(actionName) {
+  if (!currentRouteControl || !currentRouteControl.control_token || !currentRouteControl.endpoints) {
+    render("error", "Нет авторизации", "Отсутствует токен управления маршрутом");
+    return;
+  }
+  const token = currentRouteControl.control_token;
+  const endpoints = currentRouteControl.endpoints;
+  const endpointUrl = endpoints[actionName];
+  if (!endpointUrl) return;
+
+  if (actionName === "unbind" || actionName === "unbind_and_cancel") {
+    const btn = actionName === "unbind" ? btnUnbind : btnUnbindCancel;
+    const promptText = actionName === "unbind"
+      ? "Подтвердите отвязку текущего маршрута"
+      : "Подтвердите отвязку маршрута и отмену активных wake";
+    const confirmed = await confirmDestructiveAction(promptText, btn, "Точно?");
+    if (!confirmed) return;
+  }
+
+  render("working", "Маршрут", "Выполняю операцию…");
+  setRouteControlButtonsDisabled(true);
+
+  try {
+    const targetUrl = new URL(endpointUrl, window.location.href);
+    const method = actionName === "status" ? "GET" : "POST";
+    const resp = await fetch(targetUrl, {
+      method,
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const err = data.error || `HTTP ${resp.status}`;
+      render("error", "Ошибка", `Ошибка: ${err}`);
+      return;
+    }
+    if (data.safe_status) {
+      applySafeStatus(data.safe_status);
+    } else if (data.status && typeof data.status === "object") {
+      applySafeStatus(data.status);
+    } else {
+      await refreshRouteControlStatus();
+    }
+  } catch (error) {
+    console.error("Route control error", error);
+    render("error", "Сбой", "Не удалось связаться с сервисом маршрута");
+  } finally {
+    setRouteControlButtonsDisabled(false);
+  }
+}
+
+if (btnStatus) btnStatus.onclick = () => executeRouteControlAction("status");
+if (btnCancelWake) btnCancelWake.onclick = () => executeRouteControlAction("cancel_wakes");
+if (btnUnbind) btnUnbind.onclick = () => executeRouteControlAction("unbind");
+if (btnUnbindCancel) btnUnbindCancel.onclick = () => executeRouteControlAction("unbind_and_cancel");
+
 function handleRouteControl(control) {
   if (!control || typeof control !== "object") return;
+  currentRouteControl = control;
   const action = String(control.action || "");
   const operationUrl = String(control.operation_url || "");
   if (action === "bind" && operationUrl) {
@@ -101,6 +256,12 @@ function handleRouteControl(control) {
         render("error", "Ошибка открытия", "Не удалось открыть страницу привязки");
       }
     };
+  }
+
+  if (control.endpoints && control.control_token) {
+    if (routeControlsEl) routeControlsEl.hidden = false;
+    resizeWidget();
+    void refreshRouteControlStatus();
   }
 }
 

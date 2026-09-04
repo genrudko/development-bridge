@@ -124,13 +124,15 @@ def test_coordinator_route_list_returns_bounded_metadata_without_mutating_state(
     routes = {item["route_id"]: item for item in data["routes"]}
     assert set(routes.keys()) == {"bridge", "ad5xwork"}
     assert routes["bridge"]["title"] == "Development Bridge Infra"
-    assert routes["bridge"]["project_id"] == "g-p-infra"
+    assert routes["bridge"]["binding_state"] == "bound"
+    assert "project_id" not in routes["bridge"]
     assert routes["bridge"]["channel_id"] == "telegram-bridge-g0"
     assert routes["bridge"]["generation"] == 0
     assert routes["bridge"]["default"] is True
 
     assert routes["ad5xwork"]["title"] == "AD5X Work"
-    assert routes["ad5xwork"]["project_id"] == "g-p-ad5x"
+    assert routes["ad5xwork"]["binding_state"] == "bound"
+    assert "project_id" not in routes["ad5xwork"]
     assert routes["ad5xwork"]["channel_id"] == "telegram-ad5xwork-g0"
     assert routes["ad5xwork"]["generation"] == 0
     assert routes["ad5xwork"]["default"] is False

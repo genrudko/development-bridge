@@ -701,3 +701,214 @@ async def test_coordinator_widget_html_contract_and_forbidden_apis(tmp_path):
         assert "### ⚡ Bridge · задача завершена" in html
         assert "app.sendMessage" in html
         assert "app.updateModelContext" in html
+
+        # Safe widget route-control status and actions
+        assert "route-controls" in html
+        assert "rc-status" in html
+        assert "rc-cancel-wake" in html
+        assert "rc-unbind" in html
+        assert "rc-unbind-cancel" in html
+        assert "confirmDestructiveAction" in html
+        assert "Authorization" in html and "Bearer" in html
+        assert "refreshRouteControlStatus" in html
+        assert "applySafeStatus" in html
+
+
+@pytest.mark.asyncio
+async def test_coordinator_route_control_status_hidden_tool(tmp_path):
+    settings = BridgeSettings.model_validate(
+        {
+            "server": {"public_base_url": "https://bridge.example"},
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+        }
+    )
+    container = build_container(settings)
+    if container.jobs and container.jobs.store:
+        container.jobs.store.initialize()
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-old",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        result = await session.call_tool("coordinator_route_control_status", {"route_id": "bridge"})
+        data = json.loads(result.content[0].text)["data"]
+        assert data["route_id"] == "bridge"
+        assert data["state"] == "bound"
+        assert data["generation"] == 0
+        assert data["pending_coordinator_wakes"] == 0
+        assert data["pending_durable_waiters"] == 0
+
+        # Structured content matches safe data
+        assert result.structured_content == data
+
+        # Component-only meta contains control authorization
+        rc = result.meta.get("route_control")
+        assert rc is not None
+        assert rc["route_id"] == "bridge"
+        assert "control_token" in rc
+        assert "endpoints" in rc
+        assert rc["endpoints"]["status"] == "https://bridge.example/mcp/x/route-control/status"
+        assert rc["endpoints"]["unbind"] == "https://bridge.example/mcp/x/route-control/unbind"
+        assert rc["endpoints"]["cancel_wakes"] == "https://bridge.example/mcp/x/route-control/cancel-wakes"
+        assert rc["endpoints"]["unbind_and_cancel"] == "https://bridge.example/mcp/x/route-control/unbind-and-cancel"
+
+        # Model text and structured content must NOT leak physical target or control token
+        text = result.content[0].text
+        assert "conv-old" not in text
+        assert "g-p-infra" not in text
+        assert "https://chatgpt.com" not in text
+        assert rc["control_token"] not in text
+
+
+@pytest.mark.asyncio
+async def test_coordinator_route_control_diagnostic_hidden_tool(tmp_path):
+    settings = BridgeSettings.model_validate(
+        {
+            "server": {"public_base_url": "https://bridge.example"},
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        }
+    )
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-old",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+
+        # Prepare a bind to generate a diagnostic trace
+        bind_res = await session.call_tool("coordinator_route_bind_current", {"route_id": "bridge"})
+        diag_id = bind_res.meta["route_control"]["diagnostic_id"]
+
+        # Call diagnostic tool
+        diag_res = await session.call_tool(
+            "coordinator_route_control_diagnostic", {"diagnostic_id": diag_id}
+        )
+        data = json.loads(diag_res.content[0].text)["data"]
+        assert data["diagnostic_id"] == diag_id
+        assert data["operation_type"] == "bind"
+        assert "stages" in data
+
+        # Sanitized trace must NOT leak physical target or tokens
+        text = diag_res.content[0].text
+        assert "conv-old" not in text
+        assert "g-p-infra" not in text
+        assert "https://chatgpt.com" not in text
+
+        # Non-existent diagnostic returns error
+        failed_diag = await session.call_tool(
+            "coordinator_route_control_diagnostic", {"diagnostic_id": "diag-non-existent-999"}
+        )
+        assert failed_diag.is_error is True
+        assert "not found" in failed_diag.content[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_route_list_sanitization(tmp_path):
+    settings = BridgeSettings.model_validate(
+        {
+            "server": {"public_base_url": "https://bridge.example"},
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        }
+    )
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-bridge",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    container.route_registry.bootstrap(
+        "ad5xwork",
+        "https://chatgpt.com/g/g-p-ad5x/c/conv-ad5x",
+        "telegram-ad5xwork-g0",
+        "AD5X Work",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        res = await session.call_tool("coordinator_route_list", {})
+        data = json.loads(res.content[0].text)["data"]
+        routes = {r["route_id"]: r for r in data["routes"]}
+
+        assert "bridge" in routes
+        assert routes["bridge"]["binding_state"] == "bound"
+        assert routes["bridge"]["generation"] == 0
+        assert "project_id" not in routes["bridge"]
+
+        assert "ad5xwork" in routes
+        assert routes["ad5xwork"]["binding_state"] == "bound"
+        assert routes["ad5xwork"]["generation"] == 0
+        assert "project_id" not in routes["ad5xwork"]
+
+        # No project/GPT physical identifiers in output text
+        text = res.content[0].text
+        assert "g-p-infra" not in text
+        assert "g-p-ad5x" not in text
+        assert "conv-bridge" not in text
+        assert "conv-ad5x" not in text
+
+
+@pytest.mark.asyncio
+async def test_resolve_destination_rejects_unbound_routes(tmp_path):
+    settings = BridgeSettings.model_validate(
+        {
+            "server": {"public_base_url": "https://bridge.example"},
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        }
+    )
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-bridge",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    # Explicitly unbind route
+    container.route_registry.unbind("bridge", expected_generation=0)
+
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+
+        # coordinator_x_mount must reject unbound route
+        res1 = await session.call_tool("coordinator_x_mount", {"route_id": "bridge"})
+        assert res1.is_error is True
+        assert "unbound" in res1.content[0].text.lower()
+
+        # coordinator_continue must reject unbound route
+        res2 = await session.call_tool("coordinator_continue", {"route_id": "bridge", "message": "hello"})
+        assert res2.is_error is True
+        assert "unbound" in res2.content[0].text.lower()

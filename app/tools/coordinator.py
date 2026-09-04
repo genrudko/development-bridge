@@ -70,6 +70,12 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
         route = container.route_registry.resolve(route_id)
         if route is None:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        if not container.route_registry.is_bound(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route_id}' is unbound; bind a destination before mounting or waking",
+                details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
+            )
         if channel_id is not None and channel_id != route["channel_id"]:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "route_id and channel_id refer to different destinations")
         return _bind_session(container, ctx, _route_binding(container, route))
@@ -79,6 +85,19 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
         route = container.route_registry.route_for_channel(channel)
         if route is None:
             return _bind_session(container, ctx, {"channel_id": channel, "route_state": "explicit"})
+        resolved_logical = container.route_registry.resolve(route["route_id"])
+        if resolved_logical is not None and not container.route_registry.is_bound(resolved_logical):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route['route_id']}' is unbound; bind a destination before mounting or waking",
+                details={"route_id": route["route_id"], "error_code": "ROUTE_UNBOUND"},
+            )
+        if route.get("route_state") != "pending" and not container.route_registry.is_bound(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route['route_id']}' is unbound; bind a destination before mounting or waking",
+                details={"route_id": route["route_id"], "error_code": "ROUTE_UNBOUND"},
+            )
         binding = _route_binding(container, route, route_state=str(route.get("route_state", "active")))
         return _bind_session(container, ctx, binding)
 
@@ -93,6 +112,12 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
         route = container.route_registry.resolve(str(bound_route))
         if route is None:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "Bound logical route no longer exists")
+        if not container.route_registry.is_bound(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{bound_route}' is unbound; bind a destination before mounting or waking",
+                details={"route_id": str(bound_route), "error_code": "ROUTE_UNBOUND"},
+            )
         bound_generation = binding.get("generation")
         current_generation = int(route.get("generation", 0))
         if bound_generation is not None and int(bound_generation) != current_generation:
@@ -192,6 +217,10 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             **({"route_id": binding["route_id"], "generation": binding.get("generation"), "route_state": binding.get("route_state")} if binding.get("route_id") is not None else {}),
         }
         result.meta = dict(COORDINATOR_UI_META)
+        if container.route_control is not None and binding.get("route_id"):
+            result.meta["route_control"] = container.route_control.issue_control_descriptor(
+                str(binding["route_id"])
+            )
         return result
 
     async def bind_current(ctx, params, request_context):
@@ -232,16 +261,21 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         }
         result = to_mcp_result(success(request_context.request_id, safe_data))
         result.structured_content = safe_data
+        rc_meta = {
+            "action": "bind",
+            "route_id": prepared["route_id"],
+            "operation_url": prepared["operation_url"],
+            "operation_id": prepared["operation_id"],
+            "diagnostic_id": prepared["diagnostic_id"],
+            "nonce": prepared["operation_id"],
+        }
+        if container.route_control is not None:
+            descriptor = container.route_control.issue_control_descriptor(prepared["route_id"])
+            rc_meta["control_token"] = descriptor["control_token"]
+            rc_meta["endpoints"] = descriptor["endpoints"]
         result.meta = {
             **COORDINATOR_UI_META,
-            "route_control": {
-                "action": "bind",
-                "route_id": prepared["route_id"],
-                "operation_url": prepared["operation_url"],
-                "operation_id": prepared["operation_id"],
-                "diagnostic_id": prepared["diagnostic_id"],
-                "nonce": prepared["operation_id"],
-            },
+            "route_control": rc_meta,
         }
         return result
 
@@ -315,7 +349,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             {
                 "route_id": item["route_id"],
                 "title": item.get("title") or item["route_id"],
-                "project_id": item.get("project_id"),
+                "binding_state": "bound" if container.route_registry.is_bound(item) else "unbound",
                 "channel_id": item.get("channel_id"),
                 "generation": int(item.get("generation", 0)),
                 "default": bool(item.get("default", False)),
@@ -323,6 +357,39 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             for item in container.route_registry.list_routes()
         ]
         return to_mcp_result(success(request_context.request_id, {"routes": routes}))
+
+    async def route_control_status(ctx, params, request_context):
+        arguments = params.arguments or {}
+        route_id = container.route_registry.validate_route_id(arguments["route_id"])
+        if container.route_control is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INTERNAL_ERROR, "Route control is not configured")
+        data = container.route_control.safe_status(route_id)
+        result = to_mcp_result(success(request_context.request_id, data))
+        result.structured_content = dict(data)
+        descriptor = container.route_control.issue_control_descriptor(route_id)
+        result.meta = {
+            **COORDINATOR_UI_META,
+            "route_control": descriptor,
+        }
+        return result
+
+    async def route_control_diagnostic(ctx, params, request_context):
+        arguments = params.arguments or {}
+        diag_id = str(arguments.get("diagnostic_id") or "").strip()
+        if not diag_id:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "diagnostic_id is required")
+        if container.route_control is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INTERNAL_ERROR, "Route control is not configured")
+        trace = container.route_control.trace_store.sanitized(diag_id)
+        if trace is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"diagnostic trace not found: {diag_id}")
+        result = to_mcp_result(success(request_context.request_id, trace))
+        result.structured_content = dict(trace)
+        return result
 
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -583,6 +650,36 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 },
             ),
             route_list,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_control_status",
+                description="Read-only safe logical status for a registered coordinator route (generation, binding state, pending wake counts, last operation) without physical chat identity",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"}},
+                    "required": ["route_id"],
+                    "additionalProperties": False,
+                },
+                _meta=common_meta,
+            ),
+            route_control_status,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_control_diagnostic",
+                description="Read-only sanitized diagnostic trace for a route-control operation; never returns raw chat identity, tokens, or URLs",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"diagnostic_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}},
+                    "required": ["diagnostic_id"],
+                    "additionalProperties": False,
+                },
+                _meta=common_meta,
+            ),
+            route_control_diagnostic,
             "coordinator-x",
         ),
         RegisteredTool(
