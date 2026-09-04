@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import base64
 import json
-import re
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from app.api.errors import BridgeError, ErrorCode
-from app.desktop_nodes.service import DesktopNodeService
+from app.desktop_nodes.service import DesktopNodeService, has_binary_data
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.models import CadResult
 from app.fusion_cad.requests import (
@@ -21,122 +19,6 @@ from app.fusion_cad.requests import (
     FusionViewRequest,
 )
 from app.fusion_cad.scripts import FusionCadScriptBundle
-
-_BASE64_MAGIC_PREFIXES: tuple[str, ...] = (
-    "iVBORw0KGgo",  # PNG
-    "/9j/",          # JPEG
-    "R0lGOD",        # GIF
-    "UklGR",         # WEBP
-    "Qk",            # BMP
-    "JVBERi0",       # PDF
-    "UEsDB",         # ZIP / 3MF
-)
-
-_BINARY_MIME_PREFIXES: tuple[str, ...] = (
-    "image/",
-    "audio/",
-    "video/",
-    "model/",
-)
-
-_BINARY_MIME_EXACT: frozenset[str] = frozenset({
-    "application/octet-stream",
-    "application/pdf",
-    "application/zip",
-    "application/x-step",
-    "application/sla",
-    "application/vnd.ms-pki.stl",
-    "application/step",
-    "application/3mf",
-})
-
-_BINARY_KEY_SUFFIXES: tuple[str, ...] = (
-    "_b64",
-    "_base64",
-    "Base64",
-    "_binary",
-    "_bytes",
-    "_blob",
-)
-
-_BINARY_KEY_EXACT: frozenset[str] = frozenset({
-    "data",
-    "base64Data",
-    "base64_data",
-    "b64_data",
-    "image_data",
-    "binary_data",
-    "raw_bytes",
-    "thumbnail_b64",
-    "screenshot_b64",
-    "png_base64",
-    "jpg_base64",
-    "jpeg_base64",
-    "stl_base64",
-    "step_base64",
-    "mesh_data",
-    "buffer",
-})
-
-
-def _is_mime_binary(mime: Any) -> bool:
-    if not isinstance(mime, str):
-        return False
-    mime_lower = mime.lower().strip()
-    return mime_lower.startswith(_BINARY_MIME_PREFIXES) or mime_lower in _BINARY_MIME_EXACT
-
-
-def _has_image_or_binary_data(value: Any) -> bool:
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return True
-
-    if isinstance(value, str):
-        str_val = value.strip()
-        if str_val.startswith("data:") and (
-            ";base64," in str_val
-            or any(prefix in str_val for prefix in ("image/", "model/", "application/octet-stream", "application/pdf"))
-        ):
-            return True
-        if len(str_val) >= 16:
-            for prefix in _BASE64_MAGIC_PREFIXES:
-                if str_val.startswith(prefix):
-                    return True
-        if len(str_val) >= 64 and len(str_val) % 4 == 0 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", str_val):
-            try:
-                decoded = base64.b64decode(str_val, validate=True)
-                if any(b == 0 or b > 127 for b in decoded[:32]):
-                    return True
-            except (ValueError, TypeError):
-                pass
-        return False
-
-    if isinstance(value, dict):
-        val_type = value.get("type")
-        if isinstance(val_type, str) and val_type.lower() in ("image", "binary", "blob"):
-            return True
-        mime = value.get("mimeType") or value.get("mime_type") or value.get("contentType") or value.get("content_type")
-        if _is_mime_binary(mime):
-            return True
-        encoding = value.get("encoding") or value.get("transfer_encoding")
-        if isinstance(encoding, str) and encoding.lower() in ("base64", "binary", "hex"):
-            return True
-        for k, v in value.items():
-            if isinstance(k, str) and (k in _BINARY_KEY_EXACT or k.endswith(_BINARY_KEY_SUFFIXES)):
-                if isinstance(v, (bytes, bytearray, memoryview)):
-                    return True
-                if isinstance(v, str) and len(v.strip()) > 0:
-                    return True
-            if _has_image_or_binary_data(v):
-                return True
-        return False
-
-    if isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            if _has_image_or_binary_data(item):
-                return True
-
-    return False
-
 
 # Exhaustive per-(group, operation) classification mapping:
 # (group, operation) -> (is_async, is_mutation)
@@ -169,14 +51,14 @@ _CAD_OPERATION_CLASSIFICATION: dict[tuple[str, str], tuple[bool, bool]] = {
     ("inspect", "concentric"): (False, False),
     ("inspect", "face_to_face_thickness"): (False, False),
 
-    # 3. fusion_view (camera mutations are state-changing view operations; screenshot is async)
+    # 3. fusion_view (camera mutations default async and non-replayable; screenshot is async)
     ("view", "camera_read"): (False, False),
     ("view", "pick"): (False, False),
-    ("view", "camera_set"): (False, True),
-    ("view", "fit"): (False, True),
-    ("view", "zoom_entity"): (False, True),
-    ("view", "orient_to_face"): (False, True),
-    ("view", "standard_view"): (False, True),
+    ("view", "camera_set"): (True, True),
+    ("view", "fit"): (True, True),
+    ("view", "zoom_entity"): (True, True),
+    ("view", "orient_to_face"): (True, True),
+    ("view", "standard_view"): (True, True),
     ("view", "screenshot"): (True, False),
 
     # 4. fusion_metadata & fusion_style mutations
@@ -203,16 +85,15 @@ _CAD_OPERATION_CLASSIFICATION: dict[tuple[str, str], tuple[bool, bool]] = {
     ("mutate", "isolate"): (True, True),
     ("mutate", "restore"): (True, True),
 
-
     # 6. fusion_validate
     ("validate", "run"): (True, False),
 
     # 7. fusion_transaction
-    ("transaction", "begin"): (False, False),
-    ("transaction", "stage"): (False, False),
+    ("transaction", "begin"): (False, True),
+    ("transaction", "stage"): (False, True),
     ("transaction", "status"): (False, False),
-    ("transaction", "abort"): (False, False),
-    ("transaction", "preview"): (True, False),
+    ("transaction", "abort"): (False, True),
+    ("transaction", "preview"): (True, True),
     ("transaction", "commit"): (True, True),
     ("transaction", "rollback"): (True, True),
 }
@@ -233,6 +114,173 @@ class FusionCadService:
     ) -> None:
         self._desktop_nodes = desktop_nodes
         self._script_bundle = script_bundle or FusionCadScriptBundle()
+
+    @staticmethod
+    def is_domain_summary(summary: str | None) -> bool:
+        if not isinstance(summary, str):
+            return False
+        return any(
+            summary.startswith(f"{prefix}:")
+            for prefix in ("read", "inspect", "view", "mutate", "validate", "transaction")
+        )
+
+    @classmethod
+    def _extract_error_info(cls, payload: dict[str, Any]) -> tuple[ErrorCode, str, dict[str, Any]]:
+        err_msg = "Native Fusion CAD execution failed"
+        err_details: dict[str, Any] = {"raw": payload}
+        err_code = ErrorCode.FUSION_API_ERROR
+
+        if isinstance(payload.get("content"), list):
+            for block in payload["content"]:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    try:
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict):
+                            if parsed.get("status") in ("failed", "error") or "error" in parsed or parsed.get("isError") is True:
+                                err = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
+                                code_str = err.get("code") or parsed.get("code")
+                                if code_str:
+                                    try:
+                                        err_code = ErrorCode(str(code_str))
+                                    except ValueError:
+                                        err_code = ErrorCode.FUSION_API_ERROR
+                                err_msg = err.get("message") or parsed.get("message") or err_msg
+                                err_details = err.get("details") or parsed.get("details") or parsed
+                                return err_code, str(err_msg), err_details
+                    except (ValueError, TypeError):
+                        if text:
+                            err_msg = text
+                            return err_code, err_msg, err_details
+
+        if "error" in payload:
+            err = payload["error"]
+            if isinstance(err, dict):
+                code_str = err.get("code") or payload.get("code")
+                if code_str:
+                    try:
+                        err_code = ErrorCode(str(code_str))
+                    except ValueError:
+                        err_code = ErrorCode.FUSION_API_ERROR
+                err_msg = err.get("message") or payload.get("message") or err_msg
+                err_details = err.get("details") or payload.get("details") or err
+            elif isinstance(err, str):
+                err_msg = err
+            return err_code, str(err_msg), err_details
+
+        if "message" in payload:
+            err_msg = str(payload["message"])
+            code_str = payload.get("code")
+            if code_str:
+                try:
+                    err_code = ErrorCode(str(code_str))
+                except ValueError:
+                    err_code = ErrorCode.FUSION_API_ERROR
+            return err_code, err_msg, payload
+
+        return err_code, err_msg, err_details
+
+    @classmethod
+    def decode_domain_result(cls, raw_result: Any) -> CadResult:
+        """Decode and validate a domain result against fusion.cad/v1 CadResult schema.
+
+        Fails closed on malformed JSON, isError=True, failed/error status,
+        missing or incorrect api_version, invalid CadResult schema, or non-dict structures.
+        """
+        if not isinstance(raw_result, dict):
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                f"Unexpected non-dict result type from desktop node: {type(raw_result).__name__}",
+                details={"raw_result": str(raw_result)},
+            )
+
+        if raw_result.get("isError") is True:
+            err_code, err_msg, err_details = cls._extract_error_info(raw_result)
+            raise FusionCadError(err_code, err_msg, details=err_details)
+
+        if "content" in raw_result:
+            content_blocks = raw_result.get("content")
+            if not isinstance(content_blocks, list) or len(content_blocks) == 0:
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Native Fusion CAD execution returned empty content blocks",
+                    details={"raw_result": raw_result},
+                )
+
+            for block in content_blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    if not isinstance(text, str) or not text.strip():
+                        raise FusionCadError(
+                            ErrorCode.FUSION_API_ERROR,
+                            "Empty text content in native Fusion execution output",
+                            details={"block": block},
+                        )
+                    try:
+                        parsed = json.loads(text)
+                    except (ValueError, TypeError) as exc:
+                        raise FusionCadError(
+                            ErrorCode.FUSION_API_ERROR,
+                            f"Malformed non-JSON output from native Fusion script: {text[:200]}",
+                            details={"raw_output": text},
+                        ) from exc
+
+                    if not isinstance(parsed, dict):
+                        raise FusionCadError(
+                            ErrorCode.FUSION_API_ERROR,
+                            f"Invalid domain output type (expected JSON object, got {type(parsed).__name__})",
+                            details={"raw_output": text},
+                        )
+
+                    if parsed.get("isError") is True or parsed.get("status") in ("failed", "error") or "error" in parsed:
+                        err_code, err_msg, err_details = cls._extract_error_info(parsed)
+                        raise FusionCadError(err_code, err_msg, details=err_details)
+
+                    if parsed.get("api_version") != "fusion.cad/v1":
+                        raise FusionCadError(
+                            ErrorCode.FUSION_API_ERROR,
+                            f"Unrecognized domain output from native Fusion script: expected api_version 'fusion.cad/v1', got {parsed.get('api_version')!r}",
+                            details={"parsed": parsed},
+                        )
+
+                    try:
+                        return CadResult.model_validate(parsed)
+                    except ValidationError as exc:
+                        raise FusionCadError(
+                            ErrorCode.FUSION_API_ERROR,
+                            f"Invalid fusion.cad/v1 response schema: {exc}",
+                            details={"validation_errors": exc.errors()},
+                        ) from exc
+
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "No valid CAD text output found in native execution content",
+                details={"raw_result": raw_result},
+            )
+
+        if raw_result.get("status") in ("failed", "error") or "error" in raw_result:
+            err_code, err_msg, err_details = cls._extract_error_info(raw_result)
+            raise FusionCadError(err_code, err_msg, details=err_details)
+
+        if raw_result.get("api_version") == "fusion.cad/v1":
+            candidate = dict(raw_result)
+            candidate.pop("isError", None)
+            try:
+                return CadResult.model_validate(candidate)
+            except ValidationError as exc:
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    f"Invalid fusion.cad/v1 response schema: {exc}",
+                    details={"validation_errors": exc.errors()},
+                ) from exc
+
+        raise FusionCadError(
+            ErrorCode.FUSION_API_ERROR,
+            "Unrecognized domain output format from native Fusion script: missing or invalid api_version 'fusion.cad/v1'",
+            details={"raw_result": raw_result},
+        )
 
     def _resolve_group(self, request: Any) -> str:
         if isinstance(request, FusionReadRequest.__args__):  # type: ignore[attr-defined]
@@ -324,147 +372,36 @@ class FusionCadService:
                 details={"raw_result": str(raw_result)},
             )
 
-        # Handle native execution error (isError: True)
-        if raw_result.get("isError") is True:
-            err_msg = "Native Fusion CAD execution failed"
-            err_details: dict[str, Any] = {"raw_result": raw_result}
-            err_code = ErrorCode.FUSION_API_ERROR
-
-            if isinstance(raw_result.get("content"), list):
-                for block in raw_result["content"]:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text", "")
-                        try:
-                            parsed_err = json.loads(text)
-                            if isinstance(parsed_err, dict):
-                                if parsed_err.get("status") == "failed" or "error" in parsed_err:
-                                    e = parsed_err.get("error", {})
-                                    code_str = e.get("code") or parsed_err.get("code")
-                                    if code_str:
-                                        try:
-                                            err_code = ErrorCode(str(code_str))
-                                        except ValueError:
-                                            err_code = ErrorCode.FUSION_API_ERROR
-                                    err_msg = e.get("message") or parsed_err.get("message") or err_msg
-                                    err_details = e.get("details") or parsed_err.get("details") or err_details
-                                    break
-                                elif "message" in parsed_err:
-                                    err_msg = str(parsed_err["message"])
-                                    err_details = parsed_err
-                                    break
-                        except (ValueError, TypeError):
-                            if text:
-                                err_msg = text
-                                break
-            elif "message" in raw_result:
-                err_msg = str(raw_result["message"])
-            elif "error" in raw_result:
-                err_msg = str(raw_result["error"])
-
-            raise FusionCadError(err_code, err_msg, details=err_details)
-
         # Handle external_result reference already returned by desktop node
         if "external_result" in raw_result:
+            full, _ = self._desktop_nodes.external_result(raw_result["external_result"])
+            self.decode_domain_result(full)
             return raw_result
 
-        # Check for inline binary/image data in the raw result
-        if _has_image_or_binary_data(raw_result):
+        # If raw_result has content blocks with JSON text:
+        if "content" in raw_result and isinstance(raw_result["content"], list):
+            cad_result = self.decode_domain_result(raw_result)
+            domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
+            if has_binary_data(domain_payload):
+                try:
+                    return self._desktop_nodes.store_external_result(node_id, domain_payload)
+                except Exception as exc:
+                    raise BridgeError(
+                        ErrorCode.INTERNAL_ERROR,
+                        f"Failed to externalize binary result payload: {exc}",
+                    ) from exc
+            return cad_result
+
+        # Direct dictionary
+        if has_binary_data(raw_result):
+            cad_result = self.decode_domain_result(raw_result)
+            domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
             try:
-                return self._desktop_nodes.store_external_result(node_id, raw_result)
+                return self._desktop_nodes.store_external_result(node_id, domain_payload)
             except Exception as exc:
                 raise BridgeError(
                     ErrorCode.INTERNAL_ERROR,
                     f"Failed to externalize binary result payload: {exc}",
                 ) from exc
 
-        # Process MCP content blocks
-        if "content" in raw_result:
-            content_blocks = raw_result.get("content")
-            if not isinstance(content_blocks, list) or len(content_blocks) == 0:
-                raise FusionCadError(
-                    ErrorCode.FUSION_API_ERROR,
-                    "Native Fusion CAD execution returned empty content blocks",
-                    details={"raw_result": raw_result},
-                )
-
-            for block in content_blocks:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    try:
-                        parsed = json.loads(text)
-                    except (ValueError, TypeError) as exc:
-                        raise FusionCadError(
-                            ErrorCode.FUSION_API_ERROR,
-                            f"Malformed non-JSON output from native Fusion script: {text[:200]}",
-                            details={"raw_output": text},
-                        ) from exc
-
-                    if not isinstance(parsed, dict):
-                        raise FusionCadError(
-                            ErrorCode.FUSION_API_ERROR,
-                            f"Invalid domain output type (expected JSON object, got {type(parsed).__name__})",
-                            details={"raw_output": text},
-                        )
-
-                    if parsed.get("status") == "failed" or "error" in parsed:
-                        err = parsed.get("error", {})
-                        code_str = err.get("code") or parsed.get("code", "FUSION_API_ERROR")
-                        try:
-                            code = ErrorCode(str(code_str))
-                        except ValueError:
-                            code = ErrorCode.FUSION_API_ERROR
-                        raise FusionCadError(
-                            code,
-                            err.get("message") or parsed.get("message", "CAD operation failed"),
-                            details=err.get("details") or parsed.get("details", {}),
-                        )
-
-                    if _has_image_or_binary_data(parsed):
-                        try:
-                            return self._desktop_nodes.store_external_result(node_id, parsed)
-                        except Exception as exc:
-                            raise BridgeError(
-                                ErrorCode.INTERNAL_ERROR,
-                                f"Failed to externalize binary result payload: {exc}",
-                            ) from exc
-
-                    if parsed.get("api_version") != "fusion.cad/v1":
-                        raise FusionCadError(
-                            ErrorCode.FUSION_API_ERROR,
-                            f"Unrecognized domain output from native Fusion script: expected api_version 'fusion.cad/v1', got {parsed.get('api_version')!r}",
-                            details={"parsed": parsed},
-                        )
-
-                    try:
-                        return CadResult.model_validate(parsed)
-                    except ValidationError as exc:
-                        raise FusionCadError(
-                            ErrorCode.FUSION_API_ERROR,
-                            f"Invalid fusion.cad/v1 response schema: {exc}",
-                            details={"validation_errors": exc.errors()},
-                        ) from exc
-
-            raise FusionCadError(
-                ErrorCode.FUSION_API_ERROR,
-                "No valid CAD text output found in native execution content",
-                details={"raw_result": raw_result},
-            )
-
-        # Fallback if raw_result was a bare dictionary (e.g. direct CAD result without content wrapper)
-        if raw_result.get("api_version") == "fusion.cad/v1":
-            try:
-                return CadResult.model_validate(raw_result)
-            except ValidationError as exc:
-                raise FusionCadError(
-                    ErrorCode.FUSION_API_ERROR,
-                    f"Invalid fusion.cad/v1 response schema: {exc}",
-                    details={"validation_errors": exc.errors()},
-                ) from exc
-
-        raise FusionCadError(
-            ErrorCode.FUSION_API_ERROR,
-            "Unrecognized domain output format from native Fusion script",
-            details={"raw_result": raw_result},
-        )
+        return self.decode_domain_result(raw_result)

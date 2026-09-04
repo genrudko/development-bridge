@@ -35,11 +35,11 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     def external_result_response(full, metadata, request_id):
         is_error = bool(
             full.get("isError", False)
-            or full.get("status") == "failed"
+            or full.get("status") in ("failed", "error")
             or "error" in full
         )
         if is_error:
-            err = full.get("error", {})
+            err = full.get("error", {}) if isinstance(full.get("error"), dict) else {}
             err_code = err.get("code") or full.get("code", "FUSION_API_ERROR")
             err_msg = err.get("message") or full.get("message", "Fusion operation failed")
             err_details = err.get("details") or full.get("details", full)
@@ -106,7 +106,11 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
 
     async def operation_result(ctx, params, request_context):
         args = params.arguments
+        op_status = container.desktop_nodes.operation_status(args["node_id"], args["operation_id"])
         full, metadata = container.desktop_nodes.operation_result(args["node_id"], args["operation_id"])
+        summary = op_status.get("summary")
+        if isinstance(summary, str) and container.fusion_cad.is_domain_summary(summary):
+            container.fusion_cad.decode_domain_result(full)
         return external_result_response(full, metadata, request_context.request_id)
 
     def make_domain_handler(request_type: Any, tool_name: str):
@@ -127,6 +131,7 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             reference = result.get("external_result") if isinstance(result, dict) else None
             if isinstance(reference, dict):
                 full, metadata = container.desktop_nodes.external_result(reference)
+                container.fusion_cad.decode_domain_result(full)
                 return external_result_response(full, metadata, request_context.request_id)
             if isinstance(result, CadResult):
                 data = result.model_dump(mode="json", exclude_none=True)

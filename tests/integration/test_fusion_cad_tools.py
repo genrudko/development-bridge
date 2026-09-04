@@ -135,7 +135,12 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
     ("fusion_style", {"node_id": "desk-1", "operation": "text_create", "text": "Label", "height_mm": 5.0, "position": {"x": 0, "y": 0, "z": 0, "frame": {"space": "world"}}}, True),
     ("fusion_validate", {"node_id": "desk-1", "operation": "run"}, False),
     ("fusion_view", {"node_id": "desk-1", "operation": "screenshot"}, False),
-    ("fusion_transaction", {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_1234"}, False),
+    ("fusion_view", {"node_id": "desk-1", "operation": "camera_set", "fov": 45.0}, True),
+    ("fusion_view", {"node_id": "desk-1", "operation": "fit"}, True),
+    ("fusion_view", {"node_id": "desk-1", "operation": "zoom_entity", "target": "ent_1"}, True),
+    ("fusion_view", {"node_id": "desk-1", "operation": "orient_to_face", "target": "ent_1"}, True),
+    ("fusion_view", {"node_id": "desk-1", "operation": "standard_view", "view_type": "top"}, True),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_1234"}, True),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_1234"}, True),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "rollback", "transaction_id": "tx_1234"}, True),
     ("fusion_read", {"node_id": "desk-1", "operation": "model_snapshot", "detail": "full"}, False),
@@ -309,11 +314,11 @@ async def test_native_non_json_or_unrecognized_domain_output_fails_closed(mock_c
     # fusion_view (8 operations)
     ("view", "camera_read", {"operation": "camera_read"}, False, False),
     ("view", "pick", {"operation": "pick", "view_ref": "view_1", "x": 0.5, "y": 0.5}, False, False),
-    ("view", "camera_set", {"operation": "camera_set", "fov": 45.0}, False, True),
-    ("view", "fit", {"operation": "fit"}, False, True),
-    ("view", "zoom_entity", {"operation": "zoom_entity", "target": "ent_1"}, False, True),
-    ("view", "orient_to_face", {"operation": "orient_to_face", "target": "ent_1"}, False, True),
-    ("view", "standard_view", {"operation": "standard_view", "view_type": "top"}, False, True),
+    ("view", "camera_set", {"operation": "camera_set", "fov": 45.0}, True, True),
+    ("view", "fit", {"operation": "fit"}, True, True),
+    ("view", "zoom_entity", {"operation": "zoom_entity", "target": "ent_1"}, True, True),
+    ("view", "orient_to_face", {"operation": "orient_to_face", "target": "ent_1"}, True, True),
+    ("view", "standard_view", {"operation": "standard_view", "view_type": "top"}, True, True),
     ("view", "screenshot", {"operation": "screenshot"}, True, False),
 
     # fusion_metadata (9 operations)
@@ -345,11 +350,11 @@ async def test_native_non_json_or_unrecognized_domain_output_fails_closed(mock_c
     ("validate", "run", {"operation": "run"}, True, False),
 
     # fusion_transaction
-    ("transaction", "begin", {"operation": "begin"}, False, False),
-    ("transaction", "stage", {"operation": "stage", "transaction_id": "tx_1", "action": {"action_type": "show", "target": "ent_1"}}, False, False),
+    ("transaction", "begin", {"operation": "begin"}, False, True),
+    ("transaction", "stage", {"operation": "stage", "transaction_id": "tx_1", "action": {"action_type": "show", "target": "ent_1"}}, False, True),
     ("transaction", "status", {"operation": "status"}, False, False),
-    ("transaction", "abort", {"operation": "abort", "transaction_id": "tx_1"}, False, False),
-    ("transaction", "preview", {"operation": "preview", "transaction_id": "tx_1"}, True, False),
+    ("transaction", "abort", {"operation": "abort", "transaction_id": "tx_1"}, False, True),
+    ("transaction", "preview", {"operation": "preview", "transaction_id": "tx_1"}, True, True),
     ("transaction", "commit", {"operation": "commit", "transaction_id": "tx_1"}, True, True),
     ("transaction", "rollback", {"operation": "rollback", "transaction_id": "tx_1"}, True, True),
 ])
@@ -478,7 +483,12 @@ async def test_fusion_tool_renders_external_result(mock_container: ApplicationCo
         },
     })
     mock_container.desktop_nodes.external_result = MagicMock(return_value=(
-        {"isError": False},
+        {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Read entity ent_1234",
+            "data": {"ref": "ent_1234"},
+        },
         {
             "result_id": "res_123",
             "size_bytes": 1024,
@@ -635,3 +645,267 @@ def test_container_no_global_singleton():
     c2 = build_container(BridgeSettings())
     assert c1.fusion_cad is not c2.fusion_cad
     assert isinstance(c1.fusion_cad, FusionCadService)
+
+
+@pytest.mark.asyncio
+async def test_generic_key_data_with_plain_text_remains_model_visible(mock_container: ApplicationContainer):
+    registry = build_tool_registry(mock_container)
+    tool = registry.get("fusion_read")
+    assert tool is not None
+
+    semantic_payload = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Model snapshot read",
+        "data": {
+            "component_count": 5,
+            "feature_names": ["extrude_1", "fillet_2", "cut_3"],
+            "annotation": "Ordinary semantic text data",
+        },
+    }
+    mock_container.desktop_nodes.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps(semantic_payload),
+        }],
+        "isError": False,
+    })
+
+    req_ctx = RequestContext(request_id="req_semantic_data")
+    params = types.CallToolRequestParams(
+        name="fusion_read",
+        arguments={"node_id": "desk-1", "operation": "entity", "ref": "ent_1234"},
+    )
+    result = await tool.handler(None, params, req_ctx)
+    assert isinstance(result, types.CallToolResult)
+    assert not result.is_error
+    assert len(result.content) == 1
+    content_text = result.content[0].text
+    parsed = json.loads(content_text)
+    assert parsed["ok"] is True
+    # Verify semantic fields remain directly visible and were NOT externalized
+    assert "external_result" not in parsed["data"]
+    assert parsed["data"]["data"]["annotation"] == "Ordinary semantic text data"
+    assert parsed["data"]["data"]["feature_names"] == ["extrude_1", "fillet_2", "cut_3"]
+
+
+@pytest.mark.parametrize("invalid_shape, raw_output", [
+    ("malformed_json", "Traceback (most recent call last):\nScriptError: syntax error"),
+    ("wrong_api_version", json.dumps({"api_version": "wrong.version/v2", "status": "succeeded", "data": {}})),
+    ("invalid_cad_result_schema", json.dumps({"api_version": "fusion.cad/v1", "status": "unknown_status", "data": {}})),
+    ("native_is_error", json.dumps({"api_version": "fusion.cad/v1", "status": "failed", "error": {"code": "FUSION_API_ERROR", "message": "Crash"}})),
+])
+@pytest.mark.asyncio
+async def test_async_domain_operation_result_fails_closed(
+    tmp_path,
+    invalid_shape: str,
+    raw_output: str,
+):
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(tmp_path / "artifacts"),
+        },
+    }))
+    registry = build_tool_registry(container)
+    op_result_tool = registry.get("fusion_operation_result")
+    assert op_result_tool is not None
+
+    await container.desktop_nodes.register(
+        "desk-1",
+        [{"name": "fusion_mcp_execute"}],
+        fusion_available=True,
+    )
+
+    # Submit domain operation (summary="validate:run")
+    submit_res = await container.fusion_cad.execute({
+        "node_id": "desk-1",
+        "operation": "run",
+    }, group="validate")
+    assert isinstance(submit_res, dict)
+    op_id = submit_res["operation_id"]
+
+    claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
+    assert claimed is not None
+    cmd_id = claimed["command_id"]
+
+    # Submit the invalid result
+    if invalid_shape == "native_is_error":
+        node_result = {
+            "content": [{"type": "text", "text": raw_output}],
+            "isError": True,
+        }
+    else:
+        node_result = {
+            "content": [{"type": "text", "text": raw_output}],
+            "isError": False,
+        }
+
+    await container.desktop_nodes.submit_result("desk-1", cmd_id, node_result)
+
+    # Query operation_result
+    req_ctx = RequestContext(request_id=f"req_op_fail_{invalid_shape}")
+    params = types.CallToolRequestParams(
+        name="fusion_operation_result",
+        arguments={"node_id": "desk-1", "operation_id": op_id},
+    )
+
+    with pytest.raises((FusionCadError, BridgeError)):
+        await op_result_tool.handler(None, params, req_ctx)
+
+
+@pytest.mark.asyncio
+async def test_async_domain_operation_result_succeeds_for_valid_cad_result(tmp_path):
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(tmp_path / "artifacts"),
+        },
+    }))
+    registry = build_tool_registry(container)
+    op_result_tool = registry.get("fusion_operation_result")
+    assert op_result_tool is not None
+
+    await container.desktop_nodes.register(
+        "desk-1",
+        [{"name": "fusion_mcp_execute"}],
+        fusion_available=True,
+    )
+
+    # Submit domain operation
+    submit_res = await container.fusion_cad.execute({
+        "node_id": "desk-1",
+        "operation": "run",
+    }, group="validate")
+    op_id = submit_res["operation_id"]
+
+    claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
+    cmd_id = claimed["command_id"]
+
+    valid_cad_result = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Validation run passed",
+        "data": {"passed": True, "findings": []},
+    }
+    await container.desktop_nodes.submit_result("desk-1", cmd_id, {
+        "content": [{"type": "text", "text": json.dumps(valid_cad_result)}],
+        "isError": False,
+    })
+
+    req_ctx = RequestContext(request_id="req_op_success")
+    params = types.CallToolRequestParams(
+        name="fusion_operation_result",
+        arguments={"node_id": "desk-1", "operation_id": op_id},
+    )
+    res = await op_result_tool.handler(None, params, req_ctx)
+    assert isinstance(res, types.CallToolResult)
+    assert not res.is_error
+    parsed = json.loads(res.content[0].text)
+    assert parsed["ok"] is True
+    assert "external_result" in parsed["data"]
+
+
+@pytest.mark.asyncio
+async def test_generic_infrastructure_operation_result_preserves_non_domain_json(tmp_path):
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(tmp_path / "artifacts"),
+        },
+    }))
+    registry = build_tool_registry(container)
+    submit_tool = registry.get("fusion_submit")
+    op_result_tool = registry.get("fusion_operation_result")
+    assert submit_tool is not None and op_result_tool is not None
+
+    await container.desktop_nodes.register(
+        "desk-1",
+        [{"name": "generic_custom_tool"}],
+        fusion_available=True,
+    )
+
+    req_ctx = RequestContext(request_id="req_gen_submit")
+    submit_params = types.CallToolRequestParams(
+        name="fusion_submit",
+        arguments={"node_id": "desk-1", "tool_name": "generic_custom_tool", "arguments": {"foo": "bar"}},
+    )
+    submit_res = await submit_tool.handler(None, submit_params, req_ctx)
+    parsed_submit = json.loads(submit_res.content[0].text)
+    op_id = parsed_submit["data"]["operation_id"]
+
+    claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
+    cmd_id = claimed["command_id"]
+
+    # Submit generic non-domain result (not fusion.cad/v1)
+    generic_payload = {"custom_status": "ok", "arbitrary_field": 42}
+    await container.desktop_nodes.submit_result("desk-1", cmd_id, generic_payload)
+
+    # Query operation_result
+    req_ctx = RequestContext(request_id="req_gen_result")
+    params = types.CallToolRequestParams(
+        name="fusion_operation_result",
+        arguments={"node_id": "desk-1", "operation_id": op_id},
+    )
+    res = await op_result_tool.handler(None, params, req_ctx)
+    assert isinstance(res, types.CallToolResult)
+    assert not res.is_error
+    parsed_res = json.loads(res.content[0].text)
+    assert parsed_res["ok"] is True
+
+
+def test_recovered_result_expiry_cleans_up_res_and_image_files(tmp_path):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(artifact_dir),
+            "result_artifact_ttl_seconds": 60,
+        },
+    })
+    container = build_container(settings)
+
+    payload_with_binary = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Screenshot artifact",
+        "data": {
+            "thumbnail_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        },
+    }
+    result_ref = container.desktop_nodes.store_external_result("desk-1", payload_with_binary)
+    result_id = result_ref["external_result"]["result_id"]
+
+    json_file = artifact_dir / f"{result_id}.json"
+    res_files = list(artifact_dir.glob(f"{result_id}-res-*"))
+    assert json_file.exists()
+    assert len(res_files) >= 1
+
+    # Also create a legacy -image- file to verify backwards-compatible cleanup
+    legacy_image = artifact_dir / f"{result_id}-image-0.png"
+    legacy_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # Clear in-memory state so recovery is triggered
+    container.desktop_nodes._external_results.clear()
+    container.desktop_nodes._external_resources.clear()
+
+    # Set file mtime to 100 seconds in the past (exceeding 1s TTL)
+    import os
+    past_time = os.path.getmtime(json_file) - 100
+    os.utime(json_file, (past_time, past_time))
+
+    recovered = container.desktop_nodes._recover_external_result(result_id)
+    assert recovered is None
+    assert not json_file.exists()
+    assert not legacy_image.exists()
+    for res_path in res_files:
+        assert not res_path.exists()

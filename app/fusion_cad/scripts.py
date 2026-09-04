@@ -89,27 +89,34 @@ class FusionCadScriptBundle:
         common_script = common_path.read_text("utf-8")
         group_script = group_path.read_text("utf-8")
 
-        marker = "# __GROUP_SCRIPT__"
-        marker_count = common_script.count(marker)
-        if marker_count == 0:
+        payload_marker = "__PAYLOAD_JSON__"
+        payload_count = common_script.count(payload_marker)
+        if payload_count == 0:
             raise BridgeError(
                 ErrorCode.INTERNAL_ERROR,
-                f"Common script template missing required '{marker}' marker at {common_path}",
+                f"Common script template missing '{payload_marker}' marker at {common_path}",
             )
-        if marker_count > 1:
+        if payload_count > 1:
             raise BridgeError(
                 ErrorCode.INTERNAL_ERROR,
-                f"Common script template contains duplicate '{marker}' markers ({marker_count}) at {common_path}",
+                f"Common script template contains duplicate '{payload_marker}' markers ({payload_count}) at {common_path}",
             )
 
-        if "__PAYLOAD_JSON__" not in common_script:
+        group_marker = "# __GROUP_SCRIPT__"
+        group_count = common_script.count(group_marker)
+        if group_count == 0:
             raise BridgeError(
                 ErrorCode.INTERNAL_ERROR,
-                f"Common script template missing '__PAYLOAD_JSON__' marker at {common_path}",
+                f"Common script template missing required '{group_marker}' marker at {common_path}",
+            )
+        if group_count > 1:
+            raise BridgeError(
+                ErrorCode.INTERNAL_ERROR,
+                f"Common script template contains duplicate '{group_marker}' markers ({group_count}) at {common_path}",
             )
 
         escaped_literal = json.dumps(serialized_payload, ensure_ascii=False)
-        rendered_script = common_script.replace("__PAYLOAD_JSON__", escaped_literal, 1)
-        rendered_script = rendered_script.replace(marker, group_script, 1)
+        rendered_script = common_script.replace(payload_marker, escaped_literal, 1)
+        rendered_script = rendered_script.replace(group_marker, group_script, 1)
 
         return rendered_script
