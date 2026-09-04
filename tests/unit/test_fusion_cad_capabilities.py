@@ -178,7 +178,7 @@ def test_capability_matrix_from_probe_truthful_states():
         assert "P2" in rec.limitations[0]
 
 
-def test_capability_matrix_from_probe_supported_with_direct_runtime_context_evidence():
+def test_falsify_property_and_runtime_facts_never_claim_supported_for_unproven_capabilities():
     probe = {
         "application": "Autodesk Fusion",
         "fusion_version": "2.0.18000",
@@ -199,7 +199,7 @@ def test_capability_matrix_from_probe_supported_with_direct_runtime_context_evid
             "has_attributes": True,
             "has_undo_redo": True,
             "has_mutation_indicators": True,
-            # Direct behavioral / runtime-context evidence
+            # Property/object presence facts must NOT claim supported without safe non-mutating semantic contract proof
             "camera_runtime_verified": True,
             "has_active_camera": True,
             "has_active_viewport": True,
@@ -220,23 +220,32 @@ def test_capability_matrix_from_probe_supported_with_direct_runtime_context_evid
     }
     matrix = CapabilityMatrix.from_probe(probe)
 
-    # With direct behavioral/runtime-context evidence, these become supported:
+    # Only verified document/design access capabilities become supported:
     for cap_name in (
         "entity.token_resolver",
         "design.access",
         "timeline.access",
         "sketch.access",
+        "revision.mutation_indicators",
+    ):
+        rec = matrix.get(cap_name)
+        assert rec is not None, f"Capability {cap_name} missing from matrix"
+        assert rec.state == "supported", f"Capability {cap_name} was {rec.state}, expected supported with direct evidence"
+
+    # Finding 2: Property existence (activeSelections/count, Attributes collection/add/count, camera eye/target/upVector,
+    # viewport conversion methods, preview/undo API) is insufficient; must remain degraded with explicit limitations
+    for degraded_cap in (
         "view.camera",
         "view.viewport_conversion",
         "selection.primitives",
         "transaction.preview_hooks",
         "metadata.attributes",
         "transaction.undo_redo",
-        "revision.mutation_indicators",
     ):
-        rec = matrix.get(cap_name)
-        assert rec is not None, f"Capability {cap_name} missing from matrix"
-        assert rec.state == "supported", f"Capability {cap_name} was {rec.state}, expected supported with direct evidence"
+        rec = matrix.get(degraded_cap)
+        assert rec is not None, f"Capability {degraded_cap} missing from matrix"
+        assert rec.state == "degraded", f"Capability {degraded_cap} was {rec.state}, expected degraded"
+        assert len(rec.limitations) > 0
 
     # Conservative capabilities remain degraded pending later live feasibility gates / Task 4
     for conservative_cap in (

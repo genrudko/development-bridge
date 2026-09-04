@@ -422,16 +422,8 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 6. view.camera (Finding 2: do not claim contract-level supported from hasattr/class existence)
-        if not probe_failed and (facts.get("camera_runtime_verified") or facts.get("has_active_camera")):
-            records.append(CapabilityRecord(
-                name="view.camera",
-                state="supported",
-                implementation="adsk.core.Camera",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        elif not probe_failed and facts.get("has_camera"):
+        # 6. view.camera (Finding 2: property existence is insufficient; prefer degraded/unavailable)
+        if not probe_failed and (facts.get("has_camera") or facts.get("has_active_camera") or facts.get("camera_runtime_verified")):
             records.append(CapabilityRecord(
                 name="view.camera",
                 state="degraded",
@@ -449,16 +441,8 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 7. view.viewport_conversion
-        if not probe_failed and (facts.get("viewport_conversion_verified") or facts.get("has_viewport_conversion_context")):
-            records.append(CapabilityRecord(
-                name="view.viewport_conversion",
-                state="supported",
-                implementation="adsk.core.Viewport",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        elif not probe_failed and facts.get("has_viewport_conversion"):
+        # 7. view.viewport_conversion (Finding 2: method presence is insufficient; prefer degraded/unavailable)
+        if not probe_failed and (facts.get("has_viewport_conversion") or facts.get("has_viewport_conversion_context") or facts.get("viewport_conversion_verified")):
             records.append(CapabilityRecord(
                 name="view.viewport_conversion",
                 state="degraded",
@@ -504,16 +488,8 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 9. selection.primitives (Finding 2: do not claim contract-level supported from hasattr alone)
-        if not probe_failed and (facts.get("selection_runtime_verified") or facts.get("has_active_selections_context")):
-            records.append(CapabilityRecord(
-                name="selection.primitives",
-                state="supported",
-                implementation="adsk.core.UserInterface.activeSelections",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        elif not probe_failed and facts.get("has_selection_primitives"):
+        # 9. selection.primitives (Finding 2: activeSelections/count is insufficient; prefer degraded/unavailable)
+        if not probe_failed and (facts.get("has_selection_primitives") or facts.get("has_active_selections_context") or facts.get("selection_runtime_verified")):
             records.append(CapabilityRecord(
                 name="selection.primitives",
                 state="degraded",
@@ -531,16 +507,8 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 10. transaction.preview_hooks (Finding 2: do not claim contract-level supported from class existence)
-        if not probe_failed and facts.get("preview_hooks_verified"):
-            records.append(CapabilityRecord(
-                name="transaction.preview_hooks",
-                state="supported",
-                implementation="adsk.core.Command.executePreview",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        elif not probe_failed and facts.get("has_command_preview"):
+        # 10. transaction.preview_hooks (Finding 2: preview API presence is insufficient; prefer degraded/unavailable)
+        if not probe_failed and (facts.get("has_command_preview") or facts.get("preview_hooks_verified")):
             records.append(CapabilityRecord(
                 name="transaction.preview_hooks",
                 state="degraded",
@@ -586,16 +554,8 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 12. metadata.attributes (Finding 2: do not claim contract-level supported from hasattr alone)
-        if not probe_failed and (facts.get("attributes_runtime_verified") or facts.get("has_attributes_context")):
-            records.append(CapabilityRecord(
-                name="metadata.attributes",
-                state="supported",
-                implementation="adsk.core.Attributes",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        elif not probe_failed and facts.get("has_attributes"):
+        # 12. metadata.attributes (Finding 2: collection/add/count is insufficient; prefer degraded/unavailable)
+        if not probe_failed and (facts.get("has_attributes") or facts.get("has_attributes_context") or facts.get("attributes_runtime_verified")):
             records.append(CapabilityRecord(
                 name="metadata.attributes",
                 state="degraded",
@@ -632,16 +592,8 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 14. transaction.undo_redo (Finding 2: do not claim contract-level supported from class existence)
-        if not probe_failed and (facts.get("undo_redo_verified") or facts.get("has_undo_redo_context")):
-            records.append(CapabilityRecord(
-                name="transaction.undo_redo",
-                state="supported",
-                implementation="adsk.core.Application",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        elif not probe_failed and facts.get("has_undo_redo"):
+        # 14. transaction.undo_redo (Finding 2: undo API presence is insufficient; prefer degraded/unavailable)
+        if not probe_failed and (facts.get("has_undo_redo") or facts.get("has_undo_redo_context") or facts.get("undo_redo_verified")):
             records.append(CapabilityRecord(
                 name="transaction.undo_redo",
                 state="degraded",

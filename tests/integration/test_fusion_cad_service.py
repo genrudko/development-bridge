@@ -432,3 +432,116 @@ async def test_falsify_cross_node_isolation_during_reconnect_real_service(real_d
     )
     assert isinstance(res2, CadResult)
     assert res2.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_falsify_in_flight_capability_probe_race_re_registration(real_desktop_service: DesktopNodeService):
+    """Proves that if a node re-registers while read:capabilities is in-flight,
+    the old probe result is discarded, capabilities remain unprobed, and subsequent
+    gated operations fail closed with CAPABILITY_UNAVAILABLE.
+    """
+    # 1. Register desk-1 (generation 1)
+    await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    assert real_desktop_service.get_session_generation("desk-1") == 1
+
+    cad_service = FusionCadService(real_desktop_service)
+
+    # 2. Simulate in-flight race: during the probe dispatch call, desk-1 re-registers
+    orig_call = real_desktop_service.call
+
+    async def call_with_race(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        # Trigger re-registration mid-probe -> bumps session_generation to 2
+        await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+        assert real_desktop_service.get_session_generation("desk-1") == 2
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": "Probed during race",
+                    "capabilities": [
+                        {"name": "design.access", "state": "supported", "implementation": "adsk.fusion.Design"},
+                    ],
+                }),
+            }],
+            "isError": False,
+        }
+
+    real_desktop_service.call = call_with_race  # type: ignore[assignment]
+
+    # 3. Dispatch read:capabilities
+    res = await cad_service.execute({"node_id": "desk-1", "operation": "capabilities"}, group="read")
+    assert isinstance(res, CadResult)
+
+    # 4. Old in-flight probe result must be DISCARDED and NOT cached
+    assert cad_service.get_node_capabilities("desk-1") is None
+
+    # 5. Subsequent gated operation must FAIL closed because capability state is unprobed
+    real_desktop_service.call = orig_call
+    with pytest.raises(BridgeError) as exc_info:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "model_snapshot"},
+            group="read",
+        )
+    assert exc_info.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert "unprobed" in exc_info.value.message
+
+    # 6. Re-probing after the race succeeds and caches for generation 2
+    real_desktop_service.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Probed clean",
+                "capabilities": [
+                    {"name": "design.access", "state": "supported", "implementation": "adsk.fusion.Design"},
+                ],
+            }),
+        }],
+        "isError": False,
+    })
+    await cad_service.execute({"node_id": "desk-1", "operation": "capabilities"}, group="read")
+    assert cad_service.get_node_capabilities("desk-1") is not None
+    assert cad_service.get_node_capabilities("desk-1").get("design.access").state == "supported"
+
+
+@pytest.mark.asyncio
+async def test_falsify_in_flight_capability_probe_race_cross_node_isolation(real_desktop_service: DesktopNodeService):
+    """Proves in-flight race on desk-1 leaves desk-1 unprobed without affecting desk-2."""
+    await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    await real_desktop_service.register("desk-2", [{"name": "fusion_mcp_execute"}], True)
+
+    cad_service = FusionCadService(real_desktop_service)
+    # desk-2 has valid cached capabilities
+    matrix2 = CapabilityMatrix.from_records([CapabilityRecord(name="design.access", state="supported")])
+    cad_service.set_node_capabilities("desk-2", matrix2)
+    assert cad_service.get_node_capabilities("desk-2") is not None
+
+    # In-flight race occurs on desk-1
+    async def call_race_desk1(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        if node_id == "desk-1":
+            # Tool change on desk-1 -> bumps generation
+            await real_desktop_service.heartbeat("desk-1", tools=[{"name": "fusion_mcp_execute"}, {"name": "aux"}])
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": "Probed during race",
+                    "capabilities": [
+                        {"name": "design.access", "state": "supported", "implementation": "adsk.fusion.Design"},
+                    ],
+                }),
+            }],
+            "isError": False,
+        }
+
+    real_desktop_service.call = call_race_desk1  # type: ignore[assignment]
+    await cad_service.execute({"node_id": "desk-1", "operation": "capabilities"}, group="read")
+
+    # desk-1 discarded, desk-2 unaffected
+    assert cad_service.get_node_capabilities("desk-1") is None
+    assert cad_service.get_node_capabilities("desk-2") is not None

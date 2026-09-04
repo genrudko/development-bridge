@@ -164,12 +164,17 @@ class FusionCadService:
         matrix: CapabilityMatrix,
         generation: int | None = None,
     ) -> None:
-        if generation is None:
-            try:
-                generation = self._desktop_nodes.get_session_generation(node_id)
-            except (BridgeError, AttributeError):
-                generation = 1
-        self._node_capabilities[node_id] = _CachedNodeCapabilities(matrix=matrix, session_generation=generation)
+        try:
+            current_gen = self._desktop_nodes.get_session_generation(node_id)
+        except (BridgeError, AttributeError):
+            current_gen = 1
+
+        if generation is not None and generation != current_gen:
+            self._node_capabilities.pop(node_id, None)
+            return
+
+        target_gen = generation if generation is not None else current_gen
+        self._node_capabilities[node_id] = _CachedNodeCapabilities(matrix=matrix, session_generation=target_gen)
 
     def invalidate_node_capabilities(self, node_id: str | None = None) -> None:
         if node_id is None:
@@ -591,6 +596,14 @@ class FusionCadService:
         script = self._script_bundle.build(effective_bundle_group, payload)
         journal = {"mutation": is_mutation, "summary": summary}
 
+        # Authoritative DesktopNodeService session_generation captured before dispatching read:capabilities
+        probe_generation: int | None = None
+        if effective_bundle_group == "read" and op == "capabilities":
+            try:
+                probe_generation = self._desktop_nodes.get_session_generation(node_id)
+            except (BridgeError, AttributeError):
+                probe_generation = None
+
         if is_async:
             return await self._desktop_nodes.submit(
                 node_id,
@@ -622,23 +635,37 @@ class FusionCadService:
         cad_result = self.decode_domain_result(raw_result)
 
         # If operation was capabilities read, persist the probed capability matrix
-        if effective_bundle_group == "read" and op == "capabilities" and cad_result.capabilities:
-            identity = None
-            if isinstance(cad_result.data, (dict, Mapping)):
+        # only if the authoritative session_generation is still current.
+        if effective_bundle_group == "read" and op == "capabilities":
+            if cad_result.capabilities:
+                current_gen: int | None = None
                 try:
-                    data_dict = dict(cad_result.data)
-                    if "local_tool" not in data_dict or data_dict["local_tool"] is None:
-                        data_dict["local_tool"] = "fusion_mcp_execute"
-                    if "implementation" not in data_dict or data_dict["implementation"] is None:
-                        data_dict["implementation"] = "fusion-desktop-mcp"
-                    identity = FusionRuntimeIdentity.model_validate(data_dict)
-                except (ValidationError, ValueError, TypeError):
+                    current_gen = self._desktop_nodes.get_session_generation(node_id)
+                except (BridgeError, AttributeError):
+                    current_gen = None
+
+                if probe_generation is not None and current_gen == probe_generation:
                     identity = None
-            matrix = CapabilityMatrix.from_records(
-                cad_result.capabilities,
-                identity=identity,
-            )
-            self.set_node_capabilities(node_id, matrix)
+                    if isinstance(cad_result.data, (dict, Mapping)):
+                        try:
+                            data_dict = dict(cad_result.data)
+                            if "local_tool" not in data_dict or data_dict["local_tool"] is None:
+                                data_dict["local_tool"] = "fusion_mcp_execute"
+                            if "implementation" not in data_dict or data_dict["implementation"] is None:
+                                data_dict["implementation"] = "fusion-desktop-mcp"
+                            identity = FusionRuntimeIdentity.model_validate(data_dict)
+                        except (ValidationError, ValueError, TypeError):
+                            identity = None
+                    matrix = CapabilityMatrix.from_records(
+                        cad_result.capabilities,
+                        identity=identity,
+                    )
+                    self.set_node_capabilities(node_id, matrix, generation=probe_generation)
+                else:
+                    # Generation changed during in-flight probe: discard result, leave unprobed/fail-closed
+                    self._node_capabilities.pop(node_id, None)
+            else:
+                self._node_capabilities.pop(node_id, None)
 
         domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
         if has_binary_data(domain_payload):
