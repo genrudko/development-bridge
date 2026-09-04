@@ -175,13 +175,39 @@ def test_request_union_validation_pick() -> None:
     assert isinstance(req, PickRequest)
     assert req.operation == "pick"
     assert req.x == 0.5
+    assert req.filters == ("face", "edge")
 
     # Rejects inapplicable / extra fields
     with pytest.raises(ValidationError):
         adapter.validate_python({**valid_payload, "extra_unexpected_field": 123})
 
+    # Rejects invalid view_ref format
+    with pytest.raises(ValidationError):
+        adapter.validate_python({**valid_payload, "view_ref": "invalid_view"})
 
-def test_request_union_validation_text_create() -> None:
+
+def test_request_union_validation_camera_set_framed_inputs() -> None:
+    adapter = TypeAdapter(FusionViewRequest)
+    valid_payload = {
+        "node_id": "node_1",
+        "operation": "camera_set",
+        "eye": {"x": 100.0, "y": 200.0, "z": 300.0},
+        "target": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "up": {"x": 0.0, "y": 0.0, "z": 1.0},
+        "fov": 45.0,
+    }
+    req = adapter.validate_python(valid_payload)
+    assert req.operation == "camera_set"
+    assert req.eye is not None and req.eye.x == 100.0
+    assert req.eye.frame.space == "world"
+    assert req.up is not None and req.up.z == 1.0
+
+    # Rejects unframed raw list for eye
+    with pytest.raises(ValidationError):
+        adapter.validate_python({**valid_payload, "eye": [100.0, 200.0, 300.0]})
+
+
+def test_request_union_validation_text_create_framed_inputs() -> None:
     adapter = TypeAdapter(FusionStyleRequest)
     valid_payload = {
         "node_id": "node_1",
@@ -189,16 +215,26 @@ def test_request_union_validation_text_create() -> None:
         "text": "AZURE_123",
         "font": "Arial",
         "height_mm": 5.0,
-        "position": [0.0, 0.0, 0.0],
+        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
         "expected_revision": "rev_1",
     }
     req = adapter.validate_python(valid_payload)
     assert isinstance(req, TextCreateRequest)
     assert req.text == "AZURE_123"
+    assert req.position.x == 0.0
+    assert req.position.frame.space == "world"
+
+    # Rejects invalid raw list for position
+    with pytest.raises(ValidationError):
+        adapter.validate_python({**valid_payload, "position": [0.0, 0.0, 0.0]})
 
     # Rejects invalid operation in style
     with pytest.raises(ValidationError):
         adapter.validate_python({**valid_payload, "operation": "unknown_op"})
+
+    # Rejects invalid revision format
+    with pytest.raises(ValidationError):
+        adapter.validate_python({**valid_payload, "expected_revision": "not_a_rev"})
 
 
 def test_request_union_validation_read_snapshot() -> None:
@@ -211,13 +247,64 @@ def test_request_union_validation_read_snapshot() -> None:
     assert req.operation == "model_snapshot"
 
 
-def test_request_union_validation_transaction() -> None:
+def test_request_union_validation_transaction_stage_strict_action() -> None:
     adapter = TypeAdapter(FusionTransactionRequest)
     req = adapter.validate_python({
         "node_id": "node_1",
         "operation": "begin",
     })
     assert req.operation == "begin"
+
+    # Stage valid typed text_create action
+    req_stage = adapter.validate_python({
+        "node_id": "node_1",
+        "operation": "stage",
+        "transaction_id": "tx_123",
+        "action": {
+            "action_type": "text_create",
+            "text": "SCHEDULE",
+            "height_mm": 10.0,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+        },
+    })
+    assert req_stage.operation == "stage"
+    assert req_stage.action.action_type == "text_create"
+
+    # Stage valid typed metadata action
+    req_stage_meta = adapter.validate_python({
+        "node_id": "node_1",
+        "operation": "stage",
+        "transaction_id": "tx_123",
+        "action": {
+            "action_type": "metadata_set_role",
+            "target": "ent_panel_1",
+            "role": "main_panel",
+        },
+    })
+    assert req_stage_meta.operation == "stage"
+    assert req_stage_meta.action.action_type == "metadata_set_role"
+
+    # Reject arbitrary unrestricted free-form / raw_python action
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "stage",
+            "transaction_id": "tx_123",
+            "action": {
+                "raw_python": "import os; os.system('echo exploit')",
+            },
+        })
+
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "stage",
+            "transaction_id": "tx_123",
+            "action": {
+                "action_type": "unknown_mutation",
+                "arbitrary_payload": 123,
+            },
+        })
 
     req_commit = adapter.validate_python({
         "node_id": "node_1",

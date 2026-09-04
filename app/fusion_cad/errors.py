@@ -26,12 +26,13 @@ CAD_NON_RETRYABLE_CODES: frozenset[ErrorCode] = frozenset({
     ErrorCode.TRANSACTION_CONFLICT,
     ErrorCode.CHECKPOINT_DIVERGED,
     ErrorCode.SAVE_CONFIRMATION_REQUIRED,
+    ErrorCode.OPERATION_UNCERTAIN,
 })
 
 
 def is_cad_error_retryable(code: ErrorCode | str) -> bool:
     """Return whether a CAD error code can be retried automatically.
-    
+
     In CAD mutations and state operations, errors are non-retryable by default
     to prevent applying stale or conflicting modifications without new evidence.
     """
