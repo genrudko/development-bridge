@@ -21,6 +21,31 @@ from app.fusion_cad.requests import (
 from app.fusion_cad.scripts import FusionCadScriptBundle
 
 
+def _has_image_or_binary_data(value: Any) -> bool:
+    if isinstance(value, (bytes, bytearray)):
+        return True
+    if isinstance(value, str):
+        if value.startswith(("data:image/", "data:application/octet-stream")):
+            return True
+        if len(value) >= 32 and value.startswith(("iVBORw0KGgo", "/9j/", "R0lGOD", "UklGR")):
+            return True
+
+    elif isinstance(value, dict):
+        if value.get("type") == "image":
+            return True
+        mime = value.get("mimeType") or value.get("mime_type")
+        if isinstance(mime, str) and (mime.startswith("image/") or mime == "application/octet-stream"):
+            return True
+        for v in value.values():
+            if _has_image_or_binary_data(v):
+                return True
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            if _has_image_or_binary_data(item):
+                return True
+    return False
+
+
 class FusionCadService:
     """Domain service for Fusion CAD workstation operations.
 
@@ -54,6 +79,42 @@ class FusionCadService:
             return "transaction"
         return "read"
 
+    def _classify_operation(self, group: str, payload: dict[str, Any]) -> tuple[bool, bool, str]:
+        op = str(payload.get("operation", ""))
+        summary = f"{group}:{op}" if op else group
+
+        if group == "read":
+            if op == "model_snapshot":
+                is_async = (payload.get("detail") == "full" or bool(payload.get("include_views")))
+                return is_async, False, summary
+            return False, False, summary
+
+        if group == "inspect":
+            return False, False, summary
+
+        if group == "view":
+            is_async = (op == "screenshot")
+            return is_async, False, summary
+
+        if group == "validate":
+            is_async = (op == "run")
+            return is_async, False, summary
+
+        if group == "transaction":
+            if op == "commit":
+                return True, True, summary
+            if op == "preview":
+                return True, False, summary
+            return False, False, summary
+
+        if group == "mutate":
+            # Check for fast read operations in metadata/style
+            if op in ("get", "query", "provenance", "text_read"):
+                return False, False, summary
+            return True, True, summary
+
+        return False, False, summary
+
     async def execute(
         self,
         request: BaseModel | dict[str, Any],
@@ -79,15 +140,37 @@ class FusionCadService:
                 "node_id is required for Fusion CAD operations",
             )
 
+        is_async, is_mutation, summary = self._classify_operation(resolved_group, payload)
         script = self._script_bundle.build(resolved_group, payload)
+        journal = {"mutation": is_mutation, "summary": summary}
+
+        if is_async:
+            return await self._desktop_nodes.submit(
+                node_id,
+                "fusion_mcp_execute",
+                {"script": script},
+                journal=journal,
+            )
+
         raw_result = await self._desktop_nodes.call(
             node_id,
             "fusion_mcp_execute",
             {"script": script},
+            journal=journal,
         )
 
         if isinstance(raw_result, dict) and "external_result" in raw_result:
             return raw_result
+
+        # Enforce bounded model context: direct results must not return image/binary/base64 inline
+        if _has_image_or_binary_data(raw_result):
+            try:
+                return self._desktop_nodes.store_external_result(node_id, raw_result)
+            except Exception as exc:
+                raise BridgeError(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Failed to externalize binary result payload: {exc}",
+                ) from exc
 
         if isinstance(raw_result, dict) and "content" in raw_result:
             for block in raw_result.get("content", []):
@@ -110,11 +193,27 @@ class FusionCadService:
                                 err.get("message", "CAD operation failed"),
                                 details=err.get("details", {}),
                             )
+                        if _has_image_or_binary_data(parsed):
+                            try:
+                                return self._desktop_nodes.store_external_result(node_id, parsed)
+                            except Exception as exc:
+                                raise BridgeError(
+                                    ErrorCode.INTERNAL_ERROR,
+                                    f"Failed to externalize binary result payload: {exc}",
+                                ) from exc
                         if parsed.get("api_version") == "fusion.cad/v1":
                             return CadResult.model_validate(parsed)
                         return parsed
 
         if isinstance(raw_result, dict):
+            if _has_image_or_binary_data(raw_result):
+                try:
+                    return self._desktop_nodes.store_external_result(node_id, raw_result)
+                except Exception as exc:
+                    raise BridgeError(
+                        ErrorCode.INTERNAL_ERROR,
+                        f"Failed to externalize binary result payload: {exc}",
+                    ) from exc
             if raw_result.get("api_version") == "fusion.cad/v1":
                 return CadResult.model_validate(raw_result)
             return raw_result

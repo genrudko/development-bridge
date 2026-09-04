@@ -1,0 +1,5 @@
+def run():
+    op = PAYLOAD.get("operation", "")
+    if op == "echo":
+        return make_result(data={"text": PAYLOAD.get("text", "")}, summary="echo")
+    return make_result(data={"operation": op}, summary=f"Executed read:{op}")

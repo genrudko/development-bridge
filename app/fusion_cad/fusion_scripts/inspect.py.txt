@@ -1,0 +1,3 @@
+def run():
+    op = PAYLOAD.get("operation", "")
+    return make_result(data={"operation": op}, summary=f"Executed inspect:{op}")

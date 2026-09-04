@@ -499,10 +499,30 @@ class DesktopNodeService:
         self._extract_image_resources(result_id, value, created_at)
         return result_id
 
+    def store_external_result(self, node_id: str, value: dict[str, Any], command_id: str = "direct") -> dict[str, Any]:
+        self._configured()
+        self._validate_node_id(node_id)
+        if not isinstance(value, dict):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion command result must be a JSON-safe object")
+        self._cleanup_external_results()
+        result_id = self._store_result_value(node_id, command_id, value)
+        item = self._external_results[result_id]
+        return {
+            "external_result": {
+                "result_id": result_id,
+                "size_bytes": item["size_bytes"],
+                "sha256": item["sha256"],
+            },
+            "isError": bool(value.get("isError", False)),
+        }
+
     def _extract_image_resources(self, result_id: str, value: dict[str, Any], created_at: float) -> None:
         parent = self._external_results[result_id]
         extensions = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
-        for index, content in enumerate(value.get("content", [])):
+        blocks = list(value.get("content", [])) if isinstance(value.get("content"), list) else []
+        if isinstance(value.get("artifacts"), list):
+            blocks.extend(value["artifacts"])
+        for index, content in enumerate(blocks):
             if not isinstance(content, dict) or content.get("type") != "image":
                 continue
             data = content.get("data")
@@ -529,6 +549,7 @@ class DesktopNodeService:
                 "mime_type": mime_type, "file_name": path.name,
             }
             parent["resource_ids"].append(resource_id)
+
 
     def _cleanup_external_results(self) -> None:
         cutoff = time.time() - self.settings.result_artifact_ttl_seconds

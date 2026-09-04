@@ -62,3 +62,38 @@ def test_bundle_classmethod_call():
     )
     compile(script, "<fusion-cad>", "exec")
     assert "classmethod test" in script
+
+
+def test_bundle_requires_existing_group_fragment_and_fails_closed():
+    bundle = FusionCadScriptBundle()
+    with pytest.raises(BridgeError) as exc:
+        bundle.build("nonexistent_group_xyz", {"operation": "test"})
+    assert exc.value.code in (ErrorCode.INVALID_ARGUMENT, ErrorCode.INTERNAL_ERROR)
+
+
+def test_bundle_group_fragment_defines_run_before_execution(tmp_path, monkeypatch):
+    custom_scripts = tmp_path / "fusion_scripts"
+    custom_scripts.mkdir()
+    common_path = custom_scripts / "common.py.txt"
+    common_path.write_text(
+        'import json\n'
+        'API_VERSION = "fusion.cad/v1"\n'
+        'PAYLOAD_RAW = __PAYLOAD_JSON__\n'
+        'PAYLOAD = json.loads(PAYLOAD_RAW) if isinstance(PAYLOAD_RAW, str) else PAYLOAD_RAW\n'
+        '# __GROUP_SCRIPT__\n'
+        'if __name__ == "__main__" or True:\n'
+        '    _output = run()\n',
+        encoding="utf-8",
+    )
+    group_path = custom_scripts / "custom.py.txt"
+    group_path.write_text(
+        'def run():\n'
+        '    return {"group_run_executed": True, "op": PAYLOAD.get("operation")}\n',
+        encoding="utf-8",
+    )
+    bundle = FusionCadScriptBundle(scripts_dir=custom_scripts)
+    rendered = bundle.build("custom", {"operation": "custom_op"})
+    compile(rendered, "<fusion-cad>", "exec")
+    scope: dict = {}
+    exec(rendered, scope)  # noqa: S102
+    assert scope.get("_output") == {"group_run_executed": True, "op": "custom_op"}

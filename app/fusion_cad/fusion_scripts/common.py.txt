@@ -41,15 +41,13 @@ def make_error(error_code, message, details=None):
     }
 
 
-def run():
-    op = PAYLOAD.get("operation", "")
-    if op == "echo":
-        return make_result(data={"text": PAYLOAD.get("text", "")}, summary="echo")
-    return make_result(data={"payload": PAYLOAD}, summary=f"Executed {op}")
+# __GROUP_SCRIPT__
 
 
 if __name__ == "__main__" or True:
     try:
+        if "run" not in globals() or not callable(globals()["run"]):
+            raise RuntimeError("Group script must define callable run()")
         _output = run()
         print(json.dumps(_output, ensure_ascii=False, separators=(",", ":")))
     except Exception as _exc:

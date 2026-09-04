@@ -78,13 +78,21 @@ class FusionCadScriptBundle:
                 f"Common script template missing at {common_path}",
             )
 
+        group_path = self._scripts_dir / f"{group}.py.txt"
+        if not group_path.exists():
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Required script fragment for group '{group}' missing at {group_path}",
+                details={"group": group},
+            )
+
         common_script = common_path.read_text("utf-8")
+        group_script = group_path.read_text("utf-8")
         escaped_literal = json.dumps(serialized_payload, ensure_ascii=False)
         rendered_script = common_script.replace("__PAYLOAD_JSON__", escaped_literal)
-
-        group_path = self._scripts_dir / f"{group}.py.txt"
-        if group_path.exists():
-            group_script = group_path.read_text("utf-8")
+        if "# __GROUP_SCRIPT__" in rendered_script:
+            rendered_script = rendered_script.replace("# __GROUP_SCRIPT__", group_script)
+        else:
             rendered_script = f"{rendered_script}\n\n{group_script}"
 
         return rendered_script
