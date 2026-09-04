@@ -147,23 +147,36 @@ def _is_mime_binary(mime: Any) -> bool:
     return mime_lower.startswith(_BINARY_MIME_PREFIXES) or mime_lower in _BINARY_MIME_EXACT
 
 
+def _detect_verified_binary_magic(raw: bytes, preferred_mime: str | None = None) -> str | None:
+    if len(raw) >= 8 and raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(raw) >= 3 and raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(raw) >= 6 and raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if len(raw) >= 14 and raw.startswith(b"BM"):
+        return "image/bmp"
+    if len(raw) >= 5 and raw.startswith(b"%PDF-"):
+        return "application/pdf"
+    if len(raw) >= 4 and raw.startswith(b"PK\x03\x04"):
+        return preferred_mime if preferred_mime in ("model/3mf", "application/3mf") else "application/zip"
+    if len(raw) >= 14 and raw.startswith(b"ISO-10303-21;"):
+        return preferred_mime if preferred_mime else "model/step"
+    if len(raw) >= 84:
+        triangle_count = int.from_bytes(raw[80:84], "little")
+        if triangle_count > 0 and len(raw) == 84 + triangle_count * 50:
+            return preferred_mime if preferred_mime else "model/stl"
+    return None
+
+
 def _detect_mime_from_bytes(raw: bytes, preferred_mime: str | None = None) -> str:
     if preferred_mime and _is_mime_binary(preferred_mime):
         return preferred_mime
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if raw.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if raw.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if raw.startswith(b"RIFF") and b"WEBP" in raw[:16]:
-        return "image/webp"
-    if raw.startswith(b"BM"):
-        return "image/bmp"
-    if raw.startswith(b"%PDF-"):
-        return "application/pdf"
-    if raw.startswith(b"PK\x03\x04"):
-        return preferred_mime if preferred_mime in ("model/3mf", "application/3mf") else "application/zip"
+    magic_mime = _detect_verified_binary_magic(raw, preferred_mime)
+    if magic_mime:
+        return magic_mime
     if raw.startswith((b"solid ", b"ISO-10303-21;")):
         return preferred_mime if preferred_mime else "model/stl"
     return preferred_mime or "application/octet-stream"
@@ -190,28 +203,30 @@ def extract_binary_resources(value: Any) -> list[ExtractedBinaryResource]:
             try:
                 raw = base64.b64decode(b64_payload, validate=True)
                 if raw:
-                    mime = data_mime or _detect_mime_from_bytes(raw, preferred_mime)
-                    _add_resource(raw, mime, candidate_name)
-                    return True
+                    verified_magic = _detect_verified_binary_magic(raw, data_mime)
+                    if _is_mime_binary(data_mime) or verified_magic:
+                        mime = (
+                            data_mime
+                            if _is_mime_binary(data_mime)
+                            else (verified_magic or preferred_mime or "application/octet-stream")
+                        )
+                        _add_resource(raw, mime, candidate_name)
+                        return True
             except (ValueError, TypeError):
                 return False
 
-        for prefix, magic_mime in _BASE64_MAGIC_PREFIXES.items():
-            if str_val.startswith(prefix):
-                try:
-                    raw = base64.b64decode(str_val, validate=True)
-                    if raw:
-                        mime = preferred_mime or magic_mime or _detect_mime_from_bytes(raw)
-                        _add_resource(raw, mime, candidate_name)
-                        return True
-                except (ValueError, TypeError):
-                    pass
-
-        if candidate_name and (
-            candidate_name in _EXPLICIT_BINARY_KEYS
-            or any(candidate_name.endswith(suffix) for suffix in _EXPLICIT_BINARY_SUFFIXES)
+        is_explicit_binary = bool(
+            (
+                candidate_name
+                and (
+                    candidate_name in _EXPLICIT_BINARY_KEYS
+                    or any(candidate_name.endswith(suffix) for suffix in _EXPLICIT_BINARY_SUFFIXES)
+                )
+            )
             or (preferred_mime and _is_mime_binary(preferred_mime))
-        ):
+        )
+
+        if is_explicit_binary:
             try:
                 raw = base64.b64decode(str_val, validate=True)
                 if raw:
@@ -221,16 +236,14 @@ def extract_binary_resources(value: Any) -> list[ExtractedBinaryResource]:
             except (ValueError, TypeError):
                 pass
 
-        if len(str_val) >= 64 and len(str_val) % 4 == 0 and _BASE64_CHARS_RE.fullmatch(str_val):
+        if len(str_val) >= 4 and len(str_val) % 4 == 0 and _BASE64_CHARS_RE.fullmatch(str_val):
             try:
                 raw = base64.b64decode(str_val, validate=True)
-                if raw and (
-                    any(b == 0 or b > 127 for b in raw[:32])
-                    or raw.startswith((b"\x89PNG", b"\xff\xd8", b"%PDF-", b"PK\x03\x04", b"BM", b"RIFF"))
-                ):
-                    mime = _detect_mime_from_bytes(raw, preferred_mime)
-                    _add_resource(raw, mime, candidate_name)
-                    return True
+                if raw:
+                    verified_magic = _detect_verified_binary_magic(raw, preferred_mime)
+                    if verified_magic:
+                        _add_resource(raw, verified_magic, candidate_name)
+                        return True
             except (ValueError, TypeError):
                 pass
 

@@ -89,34 +89,60 @@ class FusionCadScriptBundle:
         common_script = common_path.read_text("utf-8")
         group_script = group_path.read_text("utf-8")
 
-        payload_marker = "__PAYLOAD_JSON__"
-        payload_count = common_script.count(payload_marker)
-        if payload_count == 0:
+        # Validate payload marker: require exact __PAYLOAD_JSON__ and reject extended/superset tokens
+        payload_tokens = re.findall(r"[A-Za-z0-9_]*__PAYLOAD_JSON[A-Za-z0-9_]*", common_script)
+        if any(token != "__PAYLOAD_JSON__" for token in payload_tokens):
+            invalid_tokens = [t for t in payload_tokens if t != "__PAYLOAD_JSON__"]
             raise BridgeError(
                 ErrorCode.INTERNAL_ERROR,
-                f"Common script template missing '{payload_marker}' marker at {common_path}",
+                f"Common script template contains invalid or extended payload markers ({invalid_tokens}) at {common_path}",
             )
-        if payload_count > 1:
+        if len(payload_tokens) == 0:
             raise BridgeError(
                 ErrorCode.INTERNAL_ERROR,
-                f"Common script template contains duplicate '{payload_marker}' markers ({payload_count}) at {common_path}",
+                f"Common script template missing '__PAYLOAD_JSON__' marker at {common_path}",
+            )
+        if len(payload_tokens) > 1:
+            raise BridgeError(
+                ErrorCode.INTERNAL_ERROR,
+                f"Common script template contains duplicate '__PAYLOAD_JSON__' markers ({len(payload_tokens)}) at {common_path}",
             )
 
-        group_marker = "# __GROUP_SCRIPT__"
-        group_count = common_script.count(group_marker)
-        if group_count == 0:
+        # Validate group marker: require exact single group marker line and reject extended/superset lines
+        group_lines: list[str] = []
+        for line in common_script.splitlines():
+            if "__GROUP_SCRIPT" in line:
+                if line.strip() != "# __GROUP_SCRIPT__":
+                    raise BridgeError(
+                        ErrorCode.INTERNAL_ERROR,
+                        f"Common script template contains invalid or extended group marker line: {line!r} at {common_path}",
+                    )
+                group_lines.append(line)
+
+        if len(group_lines) == 0:
             raise BridgeError(
                 ErrorCode.INTERNAL_ERROR,
-                f"Common script template missing required '{group_marker}' marker at {common_path}",
+                f"Common script template missing required '# __GROUP_SCRIPT__' marker at {common_path}",
             )
-        if group_count > 1:
+        if len(group_lines) > 1:
             raise BridgeError(
                 ErrorCode.INTERNAL_ERROR,
-                f"Common script template contains duplicate '{group_marker}' markers ({group_count}) at {common_path}",
+                f"Common script template contains duplicate '# __GROUP_SCRIPT__' markers ({len(group_lines)}) at {common_path}",
             )
 
         escaped_literal = json.dumps(serialized_payload, ensure_ascii=False)
-        rendered_script = common_script.replace(payload_marker, escaped_literal, 1)
-        rendered_script = rendered_script.replace(group_marker, group_script, 1)
+        rendered_script = re.sub(
+            r"(?<![A-Za-z0-9_])__PAYLOAD_JSON__(?![A-Za-z0-9_])",
+            lambda _: escaped_literal,
+            common_script,
+            count=1,
+        )
+        rendered_script = re.sub(
+            r"^[ \t]*#\s*__GROUP_SCRIPT__[ \t]*$",
+            lambda _: group_script,
+            rendered_script,
+            count=1,
+            flags=re.MULTILINE,
+        )
 
         return rendered_script

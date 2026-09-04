@@ -1105,3 +1105,73 @@ async def test_externalization_storage_failure_fails_closed(mock_container: Appl
         await tool.handler(None, params, req_ctx)
     assert exc_info.value.code == ErrorCode.INTERNAL_ERROR
     assert "Failed to externalize binary result payload" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_execute_rejects_arbitrary_dict_with_extra_fields(mock_container: ApplicationContainer):
+    service: FusionCadService = mock_container.fusion_cad
+
+    # 1. Dict with extra forbidden field
+    with pytest.raises(BridgeError) as exc_info:
+        await service.execute({
+            "node_id": "desk-1",
+            "operation": "camera_read",
+            "evil_extra_field": "injected",
+        })
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+    assert "validation_errors" in exc_info.value.details
+
+    # 2. Dict with invalid operation for specified group
+    with pytest.raises(BridgeError) as exc_info:
+        await service.execute({
+            "node_id": "desk-1",
+            "operation": "text_create",
+        }, group="read")
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+
+    # 3. Dict with missing required fields
+    with pytest.raises(BridgeError) as exc_info:
+        await service.execute({
+            "node_id": "desk-1",
+            "operation": "entity",
+            # missing required 'ref'
+        }, group="read")
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+
+    # 4. Arbitrary non-CAD BaseModel
+    from pydantic import BaseModel as _BM
+
+    class ArbitraryModel(_BM):
+        node_id: str
+        operation: str
+        custom_data: str
+
+    with pytest.raises(BridgeError) as exc_info:
+        await service.execute(ArbitraryModel(node_id="desk-1", operation="camera_read", custom_data="bad"))
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_execute_accepts_valid_dict_and_dispatches_cleanly(mock_container: ApplicationContainer):
+    service: FusionCadService = mock_container.fusion_cad
+
+    mock_container.desktop_nodes.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Read entity ok",
+                "data": {"entity": "ent_1234"},
+            }),
+        }],
+        "isError": False,
+    })
+
+    result = await service.execute({
+        "node_id": "desk-1",
+        "operation": "entity",
+        "ref": "ent_1234",
+    })
+    assert result.status == "succeeded"
+    assert result.summary == "Read entity ok"

@@ -271,3 +271,55 @@ def test_external_result_accepts_documented_base64_data_image_shape(tmp_path):
     path, item = service.resolve_external_export(token)
     assert path.read_bytes() == png
     assert item["mime_type"] == "image/png"
+
+
+def test_extract_binary_resources_does_not_false_positive_on_ordinary_base64():
+    from app.desktop_nodes.service import extract_binary_resources, has_binary_data
+
+    # 1. Base64-encoded UTF-8 text with bytes > 127
+    utf8_b64 = base64.b64encode("ПЫТОК 😈 привет мир это текстовая строка".encode()).decode("ascii")
+    payload_utf8 = {"summary": "read", "details": {"comment": utf8_b64}}
+    assert extract_binary_resources(payload_utf8) == []
+    assert has_binary_data(payload_utf8) is False
+
+    # 2. Base64 string starting with "Qk" that is ASCII text "BOOM"
+    boom_b64 = base64.b64encode(b"BOOM").decode("ascii")  # "Qk9PTQ=="
+    payload_boom = {"note": boom_b64}
+    assert extract_binary_resources(payload_boom) == []
+    assert has_binary_data(payload_boom) is False
+
+    # 3. Base64-encoded plain ASCII text
+    ascii_b64 = base64.b64encode(b"Hello world, this is a normal base64 encoded string!").decode("ascii")
+    payload_ascii = {"message": ascii_b64}
+    assert extract_binary_resources(payload_ascii) == []
+    assert has_binary_data(payload_ascii) is False
+
+    # 4. Text data URI
+    text_data_uri = "data:text/plain;base64," + base64.b64encode(b"Plain text").decode("ascii")
+    payload_data_uri = {"content": text_data_uri}
+    assert extract_binary_resources(payload_data_uri) == []
+    assert has_binary_data(payload_data_uri) is False
+
+
+def test_extract_binary_resources_extracts_verified_magic_and_explicit_keys():
+    from app.desktop_nodes.service import extract_binary_resources
+
+    png_bytes = b"\x89PNG\r\n\x1a\nfake-png-data"
+    png_b64 = base64.b64encode(png_bytes).decode("ascii")
+
+    # In generic field, verified magic is extracted
+    res = extract_binary_resources({"image": png_b64})
+    assert len(res) == 1
+    assert res[0].mime_type == "image/png"
+    assert res[0].raw_bytes == png_bytes
+
+    # In explicit binary key, data is extracted
+    res_explicit = extract_binary_resources({"thumbnail_b64": base64.b64encode(b"raw-thumb").decode("ascii")})
+    assert len(res_explicit) == 1
+    assert res_explicit[0].raw_bytes == b"raw-thumb"
+
+    # Data URI with image MIME
+    res_uri = extract_binary_resources({"uri": f"data:image/png;base64,{png_b64}"})
+    assert len(res_uri) == 1
+    assert res_uri[0].mime_type == "image/png"
+    assert res_uri[0].raw_bytes == png_bytes

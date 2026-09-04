@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.api.errors import BridgeError, ErrorCode
 from app.desktop_nodes.service import DesktopNodeService, has_binary_data
@@ -17,8 +17,19 @@ from app.fusion_cad.requests import (
     FusionTransactionRequest,
     FusionValidateRequest,
     FusionViewRequest,
+    _StrictCadBase,
 )
 from app.fusion_cad.scripts import FusionCadScriptBundle
+
+_GROUP_REQUEST_ADAPTERS: dict[str, TypeAdapter[Any]] = {
+    "read": TypeAdapter(FusionReadRequest),
+    "inspect": TypeAdapter(FusionInspectRequest),
+    "view": TypeAdapter(FusionViewRequest),
+    "metadata": TypeAdapter(FusionMetadataRequest),
+    "style": TypeAdapter(FusionStyleRequest),
+    "validate": TypeAdapter(FusionValidateRequest),
+    "transaction": TypeAdapter(FusionTransactionRequest),
+}
 
 # Exhaustive per-(group, operation) classification mapping:
 # (group, operation) -> (is_async, is_mutation)
@@ -323,7 +334,131 @@ class FusionCadService:
             return "validate"
         if isinstance(request, FusionTransactionRequest.__args__):  # type: ignore[attr-defined]
             return "transaction"
-        return "read"
+        raise BridgeError(
+            ErrorCode.INVALID_ARGUMENT,
+            f"Unsupported request model type: {type(request).__name__}",
+        )
+
+    @classmethod
+    def _validate_request_dict(cls, request_dict: dict[str, Any], group: str | None = None) -> tuple[BaseModel, str]:
+        if not isinstance(request_dict, dict):
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Expected request to be a dict, got {type(request_dict).__name__}",
+            )
+        op = request_dict.get("operation")
+        if not op or not isinstance(op, str):
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Operation name is required in request payload",
+                details={"request": request_dict},
+            )
+
+        target_group = group
+        if target_group is None:
+            if op in (
+                "describe",
+                "bounding_box",
+                "oriented_bbox",
+                "centroid",
+                "area",
+                "perimeter",
+                "volume",
+                "distance",
+                "minimum_distance",
+                "angle",
+                "parallel",
+                "perpendicular",
+                "coplanar",
+                "concentric",
+                "face_to_face_thickness",
+            ):
+                target_group = "inspect"
+            elif op in (
+                "camera_read",
+                "camera_set",
+                "fit",
+                "zoom_entity",
+                "orient_to_face",
+                "standard_view",
+                "screenshot",
+                "pick",
+            ):
+                target_group = "view"
+            elif op == "run":
+                target_group = "validate"
+            elif op in ("begin", "stage", "preview", "commit", "rollback", "abort", "status"):
+                target_group = "transaction"
+            elif op in (
+                "text_create",
+                "text_read",
+                "text_update",
+                "text_delete",
+                "text_extrude",
+                "text_cut",
+                "show",
+                "hide",
+                "show_only",
+                "isolate",
+                "restore",
+            ):
+                target_group = "style"
+            elif op in ("get", "remove", "tag", "untag", "set_role", "clear_role", "provenance"):
+                target_group = "metadata"
+            elif (
+                op
+                in (
+                    "model_snapshot",
+                    "entity",
+                    "feature_tree",
+                    "sketch",
+                    "parameters",
+                    "selection",
+                    "capabilities",
+                )
+                or op == "visibility"
+            ):
+                target_group = "read"
+            elif op == "query":
+                target_group = "read" if "selector" in request_dict else "metadata"
+            elif op == "set":
+                target_group = "style" if "visible" in request_dict else "metadata"
+            else:
+                raise BridgeError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"Unknown operation '{op}' in request payload",
+                    details={"operation": op},
+                )
+
+        if target_group == "mutate":
+            if (
+                op in ("get", "remove", "tag", "untag", "set_role", "clear_role", "provenance")
+                or (op == "set" and "name" in request_dict)
+                or (op == "query" and "selector" not in request_dict)
+            ):
+                adapter = _GROUP_REQUEST_ADAPTERS["metadata"]
+            else:
+                adapter = _GROUP_REQUEST_ADAPTERS["style"]
+            bundle_group = "mutate"
+        elif target_group in _GROUP_REQUEST_ADAPTERS:
+            adapter = _GROUP_REQUEST_ADAPTERS[target_group]
+            bundle_group = "mutate" if target_group in ("metadata", "style") else target_group
+        else:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Unknown request group '{target_group}'",
+                details={"group": target_group},
+            )
+
+        try:
+            validated = adapter.validate_python(request_dict)
+            return validated, bundle_group
+        except ValidationError as exc:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Invalid {target_group} request payload: {exc}",
+                details={"validation_errors": exc.errors()},
+            ) from exc
 
     def _classify_operation(self, group: str, payload: dict[str, Any]) -> tuple[bool, bool, str]:
         op = str(payload.get("operation", ""))
@@ -352,14 +487,22 @@ class FusionCadService:
         request: BaseModel | dict[str, Any],
         group: str | None = None,
     ) -> CadResult | dict[str, Any]:
-        if isinstance(request, BaseModel):
-            node_id = getattr(request, "node_id", None)
+        if isinstance(request, _StrictCadBase):
             resolved_group = group or self._resolve_group(request)
+            effective_bundle_group = "mutate" if resolved_group in ("metadata", "style") else resolved_group
+            node_id = request.node_id
             payload = request.model_dump(mode="json", exclude_none=True)
+        elif isinstance(request, BaseModel):
+            validated_model, effective_bundle_group = self._validate_request_dict(
+                request.model_dump(mode="python", exclude_none=True),
+                group=group,
+            )
+            node_id = validated_model.node_id  # type: ignore[union-attr]
+            payload = validated_model.model_dump(mode="json", exclude_none=True)
         elif isinstance(request, dict):
-            node_id = request.get("node_id")
-            resolved_group = group or "read"
-            payload = dict(request)
+            validated_model, effective_bundle_group = self._validate_request_dict(request, group=group)
+            node_id = validated_model.node_id  # type: ignore[union-attr]
+            payload = validated_model.model_dump(mode="json", exclude_none=True)
         else:
             raise BridgeError(
                 ErrorCode.INVALID_ARGUMENT,
@@ -372,8 +515,8 @@ class FusionCadService:
                 "node_id is required for Fusion CAD operations",
             )
 
-        is_async, is_mutation, summary = self._classify_operation(resolved_group, payload)
-        script = self._script_bundle.build(resolved_group, payload)
+        is_async, is_mutation, summary = self._classify_operation(effective_bundle_group, payload)
+        script = self._script_bundle.build(effective_bundle_group, payload)
         journal = {"mutation": is_mutation, "summary": summary}
 
         if is_async:
