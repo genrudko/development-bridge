@@ -96,6 +96,7 @@ async def test_post_commit_mutates_route_and_is_single_use(tmp_path):
         assert data["generation"] == 1
         assert data["changed"] is True
         assert data["diagnostic_id"] == diag_id
+        assert data["pending_wakes"] == "not_checked"
 
         # Active route in registry is updated
         updated = container.route_registry.resolve("bridge")
@@ -142,6 +143,8 @@ async def test_post_commit_form_html_rendering(tmp_path):
         assert "Chat linked" in html
         assert "Generation:" in html
         assert "1" in html
+        assert "Pending wake:" in html
+        assert "not_checked" in html
         assert diag_id in html
         assert f"/mcp/x/route-control/return/{diag_id}" in html
 
@@ -155,7 +158,6 @@ async def test_same_target_rebind_warning_treatment(tmp_path):
     app, container, _settings = create_test_app(tmp_path)
     prepared = container.route_control.prepare_bind("bridge", session_id="test-sess")
     op_id = prepared["operation_id"]
-    diag_id = prepared["diagnostic_id"]
     same_target = "https://chatgpt.com/g/g-p-infra/c/conv-initial"
 
     transport = httpx2.ASGITransport(app=app)
@@ -271,7 +273,7 @@ async def test_return_endpoint_performs_server_side_redirect(tmp_path):
     prepared = container.route_control.prepare_bind("bridge", session_id="test-sess")
     op_id = prepared["operation_id"]
     diag_id = prepared["diagnostic_id"]
-    return_target = "https://chatgpt.com/g/g-p-infra/c/conv-return-target"
+    return_target = "https://chatgpt.com/g/g-p-infra/c/conv-return-target?query=1&utm_source=chatgpt#section"
 
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
@@ -284,7 +286,8 @@ async def test_return_endpoint_performs_server_side_redirect(tmp_path):
             follow_redirects=False,
         )
         assert return_resp.status_code in {302, 303, 307}
-        assert return_resp.headers["location"] == return_target
+        # Invariant: Query parameters and fragments must be stripped via parsed canonical route_url
+        assert return_resp.headers["location"] == "https://chatgpt.com/g/g-p-infra/c/conv-return-target"
         assert return_resp.headers["cache-control"] == "private, no-store"
         assert return_resp.headers.get("referrer-policy") == "no-referrer"
         assert return_resp.headers.get("x-content-type-options") == "nosniff"
@@ -305,7 +308,6 @@ async def test_no_leakage_in_body_or_headers(tmp_path):
     app, container, _settings = create_test_app(tmp_path)
     prepared = container.route_control.prepare_bind("bridge", session_id="test-sess")
     op_id = prepared["operation_id"]
-    diag_id = prepared["diagnostic_id"]
     return_target = "https://chatgpt.com/g/g-p-infra/c/conv-sensitive-secret"
 
     transport = httpx2.ASGITransport(app=app)
@@ -315,7 +317,7 @@ async def test_no_leakage_in_body_or_headers(tmp_path):
         assert get_resp.status_code == 200
 
         # Check response headers for leakage
-        for header, val in get_resp.headers.items():
+        for val in get_resp.headers.values():
             assert "conv-sensitive-secret" not in val
             assert "g-p-infra" not in val
             assert op_id not in val
@@ -368,29 +370,59 @@ async def test_get_bind_landing_on_already_completed_operation(tmp_path):
 async def test_widget_meta_contains_redirect_domains(tmp_path):
     from mcp.client.session import ClientSession
     from mcp.client.streamable_http import streamable_http_client
+
+    from app.tools.compact import BRIDGE_DASHBOARD_UI_URI
     from app.tools.coordinator import COORDINATOR_UI_URI
 
     settings = BridgeSettings.model_validate(
         {
-            "server": {"public_base_url": "https://bridge.example.com"},
+            "server": {
+                "public_base_url": "https://bridge.example.com",
+                "tool_surface": "compact",
+            },
             "coordinator": {"route_registry_path": tmp_path / "routes.json"},
         }
     )
     container = build_container(settings)
     app = create_streamable_http_app(create_server(container), settings, container)
 
-    async with app.router.lifespan_context(app):
-        async with httpx2.AsyncClient(
-            transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
-        ) as client:
-            async with streamable_http_client(
-                "http://127.0.0.1/mcp", http_client=client
-            ) as streams:
-                async with ClientSession(*streams) as session:
-                    await session.initialize()
-                    resource = await session.read_resource(COORDINATOR_UI_URI)
-                    contents = resource.contents[0]
-                    meta = getattr(contents, "meta", None) or (getattr(contents, "model_extra", {}) or {}).get("_meta")
-                    assert meta is not None
-                    assert meta["ui"]["csp"]["redirectDomains"] == ["https://bridge.example.com"]
-                    assert meta["openai/widgetCSP"]["redirect_domains"] == ["https://bridge.example.com"]
+    async with app.router.lifespan_context(app), httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client, streamable_http_client(
+        "http://127.0.0.1/mcp", http_client=client
+    ) as streams, ClientSession(
+        *streams
+    ) as session:
+        await session.initialize()
+
+        # Check list_resources metadata scoping
+        res_list = await session.list_resources()
+        res_by_uri = {str(r.uri): getattr(r, "meta", None) or (getattr(r, "model_extra", {}) or {}).get("_meta") for r in res_list.resources}
+
+        # Coordinator resource in list_resources has redirect domains
+        coord_list_meta = res_by_uri.get(COORDINATOR_UI_URI)
+        assert coord_list_meta is not None
+        assert coord_list_meta["ui"]["csp"]["redirectDomains"] == ["https://bridge.example.com"]
+        assert coord_list_meta["openai/widgetCSP"]["redirect_domains"] == ["https://bridge.example.com"]
+
+        # Dashboard resource in list_resources does NOT inherit redirect domains
+        dash_list_meta = res_by_uri.get(BRIDGE_DASHBOARD_UI_URI)
+        assert dash_list_meta is not None
+        assert "redirectDomains" not in dash_list_meta["ui"]["csp"]
+        assert "redirect_domains" not in dash_list_meta["openai/widgetCSP"]
+
+        # Coordinator resource in read_resource has redirect domains
+        resource = await session.read_resource(COORDINATOR_UI_URI)
+        contents = resource.contents[0]
+        meta = getattr(contents, "meta", None) or (getattr(contents, "model_extra", {}) or {}).get("_meta")
+        assert meta is not None
+        assert meta["ui"]["csp"]["redirectDomains"] == ["https://bridge.example.com"]
+        assert meta["openai/widgetCSP"]["redirect_domains"] == ["https://bridge.example.com"]
+
+        # Dashboard resource in read_resource does NOT inherit redirect domains
+        dash_resource = await session.read_resource(BRIDGE_DASHBOARD_UI_URI)
+        dash_contents = dash_resource.contents[0]
+        dash_meta = getattr(dash_contents, "meta", None) or (getattr(dash_contents, "model_extra", {}) or {}).get("_meta")
+        assert dash_meta is not None
+        assert "redirectDomains" not in dash_meta["ui"]["csp"]
+        assert "redirect_domains" not in dash_meta["openai/widgetCSP"]

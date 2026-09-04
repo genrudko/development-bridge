@@ -21,6 +21,7 @@ from mcp.server.auth.settings import (
 )
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.responses import (
     FileResponse,
     HTMLResponse,
@@ -46,7 +47,6 @@ from app.coordinator.route_control_html import (
 )
 from app.ops.routes import create_operator_dashboard_routes
 from app.settings import BridgeSettings
-
 
 
 def create_streamable_http_app(
@@ -632,7 +632,7 @@ def create_streamable_http_app(
                         "channel_id": res.get("channel_id"),
                         "changed": changed,
                         "diagnostic_id": diag_id,
-                        "pending_wakes": 0,
+                        "pending_wakes": "not_checked",
                     },
                     status_code=200,
                     headers=route_control_headers,
@@ -704,7 +704,7 @@ def create_streamable_http_app(
             )
 
         try:
-            parse_chatgpt_target(target)
+            parsed = parse_chatgpt_target(target)
         except BridgeError:
             return JSONResponse(
                 {"error": "Invalid return target format"},
@@ -713,7 +713,7 @@ def create_streamable_http_app(
             )
 
         return RedirectResponse(
-            url=target,
+            url=parsed.route_url,
             status_code=303,
             headers=route_control_redirect_headers,
         )

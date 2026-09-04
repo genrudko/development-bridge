@@ -28,7 +28,7 @@ def render_route_control_page(
     mode: str,
     route_id: str | None = None,
     generation: int | None = None,
-    pending_wakes: int | str = 0,
+    pending_wakes: int | str = "not_checked",
     diagnostic_id: str | None = None,
     stage_name: str | None = None,
     commit_url: str | None = None,
@@ -91,7 +91,7 @@ def render_route_control_page(
       }}
       metaSummary.innerHTML = `
         <div class="meta-row"><span class="meta-label">Generation:</span> <span class="meta-value">${{escapeHtml(String(data.generation))}}</span></div>
-        <div class="meta-row"><span class="meta-label">Pending wake:</span> <span class="meta-value">${{escapeHtml(String(data.pending_wakes ?? 0))}}</span></div>
+        <div class="meta-row"><span class="meta-label">Pending wake:</span> <span class="meta-value">${{escapeHtml(String(data.pending_wakes ?? 'not_checked'))}}</span></div>
         <div class="meta-row"><span class="meta-label">Diagnostic code:</span> <span class="meta-value"><code>${{escapeHtml(data.diagnostic_id || '')}}</code></span></div>
       `;
       const returnUrl = '{safe_return_base}/' + encodeURIComponent(data.diagnostic_id || '');
