@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from mcp import types
 
+from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
+
 from app.api.schemas import IDENTIFIER_SCHEMA
 from app.container import ApplicationContainer
 from app.coordinator.context import (
@@ -325,12 +327,41 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
         destination = _resolve_destination(container, ctx, arguments)
-        data = await container.coordinator.arm(
-            arguments["message"],
-            channel_id=str(destination["channel_id"]),
-            delay_seconds=arguments.get("delay_seconds", 12),
-            conflict=arguments.get("conflict", "coalesce"),
-        )
+        route_id = destination.get("route_id") if destination.get("route_state") != "pending" else None
+        if route_id is not None:
+            route_id_str = str(route_id)
+            async with container.route_registry.route_lock(route_id_str):
+                route = container.route_registry.resolve(route_id_str)
+                if route is None or not container.route_registry.is_bound(route):
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "This logical route is unbound; cannot arm continuation",
+                        retryable=False,
+                    )
+                if (
+                    int(route.get("generation", -1)) != int(destination.get("generation", 0))
+                    or str(route.get("channel_id")) != str(destination.get("channel_id"))
+                ):
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "Route generation or channel is stale; cannot arm continuation",
+                        retryable=True,
+                    )
+                channel_id = str(route["channel_id"])
+                data = await container.coordinator.arm(
+                    arguments["message"],
+                    channel_id=channel_id,
+                    delay_seconds=arguments.get("delay_seconds", 12),
+                    conflict=arguments.get("conflict", "coalesce"),
+                )
+        else:
+            channel_id = str(destination["channel_id"])
+            data = await container.coordinator.arm(
+                arguments["message"],
+                channel_id=channel_id,
+                delay_seconds=arguments.get("delay_seconds", 12),
+                conflict=arguments.get("conflict", "coalesce"),
+            )
         return to_mcp_result(success(request_context.request_id, data))
 
     async def ack_continuation(ctx, params, request_context):
@@ -348,27 +379,56 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         repository = container.projects.repositories.get(
             arguments["project_id"], arguments["repository_id"]
         )
-        payload = (
-            {
-                "route_id": str(destination["route_id"]),
-                "generation": int(destination.get("generation", 0)),
-                "channel_id": channel_id,
-            }
-            if destination.get("route_id") is not None
-            else {"channel_id": channel_id}
-        )
-        if message is not None:
-            payload["message"] = message
-        data = await container.jobs.wake_on_jobs_durable(
-            repository,
-            tuple(arguments["job_ids"]),
-            arguments.get("policy", "all_terminal"),
-            "coordinator",
-            payload,
-        )
-        data["channel_id"] = channel_id
-        if destination.get("route_id") is not None:
-            data["route_id"] = destination["route_id"]
+        route_id = destination.get("route_id") if destination.get("route_state") != "pending" else None
+        if route_id is not None:
+            route_id_str = str(route_id)
+            async with container.route_registry.route_lock(route_id_str):
+                route = container.route_registry.resolve(route_id_str)
+                if route is None or not container.route_registry.is_bound(route):
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "This logical route is unbound; cannot register job waiter",
+                        retryable=False,
+                    )
+                if (
+                    int(route.get("generation", -1)) != int(destination.get("generation", 0))
+                    or str(route.get("channel_id")) != str(destination.get("channel_id"))
+                ):
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "Route generation or channel is stale; cannot register job waiter",
+                        retryable=True,
+                    )
+                gen = int(route["generation"])
+                chan = str(route["channel_id"])
+                payload = {
+                    "route_id": route_id_str,
+                    "generation": gen,
+                    "channel_id": chan,
+                }
+                if message is not None:
+                    payload["message"] = message
+                data = await container.jobs.wake_on_jobs_durable(
+                    repository,
+                    tuple(arguments["job_ids"]),
+                    arguments.get("policy", "all_terminal"),
+                    "coordinator",
+                    payload,
+                )
+                data["channel_id"] = chan
+                data["route_id"] = route_id_str
+        else:
+            payload = {"channel_id": channel_id}
+            if message is not None:
+                payload["message"] = message
+            data = await container.jobs.wake_on_jobs_durable(
+                repository,
+                tuple(arguments["job_ids"]),
+                arguments.get("policy", "all_terminal"),
+                "coordinator",
+                payload,
+            )
+            data["channel_id"] = channel_id
         result = to_mcp_result(success(request_context.request_id, data))
         return attach_coordinator_ui(result, ctx, destination)
 
@@ -384,33 +444,73 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             artifacts=arguments.get("artifacts", []), stdin=arguments.get("stdin"),
             idempotency_key=arguments.get("idempotency_key"),
         )
-        payload = (
-            {
-                "route_id": str(destination["route_id"]),
-                "generation": int(destination.get("generation", 0)),
-                "channel_id": channel_id,
-            }
-            if destination.get("route_id") is not None
-            else {"channel_id": channel_id}
-        )
-        if arguments.get("message") is not None:
-            payload["message"] = arguments["message"]
-
-        try:
-            waiter = await container.jobs.wake_on_jobs_durable(
-                repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
-            )
-        except Exception:
+        route_id = destination.get("route_id") if destination.get("route_state") != "pending" else None
+        if route_id is not None:
+            route_id_str = str(route_id)
+            async with container.route_registry.route_lock(route_id_str):
+                route = container.route_registry.resolve(route_id_str)
+                if route is None or not container.route_registry.is_bound(route):
+                    try:
+                        await container.jobs.cancel(repository, job.job_id)
+                    except Exception:
+                        pass
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "This logical route is unbound; cannot register job waiter",
+                        retryable=False,
+                    )
+                if (
+                    int(route.get("generation", -1)) != int(destination.get("generation", 0))
+                    or str(route.get("channel_id")) != str(destination.get("channel_id"))
+                ):
+                    try:
+                        await container.jobs.cancel(repository, job.job_id)
+                    except Exception:
+                        pass
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "Route generation or channel is stale; cannot register job waiter",
+                        retryable=True,
+                    )
+                gen = int(route["generation"])
+                chan = str(route["channel_id"])
+                payload = {
+                    "route_id": route_id_str,
+                    "generation": gen,
+                    "channel_id": chan,
+                }
+                if arguments.get("message") is not None:
+                    payload["message"] = arguments["message"]
+                try:
+                    waiter = await container.jobs.wake_on_jobs_durable(
+                        repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
+                    )
+                except Exception:
+                    try:
+                        await container.jobs.cancel(repository, job.job_id)
+                    except Exception:
+                        pass
+                    raise
+                response = {**job.status_dict(), **waiter, "channel_id": chan, "route_id": route_id_str}
+        else:
+            payload = {"channel_id": channel_id}
+            if arguments.get("message") is not None:
+                payload["message"] = arguments["message"]
             try:
-                await container.jobs.cancel(repository, job.job_id)
+                waiter = await container.jobs.wake_on_jobs_durable(
+                    repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
+                )
             except Exception:
-                pass
-            raise
-        response = {**job.status_dict(), **waiter, "channel_id": channel_id}
-        if destination.get("route_id") is not None:
-            response["route_id"] = destination["route_id"]
+                try:
+                    await container.jobs.cancel(repository, job.job_id)
+                except Exception:
+                    pass
+                raise
+            response = {**job.status_dict(), **waiter, "channel_id": channel_id}
         result = to_mcp_result(success(request_context.request_id, response))
         return attach_coordinator_ui(result, ctx, destination)
+
+
 
     common_meta = COORDINATOR_UI_META
     return (

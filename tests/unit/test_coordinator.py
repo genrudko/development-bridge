@@ -665,3 +665,35 @@ async def test_cancel_pending_fails_closed_when_in_flight_or_uncertain(dispositi
     with pytest.raises(BridgeError) as exc_info:
         await service.cancel_pending("route-flight")
     assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_fails_closed_on_expired_claim():
+    service = CoordinatorService()
+    await service.arm("wake message", channel_id="route-expired-claim", delay_seconds=0)
+    claim = await service.claim("route-expired-claim")
+    assert claim["claimed"] is True
+    # Simulate expired lease with non-null claim_id
+    service._pending["route-expired-claim"].lease_expires_at = 1.0
+    with pytest.raises(BridgeError) as exc_info:
+        await service.cancel_pending("route-expired-claim")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_restores_in_memory_wake_if_save_state_fails(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    service = CoordinatorService(path)
+    await service.arm("wake message", channel_id="route-save-fail", delay_seconds=10)
+    assert "route-save-fail" in service._pending
+
+    def failing_save():
+        raise OSError("Disk full")
+
+    service._save_state = failing_save
+    with pytest.raises(OSError, match="Disk full"):
+        await service.cancel_pending("route-save-fail")
+
+    # In-memory wake must be restored
+    assert "route-save-fail" in service._pending
+    assert service._pending["route-save-fail"].message == "wake message"

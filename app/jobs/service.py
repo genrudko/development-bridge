@@ -76,7 +76,9 @@ class JobService:
         self._admission_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._terminal_lock = asyncio.Lock()
         self._terminal_waiters: dict[str, TerminalWaiter] = {}
+        self._firing_terminal_waiters: dict[str, TerminalWaiter] = {}
         self._durable_terminal_handlers: dict[str, DurableTerminalHandler] = {}
+
 
     @property
     def store(self) -> JobStore | None:
@@ -173,7 +175,10 @@ class JobService:
             )
             reason = self._waiter_reason(jobs, policy)
             if reason is None:
-                if len(self._terminal_waiters) >= self.MAX_TERMINAL_WAITERS:
+                if (
+                    len(self._terminal_waiters) + len(self._firing_terminal_waiters)
+                    >= self.MAX_TERMINAL_WAITERS
+                ):
                     raise BridgeError(
                         ErrorCode.POLICY_VIOLATION,
                         "Job wake waiter capacity is full",
@@ -203,8 +208,24 @@ class JobService:
                 self._terminal_waiters[waiter_id] = waiter
             else:
                 fire = (jobs, reason)
+                if durable:
+                    waiter = TerminalWaiter(
+                        waiter_id,
+                        job_ids,
+                        policy,
+                        callback,
+                        durable=durable,
+                        handler_name=durable_handler,
+                        payload=durable_payload,
+                    )
+                    self._firing_terminal_waiters[waiter_id] = waiter
         if fire is not None:
-            await callback(*fire)
+            try:
+                await callback(*fire)
+            finally:
+                if durable:
+                    async with self._terminal_lock:
+                        self._firing_terminal_waiters.pop(waiter_id, None)
         return {
             "waiter_id": waiter_id,
             "job_ids": list(job_ids),
@@ -212,6 +233,7 @@ class JobService:
             "state": "fired" if fire is not None else "waiting",
             "durable": durable,
         }
+
 
     async def _finish_job(
         self,
@@ -256,6 +278,7 @@ class JobService:
             reason = self._waiter_reason(records, waiter.policy)
             if reason is not None:
                 del self._terminal_waiters[waiter_id]
+                self._firing_terminal_waiters[waiter_id] = waiter
                 ready.append((waiter, records, reason))
         return ready
 
@@ -267,20 +290,23 @@ class JobService:
             try:
                 await waiter.callback(jobs, reason)
             except Exception:
-                if waiter.durable:
-                    async with self._terminal_lock:
+                async with self._terminal_lock:
+                    self._firing_terminal_waiters.pop(waiter.waiter_id, None)
+                    if waiter.durable:
                         self._terminal_waiters.setdefault(waiter.waiter_id, waiter)
                 raise
             else:
-                if waiter.durable:
-                    self._require_store().delete_terminal_waiter(waiter.waiter_id)
+                async with self._terminal_lock:
+                    self._firing_terminal_waiters.pop(waiter.waiter_id, None)
+                    if waiter.durable:
+                        self._require_store().delete_terminal_waiter(waiter.waiter_id)
 
     async def _restore_durable_terminal_waiters(self) -> None:
         store = self._require_store()
         async with self._terminal_lock:
             for item in store.terminal_waiters():
                 waiter_id = str(item["waiter_id"])
-                if waiter_id in self._terminal_waiters:
+                if waiter_id in self._terminal_waiters or waiter_id in self._firing_terminal_waiters:
                     continue
                 handler_name = str(item["handler_name"])
                 handler = self._durable_terminal_handlers.get(handler_name)
@@ -322,6 +348,25 @@ class JobService:
         if not isinstance(payload_match, dict):
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "payload_match is invalid")
         async with self._terminal_lock:
+            in_flight = [
+                w
+                for w in self._firing_terminal_waiters.values()
+                if w.durable
+                and w.handler_name == handler_name
+                and isinstance(w.payload, dict)
+                and all(w.payload.get(k) == v for k, v in payload_match.items())
+            ]
+            if in_flight:
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Cannot cancel durable waiters while a terminal callback is actively firing or in-flight",
+                    retryable=False,
+                    details={
+                        "handler_name": handler_name,
+                        "in_flight_count": len(in_flight),
+                    },
+                )
+
             store = self._require_store()
             deleted_ids = set(
                 store.delete_matching_terminal_waiters(
@@ -346,6 +391,7 @@ class JobService:
             "cancelled_count": total_cancelled,
             "handler_name": handler_name,
         }
+
 
 
     @staticmethod

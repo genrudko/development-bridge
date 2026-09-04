@@ -358,34 +358,44 @@ def build_container(
     async def resume_coordinator_waiter(payload, records, reason):
         route_id = payload.get("route_id")
         if route_id is not None:
-            route = route_registry.resolve(str(route_id))
-            if route is None or not route_registry.is_bound(route):
-                return
             expected_generation = payload.get("generation")
-            if (
-                expected_generation is not None
-                and int(route.get("generation", 0)) != int(expected_generation)
-            ):
-                return
             expected_channel = payload.get("channel_id")
-            if (
-                expected_channel is not None
-                and str(route.get("channel_id")) != str(expected_channel)
-            ):
+            if expected_generation is None or expected_channel is None:
                 return
-            channel_id = str(route["channel_id"])
+            route_id_str = str(route_id)
+            async with route_registry.route_lock(route_id_str):
+                route = route_registry.resolve(route_id_str)
+                if route is None or not route_registry.is_bound(route):
+                    return
+                if (
+                    int(route.get("generation", -1)) != int(expected_generation)
+                    or str(route.get("channel_id")) != str(expected_channel)
+                ):
+                    return
+                channel_id = str(route["channel_id"])
+                await coordinator.arm_job_continuation(
+                    records,
+                    reason,
+                    channel_id=channel_id,
+                    message=(
+                        str(payload["message"])
+                        if payload.get("message") is not None
+                        else None
+                    ),
+                )
         else:
             channel_id = str(payload["channel_id"])
-        await coordinator.arm_job_continuation(
-            records,
-            reason,
-            channel_id=channel_id,
-            message=(
-                str(payload["message"])
-                if payload.get("message") is not None
-                else None
-            ),
-        )
+            await coordinator.arm_job_continuation(
+                records,
+                reason,
+                channel_id=channel_id,
+                message=(
+                    str(payload["message"])
+                    if payload.get("message") is not None
+                    else None
+                ),
+            )
+
 
     jobs.register_durable_terminal_handler("coordinator", resume_coordinator_waiter)
 

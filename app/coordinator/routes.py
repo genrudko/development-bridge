@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -42,6 +43,16 @@ def default_route_registry_path() -> Path:
 class RouteRegistry:
     def __init__(self, path: Path | None = None) -> None:
         self.path = (path or default_route_registry_path()).expanduser()
+        self._route_locks: dict[str, asyncio.Lock] = {}
+
+    def route_lock(self, route_id: str) -> asyncio.Lock:
+        route_id = self.validate_route_id(route_id)
+        if not hasattr(self, "_route_locks"):
+            self._route_locks = {}
+        if route_id not in self._route_locks:
+            self._route_locks[route_id] = asyncio.Lock()
+        return self._route_locks[route_id]
+
 
     @staticmethod
     def validate_route_id(route_id: str) -> str:

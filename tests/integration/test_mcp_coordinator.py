@@ -377,10 +377,12 @@ async def test_durable_route_waiter_follows_current_generation_at_delivery(tmp_p
         created_at="2026-08-30T00:00:00+00:00",
     )
     handler = container.jobs._durable_terminal_handlers["coordinator"]
+    # Legacy unpinned payload (missing generation and channel_id) must be a safe no-op
     await handler({"route_id": "ad5x", "message": "done"}, (job,), "all_terminal")
     assert "telegram-ad5x-g0" not in container.coordinator._pending
-    assert "telegram-ad5x-g1" in container.coordinator._pending
-    assert "message=done" in container.coordinator._pending["telegram-ad5x-g1"].message
+    assert "telegram-ad5x-g1" not in container.coordinator._pending
+    assert container.coordinator._pending == {}
+
 
 
 @pytest.mark.asyncio

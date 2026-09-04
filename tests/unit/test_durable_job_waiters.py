@@ -249,3 +249,60 @@ async def test_cancel_durable_waiters_persists_across_restart(tmp_path):
         assert second._store.terminal_waiters() == ()
     finally:
         await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_durable_waiters_fails_closed_while_callback_in_flight(tmp_path):
+    from app.api.errors import BridgeError, ErrorCode
+
+    settings = settings_for(tmp_path)
+    service, repo = service_for(settings)
+    service._store.initialize()
+
+    callback_started = asyncio.Event()
+    callback_unblock = asyncio.Event()
+    callback_finished = asyncio.Event()
+
+    async def in_flight_handler(payload, records, reason):
+        callback_started.set()
+        await callback_unblock.wait()
+        callback_finished.set()
+
+    service.register_durable_terminal_handler("coordinator", in_flight_handler)
+    job = await service.start_task(repo, "task", "req-in-flight-cancel")
+    await service.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 1, "channel_id": "telegram-bridge-g1"},
+    )
+    assert len(service._store.terminal_waiters()) == 1
+
+    # Start service worker to execute job and invoke callback
+    await service.start()
+    try:
+        # Wait for callback to begin firing and pause
+        await callback_started.wait()
+
+        # While callback is in-flight, cancel_durable_waiters must FAIL CLOSED
+        with pytest.raises(BridgeError) as exc_info:
+            await service.cancel_durable_waiters(
+                handler_name="coordinator",
+                payload_match={"route_id": "bridge", "generation": 1},
+            )
+        assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+        # Persisted waiter must NOT have been deleted from store while in-flight
+        assert len(service._store.terminal_waiters()) == 1
+
+        # Unblock callback to let it finish
+        callback_unblock.set()
+        await callback_finished.wait()
+
+        # After callback completes, persisted waiter is deleted
+        await wait_until(lambda: len(service._store.terminal_waiters()) == 0)
+        assert len(service._store.terminal_waiters()) == 0
+    finally:
+        callback_unblock.set()
+        await service.stop()
