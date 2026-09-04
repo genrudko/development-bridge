@@ -7,6 +7,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_urlsafe
+from typing import Self
 
 from app.api.errors import BridgeError, ErrorCode
 from app.coordinator.chatgpt_target import parse_chatgpt_target
@@ -40,17 +41,53 @@ def default_route_registry_path() -> Path:
     return base / "development-bridge" / "routes.json"
 
 
+class AsyncRLock:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task | None = None
+        self._count = 0
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def acquire(self) -> bool:
+        current = asyncio.current_task()
+        if self._owner is not None and self._owner is current:
+            self._count += 1
+            return True
+        await self._lock.acquire()
+        self._owner = current
+        self._count = 1
+        return True
+
+    def release(self) -> None:
+        current = asyncio.current_task()
+        if self._owner is not current:
+            raise RuntimeError("Cannot release un-acquired lock")
+        self._count -= 1
+        if self._count == 0:
+            self._owner = None
+            self._lock.release()
+
+    async def __aenter__(self) -> Self:
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+
 class RouteRegistry:
     def __init__(self, path: Path | None = None) -> None:
         self.path = (path or default_route_registry_path()).expanduser()
-        self._route_locks: dict[str, asyncio.Lock] = {}
+        self._route_locks: dict[str, AsyncRLock] = {}
 
-    def route_lock(self, route_id: str) -> asyncio.Lock:
+    def route_lock(self, route_id: str) -> AsyncRLock:
         route_id = self.validate_route_id(route_id)
         if not hasattr(self, "_route_locks"):
             self._route_locks = {}
         if route_id not in self._route_locks:
-            self._route_locks[route_id] = asyncio.Lock()
+            self._route_locks[route_id] = AsyncRLock()
         return self._route_locks[route_id]
 
 

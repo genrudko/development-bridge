@@ -808,12 +808,13 @@ async def test_resume_coordinator_waiter_legacy_unpinned_route_payload_is_safe_n
 
 @pytest.mark.asyncio
 async def test_unbind_and_cancel_serializes_with_same_route_arm(tmp_path: Path):
+    from types import SimpleNamespace
+
     from app.api.registry import ToolRegistry
     from app.container import build_container
     from app.settings import BridgeSettings
     from app.tools.coordinator import coordinator_tools
     from tests.fixtures.repositories import create_git_repository
-    from types import SimpleNamespace
 
     repo_path = create_git_repository(tmp_path, "repository")
     settings = BridgeSettings.model_validate(
@@ -856,7 +857,7 @@ async def test_unbind_and_cancel_serializes_with_same_route_arm(tmp_path: Path):
                 SimpleNamespace(arguments={"route_id": "bridge", "message": "wake in gap"}),
                 SimpleNamespace(request_id="req-cont-race"),
             )
-        except Exception as exc:
+        except BridgeError as exc:
             arm_error.append(exc)
 
     async with route_lock:
@@ -876,12 +877,13 @@ async def test_unbind_and_cancel_serializes_with_same_route_arm(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_unbind_and_cancel_serializes_with_route_waiter_registration(tmp_path: Path):
+    from types import SimpleNamespace
+
     from app.api.registry import ToolRegistry
     from app.container import build_container
     from app.settings import BridgeSettings
     from app.tools.coordinator import coordinator_tools
     from tests.fixtures.repositories import create_git_repository
-    from types import SimpleNamespace
 
     repo_path = create_git_repository(tmp_path, "repository")
     settings = BridgeSettings.model_validate(
@@ -937,7 +939,7 @@ async def test_unbind_and_cancel_serializes_with_route_waiter_registration(tmp_p
                 }),
                 SimpleNamespace(request_id="req-wake-race"),
             )
-        except Exception as exc:
+        except BridgeError as exc:
             reg_error.append(exc)
 
     async with route_lock:
@@ -1047,3 +1049,71 @@ async def test_unbind_and_cancel_serializes_with_terminal_callback(tmp_path: Pat
     await task
     # Terminal callback must safe no-op because route was unbound before it acquired route lock
     assert (await container.coordinator.status("telegram-bridge-g0"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_route_scoped_wake_on_already_terminal_jobs_does_not_deadlock(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from app.api.registry import ToolRegistry
+    from app.container import build_container
+    from app.jobs import JobStatus
+    from app.settings import BridgeSettings
+    from app.tools.coordinator import coordinator_tools
+    from tests.fixtures.repositories import create_git_repository
+
+    repo_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "projects": [{
+                "id": "project",
+                "name": "Project",
+                "repositories": [{
+                    "id": "repository",
+                    "path": repo_path,
+                    "capabilities": {"execute": True},
+                    "tasks": [{
+                        "id": "task",
+                        "name": "Task",
+                        "executable": "/bin/echo",
+                        "arguments": ["done"],
+                    }],
+                }],
+            }],
+        }
+    )
+    container = build_container(settings)
+    container.jobs._store.initialize()
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    repo = container.projects.repositories.get("project", "repository")
+    job = await container.jobs.start_task(repo, "task", "req-term")
+    # Mark job as already finished (terminal)
+    container.jobs._store.start(job.job_id)
+    container.jobs._store.finish(job.job_id, JobStatus.SUCCEEDED, exit_code=0)
+
+    tools = ToolRegistry()
+    for tool in coordinator_tools(container):
+        tools.register(tool)
+    wake_tool = tools.get("coordinator_wake_on_jobs")
+
+    # Calling wake_on_jobs on an already-terminal job must not deadlock
+    await asyncio.wait_for(
+        wake_tool.handler(
+            None,
+            SimpleNamespace(arguments={
+                "project_id": "project",
+                "repository_id": "repository",
+                "job_ids": [job.job_id],
+                "route_id": "bridge",
+            }),
+            SimpleNamespace(request_id="req-term-wake"),
+        ),
+        timeout=1.0,
+    )
+    assert (await container.coordinator.status("telegram-bridge-g0"))["state"] != "idle"

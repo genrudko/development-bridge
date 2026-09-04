@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -134,3 +135,47 @@ def test_takeover_rejects_different_project_and_preserves_old_route(tmp_path: Pa
     assert taken_over["generation"] == 1
     assert taken_over["conversation_id"] == "conv-b"
     assert registry.resolve("ad5x")["conversation_id"] == "conv-b"
+
+
+@pytest.mark.asyncio
+async def test_route_registry_route_lock_reentrancy_and_exclusion(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    lock = registry.route_lock("test-route")
+
+    # Reentrancy within the same task
+    async with lock:
+        assert lock.locked()
+        async with lock:
+            assert lock.locked()
+
+    assert not lock.locked()
+
+    # Release without acquire
+    with pytest.raises(RuntimeError):
+        lock.release()
+
+    # Mutual exclusion across tasks
+    acquired_task2 = False
+    task1_hold = asyncio.Event()
+    task1_can_release = asyncio.Event()
+
+    async def task1():
+        async with registry.route_lock("test-route"):
+            task1_hold.set()
+            await task1_can_release.wait()
+
+    async def task2():
+        nonlocal acquired_task2
+        async with registry.route_lock("test-route"):
+            acquired_task2 = True
+
+    t1 = asyncio.create_task(task1())
+    await task1_hold.wait()
+    t2 = asyncio.create_task(task2())
+    await asyncio.sleep(0.01)
+    assert not acquired_task2
+
+    task1_can_release.set()
+    await t1
+    await t2
+    assert acquired_task2
