@@ -18,11 +18,49 @@ class RouteControlTraceStore:
     def _trace_path(self, diagnostic_id: str) -> Path:
         return self.state_dir / f"{diagnostic_id}.json"
 
+    def _create_raw(self, trace_data: dict) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        diag_id = trace_data["diagnostic_id"]
+        target = self._trace_path(diag_id)
+        tmp = self.state_dir / f"{diag_id}.{token_hex(8)}.tmp"
+
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(trace_data, ensure_ascii=False, indent=2) + "\n")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+        mode = tmp.stat().st_mode & 0o777
+        if mode != 0o600:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise BridgeError(ErrorCode.INTERNAL_ERROR, f"trace file permissions {oct(mode)} are not 0600")
+
+        try:
+            os.link(tmp, target)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _save_raw(self, trace_data: dict) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         diag_id = trace_data["diagnostic_id"]
         target = self._trace_path(diag_id)
-        tmp = self.state_dir / f"{diag_id}.tmp"
+        tmp = self.state_dir / f"{diag_id}.{token_hex(8)}.tmp"
 
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
@@ -71,34 +109,48 @@ class RouteControlTraceStore:
         diagnostic_id: str | None = None,
         operation_id: str | None = None,
     ) -> str:
+        now = datetime.now(UTC).isoformat()
         if diagnostic_id:
             diag_id = diagnostic_id
-            if self._trace_path(diag_id).exists():
+            trace_data = {
+                "diagnostic_id": diag_id,
+                "operation_type": str(operation_type),
+                "operation_id": operation_id,
+                "route_id": route_id,
+                "status": "in_progress",
+                "created_at": now,
+                "updated_at": now,
+                "finished_at": None,
+                "error_code": None,
+                "stages": [],
+            }
+            try:
+                self._create_raw(trace_data)
+            except FileExistsError:
                 raise BridgeError(ErrorCode.POLICY_VIOLATION, f"diagnostic trace {diag_id} already exists")
-        else:
-            for _ in range(10):
-                candidate_id = f"bind-{token_hex(12)}"
-                if not self._trace_path(candidate_id).exists():
-                    diag_id = candidate_id
-                    break
-            else:
-                raise BridgeError(ErrorCode.INTERNAL_ERROR, "failed to generate unique diagnostic id")
+            return diag_id
 
-        now = datetime.now(UTC).isoformat()
-        trace_data = {
-            "diagnostic_id": diag_id,
-            "operation_type": str(operation_type),
-            "operation_id": operation_id,
-            "route_id": route_id,
-            "status": "in_progress",
-            "created_at": now,
-            "updated_at": now,
-            "finished_at": None,
-            "error_code": None,
-            "stages": [],
-        }
-        self._save_raw(trace_data)
-        return diag_id
+        for _ in range(10):
+            candidate_id = f"bind-{token_hex(12)}"
+            trace_data = {
+                "diagnostic_id": candidate_id,
+                "operation_type": str(operation_type),
+                "operation_id": operation_id,
+                "route_id": route_id,
+                "status": "in_progress",
+                "created_at": now,
+                "updated_at": now,
+                "finished_at": None,
+                "error_code": None,
+                "stages": [],
+            }
+            try:
+                self._create_raw(trace_data)
+                return candidate_id
+            except FileExistsError:
+                continue
+
+        raise BridgeError(ErrorCode.INTERNAL_ERROR, "failed to generate unique diagnostic id")
 
     def stage(
         self,

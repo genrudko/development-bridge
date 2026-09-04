@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from app.api.errors import BridgeError, ErrorCode
 from app.coordinator.route_control_diagnostics import RouteControlTraceStore
 
 
@@ -137,9 +138,6 @@ def test_raw_trace_ttl_enforced_on_normal_reads(tmp_path: Path):
 
 
 def test_raw_trace_0600_fails_closed_if_permission_insecure(tmp_path: Path, monkeypatch):
-    import os
-    from app.api.errors import BridgeError
-
     store = RouteControlTraceStore(tmp_path / "traces")
 
     # Mock os.fchmod to simulate failure to set permissions
@@ -163,3 +161,84 @@ def test_diagnostic_id_entropy_and_collision_safety(tmp_path: Path):
         assert len(parts) >= 2
         random_part = parts[-1]
         assert len(random_part) >= 16  # at least 16 hex chars (64 bits of entropy)
+
+
+def test_start_deterministic_forced_collision_preserves_existing_trace_bytes(tmp_path: Path, monkeypatch):
+    store = RouteControlTraceStore(tmp_path / "traces")
+
+    # 1. Create an existing trace with specific sentinel payload
+    existing_id = "bind-deterministic-collision-target"
+    store.start("bind", route_id="bridge", diagnostic_id=existing_id, operation_id="original_op")
+    store.finish(existing_id, status="ok")
+
+    trace_file = tmp_path / "traces" / f"{existing_id}.json"
+    assert trace_file.exists()
+    original_bytes = trace_file.read_bytes()
+    original_mtime_ns = trace_file.stat().st_mtime_ns
+
+    # 2. Attempting to start with explicit existing diagnostic_id must fail closed with POLICY_VIOLATION
+    # and MUST NOT modify existing trace bytes
+    with pytest.raises(BridgeError) as exc_info:
+        store.start("bind", route_id="bridge", diagnostic_id=existing_id, operation_id="clobber_attempt")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+    assert trace_file.read_bytes() == original_bytes
+    assert trace_file.stat().st_mtime_ns == original_mtime_ns
+
+    # 3. Simulate race/collision where token_hex produces existing_id on first attempt, then new_id on second attempt
+    import app.coordinator.route_control_diagnostics as rcd_mod
+
+    seq = ["deterministic-collision-target", "new-unique-token-value-1234"]
+    real_token_hex = rcd_mod.token_hex
+
+    def fake_token_hex(n):
+        if n == 12:
+            return seq.pop(0)
+        return real_token_hex(n)
+
+    monkeypatch.setattr(rcd_mod, "token_hex", fake_token_hex)
+
+    # store.start() should encounter collision, retry without mutating existing file, and return second candidate
+    new_diag_id = store.start("bind", route_id="bridge", operation_id="retry_op")
+    assert new_diag_id == "bind-new-unique-token-value-1234"
+    assert trace_file.read_bytes() == original_bytes
+    assert trace_file.stat().st_mtime_ns == original_mtime_ns
+
+    # Verify new trace was created independently
+    new_file = tmp_path / "traces" / f"{new_diag_id}.json"
+    assert new_file.exists()
+
+    # 4. If all 10 candidate attempts collide, store.start() fails closed with INTERNAL_ERROR and does not mutate target
+    def always_collide(n):
+        if n == 12:
+            return "deterministic-collision-target"
+        return real_token_hex(n)
+
+    monkeypatch.setattr(rcd_mod, "token_hex", always_collide)
+
+    with pytest.raises(BridgeError) as exc_info:
+        store.start("bind", route_id="bridge", operation_id="exhaust_op")
+    assert exc_info.value.code == ErrorCode.INTERNAL_ERROR
+    assert trace_file.read_bytes() == original_bytes
+    assert trace_file.stat().st_mtime_ns == original_mtime_ns
+
+
+def test_atomic_no_clobber_creation_prevents_overwrite_on_simulated_race(tmp_path: Path, monkeypatch):
+    store = RouteControlTraceStore(tmp_path / "traces")
+    diag_id = "bind-race-test-123"
+
+    # Pre-create the file to simulate another process creating it concurrently
+    target_path = tmp_path / "traces" / f"{diag_id}.json"
+    tmp_path.joinpath("traces").mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(b"INITIAL_UNTOUCHED_BYTES_SENTINEL\n")
+    initial_bytes = target_path.read_bytes()
+
+    # Even if existence check is bypassed (simulating race window between check and write),
+    # atomic creation must fail and never overwrite target
+    with pytest.raises((BridgeError, FileExistsError)):
+        # Directly call atomic creation or start
+        if hasattr(store, "_create_raw"):
+            store._create_raw({"diagnostic_id": diag_id, "operation_type": "bind"})
+        else:
+            # Old implementation without _create_raw would fail here
+            pytest.fail("store lacks atomic _create_raw")
+    assert target_path.read_bytes() == initial_bytes
