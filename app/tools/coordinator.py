@@ -198,23 +198,43 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
         if session_id is not None:
             container.coordinator.unbind_session(session_id)
+        if container.route_control is not None:
+            prepared = container.route_control.prepare_bind(
+                route_id,
+                session_id=session_id,
+                allow_project_change=bool(arguments.get("allow_project_change", False)),
+            )
+        else:
+            pending = container.route_registry.prepare_current_bind(
+                route_id,
+                session_id=session_id,
+                allow_project_change=bool(arguments.get("allow_project_change", False)),
+            )
+            prepared = {
+                "route_id": route_id,
+                "state": "bind_pending",
+                "generation": int(route.get("generation", 0)),
+                "operation_id": pending["token"],
+                "diagnostic_id": "bind-fallback",
+                "operation_url": f"/x/route-control/bind/{pending['token']}",
+            }
         binding = _route_binding(container, route, route_state="discovery")
-        pending = container.route_registry.prepare_current_bind(
-            route_id,
-            session_id=session_id,
-            allow_project_change=bool(arguments.get("allow_project_change", False)),
-        )
         result = to_mcp_result(success(request_context.request_id, {
-            "route_id": route_id,
-            "state": "discovery_prepared",
+            "route_id": prepared["route_id"],
+            "state": prepared["state"],
+            "generation": prepared["generation"],
         }))
         result = attach_coordinator_ui(result, ctx, binding)
-        result.structured_content["route_discovery"] = {
-            "route_id": route_id,
-            "token": pending["token"],
-            "marker": pending["marker"],
+        result.meta["route_control"] = {
+            "action": "bind",
+            "route_id": prepared["route_id"],
+            "operation_url": prepared["operation_url"],
+            "operation_id": prepared["operation_id"],
+            "diagnostic_id": prepared["diagnostic_id"],
+            "nonce": prepared["operation_id"],
         }
         return result
+
 
     async def takeover(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -392,7 +412,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_route_bind_current",
-                description="Bind an existing logical route to this exact physical ChatGPT conversation without asking the owner for a URL; by default it fails closed across projects, while explicit allow_project_change=true authorizes this one marker-verified route migration",
+                description="Bind an existing logical route to this exact physical ChatGPT conversation without asking the owner for a URL; by default it fails closed across projects, while explicit allow_project_change=true authorizes this one route migration",
                 inputSchema={
                     "type": "object",
                     "properties": {

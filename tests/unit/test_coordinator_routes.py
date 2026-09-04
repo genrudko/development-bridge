@@ -160,11 +160,99 @@ def test_bind_current_allows_sessionless_modern_mcp_request(tmp_path: Path):
         SimpleNamespace(request_id="req-bind-current-sessionless"),
     ))
     data = json.loads(result.content[0].text)["data"]
-    assert data["state"] == "discovery_prepared"
+    assert data["state"] == "bind_pending"
+    assert data["route_id"] == "bridge"
+    assert data["generation"] == 0
+    assert set(data.keys()) == {"route_id", "state", "generation"}
+
     pending = container.route_registry.pending_current_bind("bridge")
     assert pending is not None
     assert pending["session_id"] is None
-    assert result.structured_content["route_discovery"]["route_id"] == "bridge"
+
+    # Opaque operation details exist only in result.meta (MCP _meta)
+    route_control = result.meta.get("route_control")
+    assert route_control is not None
+    assert route_control["action"] == "bind"
+    assert route_control["route_id"] == "bridge"
+    assert route_control["operation_id"] == pending["token"]
+    assert route_control["operation_url"].endswith(f"/bind/{pending['token']}")
+    assert route_control["diagnostic_id"].startswith("bind-")
+
+    # Structured content and model text must have no secret tokens or URLs
+    assert "route_discovery" not in (result.structured_content or {})
+    assert "operation_url" not in (result.structured_content or {})
+    assert "token" not in (result.structured_content or {})
+    assert pending["token"] not in result.content[0].text
+    assert "conv-old" not in result.content[0].text
+    assert route_control["operation_url"] not in result.content[0].text
+
+
+def test_bind_current_handles_unbound_route(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    container.route_registry.unbind("bridge", expected_generation=0)
+
+    registry = build_tool_registry(container)
+    tool = registry.get("coordinator_route_bind_current")
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-bind-unbound"),
+    ))
+    data = json.loads(result.content[0].text)["data"]
+    assert data["state"] == "bind_pending"
+    assert data["route_id"] == "bridge"
+    assert data["generation"] == 0
+
+    route_control = result.meta.get("route_control")
+    assert route_control is not None
+    assert route_control["action"] == "bind"
+    assert route_control["route_id"] == "bridge"
+    assert route_control["operation_url"].endswith(f"/bind/{route_control['operation_id']}")
+
+    # Model content has no leak
+    assert route_control["operation_id"] not in result.content[0].text
+    assert route_control["operation_url"] not in result.content[0].text
+
+
+def test_bind_current_repeated_prepare_updates_operation_and_meta(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    registry = build_tool_registry(container)
+    tool = registry.get("coordinator_route_bind_current")
+
+    first = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-bind-1"),
+    ))
+    first_meta = first.meta["route_control"]
+    assert first_meta["action"] == "bind"
+
+    second = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-bind-2"),
+    ))
+    second_meta = second.meta["route_control"]
+    assert second_meta["action"] == "bind"
+    assert second_meta["operation_id"]
+    assert second_meta["operation_url"]
+
 
 
 def test_bind_current_schema_requires_explicit_boolean_for_project_change(tmp_path: Path):
@@ -266,9 +354,6 @@ def test_candidate_based_current_bind_same_target_is_idempotent(tmp_path: Path):
 
 
 def test_candidate_recording_rejects_project_mismatch(tmp_path: Path):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "bridge",
@@ -306,9 +391,6 @@ def test_candidate_recording_allows_authorized_project_change(tmp_path: Path):
 
 
 def test_candidate_recording_and_complete_fail_on_generation_race(tmp_path: Path):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "bridge",
@@ -338,9 +420,6 @@ def test_candidate_recording_and_complete_fail_on_generation_race(tmp_path: Path
 
 
 def test_candidate_recording_and_complete_fail_on_expired_token(tmp_path: Path):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "bridge",
@@ -371,9 +450,6 @@ def test_candidate_recording_and_complete_fail_on_expired_token(tmp_path: Path):
 
 
 def test_complete_current_bind_cannot_be_replayed(tmp_path: Path):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "bridge",
@@ -391,9 +467,6 @@ def test_complete_current_bind_cannot_be_replayed(tmp_path: Path):
 
 
 def test_complete_current_bind_fails_if_candidate_not_ready(tmp_path: Path):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "bridge",
@@ -442,9 +515,6 @@ def test_unbind_removes_physical_target_and_persists_unbound_state(tmp_path: Pat
 
 
 def test_unbind_guards_expected_generation(tmp_path: Path):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "bridge",
@@ -487,9 +557,6 @@ def test_binding_an_unbound_route_allocates_next_generation_and_channel(tmp_path
 
 
 def test_takeover_rejects_moving_bound_non_project_route_to_project(tmp_path: Path):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     # Bootstrap a bound non-Project route (project_id is None)
     registry.bootstrap(
@@ -514,9 +581,6 @@ def test_takeover_rejects_moving_bound_non_project_route_to_project(tmp_path: Pa
 
 
 def test_candidate_recording_cannot_be_overwritten_or_replayed(tmp_path: Path):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "bridge",
@@ -547,9 +611,6 @@ def test_candidate_recording_cannot_be_overwritten_or_replayed(tmp_path: Path):
     ],
 )
 def test_candidate_recording_rejects_malformed_or_cross_origin_targets(tmp_path: Path, bad_url: str):
-    import pytest
-    from app.api.errors import BridgeError, ErrorCode
-
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
         "bridge",

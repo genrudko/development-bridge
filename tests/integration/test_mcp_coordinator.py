@@ -37,9 +37,11 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                     assert [str(item.uri) for item in resources.resources] == list(COORDINATOR_UI_URIS)
                     resource = await session.read_resource(COORDINATOR_UI_URI)
                     assert "app.sendMessage" in resource.contents[0].text
-                    assert "route_discovery" in resource.contents[0].text
-                    assert "DBRIDGE_ROUTE_BIND_" in resource.contents[0].text
-                    assert 'request("discover"' in resource.contents[0].text
+                    assert "route_control" in resource.contents[0].text
+                    assert "openExternal" in resource.contents[0].text
+                    assert "DBRIDGE_ROUTE_BIND_" not in resource.contents[0].text
+                    assert 'request("discover"' not in resource.contents[0].text
+                    assert "openLink" not in resource.contents[0].text
                     assert "app.sendSizeChanged" in resource.contents[0].text
                     assert "Bridge" in resource.contents[0].text
                     assert "Готов" in resource.contents[0].text
@@ -540,6 +542,7 @@ async def test_current_chat_discovery_endpoint_delegates_to_wake_service(tmp_pat
 @pytest.mark.asyncio
 async def test_bind_current_does_not_prebind_session_to_stale_generation(tmp_path):
     settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
         "coordinator": {"route_registry_path": tmp_path / "routes.json"},
     })
     container = build_container(settings)
@@ -549,14 +552,70 @@ async def test_bind_current_does_not_prebind_session_to_stale_generation(tmp_pat
         "telegram-bridge-g4",
     )
     app = create_streamable_http_app(create_server(container), settings, container)
-    async with app.router.lifespan_context(app):
-        async with httpx2.AsyncClient(
-            transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
-        ) as client:
-            async with streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams:
-                async with ClientSession(*streams) as session:
-                    await session.initialize()
-                    result = await session.call_tool("coordinator_route_bind_current", {"route_id": "bridge"})
-                    payload = json.loads(result.content[0].text)["data"]
-                    assert payload["state"] == "discovery_prepared"
-                    assert container.coordinator._session_bindings == {}
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        result = await session.call_tool("coordinator_route_bind_current", {"route_id": "bridge"})
+        payload = json.loads(result.content[0].text)["data"]
+        assert payload["state"] == "bind_pending"
+        assert payload["route_id"] == "bridge"
+        assert payload["generation"] == 0
+        assert container.coordinator._session_bindings == {}
+
+        # Component-only meta contains the opaque operation url
+        route_control = result.meta.get("route_control")
+        assert route_control is not None
+        assert route_control["action"] == "bind"
+        assert route_control["route_id"] == "bridge"
+        op_id = route_control["operation_id"]
+        assert op_id.startswith("bind_")
+        assert route_control["operation_url"] == f"https://bridge.example/mcp/x/route-control/bind/{op_id}"
+        assert route_control["diagnostic_id"].startswith("bind-")
+
+        # Structured content and model text are strictly safe
+        assert "route_discovery" not in (result.structured_content or {})
+        assert "operation_url" not in (result.structured_content or {})
+        assert op_id not in result.content[0].text
+        assert "conv-old" not in result.content[0].text
+        assert route_control["operation_url"] not in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_coordinator_widget_html_contract_and_forbidden_apis(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        resource = await session.read_resource(COORDINATOR_UI_URI)
+        html = resource.contents[0].text
+
+        # Out-of-band openExternal must be present
+        assert "window.openai?.openExternal" in html or "window.openai.openExternal" in html
+        assert "actionBtn.onclick" in html
+        assert "handleRouteControl" in html
+
+        # Missing host API guard
+        assert "openExternal недоступен" in html or "Не поддерживается" in html
+
+        # Forbidden APIs / fallback mechanisms
+        assert "openLink" not in html
+        assert "DBRIDGE_ROUTE_BIND_" not in html
+        assert 'request("discover"' not in html
+
+        # Wake delivery messaging is preserved
+        assert "### ⚡ Bridge · задача завершена" in html
+        assert "app.sendMessage" in html
+        assert "app.updateModelContext" in html
