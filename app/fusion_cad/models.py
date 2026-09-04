@@ -1,9 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from types import MappingProxyType
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    GetJsonSchemaHandler,
+    model_validator,
+)
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import core_schema
 
 ENTITY_REF_PATTERN = r"^ent_[A-Za-z0-9._-]+$"
 DOCUMENT_REF_PATTERN = r"^doc_[A-Za-z0-9._-]+$"
@@ -22,6 +32,118 @@ StabilityClass = Literal["persistent", "contextual", "transient"]
 CapabilityState = Literal["supported", "degraded", "unavailable"]
 ValidationVerdict = Literal["GREEN", "WARN", "RED"]
 FindingSeverity = Literal["info", "warn", "error"]
+
+
+def freeze_value(val: Any) -> Any:
+    """Recursively convert nested mappings and sequences into immutable equivalents."""
+    if val is None or isinstance(val, (bool, int, float, str)):
+        return val
+    if isinstance(val, ImmutableMapping):
+        return val
+    if isinstance(val, Mapping):
+        return ImmutableMapping(val)
+    if isinstance(val, (list, tuple, set, frozenset)):
+        return tuple(freeze_value(x) for x in val)
+    if isinstance(val, BaseModel):
+        return val
+    return val
+
+
+def unfreeze_value(val: Any) -> Any:
+    """Recursively convert immutable mappings and tuples back into standard dicts/lists for serialization."""
+    if isinstance(val, Mapping):
+        return {k: unfreeze_value(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [unfreeze_value(x) for x in val]
+    return val
+
+
+class ImmutableMapping(Mapping[str, Any]):
+    """Recursively immutable mapping structure preventing top-level and nested modifications."""
+
+    __slots__ = ("_data", "_hash")
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        raw = dict(*args, **kwargs)
+        frozen: dict[str, Any] = {}
+        for k, v in raw.items():
+            if not isinstance(k, str):
+                raise TypeError(f"ImmutableMapping keys must be strings, got {type(k).__name__}")
+            frozen[k] = freeze_value(v)
+        object.__setattr__(self, "_data", MappingProxyType(frozen))
+        object.__setattr__(self, "_hash", None)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __repr__(self) -> str:
+        return f"ImmutableMapping({dict(self._data)!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return dict(self) == dict(other)
+        return False
+
+    def __hash__(self) -> int:
+        if self._hash is None:
+            try:
+                h = hash(
+                    tuple(
+                        sorted(
+                            (
+                                k,
+                                v
+                                if isinstance(v, (int, float, str, bool, tuple, type(None)))
+                                else str(v),
+                            )
+                            for k, v in self._data.items()
+                        )
+                    )
+                )
+            except (TypeError, ValueError):
+                h = hash(tuple(sorted(self._data.keys())))
+            object.__setattr__(self, "_hash", h)
+        return self._hash
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.chain_schema(
+            [
+                core_schema.dict_schema(core_schema.str_schema(), core_schema.any_schema()),
+                core_schema.no_info_plain_validator_function(cls._validate),
+            ],
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                unfreeze_value,
+                return_schema=core_schema.dict_schema(
+                    core_schema.str_schema(), core_schema.any_schema()
+                ),
+            ),
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return {"type": "object", "additionalProperties": True}
+
+    @classmethod
+    def _validate(cls, value: Any) -> ImmutableMapping:
+        if isinstance(value, ImmutableMapping):
+            return value
+        if isinstance(value, Mapping):
+            return cls(value)
+        raise ValueError(f"Expected mapping for ImmutableMapping, got {type(value).__name__}")
+
+
+FrozenDict = ImmutableMapping
 
 
 class CoordinateFrame(BaseModel):
@@ -95,7 +217,7 @@ class Point3(BaseModel):
     x: float
     y: float
     z: float
-    frame: CoordinateFrame = Field(default_factory=lambda: CoordinateFrame(space="world"))
+    frame: CoordinateFrame
 
 
 class Vector3(BaseModel):
@@ -106,7 +228,7 @@ class Vector3(BaseModel):
     x: float
     y: float
     z: float
-    frame: CoordinateFrame = Field(default_factory=lambda: CoordinateFrame(space="world"))
+    frame: CoordinateFrame
 
 
 class BoundingBox(BaseModel):
@@ -116,7 +238,7 @@ class BoundingBox(BaseModel):
 
     min_point: Point3
     max_point: Point3
-    frame: CoordinateFrame = Field(default_factory=lambda: CoordinateFrame(space="world"))
+    frame: CoordinateFrame
 
 
 class Transform(BaseModel):
@@ -125,7 +247,7 @@ class Transform(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     matrix: tuple[tuple[float, ...], ...]
-    frame: CoordinateFrame = Field(default_factory=lambda: CoordinateFrame(space="world"))
+    frame: CoordinateFrame
 
 
 class Plane(BaseModel):
@@ -135,7 +257,7 @@ class Plane(BaseModel):
 
     origin: Point3
     normal: Vector3
-    frame: CoordinateFrame = Field(default_factory=lambda: CoordinateFrame(space="world"))
+    frame: CoordinateFrame
 
 
 class Ray(BaseModel):
@@ -145,7 +267,7 @@ class Ray(BaseModel):
 
     origin: Point3
     direction: Vector3
-    frame: CoordinateFrame = Field(default_factory=lambda: CoordinateFrame(space="world"))
+    frame: CoordinateFrame
 
 
 class EntitySelector(BaseModel):
@@ -203,7 +325,7 @@ class ValidationFinding(BaseModel):
     severity: FindingSeverity
     message: str = Field(..., min_length=1)
     entity_refs: tuple[str, ...] = Field(default_factory=tuple)
-    evidence: Mapping[str, Any] = Field(default_factory=dict)
+    evidence: ImmutableMapping = Field(default_factory=ImmutableMapping)
     suggested_action: str | None = None
 
     @model_validator(mode="after")
@@ -213,7 +335,9 @@ class ValidationFinding(BaseModel):
         pattern = re.compile(ENTITY_REF_PATTERN)
         for ref in self.entity_refs:
             if not pattern.match(ref):
-                raise ValueError(f"ValidationFinding entity_ref '{ref}' does not match pattern {ENTITY_REF_PATTERN}")
+                raise ValueError(
+                    f"ValidationFinding entity_ref '{ref}' does not match pattern {ENTITY_REF_PATTERN}"
+                )
         return self
 
 
@@ -267,10 +391,10 @@ class CadResult(BaseModel):
     operation_id: str | None = Field(default=None, pattern=OPERATION_ID_PATTERN)
     document: DocumentState | None = None
     summary: str = Field(..., min_length=1)
-    data: Mapping[str, Any] = Field(default_factory=dict)
+    data: ImmutableMapping = Field(default_factory=ImmutableMapping)
     changed_refs: tuple[str, ...] = Field(default_factory=tuple)
     warnings: tuple[str, ...] = Field(default_factory=tuple)
-    artifacts: tuple[Mapping[str, Any], ...] = Field(default_factory=tuple)
-    diff: Mapping[str, Any] | None = None
-    validation: Mapping[str, Any] | None = None
+    artifacts: tuple[ImmutableMapping, ...] = Field(default_factory=tuple)
+    diff: ImmutableMapping | None = None
+    validation: ImmutableMapping | None = None
     capabilities: tuple[CapabilityRecord, ...] | None = None

@@ -108,7 +108,7 @@ class DescribeInspectRequest(_StrictCadBase):
 class BoundingBoxInspectRequest(_StrictCadBase):
     operation: Literal["bounding_box"]
     target: TargetRef
-    frame: CoordinateFrame = Field(default_factory=lambda: CoordinateFrame(space="world"))
+    frame: CoordinateFrame
 
 
 class OrientedBboxInspectRequest(_StrictCadBase):
@@ -119,7 +119,7 @@ class OrientedBboxInspectRequest(_StrictCadBase):
 class CentroidInspectRequest(_StrictCadBase):
     operation: Literal["centroid"]
     target: TargetRef
-    frame: CoordinateFrame = Field(default_factory=lambda: CoordinateFrame(space="world"))
+    frame: CoordinateFrame
 
 
 class AreaInspectRequest(_StrictCadBase):
@@ -372,7 +372,7 @@ class TextCreateRequest(_StrictCadBase):
     text: str = Field(..., min_length=1)
     font: str = "Arial"
     height_mm: float = Field(..., gt=0)
-    position: Point3 = Field(default_factory=lambda: Point3(x=0.0, y=0.0, z=0.0))
+    position: Point3
     target_plane_or_face: TargetRef | None = None
     alignment: Literal["left", "center", "right"] = "left"
     flip_x: bool = False
@@ -518,7 +518,7 @@ class StageTextCreateAction(BaseModel):
     text: str = Field(..., min_length=1)
     font: str = "Arial"
     height_mm: float = Field(..., gt=0)
-    position: Point3 = Field(default_factory=lambda: Point3(x=0.0, y=0.0, z=0.0))
+    position: Point3
     target_plane_or_face: TargetRef | None = None
     alignment: Literal["left", "center", "right"] = "left"
     flip_x: bool = False
@@ -559,11 +559,51 @@ class StageTextCutAction(BaseModel):
     target_body: TargetRef
 
 
-class StageVisibilityAction(BaseModel):
+class StageVisibilityShowAction(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    action_type: Literal["visibility_set", "show", "hide", "show_only", "isolate", "restore"]
-    target: TargetRef | None = None
-    visible: bool | None = None
+    action_type: Literal["visibility_show", "show"]
+    target: TargetRef
+
+
+class StageVisibilityHideAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    action_type: Literal["visibility_hide", "hide"]
+    target: TargetRef
+
+
+class StageVisibilitySetAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    action_type: Literal["visibility_set", "set"]
+    target: TargetRef
+    visible: bool
+
+
+class StageVisibilityShowOnlyAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    action_type: Literal["visibility_show_only", "show_only"]
+    target: TargetRef
+
+
+class StageVisibilityIsolateAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    action_type: Literal["visibility_isolate", "isolate"]
+    target: TargetRef
+
+
+class StageVisibilityRestoreAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    action_type: Literal["visibility_restore", "restore"]
+
+
+StageVisibilityAction = Annotated[
+    StageVisibilityShowAction
+    | StageVisibilityHideAction
+    | StageVisibilitySetAction
+    | StageVisibilityShowOnlyAction
+    | StageVisibilityIsolateAction
+    | StageVisibilityRestoreAction,
+    Field(discriminator="action_type"),
+]
 
 
 class StageMetadataSetAction(BaseModel):
@@ -620,7 +660,12 @@ TransactionStageAction = Annotated[
     | StageTextDeleteAction
     | StageTextExtrudeAction
     | StageTextCutAction
-    | StageVisibilityAction
+    | StageVisibilityShowAction
+    | StageVisibilityHideAction
+    | StageVisibilitySetAction
+    | StageVisibilityShowOnlyAction
+    | StageVisibilityIsolateAction
+    | StageVisibilityRestoreAction
     | StageMetadataSetAction
     | StageMetadataRemoveAction
     | StageMetadataTagAction

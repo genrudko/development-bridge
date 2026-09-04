@@ -126,14 +126,36 @@ def test_geometry_types_have_enforced_coordinate_frame() -> None:
     assert ray.frame == frame
 
 
-def test_geometry_types_default_to_world_frame_and_reject_none() -> None:
-    p_default = Point3(x=1.0, y=2.0, z=3.0)
-    assert p_default.frame.space == "world"
-    assert p_default.frame.ref is None
+def test_geometry_types_require_explicit_coordinate_frame() -> None:
+    # All geometry types must reject missing frame
+    with pytest.raises(ValidationError):
+        Point3(x=1.0, y=2.0, z=3.0)  # type: ignore[call-arg]
 
-    # frame cannot be None
+    with pytest.raises(ValidationError):
+        Vector3(x=0.0, y=0.0, z=1.0)  # type: ignore[call-arg]
+
+    frame = CoordinateFrame(space="world")
+    p = Point3(x=0.0, y=0.0, z=0.0, frame=frame)
+    v = Vector3(x=0.0, y=0.0, z=1.0, frame=frame)
+
+    with pytest.raises(ValidationError):
+        BoundingBox(min_point=p, max_point=p)  # type: ignore[call-arg]
+
+    with pytest.raises(ValidationError):
+        Transform(matrix=((1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 0.0, 0.0, 1.0)))  # type: ignore[call-arg]
+
+    with pytest.raises(ValidationError):
+        Plane(origin=p, normal=v)  # type: ignore[call-arg]
+
+    with pytest.raises(ValidationError):
+        Ray(origin=p, direction=v)  # type: ignore[call-arg]
+
+    # Reject frame=None
     with pytest.raises(ValidationError):
         Point3(x=1.0, y=2.0, z=3.0, frame=None)  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError):
+        Vector3(x=0.0, y=0.0, z=1.0, frame=None)  # type: ignore[arg-type]
 
 
 # ==========================================
@@ -273,9 +295,12 @@ def test_cad_result_envelope_strictness_and_immutability() -> None:
         operation_id="op_12345",
         document=DocumentState(document_ref="doc_1", model_revision="rev_1"),
         summary="Extruded text profile successfully",
-        data={"body_count": 2},
+        data={"body_count": 2, "nested": {"count": 1}, "items": [{"id": "a"}]},
         changed_refs=["ent_body_1", "ent_body_2"],
         warnings=["Non-critical warning"],
+        artifacts=({"file": "preview.png", "meta": {"w": 100}},),
+        diff={"created": {"faces": 1}},
+        validation={"verdict": "GREEN", "details": {"score": 99}},
     )
     assert result.api_version == "fusion.cad/v1"
     assert result.status == "succeeded"
@@ -284,6 +309,49 @@ def test_cad_result_envelope_strictness_and_immutability() -> None:
     assert result.document.document_ref == "doc_1"
     assert result.changed_refs == ("ent_body_1", "ent_body_2")
     assert result.warnings == ("Non-critical warning",)
+
+    # Finding 1: Deep immutability - top-level mutation attempts fail
+    with pytest.raises(TypeError):
+        result.data["new_key"] = 123  # type: ignore[index]
+
+    with pytest.raises(TypeError):
+        del result.data["body_count"]  # type: ignore[misc]
+
+    with pytest.raises(AttributeError):
+        result.data.pop("body_count")  # type: ignore[attr-defined]
+
+    with pytest.raises(AttributeError):
+        result.data.update({"k": 1})  # type: ignore[attr-defined]
+
+    # Finding 1: Deep immutability - nested dict and sequence mutation attempts fail
+    with pytest.raises(TypeError):
+        result.data["nested"]["count"] = 2  # type: ignore[index]
+
+    with pytest.raises(TypeError):
+        result.data["items"][0]["id"] = "b"  # type: ignore[index]
+
+    with pytest.raises(TypeError):
+        result.data["items"][0] = {"id": "c"}  # type: ignore[index]
+
+    with pytest.raises(TypeError):
+        result.artifacts[0]["meta"]["w"] = 200  # type: ignore[index]
+
+    assert result.diff is not None
+    with pytest.raises(TypeError):
+        result.diff["created"]["faces"] = 2  # type: ignore[index]
+
+    assert result.validation is not None
+    with pytest.raises(TypeError):
+        result.validation["details"]["score"] = 100  # type: ignore[index]
+
+    # JSON serialization and schema remains usable
+    dumped = result.model_dump()
+    assert dumped["data"]["nested"]["count"] == 1
+    assert dumped["artifacts"][0]["meta"]["w"] == 100
+    assert dumped["diff"]["created"]["faces"] == 1
+
+    json_str = result.model_dump_json()
+    assert '"body_count":2' in json_str or '"body_count": 2' in json_str
 
     # Finding 6: CadResult api_version is strictly Literal["fusion.cad/v1"]
     with pytest.raises(ValidationError):
@@ -299,10 +367,20 @@ def test_validation_report_structures_and_refs() -> None:
         severity="warn",
         message="Suspicious duplicate body detected",
         entity_refs=["ent_b1", "ent_b2"],
-        evidence={"delta_volume": 0.0},
+        evidence={"delta_volume": 0.0, "nested_proof": {"ratio": 1.0}},
         suggested_action="Delete orphaned duplicate body",
     )
     assert finding.entity_refs == ("ent_b1", "ent_b2")
+
+    # Finding 1: ValidationFinding evidence deep immutability
+    with pytest.raises(TypeError):
+        finding.evidence["new_key"] = 123  # type: ignore[index]
+
+    with pytest.raises(TypeError):
+        finding.evidence["nested_proof"]["ratio"] = 2.0  # type: ignore[index]
+
+    with pytest.raises(AttributeError):
+        finding.evidence.pop("delta_volume")  # type: ignore[attr-defined]
 
     # Invalid ref in validation finding
     with pytest.raises(ValidationError):

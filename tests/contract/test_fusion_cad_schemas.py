@@ -191,9 +191,9 @@ def test_request_union_validation_camera_set_framed_inputs() -> None:
     valid_payload = {
         "node_id": "node_1",
         "operation": "camera_set",
-        "eye": {"x": 100.0, "y": 200.0, "z": 300.0},
-        "target": {"x": 0.0, "y": 0.0, "z": 0.0},
-        "up": {"x": 0.0, "y": 0.0, "z": 1.0},
+        "eye": {"x": 100.0, "y": 200.0, "z": 300.0, "frame": {"space": "world"}},
+        "target": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}},
+        "up": {"x": 0.0, "y": 0.0, "z": 1.0, "frame": {"space": "world"}},
         "fov": 45.0,
     }
     req = adapter.validate_python(valid_payload)
@@ -202,9 +202,57 @@ def test_request_union_validation_camera_set_framed_inputs() -> None:
     assert req.eye.frame.space == "world"
     assert req.up is not None and req.up.z == 1.0
 
+    # Finding 2: Rejects camera_set eye without explicit CoordinateFrame
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "camera_set",
+            "eye": {"x": 100.0, "y": 200.0, "z": 300.0},
+        })
+
     # Rejects unframed raw list for eye
     with pytest.raises(ValidationError):
         adapter.validate_python({**valid_payload, "eye": [100.0, 200.0, 300.0]})
+
+
+def test_request_union_validation_inspect_geometry_framed_inputs() -> None:
+    from app.fusion_cad.requests import FusionInspectRequest
+
+    adapter_req = TypeAdapter(FusionInspectRequest)
+
+    # Valid bounding_box request with explicit frame
+    req_bbox = adapter_req.validate_python({
+        "node_id": "node_1",
+        "operation": "bounding_box",
+        "target": "ent_body_1",
+        "frame": {"space": "world"},
+    })
+    assert req_bbox.operation == "bounding_box"
+
+    # Finding 2: Rejects bounding_box request without explicit frame
+    with pytest.raises(ValidationError):
+        adapter_req.validate_python({
+            "node_id": "node_1",
+            "operation": "bounding_box",
+            "target": "ent_body_1",
+        })
+
+    # Valid centroid request with explicit frame
+    req_centroid = adapter_req.validate_python({
+        "node_id": "node_1",
+        "operation": "centroid",
+        "target": "ent_body_1",
+        "frame": {"space": "component", "ref": "ent_comp_1"},
+    })
+    assert req_centroid.operation == "centroid"
+
+    # Finding 2: Rejects centroid request without explicit frame
+    with pytest.raises(ValidationError):
+        adapter_req.validate_python({
+            "node_id": "node_1",
+            "operation": "centroid",
+            "target": "ent_body_1",
+        })
 
 
 def test_request_union_validation_text_create_framed_inputs() -> None:
@@ -215,7 +263,7 @@ def test_request_union_validation_text_create_framed_inputs() -> None:
         "text": "AZURE_123",
         "font": "Arial",
         "height_mm": 5.0,
-        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "position": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}},
         "expected_revision": "rev_1",
     }
     req = adapter.validate_python(valid_payload)
@@ -223,6 +271,25 @@ def test_request_union_validation_text_create_framed_inputs() -> None:
     assert req.text == "AZURE_123"
     assert req.position.x == 0.0
     assert req.position.frame.space == "world"
+
+    # Finding 2: Rejects text_create when position is missing explicit frame
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "text_create",
+            "text": "AZURE_123",
+            "height_mm": 5.0,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+        })
+
+    # Finding 2: Rejects text_create when position itself is omitted
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "text_create",
+            "text": "AZURE_123",
+            "height_mm": 5.0,
+        })
 
     # Rejects invalid raw list for position
     with pytest.raises(ValidationError):
@@ -255,7 +322,7 @@ def test_request_union_validation_transaction_stage_strict_action() -> None:
     })
     assert req.operation == "begin"
 
-    # Stage valid typed text_create action
+    # Stage valid typed text_create action with explicit framed position
     req_stage = adapter.validate_python({
         "node_id": "node_1",
         "operation": "stage",
@@ -264,11 +331,24 @@ def test_request_union_validation_transaction_stage_strict_action() -> None:
             "action_type": "text_create",
             "text": "SCHEDULE",
             "height_mm": 10.0,
-            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}},
         },
     })
     assert req_stage.operation == "stage"
     assert req_stage.action.action_type == "text_create"
+
+    # Finding 2: Rejects stage text_create without framed position
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "stage",
+            "transaction_id": "tx_123",
+            "action": {
+                "action_type": "text_create",
+                "text": "SCHEDULE",
+                "height_mm": 10.0,
+            },
+        })
 
     # Stage valid typed metadata action
     req_stage_meta = adapter.validate_python({
@@ -283,6 +363,101 @@ def test_request_union_validation_transaction_stage_strict_action() -> None:
     })
     assert req_stage_meta.operation == "stage"
     assert req_stage_meta.action.action_type == "metadata_set_role"
+
+    # Finding 3: Discriminated visibility actions strictness
+    # 1) Restore accepts no target and no visible
+    req_restore = adapter.validate_python({
+        "node_id": "node_1",
+        "operation": "stage",
+        "transaction_id": "tx_123",
+        "action": {"action_type": "visibility_restore"},
+    })
+    assert req_restore.action.action_type == "visibility_restore"
+
+    req_restore_unprefixed = adapter.validate_python({
+        "node_id": "node_1",
+        "operation": "stage",
+        "transaction_id": "tx_123",
+        "action": {"action_type": "restore"},
+    })
+    assert req_restore_unprefixed.action.action_type == "restore"
+
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "stage",
+            "transaction_id": "tx_123",
+            "action": {"action_type": "restore", "target": "ent_body_1"},
+        })
+
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "stage",
+            "transaction_id": "tx_123",
+            "action": {"action_type": "restore", "visible": True},
+        })
+
+    # 2) Set requires target + visible
+    req_set = adapter.validate_python({
+        "node_id": "node_1",
+        "operation": "stage",
+        "transaction_id": "tx_123",
+        "action": {"action_type": "visibility_set", "target": "ent_body_1", "visible": False},
+    })
+    assert req_set.action.action_type == "visibility_set"
+
+    req_set_unprefixed = adapter.validate_python({
+        "node_id": "node_1",
+        "operation": "stage",
+        "transaction_id": "tx_123",
+        "action": {"action_type": "set", "target": "ent_body_1", "visible": True},
+    })
+    assert req_set_unprefixed.action.action_type == "set"
+
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "stage",
+            "transaction_id": "tx_123",
+            "action": {"action_type": "visibility_set", "target": "ent_body_1"},
+        })
+
+    with pytest.raises(ValidationError):
+        adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "stage",
+            "transaction_id": "tx_123",
+            "action": {"action_type": "set", "visible": True},
+        })
+
+    # 3) Show / Hide / Show_only / Isolate require target and forbid visible
+    for act in ["visibility_show", "show", "visibility_hide", "hide", "visibility_show_only", "show_only", "visibility_isolate", "isolate"]:
+        req_vis = adapter.validate_python({
+            "node_id": "node_1",
+            "operation": "stage",
+            "transaction_id": "tx_123",
+            "action": {"action_type": act, "target": "ent_body_1"},
+        })
+        assert req_vis.action.action_type == act
+
+        # Forbid visible
+        with pytest.raises(ValidationError):
+            adapter.validate_python({
+                "node_id": "node_1",
+                "operation": "stage",
+                "transaction_id": "tx_123",
+                "action": {"action_type": act, "target": "ent_body_1", "visible": True},
+            })
+
+        # Require target
+        with pytest.raises(ValidationError):
+            adapter.validate_python({
+                "node_id": "node_1",
+                "operation": "stage",
+                "transaction_id": "tx_123",
+                "action": {"action_type": act},
+            })
 
     # Reject arbitrary unrestricted free-form / raw_python action
     with pytest.raises(ValidationError):
