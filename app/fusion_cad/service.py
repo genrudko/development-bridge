@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.api.errors import BridgeError, ErrorCode
 from app.desktop_nodes.service import DesktopNodeService, has_binary_data
+from app.fusion_cad.capabilities import (
+    CapabilityMatrix,
+    FusionRuntimeIdentity,
+    get_required_capability,
+)
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.models import CadResult
 from app.fusion_cad.requests import (
@@ -126,6 +132,13 @@ class FusionCadService:
     ) -> None:
         self._desktop_nodes = desktop_nodes
         self._script_bundle = script_bundle or FusionCadScriptBundle()
+        self._node_capabilities: dict[str, CapabilityMatrix] = {}
+
+    def get_node_capabilities(self, node_id: str) -> CapabilityMatrix:
+        return self._node_capabilities.get(node_id, CapabilityMatrix.default_supported())
+
+    def set_node_capabilities(self, node_id: str, matrix: CapabilityMatrix) -> None:
+        self._node_capabilities[node_id] = matrix
 
     @staticmethod
     def is_domain_summary(summary: str | None) -> bool:
@@ -460,7 +473,7 @@ class FusionCadService:
 
         try:
             validated = adapter.validate_python(request_dict)
-            return validated, bundle_group
+            return validated, target_group, bundle_group
         except ValidationError as exc:
             raise BridgeError(
                 ErrorCode.INVALID_ARGUMENT,
@@ -494,21 +507,22 @@ class FusionCadService:
         self,
         request: BaseModel | dict[str, Any],
         group: str | None = None,
+        allow_degraded: bool = False,
     ) -> CadResult | dict[str, Any]:
         if isinstance(request, _StrictCadBase):
-            resolved_group = group or self._resolve_group(request)
-            effective_bundle_group = "mutate" if resolved_group in ("metadata", "style") else resolved_group
+            domain_group = group or self._resolve_group(request)
+            effective_bundle_group = "mutate" if domain_group in ("metadata", "style") else domain_group
             node_id = request.node_id
             payload = request.model_dump(mode="json", exclude_none=True)
         elif isinstance(request, BaseModel):
-            validated_model, effective_bundle_group = self._validate_request_dict(
+            validated_model, domain_group, effective_bundle_group = self._validate_request_dict(
                 request.model_dump(mode="python", exclude_none=True),
                 group=group,
             )
             node_id = validated_model.node_id  # type: ignore[union-attr]
             payload = validated_model.model_dump(mode="json", exclude_none=True)
         elif isinstance(request, dict):
-            validated_model, effective_bundle_group = self._validate_request_dict(request, group=group)
+            validated_model, domain_group, effective_bundle_group = self._validate_request_dict(request, group=group)
             node_id = validated_model.node_id  # type: ignore[union-attr]
             payload = validated_model.model_dump(mode="json", exclude_none=True)
         else:
@@ -522,6 +536,14 @@ class FusionCadService:
                 ErrorCode.INVALID_ARGUMENT,
                 "node_id is required for Fusion CAD operations",
             )
+
+        # Enforce capability-first dispatch before script generation or execution
+        op = str(payload.get("operation", ""))
+        required_cap = get_required_capability(domain_group, op, payload)
+        if required_cap is not None:
+            matrix = self.get_node_capabilities(node_id)
+            effective_allow_degraded = allow_degraded or bool(payload.get("allow_degraded", False))
+            matrix.require(required_cap, allow_degraded=effective_allow_degraded)
 
         is_async, is_mutation, summary = self._classify_operation(effective_bundle_group, payload)
         script = self._script_bundle.build(effective_bundle_group, payload)
@@ -556,6 +578,20 @@ class FusionCadService:
             return raw_result
 
         cad_result = self.decode_domain_result(raw_result)
+
+        # If operation was capabilities read, persist the probed capability matrix
+        if effective_bundle_group == "read" and op == "capabilities" and cad_result.capabilities:
+            identity = None
+            if isinstance(cad_result.data, (dict, Mapping)) and "application" in cad_result.data:
+                try:
+                    identity = FusionRuntimeIdentity.model_validate(dict(cad_result.data))
+                except (ValidationError, ValueError, TypeError):
+                    identity = None
+            self._node_capabilities[node_id] = CapabilityMatrix.from_records(
+                cad_result.capabilities,
+                identity=identity,
+            )
+
         domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
         if has_binary_data(domain_payload):
             try:

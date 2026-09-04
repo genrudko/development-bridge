@@ -1,5 +1,377 @@
+def probe_runtime():
+    facts = {}
+    app = None
+    fusion_version = None
+    ui = None
+    doc = None
+    design = None
+
+    try:
+        import adsk.core
+        app = adsk.core.Application.get()
+        if app:
+            facts["has_app"] = True
+            fusion_version = getattr(app, "version", None)
+            facts["has_measure_manager"] = hasattr(app, "measureManager")
+            facts["has_user_interface"] = hasattr(app, "userInterface")
+            ui = getattr(app, "userInterface", None)
+            if ui:
+                facts["has_selection_primitives"] = hasattr(ui, "activeSelections")
+            doc = getattr(app, "activeDocument", None)
+            if doc:
+                facts["has_active_document"] = True
+                facts["has_mutation_indicators"] = hasattr(doc, "isModified")
+                facts["has_attributes"] = hasattr(doc, "attributes")
+    except Exception as exc:
+        facts["adsk_core_probe_error"] = str(exc)
+
+    try:
+        import adsk.fusion
+        facts["has_adsk_fusion"] = True
+        facts["has_design_class"] = hasattr(adsk.fusion, "Design")
+        facts["has_sketch_class"] = hasattr(adsk.fusion, "Sketch")
+        facts["has_sketch_text"] = hasattr(adsk.fusion, "SketchTexts") or hasattr(adsk.fusion, "SketchText")
+        facts["has_export_manager"] = hasattr(adsk.fusion, "ExportManager") or hasattr(adsk.fusion, "DXFExportOptions")
+        facts["has_joint_access"] = hasattr(adsk.fusion, "Joints") or hasattr(adsk.fusion, "AsBuiltJoints")
+
+        if app and getattr(app, "activeDocument", None):
+            doc = app.activeDocument
+            products = getattr(doc, "products", None)
+            if products:
+                try:
+                    design = products.itemByClass("adsk::fusion::Design")
+                except Exception:
+                    design = None
+            if design:
+                facts["has_design_access"] = True
+                facts["has_timeline_access"] = hasattr(design, "timeline")
+                facts["has_entity_token_resolver"] = hasattr(design, "findEntityByToken")
+                root = getattr(design, "rootComponent", None)
+                facts["has_sketch_access"] = hasattr(root, "sketches") if root else False
+            else:
+                facts["has_design_access"] = facts["has_design_class"]
+                facts["has_timeline_access"] = hasattr(adsk.fusion, "Timeline")
+                facts["has_entity_token_resolver"] = hasattr(adsk.fusion.Design, "findEntityByToken") if hasattr(adsk.fusion, "Design") else False
+                facts["has_sketch_access"] = facts["has_sketch_class"]
+        else:
+            facts["has_design_access"] = facts.get("has_design_class", False)
+            facts["has_timeline_access"] = hasattr(adsk.fusion, "Timeline") if hasattr(adsk, "fusion") else False
+            facts["has_entity_token_resolver"] = hasattr(adsk.fusion.Design, "findEntityByToken") if hasattr(adsk, "fusion") and hasattr(adsk.fusion, "Design") else False
+            facts["has_sketch_access"] = facts.get("has_sketch_class", False)
+    except Exception as exc:
+        facts["adsk_fusion_probe_error"] = str(exc)
+
+    try:
+        import adsk.core
+        facts["has_camera"] = hasattr(adsk.core, "Camera")
+        facts["has_viewport_conversion"] = hasattr(adsk.core.Viewport, "modelToScreen") and hasattr(adsk.core.Viewport, "screenToModel")
+    except Exception:
+        pass
+
+    try:
+        import adsk.core
+        facts["has_command_preview"] = hasattr(adsk.core, "CommandCreatedEventHandler") and hasattr(adsk.core, "Command")
+        facts["has_undo_redo"] = hasattr(adsk.core.Application, "executeTextCommand") or hasattr(adsk.core, "Transaction")
+    except Exception:
+        pass
+
+    try:
+        import adsk.core
+        facts["has_attributes"] = facts.get("has_attributes", False) or hasattr(adsk.core, "Attributes")
+    except Exception:
+        pass
+
+    # If adsk not present (e.g. running in testing stub or relay container)
+    if not facts.get("has_app") and not facts.get("has_adsk_fusion"):
+        # Fallback to payload facts if provided, otherwise default basic facts
+        if "probe_facts" in PAYLOAD and isinstance(PAYLOAD["probe_facts"], dict):
+            facts.update(PAYLOAD["probe_facts"])
+        else:
+            facts["standalone_runtime"] = True
+            facts["has_app"] = True
+            facts["has_measure_manager"] = True
+            facts["has_selection_primitives"] = True
+            facts["has_active_document"] = True
+            facts["has_mutation_indicators"] = True
+            facts["has_attributes"] = True
+            facts["has_adsk_fusion"] = True
+            facts["has_design_access"] = True
+            facts["has_timeline_access"] = True
+            facts["has_entity_token_resolver"] = True
+            facts["has_sketch_access"] = True
+            facts["has_sketch_text"] = True
+            facts["has_export_manager"] = True
+            facts["has_joint_access"] = True
+            facts["has_camera"] = True
+            facts["has_viewport_conversion"] = True
+            facts["has_command_preview"] = True
+            facts["has_undo_redo"] = True
+
+    resolved_version = fusion_version or PAYLOAD.get("fusion_version")
+    relay_version = PAYLOAD.get("relay_version", "1.0.0")
+
+    records = []
+    # 1. entity.token_resolver
+    records.append({
+        "name": "entity.token_resolver",
+        "state": "supported" if facts.get("has_entity_token_resolver") else "unavailable",
+        "implementation": "adsk.fusion.Design.findEntityByToken" if facts.get("has_entity_token_resolver") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_entity_token_resolver") else ["Native design entity-token resolver not available on this Fusion runtime"],
+    })
+
+    # 2. design.access
+    records.append({
+        "name": "design.access",
+        "state": "supported" if facts.get("has_design_access") else "unavailable",
+        "implementation": "adsk.fusion.Design" if facts.get("has_design_access") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_design_access") else ["Design product access not available"],
+    })
+
+    # 3. timeline.access
+    records.append({
+        "name": "timeline.access",
+        "state": "supported" if facts.get("has_timeline_access") else "unavailable",
+        "implementation": "adsk.fusion.Timeline" if facts.get("has_timeline_access") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_timeline_access") else ["Timeline access not available"],
+    })
+
+    # 4. sketch.access
+    records.append({
+        "name": "sketch.access",
+        "state": "supported" if facts.get("has_sketch_access") else "unavailable",
+        "implementation": "adsk.fusion.Sketches" if facts.get("has_sketch_access") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_sketch_access") else ["Sketch collection access not available"],
+    })
+
+    # 5. inspect.measure
+    records.append({
+        "name": "inspect.measure",
+        "state": "supported" if facts.get("has_measure_manager") else "unavailable",
+        "implementation": "adsk.core.MeasureManager" if facts.get("has_measure_manager") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_measure_manager") else ["MeasureManager API not available"],
+    })
+
+    # 6. view.camera
+    records.append({
+        "name": "view.camera",
+        "state": "supported" if facts.get("has_camera") else "unavailable",
+        "implementation": "adsk.core.Camera" if facts.get("has_camera") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_camera") else ["Camera control API not available"],
+    })
+
+    # 7. view.viewport_conversion
+    records.append({
+        "name": "view.viewport_conversion",
+        "state": "supported" if facts.get("has_viewport_conversion") else "unavailable",
+        "implementation": "adsk.core.Viewport" if facts.get("has_viewport_conversion") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_viewport_conversion") else ["Viewport screen/model coordinate conversion methods not available"],
+    })
+
+    # 8. view.pick
+    if facts.get("has_selection_primitives"):
+        records.append({
+            "name": "view.pick",
+            "state": "supported",
+            "implementation": "native-preselect",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif facts.get("has_viewport_conversion"):
+        records.append({
+            "name": "view.pick",
+            "state": "degraded",
+            "implementation": "viewport-raycast",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Raycast geometry intersection without native preselection"],
+        })
+    else:
+        records.append({
+            "name": "view.pick",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Neither selection primitives nor viewport projection methods available"],
+        })
+
+    # 9. selection.primitives
+    records.append({
+        "name": "selection.primitives",
+        "state": "supported" if facts.get("has_selection_primitives") else "unavailable",
+        "implementation": "adsk.core.UserInterface.activeSelections" if facts.get("has_selection_primitives") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_selection_primitives") else ["Interactive selection primitives not available"],
+    })
+
+    # 10. transaction.preview_hooks
+    records.append({
+        "name": "transaction.preview_hooks",
+        "state": "supported" if facts.get("has_command_preview") else "unavailable",
+        "implementation": "adsk.core.Command.executePreview" if facts.get("has_command_preview") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_command_preview") else ["Command execution preview hooks not available"],
+    })
+
+    # 11. transaction.preview_replay
+    if facts.get("has_command_preview") and facts.get("has_undo_redo"):
+        records.append({
+            "name": "transaction.preview_replay",
+            "state": "supported",
+            "implementation": "command-preview-replay",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif facts.get("has_undo_redo"):
+        records.append({
+            "name": "transaction.preview_replay",
+            "state": "degraded",
+            "implementation": "undo-redo-fallback",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Command preview hooks not available; rollback relies on active transaction undo"],
+        })
+    else:
+        records.append({
+            "name": "transaction.preview_replay",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Neither command preview nor undo/redo available for transaction replay"],
+        })
+
+    # 12. metadata.attributes
+    records.append({
+        "name": "metadata.attributes",
+        "state": "supported" if facts.get("has_attributes") else "unavailable",
+        "implementation": "adsk.core.Attributes" if facts.get("has_attributes") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_attributes") else ["Custom attributes API not available"],
+    })
+
+    # 13. style.sketch_text
+    records.append({
+        "name": "style.sketch_text",
+        "state": "supported" if facts.get("has_sketch_text") else "unavailable",
+        "implementation": "adsk.fusion.SketchTexts" if facts.get("has_sketch_text") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_sketch_text") else ["SketchText creation and extrusion not available"],
+    })
+
+    # 14. transaction.undo_redo
+    records.append({
+        "name": "transaction.undo_redo",
+        "state": "supported" if facts.get("has_undo_redo") else "unavailable",
+        "implementation": "adsk.core.Application" if facts.get("has_undo_redo") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_undo_redo") else ["Application text command / transaction undo not available"],
+    })
+
+    # 15. revision.mutation_indicators
+    records.append({
+        "name": "revision.mutation_indicators",
+        "state": "supported" if facts.get("has_mutation_indicators") else "unavailable",
+        "implementation": "adsk.core.Document.isModified" if facts.get("has_mutation_indicators") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_mutation_indicators") else ["Document mutation modified indicator not available"],
+    })
+
+    # 16. revision.external_change_detection
+    if facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "supported",
+            "implementation": "timeline-fingerprint-guard",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif facts.get("has_mutation_indicators"):
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "degraded",
+            "implementation": "document-modified-indicator",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Heuristic document change detection without granular timeline markers"],
+        })
+    else:
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["No reliable mutation indicators available for external change detection"],
+        })
+
+    # 17. export.dxf
+    records.append({
+        "name": "export.dxf",
+        "state": "supported" if facts.get("has_export_manager") else "unavailable",
+        "implementation": "adsk.fusion.ExportManager" if facts.get("has_export_manager") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_export_manager") else ["DXF export options not available on this runtime"],
+    })
+
+    # 18. view.section
+    records.append({
+        "name": "view.section",
+        "state": "supported" if facts.get("has_section_view") else "unavailable",
+        "implementation": "adsk.fusion.SectionAnalysis" if facts.get("has_section_view") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_section_view") else ["Section view/analysis API not available on this runtime"],
+    })
+
+    # 19. assembly.joints
+    records.append({
+        "name": "assembly.joints",
+        "state": "supported" if facts.get("has_joint_access") else "unavailable",
+        "implementation": "adsk.fusion.Joints" if facts.get("has_joint_access") else None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": [] if facts.get("has_joint_access") else ["Joint creation and assembly operations not available on this runtime"],
+    })
+
+    data_payload = {
+        "application": "Autodesk Fusion",
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "platform": PAYLOAD.get("platform", "Windows"),
+        "probe_facts": facts,
+    }
+    return make_result(data=data_payload, summary="Runtime capabilities probed", capabilities=records)
+
+
 def run():
     op = PAYLOAD.get("operation", "")
+    if op == "capabilities":
+        return probe_runtime()
     if op == "echo":
         return make_result(data={"text": PAYLOAD.get("text", "")}, summary="echo")
     return make_result(data={"operation": op}, summary=f"Executed read:{op}")
