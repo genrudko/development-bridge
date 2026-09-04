@@ -15,6 +15,8 @@
 - Inherit master plan and canonical spec.
 - Hard precondition: P1 Schedule golden gate accepted.
 - Implementation executor: Antigravity by default; Codex independent review after each task.
+- Authoritative revision freshness guard runs Fusion-side inside the same execution/command as mutation/preview/commit with no return to UI between guard and apply, closing TOCTOU races; Bridge precheck is an optimization only. If atomicity cannot be guaranteed, mutation capability is degraded/unavailable.
+- Every added or extended public operation requires strict discriminated `oneOf`/`additionalProperties:false` schema contract tests in `tests/contract/test_fusion_cad_schemas.py`.
 - Printability findings expose method, assumptions, and confidence; never claim slicer-equivalent certainty from geometry-only analysis.
 - Assembly and DXF/view operations are capability-gated; unavailable means deterministic capability error, not silent fallback.
 - Recipes reuse existing CAD domain operations; no second modeling engine and no agent-authored raw Python.
@@ -31,13 +33,14 @@
 - Create: `app/fusion_cad/printability.py`
 - Create/Extend: `app/fusion_cad/fusion_scripts/validate.py.txt`
 - Extend: `app/fusion_cad/requests.py`
+- Modify: `tests/contract/test_fusion_cad_schemas.py`
 - Create: `tests/unit/test_fusion_cad_printability.py`
 - Test: `tests/integration/test_fusion_cad_service.py`
 
 **Interfaces:**
 - Produces `fdm_printability` validation profile with bed fit, min wall/feature, overhang, bridge candidates, unsupported islands, print clearance, and orientation scoring.
 
-- [ ] **Step 1: Write printer-profile schema tests**
+- [ ] **Step 1: Write printer-profile and schema contract tests**
 
 ```python
 def test_fdm_profile_requires_positive_bed_and_nozzle():
@@ -45,7 +48,7 @@ def test_fdm_profile_requires_positive_bed_and_nozzle():
         FdmPrintProfile(bed=[220, 220, 0], nozzle=0.4, layer_height=0.2)
 ```
 
-Also validate explicit units/default angle thresholds and bounded sampling/resolution options.
+Also assert strict discriminated `oneOf` and `additionalProperties: false` for printability validation requests in `tests/contract/test_fusion_cad_schemas.py`. Validate explicit units/default angle thresholds and bounded sampling/resolution options.
 
 - [ ] **Step 2: Implement exact bed-fit and geometric clearance checks**
 
@@ -70,7 +73,7 @@ Fixtures: simple box, thin wall, 60° overhang wedge, bridge bar, disconnected i
 - [ ] **Step 7: Commit**
 
 ```bash
-pytest -q tests/unit/test_fusion_cad_printability.py tests/integration/test_fusion_cad_service.py
+pytest -q tests/unit/test_fusion_cad_printability.py tests/integration/test_fusion_cad_service.py tests/contract/test_fusion_cad_schemas.py
 git add app/fusion_cad tests
 git commit -m "feat(fusion-cad): add FDM printability analysis"
 ```
@@ -85,15 +88,16 @@ git commit -m "feat(fusion-cad): add FDM printability analysis"
 - Extend: `app/fusion_cad/requests.py`
 - Extend/Create: `app/fusion_cad/fusion_scripts/component.py.txt`
 - Modify: `app/fusion_cad/service.py`
+- Modify: `tests/contract/test_fusion_cad_schemas.py`
 - Create: `tests/unit/test_fusion_cad_assembly.py`
 - Test: `tests/integration/test_fusion_cad_service.py`
 
 **Interfaces:**
 - Adds `fusion_component` joint_create/update/delete, rigid_group_create/delete, ground/unground.
 
-- [ ] **Step 1: Write capability/schema RED tests**
+- [ ] **Step 1: Write capability and schema RED contract tests**
 
-Every assembly operation has strict input kind/frame requirements and checks a specific capability record before Fusion dispatch.
+Every assembly operation has strict input kind/frame requirements, discriminated `oneOf` with `additionalProperties: false` in `tests/contract/test_fusion_cad_schemas.py`, and checks a specific capability record before Fusion dispatch.
 
 - [ ] **Step 2: Implement joint geometry resolution**
 
@@ -101,7 +105,7 @@ Resolve occurrence/component refs plus joint origins/geometry in explicit coordi
 
 - [ ] **Step 3: Implement joint CRUD**
 
-Return joint refs, participating occurrence refs, normalized motion/type parameters, and structural diff. All mutations participate in transaction/revision/provenance semantics.
+Return joint refs, participating occurrence refs, normalized motion/type parameters, and structural diff. All mutations participate in transaction/revision/provenance semantics with Fusion-side freshness guard.
 
 - [ ] **Step 4: Implement rigid-group and ground operations**
 
@@ -114,7 +118,7 @@ Preview/abort must leave no joint/rigid-group/provenance residue; committed grou
 - [ ] **Step 6: Commit**
 
 ```bash
-pytest -q tests/unit/test_fusion_cad_assembly.py tests/integration/test_fusion_cad_service.py
+pytest -q tests/unit/test_fusion_cad_assembly.py tests/integration/test_fusion_cad_service.py tests/contract/test_fusion_cad_schemas.py
 git add app/fusion_cad tests
 git commit -m "feat(fusion-cad): add assembly operations"
 ```
@@ -131,15 +135,16 @@ git commit -m "feat(fusion-cad): add assembly operations"
 - Extend: `app/fusion_cad/fusion_scripts/export.py.txt`
 - Extend: `app/fusion_cad/capabilities.py`
 - Extend: `app/fusion_cad/requests.py`
+- Modify: `tests/contract/test_fusion_cad_schemas.py`
 - Extend: `tests/unit/test_fusion_cad_views.py`
 - Create: `tests/unit/test_fusion_cad_dxf.py`
 
 **Interfaces:**
 - Completes runtime-supported advanced sections/named views and adds `fusion_export:dxf` when contract semantics are available.
 
-- [ ] **Step 1: Re-probe runtime APIs rather than assuming earlier version facts**
+- [ ] **Step 1: Re-probe runtime APIs and write schema contract tests**
 
-Capability mapping uses current installed Fusion methods/preview status. Record limitations explicitly.
+Assert strict discriminated `oneOf` and `additionalProperties: false` for advanced section, named-view, and DXF operations in `tests/contract/test_fusion_cad_schemas.py`. Capability mapping uses current installed Fusion methods/preview status. Record limitations explicitly.
 
 - [ ] **Step 2: Implement advanced section lifecycle where supported**
 
@@ -160,7 +165,7 @@ Supported fake runtime returns DXF resource bytes; unavailable fake runtime send
 - [ ] **Step 6: Commit**
 
 ```bash
-pytest -q tests/unit/test_fusion_cad_views.py tests/unit/test_fusion_cad_dxf.py
+pytest -q tests/unit/test_fusion_cad_views.py tests/unit/test_fusion_cad_dxf.py tests/contract/test_fusion_cad_schemas.py
 git add app/fusion_cad tests
 git commit -m "feat(fusion-cad): add advanced views and DXF capability"
 ```
@@ -175,13 +180,14 @@ git commit -m "feat(fusion-cad): add advanced views and DXF capability"
 - Create: `app/fusion_cad/recipes.py`
 - Extend: `app/fusion_cad/requests.py`
 - Extend: `app/fusion_cad/transactions.py`
+- Modify: `tests/contract/test_fusion_cad_schemas.py`
 - Create: `tests/unit/test_fusion_cad_recipes.py`
 - Test: `tests/integration/test_fusion_cad_service.py`
 
 **Interfaces:**
 - Produces recipe registry and `fusion_transaction:run_recipe`; initial recipes: `magnet_pocket/v1`, `dovetail_joint/v1`, `name_plate/v1`, `vent_slot_array/v1`.
 
-- [ ] **Step 1: Write recipe registry/version tests**
+- [ ] **Step 1: Write recipe registry, version, and schema contract tests**
 
 ```python
 def test_recipe_ids_are_explicitly_versioned():
@@ -190,13 +196,15 @@ def test_recipe_ids_are_explicitly_versioned():
         registry.get("name_plate")
 ```
 
+Assert strict discriminated `oneOf` and `additionalProperties: false` for recipe requests in `tests/contract/test_fusion_cad_schemas.py`.
+
 - [ ] **Step 2: Define recipes as declarative CAD operation graphs**
 
 Each recipe expands to strict existing `fusion_sketch`/`fusion_feature`/`fusion_style`/`fusion_transform` operations. No embedded arbitrary Python source.
 
-- [ ] **Step 3: Inherit transaction semantics**
+- [ ] **Step 3: Inherit transaction semantics with Fusion-side freshness guard**
 
-`run_recipe` stages expanded operations into one transaction; preview/diff/validation/provenance/rollback behave exactly like manually staged actions.
+`run_recipe` stages expanded operations into one transaction; preview/diff/validation/provenance/rollback behave exactly like manually staged actions and enforce the authoritative Fusion-side freshness guard at commit.
 
 - [ ] **Step 4: Add recipe-specific provenance**
 
@@ -209,7 +217,7 @@ Same normalized inputs produce same declarative plan/hash; unsupported operation
 - [ ] **Step 6: Commit**
 
 ```bash
-pytest -q tests/unit/test_fusion_cad_recipes.py tests/integration/test_fusion_cad_service.py
+pytest -q tests/unit/test_fusion_cad_recipes.py tests/integration/test_fusion_cad_service.py tests/contract/test_fusion_cad_schemas.py
 git add app/fusion_cad tests
 git commit -m "feat(fusion-cad): add versioned parametric recipes"
 ```
@@ -238,7 +246,7 @@ git status --short
 
 - [ ] **Step 2: Dispatch whole-phase/final v1 reviewer**
 
-Review complete v1 branch against canonical spec and all phase ledgers. Explicit focus: four invariants, capability truth, transaction safety, coordinate frames, selectors/refs, heuristic honesty in printability, recipe reuse, no hidden save, no raw-agent-script regression.
+Review complete v1 branch against canonical spec and all phase ledgers. Explicit focus: four invariants, capability truth, transaction safety with Fusion-side freshness guard, coordinate frames, selectors/refs, strict schemas (`oneOf`/`additionalProperties:false`), heuristic honesty in printability, recipe reuse, no hidden save, no raw-agent-script regression.
 
 - [ ] **Step 3: Resolve findings with one bounded executor fix wave and scoped re-review**
 
@@ -262,7 +270,7 @@ Export applicable STL/3MF/STEP and DXF only if capability supported. Verify reso
 
 - [ ] **Step 8: Recheck four implementation invariants live**
 
-Manual/external change -> revision conflict; metadata rollback atomicity; stale camera/visibility view -> `VIEW_STALE`; capability output matches actual supported/degraded/unavailable behavior.
+Manual/external change -> revision conflict via Fusion-side guard; metadata rollback atomicity; stale camera/visibility view -> `VIEW_STALE`; capability output matches actual supported/degraded/unavailable behavior.
 
 - [ ] **Step 9: Final verdict**
 

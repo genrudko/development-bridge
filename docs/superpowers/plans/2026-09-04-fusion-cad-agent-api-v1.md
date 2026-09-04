@@ -17,7 +17,9 @@
 - Existing Fusion transport tools and `fusion_mcp_execute(script)` remain available as infrastructure/escape hatch.
 - Canonical units are `mm`, `mm^2`, `mm^3`, `deg`, `g`, and `g/cm^3`.
 - Every standalone mutation requires `expected_revision`; transaction mutations bind to `baseline_revision`.
-- `model_revision` must detect manual/external Fusion changes before a later mutation/commit; false-safe revision behavior is prohibited.
+- `model_revision` freshness is authoritatively guarded Fusion-side inside the same execution/command as mutation/preview/commit with no return to UI between guard and apply, closing TOCTOU races; Bridge precheck is an optimization only. If atomicity cannot be guaranteed, mutation capability is degraded/unavailable.
+- Every P1/P2 added or extended public operation requires strict discriminated `oneOf`/`additionalProperties:false` schema contract tests.
+- P0 delivers the minimal semantic preview-diff needed by the transaction feasibility gate; P1 delivers the full reusable `StructuralDiff` engine.
 - Automatic `bridge.cad/v1` metadata/provenance is written only inside the same Fusion transaction as the geometry it describes.
 - `view_ref` is immutable and binds model revision, camera, effective visibility, viewport dimensions, and section state.
 - Version-dependent functions explicitly report `supported`, `degraded`, or `unavailable`; no silent semantic fallback.

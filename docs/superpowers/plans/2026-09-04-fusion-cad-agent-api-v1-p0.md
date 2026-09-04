@@ -16,6 +16,9 @@
 - Implementation executor: Antigravity by default; review executor: Codex by default.
 - Wake is best-effort only; durable job ID + Git + ledger are authoritative.
 - P0 public tools are `fusion_read`, `fusion_inspect`, `fusion_view`, `fusion_metadata`, `fusion_style`, `fusion_validate`, and `fusion_transaction` foundation operations.
+- Authoritative revision freshness guard runs Fusion-side inside the same execution/command as mutation/preview/commit with no return to UI between guard and apply, closing TOCTOU races; Bridge precheck is an optimization only. If atomicity cannot be guaranteed, mutation capability is degraded/unavailable.
+- Every P0 public operation requires strict discriminated `oneOf`/`additionalProperties:false` schema contract tests.
+- P0 delivers the minimal semantic preview-diff needed by the transaction feasibility gate; full reusable `StructuralDiff` is deferred to P1.
 - P0 may not begin P1 CRUD work.
 - P0 cannot be accepted unless visual pick and transaction preview/abort/replay/commit feasibility both pass live.
 
@@ -273,13 +276,13 @@ def test_stale_expected_revision_blocks_before_executor_call():
 
 Fusion script returns sorted mutation-sensitive semantic data: document identity/modified marker, timeline feature identity/health/suppression, component/occurrence identities and transforms, bodies and geometry summary, sketches/constraints, parameter expressions/values, Bridge attributes, and effective-visibility inputs. Serialize deterministically before hashing.
 
-- [ ] **Step 3: Implement external-change observation**
+- [ ] **Step 3: Implement external-change observation and Fusion-side freshness guard**
 
-Use strongest runtime change signals as hints, but mandatory pre-mutation freshness is a semantic fingerprint comparison. If required fingerprint data cannot be established reliably, relevant mutation capabilities become degraded/unavailable.
+Use strongest runtime change signals as hints, but mandatory freshness guard runs Fusion-side inside the exact same command/script execution as mutation/preview/commit with no return to UI between guard and apply, closing TOCTOU races. Bridge precheck is an optimization only to fail fast. If required fingerprint data or Fusion-side atomicity cannot be established reliably, relevant mutation capabilities become degraded/unavailable.
 
 - [ ] **Step 4: Gate a synthetic mutation path**
 
-Integration fake asserts the service reads current fingerprint and returns `REVISION_CONFLICT` without calling mutation executor when baseline changed.
+Integration fake asserts the service executes the Fusion-side guard and returns `REVISION_CONFLICT` without applying mutation when baseline changed. Also verify Bridge precheck optimization rejects stale revisions early.
 
 - [ ] **Step 5: Debug edge cases**
 
@@ -506,9 +509,9 @@ git commit -m "feat(fusion-cad): add immutable view contexts"
 **Interfaces:**
 - Produces capability-backed `fusion_view(operation="pick")` returning ordered candidates with refs/depth/world point/distance where available.
 
-- [ ] **Step 1: Implement two internal candidate strategies behind one interface**
+- [ ] **Step 1: Evaluate candidate strategies during feasibility spike and implement only the verified strategy**
 
-Strategy A uses a verified native selection/preselection path. Strategy B constructs a ray from the immutable screenshot camera/viewport and performs verified Fusion geometry intersection. Do not expose two public operations.
+The spike evaluates candidate strategies (e.g. Strategy A native selection/preselection vs Strategy B camera/viewport raycast geometry intersection) against live Fusion behavior, selecting and implementing solely the single verified strategy behind `fusion_view(operation="pick")`. Do not maintain two parallel runtime implementations in production.
 
 - [ ] **Step 2: Write no-guess tests**
 
@@ -516,7 +519,7 @@ A stale view blocks before strategy call; multiple hit candidates return a stack
 
 - [ ] **Step 3: Prove temporary selection state safety**
 
-If Strategy A touches interactive selection state, capture/restore it and verify the operation leaves no persistent user selection mutation unless explicitly specified.
+If the verified strategy touches interactive selection state, capture/restore it and verify the operation leaves no persistent user selection mutation unless explicitly specified.
 
 - [ ] **Step 4: Run offline tests**
 
@@ -534,11 +537,11 @@ rotate camera -> pick old view_ref -> VIEW_STALE
 new screenshot -> isolate/hide -> pick old view_ref -> VIEW_STALE
 ```
 
-Record exact implementation selected and limitations in capability output.
+Record the single verified implementation selected and limitations in capability output.
 
 - [ ] **Step 6: Stop condition**
 
-If neither strategy satisfies immutable-view + correct-hit semantics, set `view.pick=unavailable`, record blocker/evidence, and STOP before P1. Do not weaken the public contract.
+If the spike does not yield a verified strategy that satisfies immutable-view + correct-hit semantics, set `view.pick=unavailable`, record blocker/evidence, and STOP before P1. Do not weaken the public contract.
 
 - [ ] **Step 7: Commit**
 
@@ -686,6 +689,7 @@ git commit -m "feat(fusion-cad): add P0 validation profiles"
 
 **Files:**
 - Create: `app/fusion_cad/transactions.py`
+- Create: `app/fusion_cad/diff.py`
 - Create: `app/fusion_cad/fusion_scripts/transaction.py.txt`
 - Modify: `app/fusion_cad/fusion_scripts/mutate.py.txt`
 - Modify: `app/fusion_cad/service.py`
@@ -695,7 +699,7 @@ git commit -m "feat(fusion-cad): add P0 validation profiles"
 - Modify: `docs/operations/fusion-cad-agent-acceptance.md`
 
 **Interfaces:**
-- Produces P0 transaction state store and `begin/stage/preview/rollback/commit` sufficient to prove the accepted staged semantics before P1 CRUD.
+- Produces P0 transaction state store, minimal semantic preview-diff needed by the transaction feasibility gate (comparing before/after semantic snapshots, counts, structural hashes, and refs), and `begin/stage/preview/rollback/commit` sufficient to prove the accepted staged semantics before P1 CRUD. Full reusable `StructuralDiff` is deferred to P1.
 
 - [ ] **Step 1: Write transaction state-machine tests**
 
@@ -705,13 +709,13 @@ Allow `NEW -> STAGED -> PREVIEWED -> STAGED -> COMMITTED` and rollback from nont
 
 Use an existing P0 logical text or similarly safe mutation that generates geometry plus Bridge metadata. The plan must exercise generated refs/provenance; a pure visibility toggle is insufficient.
 
-- [ ] **Step 3: Implement preview wrapper**
+- [ ] **Step 3: Implement preview wrapper and minimal preview-diff**
 
-Execute staged declarative plan inside verified Fusion preview transaction, collect preview semantic snapshot/refs, then abort. Preview metadata is created inside preview and disappears with it.
+Execute staged declarative plan inside verified Fusion preview transaction, collect preview semantic snapshot/refs, compute minimal semantic preview-diff, then abort. Preview metadata is created inside preview and disappears with it.
 
-- [ ] **Step 4: Implement replay commit wrapper**
+- [ ] **Step 4: Implement replay commit wrapper with Fusion-side freshness guard**
 
-Recheck baseline fingerprint/revision, replay exact plan in one final Fusion transaction/command, and keep metadata inside that same transaction.
+Recheck baseline fingerprint/revision via authoritative Fusion-side freshness guard inside the commit execution with no return to UI between guard and apply, replay exact plan in one final Fusion transaction/command, and keep metadata inside that same transaction.
 
 - [ ] **Step 5: Offline tests**
 
@@ -724,7 +728,7 @@ On disposable model:
 ```text
 capture A
 begin + stage
-preview -> capture B + refs + metadata + validation
+preview -> capture B + refs + metadata + validation + minimal preview-diff
 abort -> capture A2 and prove A2 == semantic A
 resolve pre-existing refs after abort
 replay plan -> commit C and compare accepted preview semantics
@@ -752,7 +756,7 @@ git commit -m "feat(fusion-cad): prove transaction preview replay"
 
 **Files:**
 - Modify: `docs/operations/fusion-cad-agent-acceptance.md`
-- Modify: `tests/contract/test_fusion_cad_tool_surface.py`
+- Modify: `tests/contract/test_tool_surface.py`
 - Modify: `tests/integration/test_fusion_cad_tools.py`
 
 **Interfaces:**

@@ -91,7 +91,7 @@ The logical envelope is shared:
 }
 ```
 
-This is a conceptual envelope, not permission for free-form JSON. Each public MCP tool exposes a strict discriminated `oneOf` schema keyed by `operation`. `additionalProperties: false` is used wherever practical.
+This is a conceptual envelope, not permission for free-form JSON. Each public MCP tool exposes a strict discriminated `oneOf` schema keyed by `operation`. `additionalProperties: false` is required for every added or extended public operation branch. Strict schema contract tests are required for all operations.
 
 Examples:
 
@@ -261,9 +261,9 @@ Every active design has:
 
 `expected_revision` is useful only if manual model changes are observed before a new mutation or commit. Therefore the CAD service maintains an external-change detector using the strongest available Fusion signals for the installed runtime, with a deterministic fingerprint fallback.
 
-Before any mutation or transaction commit, Bridge performs a revision freshness check. If the active model fingerprint no longer matches the revision baseline, it advances the model revision and returns `REVISION_CONFLICT` before applying the requested mutation.
+To eliminate time-of-check to time-of-use (TOCTOU) races, the authoritative revision freshness guard executes Fusion-side inside the exact same command/execution context as the mutation, preview, or commit, with no return to the UI or inter-process gap between guard verification and apply. The Bridge precheck is an optimization only to fail fast. If Fusion-side atomicity cannot be guaranteed by the runtime, the mutation capability is reported `degraded` or `unavailable` rather than pretending revision safety exists.
 
-A false-safe revision is prohibited: if the runtime cannot reliably establish freshness, the relevant mutation capability is reported `degraded` or `unavailable` rather than pretending revision safety exists.
+Before any mutation or transaction commit, the Fusion-side guard verifies that the active model fingerprint matches the expected baseline. If the fingerprint has diverged, the operation fails with `REVISION_CONFLICT` without applying changes, and Bridge advances the observed model revision.
 
 ## 12. Mutation revision safety
 
@@ -273,9 +273,9 @@ Every standalone mutation requires:
 {"expected_revision": "rev_17"}
 ```
 
-If the current revision differs, the mutation is not started.
+If the current revision differs, the mutation is not started. The authoritative freshness guard runs Fusion-side inside the mutation script itself with no return to UI between guard and apply; Bridge precheck is an optimization only.
 
-Inside a transaction, all staged work is bound to the transaction `baseline_revision`. Commit and preview re-check model freshness against that baseline.
+Inside a transaction, all staged work is bound to the transaction `baseline_revision`. Commit and preview atomically re-check model freshness Fusion-side against that baseline inside the transaction execution.
 
 ## 13. Runtime capabilities
 
@@ -478,7 +478,7 @@ Before `pick`, Bridge verifies that the active model, camera, and effective visi
 
 It returns an ordered candidate stack with refs, kind, depth/order, world hit point where available, and camera distance where meaningful.
 
-P0 contains a mandatory feasibility spike because Fusion does not expose a simple documented static `hitTest(x,y)` API. The implementation may use a native preselection/selection mechanism or a verified custom ray-picking implementation. The public contract is fixed; the capability record exposes the chosen implementation and limitations.
+P0 contains a mandatory feasibility spike because Fusion does not expose a simple documented static `hitTest(x,y)` API. The spike may evaluate candidate strategies (such as native preselection/selection or camera/viewport raycast geometry intersection) against live Fusion behavior, but the service implements and maintains solely the single verified strategy behind `fusion_view(operation="pick")`, rather than maintaining two redundant runtime implementations. The public contract is fixed; the capability record exposes the chosen implementation and limitations.
 
 ## 18. `fusion_metadata`
 
@@ -638,6 +638,8 @@ An unconstrained sketch or open profile is policy-dependent; it is not globally 
 - `mechanical_clearance`
 - `pre_export`
 
+The `pre_commit` profile runs against the staged/preview transaction state prior to commit. If any check returns RED or violates commit-blocking policy, the commit is blocked with `VALIDATION_FAILED`, preventing broken/invalid geometry or references from being committed.
+
 ### 21.3 P2 profile
 
 - `fdm_printability`
@@ -667,7 +669,7 @@ Mutations supplied with `transaction_id` are stored as a declarative plan and ar
 `preview` temporarily applies the plan, then produces:
 
 - preview snapshot
-- structural diff
+- preview diff (minimal semantic preview-diff in P0; full reusable structural diff in P1)
 - requested validations
 - optional screenshot/view ref
 - generated preview refs
@@ -676,7 +678,7 @@ The preview state is aborted before returning to normal model state.
 
 ### 22.4 Commit
 
-`commit` re-checks the baseline revision and runtime state, replays the declarative plan in one Fusion command/transaction, writes provenance inside that same transaction, produces final diff/validation, and becomes one logical Undo operation where the runtime supports the contract.
+`commit` re-checks the baseline revision and runtime state via an authoritative Fusion-side freshness guard inside the same transaction execution (with no return to UI between guard and apply), replays the declarative plan in one Fusion command/transaction, writes provenance inside that same transaction, produces final diff/validation, and becomes one logical Undo operation where the runtime supports the contract.
 
 ### 22.5 Rollback
 
@@ -698,7 +700,7 @@ Before P1 Sketch/Feature CRUD implementation, live Fusion acceptance must prove:
 
 1. baseline A;
 2. preview plan;
-3. snapshot/diff/validation of preview B;
+3. snapshot/minimal preview-diff/validation of preview B;
 4. abort and proof that model returns to A;
 5. ref resolution after abort;
 6. replay of the same declarative plan;
@@ -712,7 +714,7 @@ If this gate fails, P1 does not proceed on top of a fake transaction abstraction
 
 ## 23. Structural diff
 
-P1 diff compares semantic state, not raw meshes by default.
+P0 implements a minimal semantic preview-diff needed by the transaction feasibility gate (comparing before/after semantic snapshots, structural hashes, counts, and refs). P1 delivers the full reusable `StructuralDiff` engine comparing semantic state across all entity categories without raw mesh noise.
 
 Tracked categories:
 
@@ -1086,7 +1088,7 @@ The architecture and P0/P1/P2 boundaries are frozen by this spec. New feature id
 
 These four invariants are normative and must be tested explicitly:
 
-1. **Revision truth:** `model_revision` detects manual/external model changes before a later mutation/commit. `expected_revision` may never provide false safety.
+1. **Revision truth:** `model_revision` detects manual/external model changes before a later mutation/commit through an authoritative Fusion-side freshness guard inside the same execution as the mutation/preview/commit, eliminating TOCTOU races. `expected_revision` may never provide false safety; if atomicity cannot be guaranteed, mutation capability is degraded/unavailable.
 2. **Transactional metadata:** automatic `bridge.cad/v1` metadata/provenance is written only within the same transaction as geometry; metadata mutation is revisioned and rolls back with its object. No hidden post-commit metadata writes.
 3. **Immutable view context:** `view_ref` binds model revision, camera, effective visibility, viewport dimensions, and section state. Any mismatch before pick yields `VIEW_STALE`.
 4. **Capability truth:** Fusion-version-dependent functions explicitly report supported/degraded/unavailable. No operation silently switches to materially different behavior.
