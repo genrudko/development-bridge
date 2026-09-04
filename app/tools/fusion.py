@@ -1,12 +1,34 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from mcp import types
+from pydantic import TypeAdapter, ValidationError
 
+from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
 from app.container import ApplicationContainer
+from app.fusion_cad.models import CadResult
+from app.fusion_cad.requests import (
+    FusionInspectRequest,
+    FusionMetadataRequest,
+    FusionReadRequest,
+    FusionStyleRequest,
+    FusionTransactionRequest,
+    FusionValidateRequest,
+    FusionViewRequest,
+)
+from app.fusion_cad.schemas import (
+    fusion_inspect_schema,
+    fusion_metadata_schema,
+    fusion_read_schema,
+    fusion_style_schema,
+    fusion_transaction_schema,
+    fusion_validate_schema,
+    fusion_view_schema,
+)
 
 
 def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
@@ -71,6 +93,32 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         full, metadata = container.desktop_nodes.operation_result(args["node_id"], args["operation_id"])
         return external_result_response(full, metadata, request_context.request_id)
 
+    def make_domain_handler(request_type: Any, tool_name: str):
+        adapter = TypeAdapter(request_type)
+
+        async def domain_handler(ctx, params, request_context):
+            args = params.arguments or {}
+            try:
+                req = adapter.validate_python(args)
+            except ValidationError as exc:
+                raise BridgeError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"Invalid {tool_name} arguments: {exc}",
+                    details={"validation_errors": exc.errors()},
+                ) from exc
+
+            result = await container.fusion_cad.execute(req)
+            reference = result.get("external_result") if isinstance(result, dict) else None
+            if isinstance(reference, dict):
+                full, metadata = container.desktop_nodes.external_result(reference)
+                return external_result_response(full, metadata, request_context.request_id)
+            if isinstance(result, CadResult):
+                data = result.model_dump(mode="json", exclude_none=True)
+                return to_mcp_result(success(request_context.request_id, data))
+            return to_mcp_result(success(request_context.request_id, result))
+
+        return domain_handler
+
     node = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"}
     operation_id = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$"}
     journal = {
@@ -109,4 +157,11 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         RegisteredTool(types.Tool(name="fusion_submit", description="Queue one dynamically discovered Autodesk Fusion MCP tool and return immediately with an operation_id for long-running work.", inputSchema=invocation), submit, "fusion-desktop"),
         RegisteredTool(types.Tool(name="fusion_operation_status", description="Read the current state of a submitted Fusion operation without replaying it.", inputSchema=operation_lookup), operation_status, "fusion-desktop"),
         RegisteredTool(types.Tool(name="fusion_operation_result", description="Return the completed result and artifact links for a submitted Fusion operation.", inputSchema=operation_lookup), operation_result, "fusion-desktop"),
+        RegisteredTool(types.Tool(name="fusion_read", description="Semantic model reads, snapshots, feature/sketch reads, revisions, and selectors", inputSchema=fusion_read_schema()), make_domain_handler(FusionReadRequest, "fusion_read"), "fusion-desktop"),
+        RegisteredTool(types.Tool(name="fusion_inspect", description="Measurements, geometric relations, and clearance inspections", inputSchema=fusion_inspect_schema()), make_domain_handler(FusionInspectRequest, "fusion_inspect"), "fusion-desktop"),
+        RegisteredTool(types.Tool(name="fusion_view", description="Camera control, screenshots, visual pick, sections, and named views", inputSchema=fusion_view_schema()), make_domain_handler(FusionViewRequest, "fusion_view"), "fusion-desktop"),
+        RegisteredTool(types.Tool(name="fusion_metadata", description="Model metadata, tags, roles, and CAD entity provenance", inputSchema=fusion_metadata_schema()), make_domain_handler(FusionMetadataRequest, "fusion_metadata"), "fusion-desktop"),
+        RegisteredTool(types.Tool(name="fusion_style", description="Parametric 3D/sketch text styling, visibility, and appearances", inputSchema=fusion_style_schema()), make_domain_handler(FusionStyleRequest, "fusion_style"), "fusion-desktop"),
+        RegisteredTool(types.Tool(name="fusion_validate", description="CAD model hygiene, reference integrity, and mechanical validation", inputSchema=fusion_validate_schema()), make_domain_handler(FusionValidateRequest, "fusion_validate"), "fusion-desktop"),
+        RegisteredTool(types.Tool(name="fusion_transaction", description="Staged transaction lifecycle, preview diff, rollback, and commit", inputSchema=fusion_transaction_schema()), make_domain_handler(FusionTransactionRequest, "fusion_transaction"), "fusion-desktop"),
     )

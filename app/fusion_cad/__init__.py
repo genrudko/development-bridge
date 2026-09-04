@@ -73,6 +73,8 @@ from app.fusion_cad.schemas import (
     fusion_validate_schema,
     fusion_view_schema,
 )
+from app.fusion_cad.scripts import FusionCadScriptBundle
+from app.fusion_cad.service import FusionCadService
 
 __all__ = [
     "CAD_NON_RETRYABLE_CODES",
@@ -90,6 +92,8 @@ __all__ = [
     "FindingSeverity",
     "FrozenDict",
     "FusionCadError",
+    "FusionCadScriptBundle",
+    "FusionCadService",
     "FusionInspectRequest",
     "FusionMetadataRequest",
     "FusionReadRequest",

@@ -1,0 +1,57 @@
+# fusion.cad/v1 runtime prelude
+import json
+import traceback
+
+API_VERSION = "fusion.cad/v1"
+
+PAYLOAD_RAW = __PAYLOAD_JSON__
+PAYLOAD = json.loads(PAYLOAD_RAW) if isinstance(PAYLOAD_RAW, str) else (PAYLOAD_RAW or {})
+
+
+def make_result(data=None, summary="ok", status="succeeded", warnings=None, artifacts=None, changed_refs=None, diff=None, validation=None, capabilities=None, document=None):
+    res = {
+        "api_version": API_VERSION,
+        "status": status,
+        "summary": summary,
+        "data": data or {},
+        "changed_refs": changed_refs or [],
+        "warnings": warnings or [],
+        "artifacts": artifacts or [],
+    }
+    if document is not None:
+        res["document"] = document
+    if diff is not None:
+        res["diff"] = diff
+    if validation is not None:
+        res["validation"] = validation
+    if capabilities is not None:
+        res["capabilities"] = capabilities
+    return res
+
+
+def make_error(error_code, message, details=None):
+    return {
+        "api_version": API_VERSION,
+        "status": "failed",
+        "error": {
+            "code": error_code,
+            "message": message,
+            "details": details or {},
+        },
+    }
+
+
+def run():
+    op = PAYLOAD.get("operation", "")
+    if op == "echo":
+        return make_result(data={"text": PAYLOAD.get("text", "")}, summary="echo")
+    return make_result(data={"payload": PAYLOAD}, summary=f"Executed {op}")
+
+
+if __name__ == "__main__" or True:
+    try:
+        _output = run()
+        print(json.dumps(_output, ensure_ascii=False, separators=(",", ":")))
+    except Exception as _exc:
+        _err = make_error("FUSION_API_ERROR", str(_exc), {"traceback": traceback.format_exc()})
+        print(json.dumps(_err, ensure_ascii=False, separators=(",", ":")))

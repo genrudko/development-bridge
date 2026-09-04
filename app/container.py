@@ -23,8 +23,14 @@ from app.coordinator import (
     WakeTransport,
 )
 from app.desktop_nodes import DesktopNodeService
+from app.executors import (
+    AntigravityExecutor,
+    AsyncioProcessRunner,
+    ExecutorSelector,
+    ExecutorService,
+)
 from app.files import FileService
-from app.executors import AntigravityExecutor, AsyncioProcessRunner, ExecutorSelector, ExecutorService
+from app.fusion_cad.service import FusionCadService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
     GitHubActionsArtifactExportService,
@@ -93,6 +99,7 @@ class ApplicationContainer:
     commands: RepositoryCommandService
     bridge_restart: BridgeRestartService
     desktop_nodes: DesktopNodeService
+    fusion_cad: FusionCadService | None = None
     coordinator_wake_delivery: CoordinatorWakeDeliveryService | None = None
 
 
@@ -431,10 +438,11 @@ def build_container(
         route_registry=route_registry,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
-        desktop_nodes=DesktopNodeService(
+        desktop_nodes=(desktop_nodes := DesktopNodeService(
             configured.desktop_nodes,
             str(configured.server.public_base_url) if configured.server.public_base_url else None,
             configured.server.endpoint,
-        ),
+        )),
+        fusion_cad=FusionCadService(desktop_nodes),
         coordinator_wake_delivery=coordinator_wake_delivery,
     )
