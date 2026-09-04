@@ -577,11 +577,91 @@ async def test_bind_current_does_not_prebind_session_to_stale_generation(tmp_pat
         assert route_control["diagnostic_id"].startswith("bind-")
 
         # Structured content and model text are strictly safe
-        assert "route_discovery" not in (result.structured_content or {})
-        assert "operation_url" not in (result.structured_content or {})
+        assert result.structured_content == {
+            "route_id": "bridge",
+            "state": "bind_pending",
+            "generation": 0,
+        }
+        assert "channel_id" not in result.structured_content
+        assert "trigger_url" not in result.structured_content
+        assert "delivery_lease" not in result.structured_content
+        assert "route_state" not in result.structured_content
+        assert "route_discovery" not in result.structured_content
+        assert "operation_url" not in result.structured_content
+        assert result.meta["ui"]["resourceUri"] == COORDINATOR_UI_URI
+        assert result.meta["ui/resourceUri"] == COORDINATOR_UI_URI
+        assert result.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
         assert op_id not in result.content[0].text
         assert "conv-old" not in result.content[0].text
         assert route_control["operation_url"] not in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_bind_current_preserves_existing_route_delivery_lease(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old",
+        "telegram-bridge-g4",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+    ):
+        # Session 1 mounts the route
+        async with (
+            streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams1,
+            ClientSession(*streams1) as session1,
+        ):
+            await session1.initialize()
+            mounted = await session1.call_tool("coordinator_x_mount", {"route_id": "bridge"})
+            lease_1 = mounted.structured_content["delivery_lease"]
+            assert lease_1 is not None
+            before_lease_record = dict(container.coordinator.delivery_lease("telegram-bridge-g4"))
+            assert before_lease_record["lease_id"] == lease_1
+
+            # Session 2 invokes bind_current for the same route
+            async with (
+                streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams2,
+                ClientSession(*streams2) as session2,
+            ):
+                await session2.initialize()
+                bind_result = await session2.call_tool("coordinator_route_bind_current", {"route_id": "bridge"})
+                assert bind_result.structured_content == {
+                    "route_id": "bridge",
+                    "state": "bind_pending",
+                    "generation": 0,
+                }
+                assert "channel_id" not in bind_result.structured_content
+                assert "delivery_lease" not in bind_result.structured_content
+
+                # Failed prep from session 2 also does not mutate lease
+                failed_bind = await session2.call_tool("coordinator_route_bind_current", {"route_id": "nonexistent"})
+                assert failed_bind.is_error is True
+
+            # Delivery lease for telegram-bridge-g4 is unchanged
+            after_lease_record = container.coordinator.delivery_lease("telegram-bridge-g4")
+            assert after_lease_record == before_lease_record
+            assert after_lease_record["lease_id"] == lease_1
+
+            # Session 1's delivery lease is still active and can claim wakes
+            status = await client.get(
+                f"/mcp/x/coordinator/status?channel_id=telegram-bridge-g4&delivery_lease={lease_1}"
+            )
+            assert status.json()["state"] == "idle"
+            assert "delivery_lease_required" not in status.json()
+
+            await container.coordinator.arm("wake-preserved", channel_id="telegram-bridge-g4", delay_seconds=0)
+            claim = await client.post(
+                f"/mcp/x/coordinator/claim?channel_id=telegram-bridge-g4&delivery_lease={lease_1}"
+            )
+            assert claim.json()["claimed"] is True
+            assert claim.json()["message"] == "wake-preserved"
 
 
 @pytest.mark.asyncio

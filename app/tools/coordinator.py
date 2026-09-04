@@ -218,20 +218,23 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 "diagnostic_id": "bind-fallback",
                 "operation_url": f"/x/route-control/bind/{pending['token']}",
             }
-        binding = _route_binding(container, route, route_state="discovery")
-        result = to_mcp_result(success(request_context.request_id, {
+        safe_data = {
             "route_id": prepared["route_id"],
             "state": prepared["state"],
             "generation": prepared["generation"],
-        }))
-        result = attach_coordinator_ui(result, ctx, binding)
-        result.meta["route_control"] = {
-            "action": "bind",
-            "route_id": prepared["route_id"],
-            "operation_url": prepared["operation_url"],
-            "operation_id": prepared["operation_id"],
-            "diagnostic_id": prepared["diagnostic_id"],
-            "nonce": prepared["operation_id"],
+        }
+        result = to_mcp_result(success(request_context.request_id, safe_data))
+        result.structured_content = safe_data
+        result.meta = {
+            **COORDINATOR_UI_META,
+            "route_control": {
+                "action": "bind",
+                "route_id": prepared["route_id"],
+                "operation_url": prepared["operation_url"],
+                "operation_id": prepared["operation_id"],
+                "diagnostic_id": prepared["diagnostic_id"],
+                "nonce": prepared["operation_id"],
+            },
         }
         return result
 

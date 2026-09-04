@@ -11,6 +11,7 @@ from app.api.errors import BridgeError, ErrorCode
 from app.container import build_container
 from app.coordinator.routes import RouteRegistry
 from app.settings import BridgeSettings
+from app.tools.coordinator import COORDINATOR_UI_URI
 from app.tools.registry import build_tool_registry
 
 
@@ -169,6 +170,22 @@ def test_bind_current_allows_sessionless_modern_mcp_request(tmp_path: Path):
     assert pending is not None
     assert pending["session_id"] is None
 
+    # Structured content must strictly contain only the safe whitelist fields
+    assert result.structured_content == {
+        "route_id": "bridge",
+        "state": "bind_pending",
+        "generation": 0,
+    }
+    assert "channel_id" not in result.structured_content
+    assert "trigger_url" not in result.structured_content
+    assert "delivery_lease" not in result.structured_content
+    assert "route_state" not in result.structured_content
+
+    # UI meta must contain the coordinator UI resource descriptor
+    assert result.meta["ui"]["resourceUri"] == COORDINATOR_UI_URI
+    assert result.meta["ui/resourceUri"] == COORDINATOR_UI_URI
+    assert result.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
+
     # Opaque operation details exist only in result.meta (MCP _meta)
     route_control = result.meta.get("route_control")
     assert route_control is not None
@@ -185,6 +202,58 @@ def test_bind_current_allows_sessionless_modern_mcp_request(tmp_path: Path):
     assert pending["token"] not in result.content[0].text
     assert "conv-old" not in result.content[0].text
     assert route_control["operation_url"] not in result.content[0].text
+
+
+def test_bind_current_does_not_issue_or_mutate_delivery_lease(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old",
+        "telegram-bridge-g4",
+    )
+    # Pre-issue delivery lease for an active session
+    issued = container.coordinator.issue_delivery_lease(
+        "telegram-bridge-g4",
+        session_id="mounted-session-1",
+        route_id="bridge",
+        generation=0,
+    )
+    before_lease = dict(container.coordinator.delivery_lease("telegram-bridge-g4"))
+    assert before_lease["lease_id"] == issued["lease_id"]
+
+    registry = build_tool_registry(container)
+    tool = registry.get("coordinator_route_bind_current")
+
+    # Call bind_current from another session
+    other_ctx = SimpleNamespace(
+        session=SimpleNamespace(_connection=SimpleNamespace(session_id="other-mcp-session"))
+    )
+    result = asyncio.run(tool.handler(
+        other_ctx,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-bind-preserve-lease"),
+    ))
+    assert result.structured_content == {
+        "route_id": "bridge",
+        "state": "bind_pending",
+        "generation": 0,
+    }
+
+    # Verify delivery lease remains byte-for-byte / logically unchanged
+    after_lease = container.coordinator.delivery_lease("telegram-bridge-g4")
+    assert after_lease == before_lease
+
+    # Failed/abandoned prep also does not mutate lease
+    with pytest.raises(BridgeError):
+        asyncio.run(tool.handler(
+            other_ctx,
+            SimpleNamespace(arguments={"route_id": "nonexistent"}),
+            SimpleNamespace(request_id="req-bind-failed"),
+        ))
+    assert container.coordinator.delivery_lease("telegram-bridge-g4") == before_lease
 
 
 def test_bind_current_handles_unbound_route(tmp_path: Path):
@@ -210,6 +279,12 @@ def test_bind_current_handles_unbound_route(tmp_path: Path):
     assert data["state"] == "bind_pending"
     assert data["route_id"] == "bridge"
     assert data["generation"] == 0
+    assert result.structured_content == {
+        "route_id": "bridge",
+        "state": "bind_pending",
+        "generation": 0,
+    }
+    assert result.meta["ui"]["resourceUri"] == COORDINATOR_UI_URI
 
     route_control = result.meta.get("route_control")
     assert route_control is not None
@@ -240,6 +315,11 @@ def test_bind_current_repeated_prepare_updates_operation_and_meta(tmp_path: Path
         SimpleNamespace(arguments={"route_id": "bridge"}),
         SimpleNamespace(request_id="req-bind-1"),
     ))
+    assert first.structured_content == {
+        "route_id": "bridge",
+        "state": "bind_pending",
+        "generation": 0,
+    }
     first_meta = first.meta["route_control"]
     assert first_meta["action"] == "bind"
 
@@ -248,6 +328,11 @@ def test_bind_current_repeated_prepare_updates_operation_and_meta(tmp_path: Path
         SimpleNamespace(arguments={"route_id": "bridge"}),
         SimpleNamespace(request_id="req-bind-2"),
     ))
+    assert second.structured_content == {
+        "route_id": "bridge",
+        "state": "bind_pending",
+        "generation": 0,
+    }
     second_meta = second.meta["route_control"]
     assert second_meta["action"] == "bind"
     assert second_meta["operation_id"]
