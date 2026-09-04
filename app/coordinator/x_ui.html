@@ -130,7 +130,7 @@ function setRouteControlButtonsDisabled(disabled) {
   if (btnUnbindCancel) btnUnbindCancel.disabled = disabled;
 }
 
-function applySafeStatus(st) {
+function applySafeStatus(st, errorMessage = "") {
   if (!st || typeof st !== "object") return;
   const isBound = st.state === "bound" || st.binding_state === "bound";
   const stateLabel = isBound ? "Привязан" : "Отвязан";
@@ -146,10 +146,14 @@ function applySafeStatus(st) {
   if (diag) {
     detail += ` · diag: ${diag}`;
   }
-  render(isBound ? "ready" : "working", stateLabel, detail);
+  if (errorMessage) {
+    render("error", `Ошибка · ${stateLabel}`, `${detail} · ${errorMessage}`);
+  } else {
+    render(isBound ? "ready" : "working", stateLabel, detail);
+  }
 }
 
-async function refreshRouteControlStatus() {
+async function refreshRouteControlStatus(errorMessage = "") {
   if (!currentRouteControl || !currentRouteControl.control_token || !currentRouteControl.endpoints?.status) return;
   const token = currentRouteControl.control_token;
   const url = new URL(currentRouteControl.endpoints.status, window.location.href);
@@ -163,7 +167,7 @@ async function refreshRouteControlStatus() {
     });
     const data = await resp.json().catch(() => ({}));
     if (resp.ok && data.ok) {
-      applySafeStatus(data.status || data);
+      applySafeStatus(data.status || data, errorMessage);
       return data;
     }
   } catch (err) {
@@ -207,7 +211,12 @@ async function executeRouteControlAction(actionName) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       const err = data.error || `HTTP ${resp.status}`;
-      render("error", "Ошибка", `Ошибка: ${err}`);
+      const errorMessage = `Ошибка: ${err}`;
+      if (data.safe_status) {
+        applySafeStatus(data.safe_status, errorMessage);
+      } else if (!await refreshRouteControlStatus(errorMessage)) {
+        render("error", "Ошибка", errorMessage);
+      }
       return;
     }
     if (data.safe_status) {

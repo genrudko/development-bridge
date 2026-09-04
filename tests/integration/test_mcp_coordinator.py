@@ -713,6 +713,12 @@ async def test_coordinator_widget_html_contract_and_forbidden_apis(tmp_path):
         assert "refreshRouteControlStatus" in html
         assert "applySafeStatus" in html
 
+        failure_branch = html.split("if (!resp.ok) {", 1)[1].split("\n    }\n    if (data.safe_status)", 1)[0]
+        assert "if (data.safe_status)" in failure_branch
+        assert "applySafeStatus(data.safe_status, errorMessage)" in failure_branch
+        assert "await refreshRouteControlStatus(errorMessage)" in failure_branch
+        assert failure_branch.index("applySafeStatus(data.safe_status, errorMessage)") < failure_branch.rindex("return;")
+
 
 @pytest.mark.asyncio
 async def test_coordinator_route_control_status_hidden_tool(tmp_path):

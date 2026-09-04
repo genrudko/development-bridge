@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx2
 import pytest
 
+from app.api.errors import BridgeError, ErrorCode
 from app.container import build_container
 from app.runtime import create_server
 from app.settings import BridgeSettings
@@ -512,6 +513,95 @@ async def test_route_control_endpoints_require_component_authorization(tmp_path)
         )
         r_stale = await client.get("/mcp/x/route-control/status?route_id=bridge", headers=headers_valid)
         assert r_stale.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "/mcp/x/route-control/cancel-wakes",
+        "/mcp/x/route-control/unbind",
+        "/mcp/x/route-control/unbind-and-cancel",
+    ),
+)
+@pytest.mark.parametrize(
+    "credential_case",
+    ("missing", "forged", "malformed", "custom_header", "query", "body", "mismatched"),
+)
+@pytest.mark.asyncio
+async def test_route_control_action_errors_do_not_disclose_status_before_authorization(
+    tmp_path, endpoint, credential_case
+):
+    app, container, _settings = create_test_app(tmp_path)
+    route_id = "bridge"
+    headers = {}
+    request_endpoint = endpoint
+    body = {"route_id": route_id}
+
+    if credential_case == "forged":
+        headers = {"Authorization": "Bearer forged_control_token_123"}
+    elif credential_case == "malformed":
+        headers = {"Authorization": "Basic malformed_control_token"}
+    elif credential_case == "custom_header":
+        headers = {"X-Route-Control-Token": "forbidden_control_token"}
+    elif credential_case == "query":
+        request_endpoint = f"{endpoint}?route_id=bridge&token=forbidden_control_token"
+        body = {}
+    elif credential_case == "body":
+        body["control_token"] = "forbidden_control_token"
+    elif credential_case == "mismatched":
+        container.route_registry.bootstrap(
+            "other",
+            "https://chatgpt.com/g/g-p-infra/c/conv-other",
+            "telegram-other-g0",
+            "Other Route",
+        )
+        token = container.route_control.issue_control_descriptor("bridge")["control_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        route_id = "other"
+        body["route_id"] = route_id
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.post(request_endpoint, json=body, headers=headers)
+
+    assert response.status_code in {401, 409}
+    data = response.json()
+    assert set(data) <= {"ok", "error", "code", "details"}
+    assert "safe_status" not in data
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "operation_name"),
+    (
+        ("/mcp/x/route-control/cancel-wakes", "cancel_wakes"),
+        ("/mcp/x/route-control/unbind", "unbind"),
+        ("/mcp/x/route-control/unbind-and-cancel", "unbind_and_cancel"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_route_control_authenticated_action_failure_returns_verified_route_status(
+    tmp_path, monkeypatch, endpoint, operation_name
+):
+    app, container, _settings = create_test_app(tmp_path)
+    token = container.route_control.issue_control_descriptor("bridge")["control_token"]
+
+    async def fail_operation(route_id, **_kwargs):
+        assert route_id == "bridge"
+        raise BridgeError(ErrorCode.POLICY_VIOLATION, "downstream operation failed")
+
+    monkeypatch.setattr(container.route_control, operation_name, fail_operation)
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 409
+    data = response.json()
+    assert data["ok"] is False
+    assert data["safe_status"]["route_id"] == "bridge"
+    assert data["safe_status"]["state"] == "bound"
 
 
 @pytest.mark.asyncio

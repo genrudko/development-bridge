@@ -797,10 +797,12 @@ def create_streamable_http_app(
 
         body_data = await _parse_json_safely(request)
         route_id = request.query_params.get("route_id") or body_data.get("route_id")
+        authorized_route_id = None
 
         try:
             token = _extract_route_control_auth(request, body_data)
             token_rec = service.verify_control_token(token, route_id=route_id)
+            authorized_route_id = token_rec["route_id"]
             target_route = route_id or token_rec["route_id"]
             res = await service.cancel_wakes(target_route)
             safe_st = service.safe_status(target_route)
@@ -812,9 +814,9 @@ def create_streamable_http_app(
         except BridgeError as error:
             status_code = 401 if error.code is ErrorCode.PERMISSION_DENIED else (409 if error.code is ErrorCode.POLICY_VIOLATION else 400)
             safe_st = None
-            if route_id:
+            if authorized_route_id:
                 try:
-                    safe_st = service.safe_status(route_id)
+                    safe_st = service.safe_status(authorized_route_id)
                 except BridgeError:
                     pass
             return JSONResponse(
@@ -830,10 +832,12 @@ def create_streamable_http_app(
 
         body_data = await _parse_json_safely(request)
         route_id = request.query_params.get("route_id") or body_data.get("route_id")
+        authorized_route_id = None
 
         try:
             token = _extract_route_control_auth(request, body_data)
             token_rec = service.verify_control_token(token, route_id=route_id)
+            authorized_route_id = token_rec["route_id"]
             target_route = route_id or token_rec["route_id"]
             res = await service.unbind(target_route, expected_generation=token_rec["generation"])
             safe_st = service.safe_status(target_route)
@@ -845,9 +849,9 @@ def create_streamable_http_app(
         except BridgeError as error:
             status_code = 401 if error.code is ErrorCode.PERMISSION_DENIED else (409 if error.code is ErrorCode.POLICY_VIOLATION else 400)
             safe_st = None
-            if route_id:
+            if authorized_route_id:
                 try:
-                    safe_st = service.safe_status(route_id)
+                    safe_st = service.safe_status(authorized_route_id)
                 except BridgeError:
                     pass
             return JSONResponse(
@@ -863,10 +867,12 @@ def create_streamable_http_app(
 
         body_data = await _parse_json_safely(request)
         route_id = request.query_params.get("route_id") or body_data.get("route_id")
+        authorized_route_id = None
 
         try:
             token = _extract_route_control_auth(request, body_data)
             token_rec = service.verify_control_token(token, route_id=route_id)
+            authorized_route_id = token_rec["route_id"]
             target_route = route_id or token_rec["route_id"]
             res = await service.unbind_and_cancel(target_route, expected_generation=token_rec["generation"])
             safe_st = service.safe_status(target_route)
@@ -878,9 +884,9 @@ def create_streamable_http_app(
         except BridgeError as error:
             status_code = 401 if error.code is ErrorCode.PERMISSION_DENIED else (409 if error.code is ErrorCode.POLICY_VIOLATION else 400)
             safe_st = None
-            if route_id:
+            if authorized_route_id:
                 try:
-                    safe_st = service.safe_status(route_id)
+                    safe_st = service.safe_status(authorized_route_id)
                 except BridgeError:
                     pass
             return JSONResponse(
