@@ -50,6 +50,24 @@ class RouteRegistry:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "route_id is invalid")
         return route_id
 
+    @staticmethod
+    def is_bound(route: dict | None) -> bool:
+        if not isinstance(route, dict):
+            return False
+        state = route.get("binding_state")
+        if state == "bound":
+            return True
+        if state == "unbound":
+            return False
+        return bool(route.get("url") and route.get("conversation_id"))
+
+    @classmethod
+    def _normalize_route_record(cls, route: dict) -> dict:
+        item = dict(route)
+        if "binding_state" not in item:
+            item["binding_state"] = "bound" if cls.is_bound(item) else "unbound"
+        return item
+
     def _load(self) -> dict:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -75,7 +93,7 @@ class RouteRegistry:
         default_route = data.get("default_route")
         items = []
         for route_id, route in sorted(data["routes"].items()):
-            item = dict(route)
+            item = self._normalize_route_record(route)
             item["route_id"] = route_id
             item["default"] = route_id == default_route
             items.append(item)
@@ -97,14 +115,18 @@ class RouteRegistry:
         if not selected:
             return None
         route = data["routes"].get(selected)
-        return {**route, "route_id": selected} if route else None
+        if not route:
+            return None
+        normalized = self._normalize_route_record(route)
+        return {**normalized, "route_id": selected}
 
     def route_for_channel(self, channel_id: str) -> dict | None:
         channel = str(channel_id).strip()
         data = self._load()
         for route_id, route in data["routes"].items():
             if route.get("channel_id") == channel:
-                return {**route, "route_id": route_id, "route_state": "active"}
+                normalized = self._normalize_route_record(route)
+                return {**normalized, "route_id": route_id, "route_state": "active"}
         for route_id, pending in (data.get("rollovers") or {}).items():
             if isinstance(pending, dict) and pending.get("channel_id") == channel:
                 return {
@@ -125,7 +147,7 @@ class RouteRegistry:
         data["requested_route"] = route_id
         data["requested_at"] = datetime.now(UTC).isoformat()
         self._save(data)
-        return {**data["routes"][route_id], "route_id": route_id}
+        return {**self._normalize_route_record(data["routes"][route_id]), "route_id": route_id}
 
     def select_default(self, route_id: str) -> dict:
         route_id = self.validate_route_id(route_id)
@@ -136,7 +158,7 @@ class RouteRegistry:
         data["requested_route"] = route_id
         data["requested_at"] = datetime.now(UTC).isoformat()
         self._save(data)
-        return {**data["routes"][route_id], "route_id": route_id, "default": True}
+        return {**self._normalize_route_record(data["routes"][route_id]), "route_id": route_id, "default": True}
 
     def bootstrap(self, route_id: str, url: str, channel_id: str, title: str | None = None) -> dict:
         route_id = self.validate_route_id(route_id)
@@ -151,6 +173,7 @@ class RouteRegistry:
                 "conversation_id": conversation_id,
                 "channel_id": channel_id,
                 "generation": 0,
+                "binding_state": "bound",
                 "updated_at": datetime.now(UTC).isoformat(),
             }
             if not data.get("default_route"):
@@ -158,7 +181,7 @@ class RouteRegistry:
             if not data.get("requested_route"):
                 data["requested_route"] = route_id
             self._save(data)
-        return {**data["routes"][route_id], "route_id": route_id}
+        return {**self._normalize_route_record(data["routes"][route_id]), "route_id": route_id}
 
     def pending_current_bind(self, route_id: str) -> dict | None:
         route_id = self.validate_route_id(route_id)
@@ -182,14 +205,14 @@ class RouteRegistry:
                 stale = (datetime.now(UTC) - created_at.astimezone(UTC)).total_seconds() > _CURRENT_BIND_TTL_SECONDS
             except (TypeError, ValueError):
                 stale = True
-            if stale:
+            if stale or int(existing.get("source_generation", -1)) != int(route.get("generation", 0)):
                 del binds[route_id]
                 existing = None
             elif (
                 int(existing.get("source_generation", -1)) == int(route.get("generation", 0))
                 and existing.get("session_id") == session_id
                 and bool(existing.get("allow_project_change", False)) is bool(allow_project_change)
-                and existing.get("state") == "prepared"
+                and existing.get("state") in {"prepared", "candidate"}
             ):
                 return {**existing, "route_id": route_id}
             else:
@@ -200,12 +223,13 @@ class RouteRegistry:
                 )
         token = f"bind_{token_urlsafe(24)}"
         marker = "DBRIDGE_ROUTE_BIND_" + token.removeprefix("bind_")
+        channel_id = route.get("channel_id") or f"telegram-{route_id}-g{int(route.get('generation', 0))}"
         pending = {
             "token": token,
             "marker": marker,
             "state": "prepared",
             "source_generation": int(route.get("generation", 0)),
-            "channel_id": route["channel_id"],
+            "channel_id": channel_id,
             "session_id": session_id,
             "allow_project_change": bool(allow_project_change),
             "created_at": datetime.now(UTC).isoformat(),
@@ -214,7 +238,7 @@ class RouteRegistry:
         self._save(data)
         return {**pending, "route_id": route_id}
 
-    def complete_current_bind(self, route_id: str, token: str, url: str) -> dict:
+    def record_current_bind_candidate(self, route_id: str, token: str, url: str) -> dict:
         route_id = self.validate_route_id(route_id)
         canonical = canonical_chat_url(url)
         project_id, conversation_id = conversation_parts(canonical)
@@ -223,6 +247,17 @@ class RouteRegistry:
         pending = (data.get("current_binds") or {}).get(route_id)
         if route is None or not isinstance(pending, dict) or pending.get("token") != token:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+        try:
+            created_at = datetime.fromisoformat(str(pending.get("created_at") or ""))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            stale = (datetime.now(UTC) - created_at.astimezone(UTC)).total_seconds() > _CURRENT_BIND_TTL_SECONDS
+        except (TypeError, ValueError):
+            stale = True
+        if stale:
+            data.get("current_binds", {}).pop(route_id, None)
+            self._save(data)
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
         if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
         if (
@@ -230,8 +265,69 @@ class RouteRegistry:
             and not bool(pending.get("allow_project_change", False))
         ):
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate belongs to a different project")
-        changed = conversation_id != route.get("conversation_id")
-        if changed:
+        pending.update({
+            "state": "candidate",
+            "candidate_url": canonical,
+            "candidate_conversation_id": conversation_id,
+            "candidate_project_id": project_id,
+            "candidate_seen_at": datetime.now(UTC).isoformat(),
+        })
+        self._save(data)
+        return {**pending, "route_id": route_id}
+
+    def complete_current_bind(self, route_id: str, token: str, url: str | None = None) -> dict:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        route = data["routes"].get(route_id)
+        pending = (data.get("current_binds") or {}).get(route_id)
+        if route is None or not isinstance(pending, dict) or pending.get("token") != token:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+        try:
+            created_at = datetime.fromisoformat(str(pending.get("created_at") or ""))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            stale = (datetime.now(UTC) - created_at.astimezone(UTC)).total_seconds() > _CURRENT_BIND_TTL_SECONDS
+        except (TypeError, ValueError):
+            stale = True
+        if stale:
+            data.get("current_binds", {}).pop(route_id, None)
+            self._save(data)
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+        if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
+
+        if url is not None:
+            canonical = canonical_chat_url(url)
+            project_id, conversation_id = conversation_parts(canonical)
+            if (
+                project_identity(project_id) != project_identity(route.get("project_id"))
+                and not bool(pending.get("allow_project_change", False))
+            ):
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate belongs to a different project")
+        else:
+            if pending.get("state") != "candidate" or not pending.get("candidate_url"):
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate is not ready")
+            canonical = pending["candidate_url"]
+            conversation_id = pending["candidate_conversation_id"]
+            project_id = pending.get("candidate_project_id")
+            if (
+                project_identity(project_id) != project_identity(route.get("project_id"))
+                and not bool(pending.get("allow_project_change", False))
+            ):
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate belongs to a different project")
+
+        is_already_bound = (
+            self.is_bound(route)
+            and route.get("conversation_id") == conversation_id
+            and project_identity(route.get("project_id")) == project_identity(project_id)
+        )
+
+        if is_already_bound:
+            changed = False
+            route["binding_state"] = "bound"
+            data["routes"][route_id] = route
+        else:
+            changed = True
             generation = int(route.get("generation", 0)) + 1
             route = {
                 "title": route.get("title") or route_id,
@@ -240,14 +336,40 @@ class RouteRegistry:
                 "conversation_id": conversation_id,
                 "channel_id": f"telegram-{route_id}-g{generation}",
                 "generation": generation,
+                "binding_state": "bound",
                 "updated_at": datetime.now(UTC).isoformat(),
             }
             data["routes"][route_id] = route
             data["requested_route"] = route_id
             data["requested_at"] = datetime.now(UTC).isoformat()
+
         del data["current_binds"][route_id]
         self._save(data)
-        return {**route, "route_id": route_id, "changed": changed, "session_id": pending.get("session_id")}
+        return {**self._normalize_route_record(route), "route_id": route_id, "changed": changed, "session_id": pending.get("session_id")}
+
+    def unbind(self, route_id: str, *, expected_generation: int | None = None) -> dict:
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        route = data["routes"].get(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        current_gen = int(route.get("generation", 0))
+        if expected_generation is not None and current_gen != int(expected_generation):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "route generation changed before unbind")
+
+        unbound_route = {
+            "title": route.get("title") or route_id,
+            "channel_id": route.get("channel_id") or f"telegram-{route_id}-g{current_gen}",
+            "generation": current_gen,
+            "binding_state": "unbound",
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        data["routes"][route_id] = unbound_route
+        data["requested_at"] = datetime.now(UTC).isoformat()
+        if "current_binds" in data and route_id in data["current_binds"]:
+            del data["current_binds"][route_id]
+        self._save(data)
+        return {**unbound_route, "route_id": route_id}
 
     def pending_rollover(self, route_id: str) -> dict | None:
         route_id = self.validate_route_id(route_id)
@@ -323,6 +445,7 @@ class RouteRegistry:
             "title": pending.get("title") or route.get("title") or route_id, "url": pending["candidate_url"],
             "project_id": pending.get("project_id"), "conversation_id": pending["candidate_conversation_id"],
             "channel_id": pending["channel_id"], "generation": int(pending["target_generation"]),
+            "binding_state": "bound",
             "updated_at": datetime.now(UTC).isoformat(),
         }
         data["routes"][route_id] = committed
@@ -337,7 +460,7 @@ class RouteRegistry:
         }
         del data["rollovers"][route_id]
         self._save(data)
-        return {**committed, "route_id": route_id, "default": data.get("default_route") == route_id}
+        return {**self._normalize_route_record(committed), "route_id": route_id, "default": data.get("default_route") == route_id}
 
     def complete_rollover(self, route_id: str, token: str) -> dict:
         route_id = self.validate_route_id(route_id)
@@ -383,14 +506,15 @@ class RouteRegistry:
                 retryable=True,
             )
         previous = data["routes"].get(route_id)
-        if previous is not None:
+        if previous is not None and previous.get("binding_state") != "unbound":
             previous_project = previous.get("project_id")
-            same_project = project_identity(project_id) == project_identity(previous_project)
-            if not same_project:
-                raise BridgeError(
-                    ErrorCode.POLICY_VIOLATION,
-                    "takeover candidate belongs to a different project",
-                )
+            if previous_project is not None:
+                same_project = project_identity(project_id) == project_identity(previous_project)
+                if not same_project:
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "takeover candidate belongs to a different project",
+                    )
         previous = previous or {}
         generation = int(previous.get("generation", 0)) + 1
         channel_id = f"telegram-{route_id}-g{generation}"
@@ -401,6 +525,7 @@ class RouteRegistry:
             "conversation_id": conversation_id,
             "channel_id": channel_id,
             "generation": generation,
+            "binding_state": "bound",
             "updated_at": datetime.now(UTC).isoformat(),
         }
         data["routes"][route_id] = route
@@ -409,4 +534,4 @@ class RouteRegistry:
         data["requested_route"] = route_id
         data["requested_at"] = datetime.now(UTC).isoformat()
         self._save(data)
-        return {**route, "route_id": route_id, "default": data["default_route"] == route_id}
+        return {**self._normalize_route_record(route), "route_id": route_id, "default": data["default_route"] == route_id}
