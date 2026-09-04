@@ -1117,3 +1117,85 @@ async def test_route_scoped_wake_on_already_terminal_jobs_does_not_deadlock(tmp_
         timeout=1.0,
     )
     assert (await container.coordinator.status("telegram-bridge-g0"))["state"] != "idle"
+
+
+@pytest.mark.asyncio
+async def test_pre_task_5_waiter_without_generation_handled_safely_for_status_and_unbind(tmp_path: Path):
+    from app.container import build_container
+    from app.settings import BridgeSettings
+    from tests.fixtures.repositories import create_git_repository
+
+    repo_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "projects": [{
+                "id": "project",
+                "name": "Project",
+                "repositories": [{
+                    "id": "repository",
+                    "path": repo_path,
+                    "capabilities": {"execute": True},
+                    "tasks": [{
+                        "id": "task",
+                        "name": "Task",
+                        "executable": "/bin/echo",
+                        "arguments": ["done"],
+                    }],
+                }],
+            }],
+        }
+    )
+    container = build_container(settings)
+    container.jobs._store.initialize()
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    repo = container.projects.repositories.get("project", "repository")
+    job = await container.jobs.start_task(repo, "task", "req-legacy-status")
+
+    # Manually persist pre-Task-5 legacy waiter with generation=None in payload
+    container.jobs.store.save_terminal_waiter(
+        waiter_id="legacy-waiter-1",
+        project_id="project",
+        repository_id="repository",
+        job_ids=(job.job_id,),
+        policy="all_terminal",
+        handler_name="coordinator",
+        payload={"route_id": "bridge", "generation": None},
+    )
+
+    # safe_status must not crash with TypeError on generation=None
+    status = container.route_control.safe_status("bridge")
+    assert status["state"] == "bound"
+    assert status["pending_durable_waiters"] == 0
+
+    # unbind must not crash with TypeError and must succeed safely since unpinned waiter is not wake-producing
+    unbind_res = await container.route_control.unbind("bridge")
+    assert unbind_res["state"] == "unbound"
+
+    # Re-bind route to successor generation
+    prep = container.route_control.prepare_bind("bridge", allow_project_change=True)
+    container.route_control.accept_bind_return(
+        prep["operation_id"], "https://chatgpt.com/g/g-p-infra/c/conv-successor"
+    )
+    container.route_control.commit_bind(prep["operation_id"])
+    assert container.route_registry.resolve("bridge")["generation"] == 1
+
+    # Persist another legacy waiter without generation key
+    container.jobs.store.save_terminal_waiter(
+        waiter_id="legacy-waiter-2",
+        project_id="project",
+        repository_id="repository",
+        job_ids=(job.job_id,),
+        policy="all_terminal",
+        handler_name="coordinator",
+        payload={"route_id": "bridge"},
+    )
+
+    # unbind_and_cancel must handle legacy waiter safely without error
+    unbind_cancel_res = await container.route_control.unbind_and_cancel("bridge")
+    assert unbind_cancel_res["state"] == "unbound"

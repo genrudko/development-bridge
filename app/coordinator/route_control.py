@@ -283,6 +283,20 @@ class RouteControlService:
             "diagnostic_id": diag_id,
         }
 
+    @staticmethod
+    def _matches_route_and_generation(payload: object, route_id: str, generation: int) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("route_id") != route_id:
+            return False
+        gen = payload.get("generation")
+        if gen is None:
+            return False
+        try:
+            return int(gen) == generation
+        except (ValueError, TypeError):
+            return False
+
     def safe_status(self, route_id: str) -> dict:
         route_id = self.route_registry.validate_route_id(route_id)
         route = self.route_registry.resolve(route_id)
@@ -322,9 +336,7 @@ class RouteControlService:
                 w
                 for w in self.jobs.store.terminal_waiters()
                 if w.get("handler_name") == "coordinator"
-                and isinstance(w.get("payload"), dict)
-                and w["payload"].get("route_id") == route_id
-                and int(w["payload"].get("generation", -1)) == generation
+                and self._matches_route_and_generation(w.get("payload"), route_id, generation)
             ]
             pending_waiters = len(waiters)
 
@@ -453,9 +465,7 @@ class RouteControlService:
                     w
                     for w in self.jobs.store.terminal_waiters()
                     if w.get("handler_name") == "coordinator"
-                    and isinstance(w.get("payload"), dict)
-                    and w["payload"].get("route_id") == route_id
-                    and int(w["payload"].get("generation", -1)) == generation
+                    and self._matches_route_and_generation(w.get("payload"), route_id, generation)
                 ]
                 if waiters:
                     self.trace_store.stage(
@@ -565,9 +575,7 @@ class RouteControlService:
                     w
                     for w in self.jobs.store.terminal_waiters()
                     if w.get("handler_name") == "coordinator"
-                    and isinstance(w.get("payload"), dict)
-                    and w["payload"].get("route_id") == route_id
-                    and int(w["payload"].get("generation", -1)) == generation
+                    and self._matches_route_and_generation(w.get("payload"), route_id, generation)
                 ]
                 if remaining_waiters:
                     self.trace_store.stage(

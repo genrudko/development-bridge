@@ -286,20 +286,24 @@ class JobService:
         self,
         ready: list[tuple[TerminalWaiter, tuple[JobRecord, ...], str]],
     ) -> None:
+        first_exc: Exception | None = None
         for waiter, jobs, reason in ready:
             try:
                 await waiter.callback(jobs, reason)
-            except Exception:
+            except Exception as exc:
                 async with self._terminal_lock:
                     self._firing_terminal_waiters.pop(waiter.waiter_id, None)
                     if waiter.durable:
                         self._terminal_waiters.setdefault(waiter.waiter_id, waiter)
-                raise
+                if first_exc is None:
+                    first_exc = exc
             else:
                 async with self._terminal_lock:
                     self._firing_terminal_waiters.pop(waiter.waiter_id, None)
                     if waiter.durable:
                         self._require_store().delete_terminal_waiter(waiter.waiter_id)
+        if first_exc is not None:
+            raise first_exc
 
     async def _restore_durable_terminal_waiters(self) -> None:
         store = self._require_store()

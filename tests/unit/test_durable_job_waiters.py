@@ -306,3 +306,47 @@ async def test_cancel_durable_waiters_fails_closed_while_callback_in_flight(tmp_
     finally:
         callback_unblock.set()
         await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_terminal_callback_exception_does_not_leak_other_firing_waiters(tmp_path):
+    settings = settings_for(tmp_path)
+    service, repo = service_for(settings)
+    service._store.initialize()
+
+    second_called = asyncio.Event()
+
+    async def failing_handler(payload, records, reason):
+        raise RuntimeError("Callback failure")
+
+    async def second_handler(payload, records, reason):
+        second_called.set()
+
+    service.register_durable_terminal_handler("failing", failing_handler)
+    service.register_durable_terminal_handler("second", second_handler)
+
+    job = await service.start_task(repo, "task", "req-multi-callback")
+    await service.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "failing",
+        {"id": 1},
+    )
+    await service.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "second",
+        {"id": 2},
+    )
+
+    # Start service to execute job and invoke callbacks
+    await service.start()
+    try:
+        # Second handler must be invoked even if first handler raised
+        await asyncio.wait_for(second_called.wait(), timeout=3.0)
+        # No waiters should be leaked in _firing_terminal_waiters
+        assert len(service._firing_terminal_waiters) == 0
+    finally:
+        await service.stop()
