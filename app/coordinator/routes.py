@@ -54,10 +54,7 @@ class RouteRegistry:
     def is_bound(route: dict | None) -> bool:
         if not isinstance(route, dict):
             return False
-        state = route.get("binding_state")
-        if state == "bound":
-            return True
-        if state == "unbound":
+        if route.get("binding_state") not in (None, "bound"):
             return False
         return bool(route.get("url") and route.get("conversation_id"))
 
@@ -258,6 +255,8 @@ class RouteRegistry:
             data.get("current_binds", {}).pop(route_id, None)
             self._save(data)
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+        if pending.get("state") != "prepared":
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate already recorded")
         if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
         if (
@@ -347,14 +346,14 @@ class RouteRegistry:
         self._save(data)
         return {**self._normalize_route_record(route), "route_id": route_id, "changed": changed, "session_id": pending.get("session_id")}
 
-    def unbind(self, route_id: str, *, expected_generation: int | None = None) -> dict:
+    def unbind(self, route_id: str, *, expected_generation: int) -> dict:
         route_id = self.validate_route_id(route_id)
         data = self._load()
         route = data["routes"].get(route_id)
         if route is None:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
         current_gen = int(route.get("generation", 0))
-        if expected_generation is not None and current_gen != int(expected_generation):
+        if current_gen != int(expected_generation):
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "route generation changed before unbind")
 
         unbound_route = {
@@ -506,15 +505,14 @@ class RouteRegistry:
                 retryable=True,
             )
         previous = data["routes"].get(route_id)
-        if previous is not None and previous.get("binding_state") != "unbound":
+        if previous is not None and self.is_bound(previous):
             previous_project = previous.get("project_id")
-            if previous_project is not None:
-                same_project = project_identity(project_id) == project_identity(previous_project)
-                if not same_project:
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "takeover candidate belongs to a different project",
-                    )
+            same_project = project_identity(project_id) == project_identity(previous_project)
+            if not same_project:
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "takeover candidate belongs to a different project",
+                )
         previous = previous or {}
         generation = int(previous.get("generation", 0)) + 1
         channel_id = f"telegram-{route_id}-g{generation}"

@@ -197,6 +197,13 @@ def test_is_bound_identifies_bound_unbound_and_legacy_records(tmp_path: Path):
     explicit_bound = {**legacy_bound, "binding_state": "bound"}
     assert registry.is_bound(explicit_bound) is True
 
+    # Explicit bound record missing physical target fields must NOT be considered bound
+    explicit_bound_missing_target = {"title": "Broken", "binding_state": "bound"}
+    assert registry.is_bound(explicit_bound_missing_target) is False
+
+    explicit_bound_missing_conv = {"title": "Broken", "url": "https://chatgpt.com/c/123", "binding_state": "bound"}
+    assert registry.is_bound(explicit_bound_missing_conv) is False
+
     # Explicit unbound record
     explicit_unbound = {"title": "Unbound", "channel_id": "telegram-unbound-g0", "generation": 0, "binding_state": "unbound"}
     assert registry.is_bound(explicit_unbound) is False
@@ -410,7 +417,7 @@ def test_unbind_removes_physical_target_and_persists_unbound_state(tmp_path: Pat
     )
     assert registry.is_bound(registry.resolve("bridge")) is True
 
-    unbound = registry.unbind("bridge")
+    unbound = registry.unbind("bridge", expected_generation=0)
     assert unbound["route_id"] == "bridge"
     assert unbound["title"] == "Development Bridge Infra"
     assert unbound["binding_state"] == "unbound"
@@ -448,6 +455,10 @@ def test_unbind_guards_expected_generation(tmp_path: Path):
         registry.unbind("bridge", expected_generation=5)
     assert exc.value.code is ErrorCode.POLICY_VIOLATION
 
+    # Unbind without expected_generation must fail with TypeError
+    with pytest.raises(TypeError):
+        registry.unbind("bridge")  # type: ignore[call-arg]
+
     # Correct expected generation succeeds
     unbound = registry.unbind("bridge", expected_generation=0)
     assert unbound["binding_state"] == "unbound"
@@ -460,7 +471,7 @@ def test_binding_an_unbound_route_allocates_next_generation_and_channel(tmp_path
         "https://chatgpt.com/c/conv-1",
         "telegram-bridge-g0",
     )
-    registry.unbind("bridge")
+    registry.unbind("bridge", expected_generation=0)
     assert registry.resolve("bridge")["binding_state"] == "unbound"
 
     pending = registry.prepare_current_bind("bridge", session_id="session-1")
@@ -473,6 +484,54 @@ def test_binding_an_unbound_route_allocates_next_generation_and_channel(tmp_path
     assert bound["generation"] == 1
     assert bound["channel_id"] == "telegram-bridge-g1"
     assert bound["changed"] is True
+
+
+def test_takeover_rejects_moving_bound_non_project_route_to_project(tmp_path: Path):
+    import pytest
+    from app.api.errors import BridgeError, ErrorCode
+
+    registry = RouteRegistry(tmp_path / "routes.json")
+    # Bootstrap a bound non-Project route (project_id is None)
+    registry.bootstrap(
+        "plain",
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+        "telegram-plain-g0",
+    )
+    assert registry.resolve("plain")["project_id"] is None
+    assert registry.is_bound(registry.resolve("plain")) is True
+
+    # Attempting to takeover a bound non-project route into a project must be rejected
+    with pytest.raises(BridgeError) as exc:
+        registry.takeover("plain", "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-proj")
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
+    assert "different project" in exc.value.message
+
+    # But taking over an unbound route into a project is allowed
+    registry.unbind("plain", expected_generation=0)
+    taken = registry.takeover("plain", "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-proj")
+    assert taken["project_id"] == "g-p-11111111111111111111111111111111"
+    assert taken["generation"] == 1
+
+
+def test_candidate_recording_cannot_be_overwritten_or_replayed(tmp_path: Path):
+    import pytest
+    from app.api.errors import BridgeError, ErrorCode
+
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    pending = registry.prepare_current_bind("bridge", session_id="session-1")
+    # First record succeeds
+    rec = registry.record_current_bind_candidate("bridge", pending["token"], "https://chatgpt.com/c/conv-first")
+    assert rec["state"] == "candidate"
+
+    # Second record with same token must fail closed (one-shot candidate recording)
+    with pytest.raises(BridgeError) as exc:
+        registry.record_current_bind_candidate("bridge", pending["token"], "https://chatgpt.com/c/conv-second")
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
 
 
 @pytest.mark.parametrize(
