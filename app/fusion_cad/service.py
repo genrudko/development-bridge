@@ -101,10 +101,10 @@ _CAD_OPERATION_CLASSIFICATION: dict[tuple[str, str], tuple[bool, bool]] = {
     ("validate", "run"): (True, False),
 
     # 7. fusion_transaction
-    ("transaction", "begin"): (False, True),
-    ("transaction", "stage"): (False, True),
+    ("transaction", "begin"): (True, True),
+    ("transaction", "stage"): (True, True),
     ("transaction", "status"): (False, False),
-    ("transaction", "abort"): (False, True),
+    ("transaction", "abort"): (True, True),
     ("transaction", "preview"): (True, True),
     ("transaction", "commit"): (True, True),
     ("transaction", "rollback"): (True, True),

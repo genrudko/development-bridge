@@ -139,7 +139,9 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
     ("fusion_view", {"node_id": "desk-1", "operation": "fit"}, True),
     ("fusion_view", {"node_id": "desk-1", "operation": "zoom_entity", "target": "ent_1"}, True),
     ("fusion_view", {"node_id": "desk-1", "operation": "orient_to_face", "target": "ent_1"}, True),
-    ("fusion_view", {"node_id": "desk-1", "operation": "standard_view", "view_type": "top"}, True),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "begin"}, True),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "stage", "transaction_id": "tx_1234", "action": {"action_type": "show", "target": "ent_1"}}, True),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_1234"}, True),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_1234"}, True),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_1234"}, True),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "rollback", "transaction_id": "tx_1234"}, True),
@@ -350,10 +352,10 @@ async def test_native_non_json_or_unrecognized_domain_output_fails_closed(mock_c
     ("validate", "run", {"operation": "run"}, True, False),
 
     # fusion_transaction
-    ("transaction", "begin", {"operation": "begin"}, False, True),
-    ("transaction", "stage", {"operation": "stage", "transaction_id": "tx_1", "action": {"action_type": "show", "target": "ent_1"}}, False, True),
+    ("transaction", "begin", {"operation": "begin"}, True, True),
+    ("transaction", "stage", {"operation": "stage", "transaction_id": "tx_1", "action": {"action_type": "show", "target": "ent_1"}}, True, True),
     ("transaction", "status", {"operation": "status"}, False, False),
-    ("transaction", "abort", {"operation": "abort", "transaction_id": "tx_1"}, False, True),
+    ("transaction", "abort", {"operation": "abort", "transaction_id": "tx_1"}, True, True),
     ("transaction", "preview", {"operation": "preview", "transaction_id": "tx_1"}, True, True),
     ("transaction", "commit", {"operation": "commit", "transaction_id": "tx_1"}, True, True),
     ("transaction", "rollback", {"operation": "rollback", "transaction_id": "tx_1"}, True, True),
@@ -396,6 +398,10 @@ def test_exhaustive_operation_classification(
     ("fusion_style", {"node_id": "desk-1", "operation": "show_only", "target": "ent_1"}),
     ("fusion_style", {"node_id": "desk-1", "operation": "isolate", "target": "ent_1"}),
     ("fusion_style", {"node_id": "desk-1", "operation": "restore"}),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "begin"}),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "stage", "transaction_id": "tx_1", "action": {"action_type": "show", "target": "ent_1"}}),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_1"}),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_1"}),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_1"}),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "rollback", "transaction_id": "tx_1"}),
 ])
@@ -1036,18 +1042,26 @@ async def test_fusion_call_fails_closed_on_native_errors(mock_container: Applica
     ("abort", {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_1234"}),
 ])
 @pytest.mark.asyncio
-async def test_sync_transaction_mutations_timeout_uncertain_and_non_replayable(operation: str, payload: dict, tmp_path):
-    container = build_container(BridgeSettings.model_validate({
+async def test_async_transaction_mutations_lifecycle_operation_result_and_uncertain_recovery(
+    operation: str,
+    payload: dict,
+    tmp_path,
+):
+    settings = BridgeSettings.model_validate({
         "server": {"public_base_url": "https://127.0.0.1:8000"},
         "desktop_nodes": {
             "token": "test-token",
             "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(tmp_path / "artifacts"),
             "call_timeout_seconds": 0.05,
         },
-    }))
+    })
+    container = build_container(settings)
     registry = build_tool_registry(container)
     tool = registry.get("fusion_transaction")
+    op_result_tool = registry.get("fusion_operation_result")
     assert tool is not None
+    assert op_result_tool is not None
 
     await container.desktop_nodes.register(
         "desk-1",
@@ -1055,23 +1069,60 @@ async def test_sync_transaction_mutations_timeout_uncertain_and_non_replayable(o
         fusion_available=True,
     )
 
+    # 1. Asynchronous dispatch via submit with mutation journal
     req_ctx = RequestContext(request_id=f"req_tx_{operation}")
     params = types.CallToolRequestParams(name="fusion_transaction", arguments=payload)
+    res = await tool.handler(None, params, req_ctx)
+    assert not res.is_error
+    parsed_submit = json.loads(res.content[0].text)
+    assert parsed_submit["ok"] is True
+    op_id = parsed_submit["data"]["operation_id"]
 
-    call_task = asyncio.create_task(tool.handler(None, params, req_ctx))
+    # Check journal has mutation=True and summary=transaction:<op>
+    status_submitted = container.desktop_nodes.operation_status("desk-1", op_id)
+    assert status_submitted["status"] == "queued"
+    assert status_submitted["mutation"] is True
+    assert status_submitted["summary"] == f"transaction:{operation}"
 
+    # 2. Claiming transitions to running
     claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
     assert claimed is not None
-    op_id = claimed["operation_id"]
+    assert claimed["operation_id"] == op_id
+    cmd_id = claimed["command_id"]
 
-    with pytest.raises(BridgeError) as exc_info:
-        await call_task
-    assert exc_info.value.code == ErrorCode.DESKTOP_NODE_TIMEOUT
-    assert exc_info.value.retryable is False
+    status_claimed = container.desktop_nodes.operation_status("desk-1", op_id)
+    assert status_claimed["status"] == "running"
+    assert status_claimed["mutation"] is True
 
-    status_data = container.desktop_nodes.operation_status("desk-1", op_id)
-    assert status_data["status"] == "uncertain"
-    assert status_data["mutation"] is True
+    # 3. Simulate bridge restart/crash during active claimed mutation -> recovered as uncertain (non-replayable)
+    restarted = build_container(settings)
+    restarted_status = restarted.desktop_nodes.operation_status("desk-1", op_id)
+    assert restarted_status["status"] == "uncertain"
+    assert restarted_status["mutation"] is True
+
+    # 4. Successful result submission -> retained operation_result succeeds with decoded CadResult
+    valid_cad_result = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": f"Transaction {operation} completed",
+        "data": {"transaction_id": "tx_1234", "operation": operation},
+    }
+    await container.desktop_nodes.submit_result("desk-1", cmd_id, {
+        "content": [{"type": "text", "text": json.dumps(valid_cad_result)}],
+        "isError": False,
+    })
+
+    # Query fusion_operation_result
+    op_res_ctx = RequestContext(request_id=f"req_op_res_{operation}")
+    op_res_params = types.CallToolRequestParams(
+        name="fusion_operation_result",
+        arguments={"node_id": "desk-1", "operation_id": op_id},
+    )
+    result_res = await op_result_tool.handler(None, op_res_params, op_res_ctx)
+    assert not result_res.is_error
+    parsed_op_result = json.loads(result_res.content[0].text)
+    assert parsed_op_result["ok"] is True
+    assert "external_result" in parsed_op_result["data"]
 
 
 @pytest.mark.asyncio
