@@ -48,7 +48,6 @@ class RouteControlService:
         token = pending["token"]
 
         diag_id = self.trace_store.start("bind", route_id=route_id, operation_id=token)
-        self.trace_store.stage(diag_id, "widget_external_open", "ok")
 
         base = self.public_base_url.rstrip("/") if self.public_base_url else ""
         operation_url = f"{base}{self.endpoint_prefix}/bind/{token}"
@@ -65,7 +64,14 @@ class RouteControlService:
 
     def accept_bind_return(self, operation_id: str, redirect_url: str | None) -> dict:
         diag_id = self.trace_store.find_by_operation_id(operation_id)
-        if diag_id is None:
+        if diag_id is not None:
+            existing_trace = self.trace_store.sanitized(diag_id)
+            if existing_trace and existing_trace.get("status") in ("ok", "failed"):
+                if existing_trace.get("status") == "ok":
+                    raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind operation already completed")
+                err = existing_trace.get("error_code") or "OPERATION_FAILED"
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"current-chat bind operation already failed: {err}")
+        else:
             diag_id = self.trace_store.start("bind", operation_id=operation_id)
 
         if not redirect_url or not str(redirect_url).strip():
@@ -148,6 +154,13 @@ class RouteControlService:
 
     def commit_bind(self, operation_id: str) -> dict:
         diag_id = self.trace_store.find_by_operation_id(operation_id)
+        if diag_id:
+            existing_trace = self.trace_store.sanitized(diag_id)
+            if existing_trace and existing_trace.get("status") in ("ok", "failed"):
+                if existing_trace.get("status") == "ok":
+                    raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind operation already completed")
+                err = existing_trace.get("error_code") or "OPERATION_FAILED"
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"current-chat bind operation already failed: {err}")
 
         route_id = self._find_route_id_for_token(operation_id)
         if route_id is None:
@@ -156,9 +169,9 @@ class RouteControlService:
                     diag_id,
                     "registry_commit",
                     "failed",
-                    error_code="TOKEN_INVALID",
+                    error_code="TOKEN_EXPIRED",
                 )
-                self.trace_store.finish(diag_id, status="failed", error_code="TOKEN_INVALID")
+                self.trace_store.finish(diag_id, status="failed", error_code="TOKEN_EXPIRED")
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
 
         try:
@@ -166,7 +179,7 @@ class RouteControlService:
         except BridgeError as exc:
             msg = str(exc)
             if "candidate is not ready" in msg or "not ready" in msg:
-                err_code = "CANDIDATE_EXPIRED"
+                err_code = "CANDIDATE_NOT_READY"
                 if diag_id:
                     self.trace_store.stage(diag_id, "registry_commit", "failed", error_code=err_code)
             elif "different project" in msg:
@@ -177,6 +190,10 @@ class RouteControlService:
                 err_code = "GENERATION_CHANGED"
                 if diag_id:
                     self.trace_store.stage(diag_id, "generation_guard", "failed", error_code=err_code)
+            elif "invalid or stale" in msg:
+                err_code = "TOKEN_EXPIRED"
+                if diag_id:
+                    self.trace_store.stage(diag_id, "registry_commit", "failed", error_code=err_code)
             else:
                 err_code = "REGISTRY_WRITE_FAILED"
                 if diag_id:

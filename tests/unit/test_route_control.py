@@ -50,11 +50,13 @@ def test_prepare_bind_returns_safe_descriptor_and_opaque_url(test_setup):
     assert "g-p-infra" not in dumped
     assert "marker" not in dumped
 
-    # Verify trace started
+    # Verify trace started and widget_external_open is NOT staged in prepare
     sanitized = trace_store.sanitized(prepared["diagnostic_id"])
     assert sanitized is not None
     assert sanitized["status"] == "in_progress"
     assert sanitized["route_id"] == "bridge"
+    assert len(sanitized["stages"]) == 0
+    assert not any(st["name"] == "widget_external_open" for st in sanitized["stages"])
 
 
 def test_accept_bind_return_records_candidate_without_mutating_active_route(test_setup):
@@ -110,7 +112,7 @@ def test_commit_bind_consumes_candidate_and_mutates_route(test_setup):
 
 
 def test_commit_bind_is_single_use_replay_fails(test_setup):
-    _registry, _trace_store, service = test_setup
+    _registry, trace_store, service = test_setup
 
     prepared = service.prepare_bind("bridge", session_id="session-1")
     op_id = prepared["operation_id"]
@@ -123,6 +125,55 @@ def test_commit_bind_is_single_use_replay_fails(test_setup):
     with pytest.raises(BridgeError) as exc_info:
         service.commit_bind(op_id)
     assert exc_info.value.code in {ErrorCode.INVALID_ARGUMENT, ErrorCode.POLICY_VIOLATION}
+
+    # Replay must NOT mutate or corrupt the completed successful trace
+    sanitized = trace_store.sanitized(prepared["diagnostic_id"])
+    assert sanitized is not None
+    assert sanitized["status"] == "ok"
+    assert sanitized["error_code"] is None
+    for stage in sanitized["stages"]:
+        assert stage["status"] == "ok"
+
+
+def test_commit_bind_replay_on_failed_trace_does_not_corrupt_history(test_setup):
+    _registry, trace_store, service = test_setup
+
+    prepared = service.prepare_bind("bridge", session_id="session-1")
+    op_id = prepared["operation_id"]
+
+    # Trigger failure during accept
+    with pytest.raises(BridgeError):
+        service.accept_bind_return(op_id, "https://malicious.com/bad")
+
+    # Attempting commit on failed op should fail closed and preserve original error code
+    with pytest.raises(BridgeError):
+        service.commit_bind(op_id)
+
+    sanitized = trace_store.sanitized(prepared["diagnostic_id"])
+    assert sanitized["status"] == "failed"
+    assert sanitized["error_code"] == "TARGET_PARSE_FAILED"
+
+
+def test_commit_expired_token_fails_with_token_expired(test_setup):
+    registry, trace_store, service = test_setup
+
+    prepared = service.prepare_bind("bridge", session_id="session-1")
+    op_id = prepared["operation_id"]
+    return_target = "https://chatgpt.com/g/g-p-infra/c/conv-new-target"
+    service.accept_bind_return(op_id, return_target)
+
+    # Expire the pending bind in the registry
+    data = registry._load()
+    data["current_binds"]["bridge"]["created_at"] = "2020-01-01T00:00:00+00:00"
+    registry._save(data)
+
+    with pytest.raises(BridgeError) as exc_info:
+        service.commit_bind(op_id)
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+
+    sanitized = trace_store.sanitized(prepared["diagnostic_id"])
+    assert sanitized["status"] == "failed"
+    assert sanitized["error_code"] == "TOKEN_EXPIRED"
 
 
 def test_same_target_bind_is_idempotent(test_setup):
@@ -197,7 +248,7 @@ def test_commit_before_accept_fails_closed(test_setup):
 
     sanitized = trace_store.sanitized(prepared["diagnostic_id"])
     assert sanitized["status"] == "failed"
-    assert sanitized["error_code"] in {"CANDIDATE_EXPIRED", "REGISTRY_WRITE_FAILED"}
+    assert sanitized["error_code"] == "CANDIDATE_NOT_READY"
 
 
 def test_generation_race_fails_closed(test_setup):

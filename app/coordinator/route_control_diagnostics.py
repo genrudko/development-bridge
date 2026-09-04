@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_hex
 
+from app.api.errors import BridgeError, ErrorCode
+
 
 class RouteControlTraceStore:
     def __init__(self, state_dir: Path, raw_ttl_seconds: int = 86400) -> None:
@@ -21,16 +23,43 @@ class RouteControlTraceStore:
         diag_id = trace_data["diagnostic_id"]
         target = self._trace_path(diag_id)
         tmp = self.state_dir / f"{diag_id}.tmp"
-        tmp.write_text(json.dumps(trace_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
+            os.fchmod(fd, 0o600)
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(trace_data, ensure_ascii=False, indent=2) + "\n")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+        mode = tmp.stat().st_mode & 0o777
+        if mode != 0o600:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise BridgeError(ErrorCode.INTERNAL_ERROR, f"trace file permissions {oct(mode)} are not 0600")
+
         os.replace(tmp, target)
 
     def _load_raw(self, diagnostic_id: str) -> dict | None:
         path = self._trace_path(diagnostic_id)
         try:
+            stat = path.stat()
+            if time.time() - stat.st_mtime > self.raw_ttl_seconds:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                return None
             return json.loads(path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return None
@@ -42,7 +71,19 @@ class RouteControlTraceStore:
         diagnostic_id: str | None = None,
         operation_id: str | None = None,
     ) -> str:
-        diag_id = diagnostic_id or f"bind-{token_hex(2).upper()}"
+        if diagnostic_id:
+            diag_id = diagnostic_id
+            if self._trace_path(diag_id).exists():
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, f"diagnostic trace {diag_id} already exists")
+        else:
+            for _ in range(10):
+                candidate_id = f"bind-{token_hex(12)}"
+                if not self._trace_path(candidate_id).exists():
+                    diag_id = candidate_id
+                    break
+            else:
+                raise BridgeError(ErrorCode.INTERNAL_ERROR, "failed to generate unique diagnostic id")
+
         now = datetime.now(UTC).isoformat()
         trace_data = {
             "diagnostic_id": diag_id,
@@ -72,6 +113,8 @@ class RouteControlTraceStore:
         trace = self._load_raw(diagnostic_id)
         if trace is None:
             return
+        if trace.get("finished_at") is not None or trace.get("status") in ("ok", "failed"):
+            return
         now = datetime.now(UTC).isoformat()
         stage_record = {
             "name": str(stage_name),
@@ -99,6 +142,8 @@ class RouteControlTraceStore:
         trace = self._load_raw(diagnostic_id)
         if trace is None:
             return None
+        if trace.get("finished_at") is not None or trace.get("status") in ("ok", "failed"):
+            return self.sanitized(diagnostic_id)
         now = datetime.now(UTC).isoformat()
         trace["status"] = str(status)
         trace["finished_at"] = now
@@ -139,8 +184,15 @@ class RouteControlTraceStore:
     def find_by_operation_id(self, operation_id: str) -> str | None:
         if not self.state_dir.exists():
             return None
+        now = time.time()
         for path in self.state_dir.glob("*.json"):
             try:
+                if now - path.stat().st_mtime > self.raw_ttl_seconds:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    continue
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("operation_id") == operation_id:
                     return str(data.get("diagnostic_id"))
@@ -151,10 +203,17 @@ class RouteControlTraceStore:
     def latest_diagnostic_id_for_route(self, route_id: str) -> str | None:
         if not self.state_dir.exists():
             return None
+        now = time.time()
         latest_time = None
         latest_diag = None
         for path in self.state_dir.glob("*.json"):
             try:
+                if now - path.stat().st_mtime > self.raw_ttl_seconds:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    continue
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("route_id") == route_id:
                     created_at = data.get("created_at") or ""
