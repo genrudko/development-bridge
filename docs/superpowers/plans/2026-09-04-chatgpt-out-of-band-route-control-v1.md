@@ -38,17 +38,17 @@
 
 **Interfaces:**
 - Consumes: existing `RouteRegistry.resolve()`, `prepare_current_bind()`, `complete_current_bind()`, `parse_chatgpt_target()`, `project_identity()`.
-- Produces: `RouteRegistry.prepare_current_bind(route_id, *, session_id, allow_project_change=False) -> dict` with no marker field.
+- Produces: `RouteRegistry.prepare_current_bind(route_id, *, session_id, allow_project_change=False) -> dict` with candidate-capable state; the existing `marker` field may remain temporarily for legacy compatibility until Task 4 switches the active bind path, but new out-of-band code must not consume it.
 - Produces: `RouteRegistry.record_current_bind_candidate(route_id, token, url) -> dict` that validates target/project/source generation and stores the candidate without mutating the active binding.
 - Produces: `RouteRegistry.complete_current_bind(route_id, token) -> dict` that atomically consumes a stored candidate.
 - Produces: `RouteRegistry.unbind(route_id, *, expected_generation) -> dict` that preserves logical route/generation/channel history while removing active physical target fields and setting `binding_state="unbound"`.
 - Produces: `RouteRegistry.is_bound(route) -> bool`; legacy records without `binding_state` are interpreted as bound only when valid physical target fields exist.
 
-- [ ] **Step 1: Write failing registry/parser tests** for legacy-bound migration semantics, marker-free pending bind records, GET-stage candidate recording without route mutation, one-time candidate consumption, TTL expiry, replay, project mismatch, source-generation race, same-target idempotency, changed-target single generation increment, and explicit unbind.
+- [ ] **Step 1: Write failing registry/parser tests** for legacy-bound migration semantics, candidate-capable pending bind records while preserving temporary legacy marker compatibility, GET-stage candidate recording without route mutation, one-time candidate consumption, TTL expiry, replay, project mismatch, source-generation race, same-target idempotency, changed-target single generation increment, and explicit unbind.
 
 ```python
 pending = registry.prepare_current_bind("bridge", session_id="session-1")
-assert "marker" not in pending
+assert pending["state"] == "prepared"
 before = registry.resolve("bridge")
 registry.record_current_bind_candidate("bridge", pending["token"], candidate_url)
 assert registry.resolve("bridge") == before
