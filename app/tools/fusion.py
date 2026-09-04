@@ -8,7 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool
-from app.api.results import success, to_mcp_result
+from app.api.results import failure, success, to_mcp_result
 from app.container import ApplicationContainer
 from app.fusion_cad.models import CadResult
 from app.fusion_cad.requests import (
@@ -33,7 +33,23 @@ from app.fusion_cad.schemas import (
 
 def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     def external_result_response(full, metadata, request_id):
-        summary = success(request_id, {"external_result": metadata})
+        is_error = bool(
+            full.get("isError", False)
+            or full.get("status") == "failed"
+            or "error" in full
+        )
+        if is_error:
+            err = full.get("error", {})
+            err_code = err.get("code") or full.get("code", "FUSION_API_ERROR")
+            err_msg = err.get("message") or full.get("message", "Fusion operation failed")
+            err_details = err.get("details") or full.get("details", full)
+            try:
+                code_enum = ErrorCode(str(err_code))
+            except ValueError:
+                code_enum = ErrorCode.FUSION_API_ERROR
+            summary = failure(request_id, BridgeError(code_enum, str(err_msg), details=err_details))
+        else:
+            summary = success(request_id, {"external_result": metadata})
         blocks: list[types.ContentBlock] = [
             types.TextContent(
                 type="text",
@@ -54,7 +70,7 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 mimeType="application/json", size=metadata["size_bytes"],
                 description="Full high-resolution Fusion tool result",
             ))
-        return types.CallToolResult(content=blocks, isError=bool(full.get("isError", False)))
+        return types.CallToolResult(content=blocks, isError=is_error)
 
     async def status(ctx, params, request_context):
         return to_mcp_result(success(request_context.request_id, container.desktop_nodes.status(params.arguments["node_id"])))
@@ -115,9 +131,16 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             if isinstance(result, CadResult):
                 data = result.model_dump(mode="json", exclude_none=True)
                 return to_mcp_result(success(request_context.request_id, data))
-            return to_mcp_result(success(request_context.request_id, result))
+            if isinstance(result, dict) and "operation_id" in result and result.get("status") == "queued":
+                return to_mcp_result(success(request_context.request_id, result))
+            raise BridgeError(
+                ErrorCode.INTERNAL_ERROR,
+                f"Unexpected domain result format from {tool_name}",
+                details={"result": result},
+            )
 
         return domain_handler
+
 
     node = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"}
     operation_id = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$"}

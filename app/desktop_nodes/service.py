@@ -486,7 +486,18 @@ class DesktopNodeService:
         return path
 
     def _store_result_value(self, node_id: str, command_id: str, value: dict[str, Any]) -> str:
-        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        def _json_default(obj: Any) -> Any:
+            if isinstance(obj, (bytes, bytearray, memoryview)):
+                return base64.b64encode(bytes(obj)).decode("ascii")
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+            default=_json_default,
+        ).encode("utf-8")
         result_id = token_urlsafe(18)
         created_at = time.time()
         path = self._artifact_dir() / f"{result_id}.json"
@@ -498,6 +509,7 @@ class DesktopNodeService:
         }
         self._extract_image_resources(result_id, value, created_at)
         return result_id
+
 
     def store_external_result(self, node_id: str, value: dict[str, Any], command_id: str = "direct") -> dict[str, Any]:
         self._configured()
@@ -518,37 +530,126 @@ class DesktopNodeService:
 
     def _extract_image_resources(self, result_id: str, value: dict[str, Any], created_at: float) -> None:
         parent = self._external_results[result_id]
-        extensions = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
-        blocks = list(value.get("content", [])) if isinstance(value.get("content"), list) else []
+        extensions = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+            "image/bmp": ".bmp",
+            "application/pdf": ".pdf",
+            "model/stl": ".stl",
+            "model/3mf": ".3mf",
+            "model/step": ".step",
+            "application/octet-stream": ".bin",
+            "application/sla": ".stl",
+            "application/x-step": ".step",
+        }
+        blocks: list[dict[str, Any]] = []
+        if isinstance(value.get("content"), list):
+            for item in value["content"]:
+                if isinstance(item, dict):
+                    blocks.append(item)
         if isinstance(value.get("artifacts"), list):
-            blocks.extend(value["artifacts"])
+            for item in value["artifacts"]:
+                if isinstance(item, dict):
+                    blocks.append(item)
+        if isinstance(value.get("data"), dict):
+            for k, v in value["data"].items():
+                if isinstance(v, dict):
+                    blocks.append(v)
+                elif isinstance(v, list):
+                    for elem in v:
+                        if isinstance(elem, dict):
+                            blocks.append(elem)
+                elif isinstance(v, str) and (
+                    k.endswith(("_b64", "_base64", "Base64", "_data", "_binary"))
+                    or k in ("thumbnail", "screenshot", "image", "raw_bytes")
+                    or v.startswith(("data:image/", "data:model/", "data:application/"))
+                ):
+                    blocks.append({"type": "image", "data": v, "name": k})
+
+        # Also inspect top-level dictionary
+        for k in ("data", "base64Data", "base64_data", "b64_data", "image_data", "binary_data"):
+            if k in value and isinstance(value[k], (str, bytes, bytearray, dict)):
+                if isinstance(value[k], dict):
+                    blocks.append(value[k])
+                elif value.get("type") in ("image", "binary", "blob") or isinstance(value.get("mimeType"), str) or isinstance(value.get("mime_type"), str):
+                    blocks.append(value)
+
         for index, content in enumerate(blocks):
-            if not isinstance(content, dict) or content.get("type") != "image":
+            if not isinstance(content, dict):
                 continue
-            data = content.get("data")
-            if not isinstance(data, str):
-                data = content.get("base64Data")
-            mime_type = content.get("mimeType")
+            raw: bytes | None = None
+            mime_type = content.get("mimeType") or content.get("mime_type") or content.get("contentType") or content.get("content_type")
+
+            for candidate_key in (
+                "data", "base64Data", "base64_data", "b64_data",
+                "image_data", "binary_data", "raw_bytes",
+                "thumbnail_b64", "screenshot_b64", "png_base64", "jpg_base64",
+                "stl_base64", "step_base64", "mesh_data",
+            ):
+                candidate = content.get(candidate_key)
+                if candidate is None:
+                    continue
+                if isinstance(candidate, (bytes, bytearray, memoryview)):
+                    raw = bytes(candidate)
+                    if not mime_type:
+                        mime_type = "application/octet-stream"
+                    break
+                if isinstance(candidate, str) and candidate.strip():
+                    str_val = candidate.strip()
+                    if str_val.startswith("data:") and ";base64," in str_val:
+                        header, b64_data = str_val.split(";base64,", 1)
+                        data_mime = header.removeprefix("data:")
+                        if not mime_type or not isinstance(mime_type, str):
+                            mime_type = data_mime
+                        try:
+                            raw = base64.b64decode(b64_data, validate=True)
+                        except (TypeError, ValueError):
+                            continue
+                    else:
+                        try:
+                            raw = base64.b64decode(str_val, validate=True)
+                        except (TypeError, ValueError):
+                            continue
+                    break
+
+            if raw is None or len(raw) == 0:
+                continue
+
             if not isinstance(mime_type, str):
-                mime_type = content.get("mime_type")
-            if not isinstance(data, str) or not isinstance(mime_type, str):
-                continue
-            try:
-                raw = base64.b64decode(data, validate=True)
-            except (TypeError, ValueError):
-                continue
-            if not raw:
-                continue
+                if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                    mime_type = "image/png"
+                elif raw.startswith(b"\xff\xd8\xff"):
+                    mime_type = "image/jpeg"
+                elif raw.startswith((b"GIF87a", b"GIF89a")):
+                    mime_type = "image/gif"
+                elif raw.startswith(b"RIFF") and b"WEBP" in raw[:16]:
+                    mime_type = "image/webp"
+                elif raw.startswith(b"%PDF-"):
+                    mime_type = "application/pdf"
+                else:
+                    mime_type = "application/octet-stream"
+
+
             resource_id = token_urlsafe(18)
             extension = extensions.get(mime_type, ".bin")
-            path = self._artifact_dir() / f"{result_id}-image-{index}{extension}"
+            file_name = content.get("file_name") or content.get("name") or f"{result_id}-resource-{index}{extension}"
+            if not file_name.endswith(extension):
+                file_name = f"{file_name}{extension}"
+            path = self._artifact_dir() / f"{result_id}-res-{index}{extension}"
             path.write_bytes(raw)
             self._external_resources[resource_id] = {
-                "path": path, "parent_result_id": result_id, "size_bytes": len(raw),
-                "sha256": hashlib.sha256(raw).hexdigest(), "created_at": created_at,
-                "mime_type": mime_type, "file_name": path.name,
+                "path": path,
+                "parent_result_id": result_id,
+                "size_bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "created_at": created_at,
+                "mime_type": mime_type,
+                "file_name": file_name,
             }
             parent["resource_ids"].append(resource_id)
+
 
 
     def _cleanup_external_results(self) -> None:

@@ -88,11 +88,28 @@ class FusionCadScriptBundle:
 
         common_script = common_path.read_text("utf-8")
         group_script = group_path.read_text("utf-8")
+
+        marker = "# __GROUP_SCRIPT__"
+        marker_count = common_script.count(marker)
+        if marker_count == 0:
+            raise BridgeError(
+                ErrorCode.INTERNAL_ERROR,
+                f"Common script template missing required '{marker}' marker at {common_path}",
+            )
+        if marker_count > 1:
+            raise BridgeError(
+                ErrorCode.INTERNAL_ERROR,
+                f"Common script template contains duplicate '{marker}' markers ({marker_count}) at {common_path}",
+            )
+
+        if "__PAYLOAD_JSON__" not in common_script:
+            raise BridgeError(
+                ErrorCode.INTERNAL_ERROR,
+                f"Common script template missing '__PAYLOAD_JSON__' marker at {common_path}",
+            )
+
         escaped_literal = json.dumps(serialized_payload, ensure_ascii=False)
-        rendered_script = common_script.replace("__PAYLOAD_JSON__", escaped_literal)
-        if "# __GROUP_SCRIPT__" in rendered_script:
-            rendered_script = rendered_script.replace("# __GROUP_SCRIPT__", group_script)
-        else:
-            rendered_script = f"{rendered_script}\n\n{group_script}"
+        rendered_script = common_script.replace("__PAYLOAD_JSON__", escaped_literal, 1)
+        rendered_script = rendered_script.replace(marker, group_script, 1)
 
         return rendered_script

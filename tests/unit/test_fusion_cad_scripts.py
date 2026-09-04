@@ -71,7 +71,7 @@ def test_bundle_requires_existing_group_fragment_and_fails_closed():
     assert exc.value.code in (ErrorCode.INVALID_ARGUMENT, ErrorCode.INTERNAL_ERROR)
 
 
-def test_bundle_group_fragment_defines_run_before_execution(tmp_path, monkeypatch):
+def test_bundle_group_fragment_defines_run_before_execution(tmp_path):
     custom_scripts = tmp_path / "fusion_scripts"
     custom_scripts.mkdir()
     common_path = custom_scripts / "common.py.txt"
@@ -97,3 +97,71 @@ def test_bundle_group_fragment_defines_run_before_execution(tmp_path, monkeypatc
     scope: dict = {}
     exec(rendered, scope)  # noqa: S102
     assert scope.get("_output") == {"group_run_executed": True, "op": "custom_op"}
+
+
+def test_bundle_fails_on_missing_group_script_marker(tmp_path):
+    custom_scripts = tmp_path / "fusion_scripts"
+    custom_scripts.mkdir()
+    common_path = custom_scripts / "common.py.txt"
+    common_path.write_text(
+        'import json\n'
+        'API_VERSION = "fusion.cad/v1"\n'
+        'PAYLOAD_RAW = __PAYLOAD_JSON__\n'
+        'if __name__ == "__main__":\n'
+        '    _output = run()\n',
+        encoding="utf-8",
+    )
+    group_path = custom_scripts / "custom.py.txt"
+    group_path.write_text('def run(): return {}\n', encoding="utf-8")
+
+    bundle = FusionCadScriptBundle(scripts_dir=custom_scripts)
+    with pytest.raises(BridgeError) as exc:
+        bundle.build("custom", {"operation": "test"})
+    assert exc.value.code == ErrorCode.INTERNAL_ERROR
+    assert "missing required '# __GROUP_SCRIPT__' marker" in exc.value.message
+
+
+def test_bundle_fails_on_duplicate_group_script_marker(tmp_path):
+    custom_scripts = tmp_path / "fusion_scripts"
+    custom_scripts.mkdir()
+    common_path = custom_scripts / "common.py.txt"
+    common_path.write_text(
+        'import json\n'
+        'API_VERSION = "fusion.cad/v1"\n'
+        'PAYLOAD_RAW = __PAYLOAD_JSON__\n'
+        '# __GROUP_SCRIPT__\n'
+        '# __GROUP_SCRIPT__\n'
+        'if __name__ == "__main__":\n'
+        '    _output = run()\n',
+        encoding="utf-8",
+    )
+    group_path = custom_scripts / "custom.py.txt"
+    group_path.write_text('def run(): return {}\n', encoding="utf-8")
+
+    bundle = FusionCadScriptBundle(scripts_dir=custom_scripts)
+    with pytest.raises(BridgeError) as exc:
+        bundle.build("custom", {"operation": "test"})
+    assert exc.value.code == ErrorCode.INTERNAL_ERROR
+    assert "duplicate '# __GROUP_SCRIPT__' markers" in exc.value.message
+
+
+def test_bundle_fails_on_missing_payload_json_marker(tmp_path):
+    custom_scripts = tmp_path / "fusion_scripts"
+    custom_scripts.mkdir()
+    common_path = custom_scripts / "common.py.txt"
+    common_path.write_text(
+        'import json\n'
+        'API_VERSION = "fusion.cad/v1"\n'
+        '# __GROUP_SCRIPT__\n'
+        'if __name__ == "__main__":\n'
+        '    _output = run()\n',
+        encoding="utf-8",
+    )
+    group_path = custom_scripts / "custom.py.txt"
+    group_path.write_text('def run(): return {}\n', encoding="utf-8")
+
+    bundle = FusionCadScriptBundle(scripts_dir=custom_scripts)
+    with pytest.raises(BridgeError) as exc:
+        bundle.build("custom", {"operation": "test"})
+    assert exc.value.code == ErrorCode.INTERNAL_ERROR
+    assert "missing '__PAYLOAD_JSON__' marker" in exc.value.message
