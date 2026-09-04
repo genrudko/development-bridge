@@ -29,6 +29,7 @@ from app.fusion_cad.schemas import (
     fusion_validate_schema,
     fusion_view_schema,
 )
+from app.fusion_cad.service import FusionCadService
 
 
 def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
@@ -37,17 +38,11 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             full.get("isError", False)
             or full.get("status") in ("failed", "error")
             or "error" in full
+            or FusionCadService._is_error_payload(full)
         )
         if is_error:
-            err = full.get("error", {}) if isinstance(full.get("error"), dict) else {}
-            err_code = err.get("code") or full.get("code", "FUSION_API_ERROR")
-            err_msg = err.get("message") or full.get("message", "Fusion operation failed")
-            err_details = err.get("details") or full.get("details", full)
-            try:
-                code_enum = ErrorCode(str(err_code))
-            except ValueError:
-                code_enum = ErrorCode.FUSION_API_ERROR
-            summary = failure(request_id, BridgeError(code_enum, str(err_msg), details=err_details))
+            err_code, err_msg, err_details = FusionCadService._extract_error_info(full)
+            summary = failure(request_id, BridgeError(err_code, err_msg, details=err_details))
         else:
             summary = success(request_id, {"external_result": metadata})
         blocks: list[types.ContentBlock] = [
@@ -90,6 +85,9 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         if isinstance(reference, dict):
             full, metadata = container.desktop_nodes.external_result(reference)
             return external_result_response(full, metadata, request_context.request_id)
+        if isinstance(data, dict) and FusionCadService._is_error_payload(data):
+            err_code, err_msg, err_details = FusionCadService._extract_error_info(data)
+            return to_mcp_result(failure(request_context.request_id, BridgeError(err_code, err_msg, details=err_details)))
         return to_mcp_result(success(request_context.request_id, data))
 
     async def submit(ctx, params, request_context):
@@ -109,8 +107,11 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         op_status = container.desktop_nodes.operation_status(args["node_id"], args["operation_id"])
         full, metadata = container.desktop_nodes.operation_result(args["node_id"], args["operation_id"])
         summary = op_status.get("summary")
-        if isinstance(summary, str) and container.fusion_cad.is_domain_summary(summary):
+        if isinstance(summary, str) and getattr(container, "fusion_cad", None) and container.fusion_cad.is_domain_summary(summary):
             container.fusion_cad.decode_domain_result(full)
+        elif FusionCadService._is_error_payload(full) or op_status.get("status") in ("failed", "late_failed"):
+            err_code, err_msg, err_details = FusionCadService._extract_error_info(full)
+            raise BridgeError(err_code, err_msg, details=err_details)
         return external_result_response(full, metadata, request_context.request_id)
 
     def make_domain_handler(request_type: Any, tool_name: str):

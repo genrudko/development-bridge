@@ -189,3 +189,18 @@ def test_bundle_fails_on_duplicate_payload_json_marker(tmp_path):
         bundle.build("custom", {"operation": "test"})
     assert exc.value.code == ErrorCode.INTERNAL_ERROR
     assert "duplicate '__PAYLOAD_JSON__' markers" in exc.value.message
+
+
+@pytest.mark.parametrize("group", ["read", "inspect", "view", "mutate", "validate", "transaction"])
+def test_all_builtin_script_groups_compile_and_execute(group: str):
+    bundle = FusionCadScriptBundle()
+    script = bundle.build(group, {"operation": "test_op"})
+    compiled = compile(script, f"<fusion-cad-{group}>", "exec")
+    assert compiled is not None
+
+    scope: dict = {}
+    exec(compiled, scope)  # noqa: S102
+    assert "_output" in scope
+    assert scope["_output"]["api_version"] == "fusion.cad/v1"
+    assert scope["_output"]["status"] == "succeeded"
+    assert scope["_output"]["summary"] == f"Executed {group}:test_op"

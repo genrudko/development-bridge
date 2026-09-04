@@ -33,6 +33,7 @@ _CAD_OPERATION_CLASSIFICATION: dict[tuple[str, str], tuple[bool, bool]] = {
     ("read", "query"): (False, False),
     ("read", "capabilities"): (False, False),
     ("read", "echo"): (False, False),
+    ("read", "model_snapshot"): (False, False),
 
     # 2. fusion_inspect (all 15 inspect operations are sync, non-mutating)
     ("inspect", "describe"): (False, False),
@@ -125,6 +126,28 @@ class FusionCadService:
         )
 
     @classmethod
+    def _is_error_payload(cls, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return True
+        if payload.get("isError") is True or payload.get("status") in ("failed", "error") or "error" in payload:
+            return True
+        if isinstance(payload.get("content"), list):
+            for block in payload["content"]:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    try:
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict) and (
+                            parsed.get("isError") is True
+                            or parsed.get("status") in ("failed", "error")
+                            or "error" in parsed
+                        ):
+                            return True
+                    except (ValueError, TypeError):
+                        pass
+        return False
+
+    @classmethod
     def _extract_error_info(cls, payload: dict[str, Any]) -> tuple[ErrorCode, str, dict[str, Any]]:
         err_msg = "Native Fusion CAD execution failed"
         err_details: dict[str, Any] = {"raw": payload}
@@ -136,18 +159,21 @@ class FusionCadService:
                     text = block.get("text", "")
                     try:
                         parsed = json.loads(text)
-                        if isinstance(parsed, dict):
-                            if parsed.get("status") in ("failed", "error") or "error" in parsed or parsed.get("isError") is True:
-                                err = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
-                                code_str = err.get("code") or parsed.get("code")
-                                if code_str:
-                                    try:
-                                        err_code = ErrorCode(str(code_str))
-                                    except ValueError:
-                                        err_code = ErrorCode.FUSION_API_ERROR
-                                err_msg = err.get("message") or parsed.get("message") or err_msg
-                                err_details = err.get("details") or parsed.get("details") or parsed
-                                return err_code, str(err_msg), err_details
+                        if isinstance(parsed, dict) and (
+                            parsed.get("status") in ("failed", "error")
+                            or "error" in parsed
+                            or parsed.get("isError") is True
+                        ):
+                            err = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
+                            code_str = err.get("code") or parsed.get("code")
+                            if code_str:
+                                try:
+                                    err_code = ErrorCode(str(code_str))
+                                except ValueError:
+                                    err_code = ErrorCode.FUSION_API_ERROR
+                            err_msg = err.get("message") or parsed.get("message") or err_msg
+                            err_details = err.get("details") or parsed.get("details") or parsed
+                            return err_code, str(err_msg), err_details
                     except (ValueError, TypeError):
                         if text:
                             err_msg = text
@@ -378,24 +404,9 @@ class FusionCadService:
             self.decode_domain_result(full)
             return raw_result
 
-        # If raw_result has content blocks with JSON text:
-        if "content" in raw_result and isinstance(raw_result["content"], list):
-            cad_result = self.decode_domain_result(raw_result)
-            domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
-            if has_binary_data(domain_payload):
-                try:
-                    return self._desktop_nodes.store_external_result(node_id, domain_payload)
-                except Exception as exc:
-                    raise BridgeError(
-                        ErrorCode.INTERNAL_ERROR,
-                        f"Failed to externalize binary result payload: {exc}",
-                    ) from exc
-            return cad_result
-
-        # Direct dictionary
-        if has_binary_data(raw_result):
-            cad_result = self.decode_domain_result(raw_result)
-            domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
+        cad_result = self.decode_domain_result(raw_result)
+        domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
+        if has_binary_data(domain_payload):
             try:
                 return self._desktop_nodes.store_external_result(node_id, domain_payload)
             except Exception as exc:
@@ -404,4 +415,4 @@ class FusionCadService:
                     f"Failed to externalize binary result payload: {exc}",
                 ) from exc
 
-        return self.decode_domain_result(raw_result)
+        return cad_result

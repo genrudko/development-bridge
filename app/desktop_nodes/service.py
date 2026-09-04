@@ -164,7 +164,7 @@ def _detect_mime_from_bytes(raw: bytes, preferred_mime: str | None = None) -> st
         return "application/pdf"
     if raw.startswith(b"PK\x03\x04"):
         return preferred_mime if preferred_mime in ("model/3mf", "application/3mf") else "application/zip"
-    if raw.startswith(b"solid ") or raw.startswith(b"ISO-10303-21;"):
+    if raw.startswith((b"solid ", b"ISO-10303-21;")):
         return preferred_mime if preferred_mime else "model/stl"
     return preferred_mime or "application/octet-stream"
 
@@ -669,7 +669,26 @@ class DesktopNodeService:
             and isinstance(external.get("sha256"), str)
             else self._json_hash(result)
         )
-        result_failed = bool(result.get("isError", False))
+        result_failed = bool(
+            result.get("isError", False)
+            or result.get("status") in ("failed", "error")
+            or "error" in result
+        )
+        if not result_failed and isinstance(result.get("content"), list):
+            for block in result["content"]:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    try:
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict) and (
+                            parsed.get("isError") is True
+                            or parsed.get("status") in ("failed", "error")
+                            or "error" in parsed
+                        ):
+                            result_failed = True
+                            break
+                    except (ValueError, TypeError):
+                        pass
         external_result_id = (
             external.get("result_id")
             if isinstance(external, dict) and isinstance(external.get("result_id"), str)

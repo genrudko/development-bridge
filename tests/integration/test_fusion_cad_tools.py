@@ -909,3 +909,199 @@ def test_recovered_result_expiry_cleans_up_res_and_image_files(tmp_path):
     assert not legacy_image.exists()
     for res_path in res_files:
         assert not res_path.exists()
+
+
+@pytest.mark.parametrize("error_payload", [
+    {"isError": True, "error": {"code": "INVALID_ARGUMENT", "message": "Bad arg"}},
+    {"status": "failed", "error": {"code": "DOCUMENT_NOT_OPEN", "message": "No doc"}},
+    {"content": [{"type": "text", "text": "Traceback (most recent call last):\nRuntimeError: crashed"}], "isError": True},
+    {"content": [{"type": "text", "text": json.dumps({"status": "failed", "error": {"code": "FUSION_API_ERROR", "message": "Internal CAD error"}})}]},
+])
+@pytest.mark.asyncio
+async def test_fusion_call_fails_closed_on_native_errors(mock_container: ApplicationContainer, error_payload: dict):
+    registry = build_tool_registry(mock_container)
+    tool = registry.get("fusion_call")
+    assert tool is not None
+
+    mock_container.desktop_nodes.call = AsyncMock(return_value=error_payload)
+
+    req_ctx = RequestContext(request_id="req_call_err")
+    params = types.CallToolRequestParams(
+        name="fusion_call",
+        arguments={"node_id": "desk-1", "tool_name": "fusion_mcp_execute", "arguments": {"script": "# test"}},
+    )
+    result = await tool.handler(None, params, req_ctx)
+    assert isinstance(result, types.CallToolResult)
+    assert result.is_error is True
+    parsed = json.loads(result.content[0].text)
+    assert parsed["ok"] is False
+    assert parsed["error"] is not None
+
+
+@pytest.mark.parametrize("operation, payload", [
+    ("begin", {"node_id": "desk-1", "operation": "begin"}),
+    ("stage", {"node_id": "desk-1", "operation": "stage", "transaction_id": "tx_1234", "action": {"action_type": "show", "target": "ent_1"}}),
+    ("abort", {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_1234"}),
+])
+@pytest.mark.asyncio
+async def test_sync_transaction_mutations_timeout_uncertain_and_non_replayable(operation: str, payload: dict, tmp_path):
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "call_timeout_seconds": 0.05,
+        },
+    }))
+    registry = build_tool_registry(container)
+    tool = registry.get("fusion_transaction")
+    assert tool is not None
+
+    await container.desktop_nodes.register(
+        "desk-1",
+        [{"name": "fusion_mcp_execute"}],
+        fusion_available=True,
+    )
+
+    req_ctx = RequestContext(request_id=f"req_tx_{operation}")
+    params = types.CallToolRequestParams(name="fusion_transaction", arguments=payload)
+
+    call_task = asyncio.create_task(tool.handler(None, params, req_ctx))
+
+    claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
+    assert claimed is not None
+    op_id = claimed["operation_id"]
+
+    with pytest.raises(BridgeError) as exc_info:
+        await call_task
+    assert exc_info.value.code == ErrorCode.DESKTOP_NODE_TIMEOUT
+    assert exc_info.value.retryable is False
+
+    status_data = container.desktop_nodes.operation_status("desk-1", op_id)
+    assert status_data["status"] == "uncertain"
+    assert status_data["mutation"] is True
+
+
+@pytest.mark.asyncio
+async def test_sync_read_timeout_preserves_retryable_and_timed_out_status(tmp_path):
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "call_timeout_seconds": 0.05,
+        },
+    }))
+    registry = build_tool_registry(container)
+    tool = registry.get("fusion_read")
+    assert tool is not None
+
+    await container.desktop_nodes.register(
+        "desk-1",
+        [{"name": "fusion_mcp_execute"}],
+        fusion_available=True,
+    )
+
+    req_ctx = RequestContext(request_id="req_read_timeout")
+    params = types.CallToolRequestParams(
+        name="fusion_read",
+        arguments={"node_id": "desk-1", "operation": "entity", "ref": "ent_1234"},
+    )
+
+    call_task = asyncio.create_task(tool.handler(None, params, req_ctx))
+
+    claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
+    assert claimed is not None
+    op_id = claimed["operation_id"]
+
+    with pytest.raises(BridgeError) as exc_info:
+        await call_task
+    assert exc_info.value.code == ErrorCode.DESKTOP_NODE_TIMEOUT
+    assert exc_info.value.retryable is True
+
+    status_data = container.desktop_nodes.operation_status("desk-1", op_id)
+    assert status_data["status"] == "timed_out"
+    assert status_data["mutation"] is False
+
+
+def test_bridge_restart_recovers_claimed_mutations_as_uncertain(tmp_path):
+    journal_file = str(tmp_path / "journal.jsonl")
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": journal_file,
+        },
+    })
+    c1 = build_container(settings)
+    # Manually write an incomplete claimed mutating operation into journal
+    c1.desktop_nodes._journal.create({
+        "operation_id": "op_tx_stage_1",
+        "command_id": "cmd_tx_1",
+        "node_id": "desk-1",
+        "tool_name": "fusion_mcp_execute",
+        "arguments_sha256": "abc",
+        "status": "claimed",
+        "mutation": True,
+        "summary": "transaction:stage",
+        "created_at": 1000.0,
+        "claimed_at": 1001.0,
+        "completed_at": None,
+        "result_sha256": None,
+    })
+    c1.desktop_nodes._journal.create({
+        "operation_id": "op_read_ent_1",
+        "command_id": "cmd_read_1",
+        "node_id": "desk-1",
+        "tool_name": "fusion_mcp_execute",
+        "arguments_sha256": "def",
+        "status": "claimed",
+        "mutation": False,
+        "summary": "read:entity",
+        "created_at": 1000.0,
+        "claimed_at": 1001.0,
+        "completed_at": None,
+        "result_sha256": None,
+    })
+
+    # Restart bridge
+    c2 = build_container(settings)
+    st_mut = c2.desktop_nodes.operation_status("desk-1", "op_tx_stage_1")
+    assert st_mut["status"] == "uncertain"
+    assert st_mut["mutation"] is True
+
+    st_read = c2.desktop_nodes.operation_status("desk-1", "op_read_ent_1")
+    assert st_read["status"] == "interrupted"
+    assert st_read["mutation"] is False
+
+
+@pytest.mark.asyncio
+async def test_externalization_storage_failure_fails_closed(mock_container: ApplicationContainer):
+    registry = build_tool_registry(mock_container)
+    tool = registry.get("fusion_read")
+    assert tool is not None
+
+    mock_container.desktop_nodes.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Read with binary",
+                "data": {"raw_blob": "data:application/octet-stream;base64,AQIDBAU="},
+            }),
+        }],
+        "isError": False,
+    })
+    # Simulate disk / storage failure during store_external_result
+    mock_container.desktop_nodes.store_external_result = MagicMock(side_effect=OSError("Disk full"))
+
+    req_ctx = RequestContext(request_id="req_ext_fail")
+    params = types.CallToolRequestParams(
+        name="fusion_read",
+        arguments={"node_id": "desk-1", "operation": "entity", "ref": "ent_1234"},
+    )
+    with pytest.raises(BridgeError) as exc_info:
+        await tool.handler(None, params, req_ctx)
+    assert exc_info.value.code == ErrorCode.INTERNAL_ERROR
+    assert "Failed to externalize binary result payload" in exc_info.value.message
