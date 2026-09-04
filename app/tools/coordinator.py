@@ -143,6 +143,32 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
     return dict(binding)
 
 
+def _resolve_mount_destination(container: ApplicationContainer, ctx, arguments: dict) -> dict:
+    """Resolve the mount-only pending-generation exception without weakening wakes."""
+    route_id = arguments.get("route_id")
+    channel_id = arguments.get("channel_id")
+    if route_id is not None or channel_id is None:
+        return _resolve_destination(container, ctx, arguments)
+
+    channel = container.coordinator.validate_channel(channel_id)
+    route = container.route_registry.mount_route_for_channel(channel)
+    if route is None:
+        return _bind_session(
+            container, ctx, {"channel_id": channel, "route_state": "explicit"}
+        )
+    if route.get("route_state") == "active" and not container.route_registry.is_bound(route):
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            f"Route '{route['route_id']}' is unbound; bind a destination before mounting",
+            details={"route_id": route["route_id"], "error_code": "ROUTE_UNBOUND"},
+        )
+    return _bind_session(
+        container,
+        ctx,
+        _route_binding(container, route, route_state=str(route["route_state"])),
+    )
+
+
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
 
@@ -185,7 +211,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             data = dict(ack)
             data["state"] = "acknowledged" if ack.get("acknowledged") else "not_found"
             return to_mcp_result(success(request_context.request_id, data))
-        binding = _resolve_destination(container, ctx, arguments)
+        binding = _resolve_mount_destination(container, ctx, arguments)
         channel_id = str(binding["channel_id"])
         if binding.get("route_id") is not None and binding.get("route_state") == "active":
             container.route_registry.request(str(binding["route_id"]))
@@ -307,11 +333,15 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         route_id = container.route_registry.validate_route_id(arguments["route_id"])
         route = container.route_registry.resolve(route_id)
         if route is None:
-            from app.api.errors import BridgeError, ErrorCode
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        if not container.route_registry.is_bound(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route_id}' is unbound; rollover cannot be prepared",
+                details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
+            )
         coordinator_status = await container.coordinator.status(route["channel_id"])
         if coordinator_status.get("state") != "idle":
-            from app.api.errors import BridgeError, ErrorCode
             raise BridgeError(
                 ErrorCode.POLICY_VIOLATION,
                 f"route coordinator is not idle: {coordinator_status.get('state')}",
@@ -354,17 +384,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         return to_mcp_result(success(request_context.request_id, data))
 
     async def route_list(ctx, params, request_context):
-        routes = [
-            {
-                "route_id": item["route_id"],
-                "title": item.get("title") or item["route_id"],
-                "binding_state": "bound" if container.route_registry.is_bound(item) else "unbound",
-                "channel_id": item.get("channel_id"),
-                "generation": int(item.get("generation", 0)),
-                "default": bool(item.get("default", False)),
-            }
-            for item in container.route_registry.list_routes()
-        ]
+        routes = container.route_registry.list_safe_routes()
         return to_mcp_result(success(request_context.request_id, {"routes": routes}))
 
     async def route_control_status(ctx, params, request_context):

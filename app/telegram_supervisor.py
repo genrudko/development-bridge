@@ -165,6 +165,12 @@ class TelegramSupervisorService:
             "coordinator": await self.coordinator.status((self.route_registry.resolve() or {}).get("channel_id", self.channel_id)),
         }
 
+    async def model_status(self) -> dict:
+        """Return supervisor state with only safe logical route metadata."""
+        data = await self.status()
+        data["routes"] = self.route_registry.list_safe_routes()
+        return data
+
     @staticmethod
     def _message_topic_id(message) -> int | None:
         reply_to = getattr(message, "reply_to", None)

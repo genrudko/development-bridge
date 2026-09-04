@@ -210,6 +210,34 @@ async def test_external_trigger_rejects_unbound_route_channel(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_external_trigger_rejects_registered_pending_route_channel(tmp_path):
+    settings = load_settings(environ={
+        "DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN": "secret",
+        "DEVELOPMENT_BRIDGE_ROUTE_REGISTRY_PATH": str(tmp_path / "routes.json"),
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    pending = container.route_registry.prepare_rollover("bridge")
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.post(
+            "/mcp/x/coordinator/trigger",
+            headers={"Authorization": "Bearer secret"},
+            json={"channel_id": pending["channel_id"], "message": "premature wake"},
+        )
+
+    assert response.status_code == 409
+    assert (await container.coordinator.status(pending["channel_id"]))["state"] == "idle"
+
+
+@pytest.mark.asyncio
 async def test_external_trigger_arms_route_channel_under_route_lock(tmp_path):
     settings = load_settings(environ={
         "DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN": "secret",
@@ -255,6 +283,21 @@ async def test_rollover_control_keeps_active_route_until_commit(tmp_path):
         "telegram-ad5x-g5",
     )
     prepared = container.route_registry.prepare_rollover("ad5x")
+    route_lock = container.route_registry.route_lock("ad5x")
+    lock_observations = []
+    original_candidate = container.route_registry.record_rollover_candidate
+    original_commit = container.route_registry.commit_rollover
+
+    def observe_candidate(*args, **kwargs):
+        lock_observations.append(("candidate", route_lock.locked()))
+        return original_candidate(*args, **kwargs)
+
+    def observe_commit(*args, **kwargs):
+        lock_observations.append(("commit", route_lock.locked()))
+        return original_commit(*args, **kwargs)
+
+    container.route_registry.record_rollover_candidate = observe_candidate
+    container.route_registry.commit_rollover = observe_commit
     app = create_streamable_http_app(create_server(container), settings, container)
     async with app.router.lifespan_context(app):
         async with httpx2.AsyncClient(
@@ -277,6 +320,7 @@ async def test_rollover_control_keeps_active_route_until_commit(tmp_path):
             assert committed.status_code == 200
             assert committed.json()["conversation_id"] == "conv-b"
             assert container.route_registry.resolve("ad5x")["conversation_id"] == "conv-b"
+    assert lock_observations == [("candidate", True), ("commit", True)]
 
 @pytest.mark.asyncio
 async def test_compact_dashboard_live_state_resource(tmp_path):
@@ -444,6 +488,41 @@ async def test_durable_route_waiter_follows_current_generation_at_delivery(tmp_p
     await handler({"route_id": "ad5x", "message": "done"}, (job,), "all_terminal")
     assert "telegram-ad5x-g0" not in container.coordinator._pending
     assert "telegram-ad5x-g1" not in container.coordinator._pending
+    assert container.coordinator._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_durable_legacy_waiter_rejects_registered_pending_route_channel(tmp_path):
+    from app.jobs.models import JobRecord, JobStatus
+
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "ad5x",
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000041",
+        "telegram-ad5x-g0",
+        "AD5X",
+    )
+    pending = container.route_registry.prepare_rollover("ad5x")
+    job = JobRecord(
+        job_id="job_00000000000000000000000000000002",
+        project_id="development-bridge",
+        repository_id="development-bridge",
+        task_id="test",
+        request_id="req_test",
+        status=JobStatus.SUCCEEDED,
+        created_at="2026-08-30T00:00:00+00:00",
+    )
+    handler = container.jobs._durable_terminal_handlers["coordinator"]
+
+    await handler(
+        {"channel_id": pending["channel_id"], "message": "done"},
+        (job,),
+        "all_terminal",
+    )
+
     assert container.coordinator._pending == {}
 
 

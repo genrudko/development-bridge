@@ -114,6 +114,32 @@ async def test_supervisor_rejects_unbound_default_route(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_supervisor_rejects_registered_pending_route_channel(tmp_path):
+    supervisor = make_supervisor(tmp_path)
+    supervisor.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    pending = supervisor.route_registry.prepare_rollover("bridge")
+    raw = supervisor.route_registry.snapshot()
+    raw["default_route"] = None
+    supervisor.route_registry._save(raw)
+    supervisor.channel_id = pending["channel_id"]
+    notices = []
+
+    async def notice(text):
+        notices.append(text)
+        return True
+
+    supervisor._notice = notice
+    await supervisor._on_message(forum_event("must not wake pending", 106, 56))
+
+    assert supervisor.coordinator.armed == []
+    assert notices == ["предыдущая команда ещё не забрана ChatGPT; это сообщение не передано."]
+
+
+@pytest.mark.asyncio
 async def test_supervisor_arms_bound_route_under_route_lock(tmp_path):
     supervisor = make_supervisor(tmp_path)
     supervisor.route_registry.bootstrap(

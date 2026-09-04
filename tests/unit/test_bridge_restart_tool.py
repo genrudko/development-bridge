@@ -28,7 +28,11 @@ class FakeCoordinator:
 
 
 class FakeRestart:
+    def __init__(self):
+        self.calls = 0
+
     async def schedule(self, *, checkpoint=None):
+        self.calls += 1
         if checkpoint is not None:
             await checkpoint()
         return {"restart_scheduled": True}
@@ -119,6 +123,35 @@ async def test_restart_rejects_explicit_unbound_route(tmp_path):
             SimpleNamespace(request_id="request-unbound"),
         )
     assert coordinator.armed == []
+
+
+@pytest.mark.asyncio
+async def test_restart_rejects_registered_pending_route_channel(tmp_path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "ad5x",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-ad5x-g0",
+    )
+    pending = registry.prepare_rollover("ad5x")
+    coordinator = FakeCoordinator()
+    coordinator.validate_channel = lambda value: value
+    restart = FakeRestart()
+    container = SimpleNamespace(
+        route_registry=registry,
+        coordinator=coordinator,
+        bridge_restart=restart,
+    )
+    tool = bridge_restart_tools(container)[0]
+
+    with pytest.raises(BridgeError, match="pending route-generation"):
+        await tool.handler(
+            None,
+            SimpleNamespace(arguments={"channel_id": pending["channel_id"]}),
+            SimpleNamespace(request_id="request-pending"),
+        )
+    assert coordinator.armed == []
+    assert restart.calls == 0
 
 
 @pytest.mark.asyncio

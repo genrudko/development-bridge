@@ -1352,7 +1352,7 @@ class BrowserHost:
             ws.close()
 
     def create_project_successor(
-        self, source_url: str, target_channel: str, token: str, *, timeout: float = 120
+        self, source_url: str, target_channel: str, *, timeout: float = 120
     ) -> tuple[dict, str]:
         source = canonical_chat_url(source_url)
         project_prefix = source.rsplit("/c/", 1)[0]
@@ -1382,7 +1382,7 @@ class BrowserHost:
             preflight_message = (
                 "Development Bridge fresh-chat rollover preflight. Do not continue project work. "
                 f"Call coordinator_x_mount with channel_id={target_channel}. After that tool succeeds, "
-                f"reply exactly: ROLLOVER_READY {token}. Do not do other work."
+                "stop without doing other work."
             )
             self.submit_native_prompt(page, preflight_message)
 
@@ -1419,7 +1419,9 @@ class BrowserHost:
             if not validation.get("ok"):
                 current = validation.get("current_url") or "unknown"
                 raise RuntimeError(f"fresh successor failed UI hydration: {current}")
-            preflight = self.wait_for_rollover_preflight(page, token, timeout=max(5, min(75, timeout)))
+            preflight = self.wait_for_rollover_preflight(
+                page, target_channel, timeout=max(5, min(75, timeout))
+            )
             if not preflight.get("ready"):
                 raise RuntimeError("fresh successor did not complete native rollover preflight")
             return page, candidate_url
@@ -1596,7 +1598,15 @@ class BrowserHost:
             and (page_id is None or str(item.get("parentId") or "") == page_id)
         ]
 
-    def coordinator_app_control(self, page: dict, action: str, **payload) -> dict:
+    def coordinator_app_control(
+        self,
+        page: dict,
+        action: str,
+        *,
+        expected_channel_id: str | None = None,
+        expected_observer_only: bool | None = None,
+        **payload,
+    ) -> dict:
         nonce = token_urlsafe(12)
         message = {
             "type": "development-bridge/control-v1",
@@ -1675,6 +1685,16 @@ class BrowserHost:
                                 and value.get("observer_only") is not True
                             ):
                                 break
+                            if (
+                                expected_channel_id is not None
+                                and value.get("channel_id") != expected_channel_id
+                            ):
+                                break
+                            if (
+                                expected_observer_only is not None
+                                and value.get("observer_only") is not expected_observer_only
+                            ):
+                                break
                             return value
                         break
             finally:
@@ -1714,36 +1734,32 @@ class BrowserHost:
             time.sleep(1)
         return False, detail
 
-    def wait_for_rollover_preflight(self, page: dict, token: str, timeout: float = 75) -> dict:
-        marker = f"ROLLOVER_READY {token}"
-        encoded_marker = json.dumps(marker, ensure_ascii=False)
-        expression = f'''(()=>{{
-          const marker={encoded_marker};
-          const generating=[...document.querySelectorAll('button')].some(b=>{{
-            const text=((b.getAttribute('aria-label')||'')+' '+(b.innerText||'')).toLowerCase();
-            return text.includes('stop generating')||text.includes('stop streaming')||text.includes('остановить');
-          }});
-          let matched=false, iframeCount=0;
-          for(const turn of document.querySelectorAll('[data-testid^="conversation-turn-"]')){{
-            const text=(turn.innerText||turn.textContent||'');
-            if(!text.includes(marker))continue;
-            const assistant=(turn.querySelector('[data-message-author-role="assistant"]')?.innerText||'').trim();
-            const frames=[...turn.querySelectorAll('iframe')].filter(f=>
-              f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html')
-            );
-            iframeCount=Math.max(iframeCount,frames.length);
-            if(assistant&&frames.length)matched=true;
-          }}
-          return {{ready:matched&&!generating,generating,iframe_count:iframeCount}};
-        }})()'''
+    def wait_for_rollover_preflight(
+        self, page: dict, target_channel: str, timeout: float = 75
+    ) -> dict:
         deadline = time.monotonic() + timeout
-        last = {"ready": False, "iframe_count": 0}
+        last = {"ready": False, "error": "native_mount_timeout"}
         while time.monotonic() < deadline:
-            value = self.runtime_evaluate(page, expression)
+            try:
+                value = self.coordinator_app_control(
+                    page,
+                    "ping",
+                    expected_channel_id=target_channel,
+                    expected_observer_only=False,
+                )
+            except TRANSIENT_CDP_ERRORS as exc:
+                value = {"ok": False, "error": str(exc)}
             if isinstance(value, dict):
-                last = value
-                if value.get("ready") is True:
-                    return value
+                last = {
+                    **value,
+                    "ready": bool(
+                        value.get("ok")
+                        and value.get("channel_id") == target_channel
+                        and value.get("observer_only") is False
+                    ),
+                }
+                if last["ready"]:
+                    return last
             time.sleep(1)
         return last
 
@@ -1820,7 +1836,7 @@ class BrowserHost:
                 # This is intentional: rollover must still work when the old long chat
                 # can no longer hydrate its historical coordinator card.
                 candidate_page, candidate_url = self.create_project_successor(
-                    source_url, target_channel, rollover["token"]
+                    source_url, target_channel
                 )
                 rollover = self.rollover_control("candidate", rollover, url=candidate_url)
                 state = "candidate"
@@ -1869,14 +1885,14 @@ class BrowserHost:
                 raise RuntimeError(f"successor X polling was not observed: {poll_detail}")
 
             preflight = self.wait_for_rollover_preflight(
-                candidate_page, rollover["token"], timeout=2
+                candidate_page, target_channel, timeout=2
             )
             if not preflight.get("ready"):
-                preflight_operation = f"{rollover['token']}-preflight"
+                preflight_operation = f"rollover-preflight-{target_channel}"
                 preflight_message = (
-                    f"Development Bridge automatic rollover preflight. Do not continue project work. "
+                    "Development Bridge automatic rollover preflight. Do not continue project work. "
                     f"Call coordinator_x_mount with channel_id={target_channel}. After that tool succeeds, "
-                    f"reply exactly: ROLLOVER_READY {rollover['token']}"
+                    "stop without doing other work."
                 )
                 preflight_send = self.coordinator_app_control(
                     candidate_page,
@@ -1890,7 +1906,7 @@ class BrowserHost:
                         f"successor preflight delivery failed: {preflight_send.get('error', 'unknown')}"
                     )
                 preflight = self.wait_for_rollover_preflight(
-                    candidate_page, rollover["token"], timeout=75
+                    candidate_page, target_channel, timeout=75
                 )
             if not preflight.get("ready"):
                 raise RuntimeError(

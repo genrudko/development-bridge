@@ -1,6 +1,7 @@
 
 
 import asyncio
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from app.api.errors import BridgeError, ErrorCode
 from app.container import build_container
 from app.coordinator.routes import RouteRegistry
 from app.settings import BridgeSettings
+from app.telegram_supervisor import TelegramSupervisorService
 from app.tools.coordinator import COORDINATOR_UI_URI
 from app.tools.registry import build_tool_registry
 
@@ -156,6 +158,180 @@ def test_coordinator_route_rollover_prepare_hides_physical_identity_and_token(tm
             pending["token"],
         ),
     )
+
+
+def test_coordinator_route_rollover_prepare_rejects_unbound_route_before_prepare(
+    tmp_path: Path,
+):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-sensitive-project/c/conv-unbound",
+        "telegram-bridge-g0",
+    )
+    container.route_registry.unbind("bridge", expected_generation=0)
+    called = []
+    original_prepare = container.route_registry.prepare_rollover
+
+    def prepare(route_id):
+        called.append(route_id)
+        return original_prepare(route_id)
+
+    container.route_registry.prepare_rollover = prepare
+    tool = build_tool_registry(container).get("coordinator_route_rollover_prepare")
+
+    with pytest.raises(BridgeError) as raised:
+        asyncio.run(tool.handler(
+            None,
+            SimpleNamespace(arguments={"route_id": "bridge"}),
+            SimpleNamespace(request_id="req-rollover-unbound"),
+        ))
+
+    assert raised.value.code == ErrorCode.POLICY_VIOLATION
+    assert raised.value.details["error_code"] == "ROUTE_UNBOUND"
+    assert called == []
+
+
+def test_telegram_supervisor_status_projects_only_safe_logical_routes(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-sensitive-project/c/conv-sensitive-supervisor",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    raw = container.route_registry.snapshot()
+    raw["routes"]["bridge"]["control_token"] = "private-route-control-token"
+    container.route_registry._save(raw)
+    supervisor = TelegramSupervisorService(
+        enabled=False,
+        api_id=None,
+        api_hash=None,
+        session_path=None,
+        chat_id=None,
+        topic_id=None,
+        channel_id="telegram-supervisor",
+        coordinator=container.coordinator,
+        route_registry=container.route_registry,
+    )
+    container = dataclasses.replace(container, telegram_supervisor=supervisor)
+    tool = build_tool_registry(container).get("telegram_supervisor_status")
+
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={}),
+        SimpleNamespace(request_id="req-supervisor-safe"),
+    ))
+    data = json.loads(result.content[0].text)["data"]
+    route = data["routes"][0]
+
+    assert route == {
+        "route_id": "bridge",
+        "title": "Development Bridge Infra",
+        "binding_state": "bound",
+        "channel_id": "telegram-bridge-g0",
+        "generation": 0,
+        "default": True,
+    }
+    _assert_model_surfaces_exclude(
+        result,
+        (
+            "https://chatgpt.com",
+            "g-p-sensitive-project",
+            "conv-sensitive-supervisor",
+            "private-route-control-token",
+        ),
+    )
+
+
+def test_coordinator_x_mount_accepts_only_exact_registered_pending_channel(
+    tmp_path: Path,
+):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    pending = container.route_registry.prepare_rollover("bridge")
+    tool = build_tool_registry(container).get("coordinator_x_mount")
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(_connection=SimpleNamespace(session_id="pending-mount"))
+    )
+
+    result = asyncio.run(tool.handler(
+        ctx,
+        SimpleNamespace(arguments={"channel_id": pending["channel_id"]}),
+        SimpleNamespace(request_id="req-pending-mount"),
+    ))
+
+    assert result.structured_content["channel_id"] == "telegram-bridge-g1"
+    assert result.structured_content["route_id"] == "bridge"
+    assert result.structured_content["generation"] == 1
+    assert result.structured_content["route_state"] == "pending"
+    binding = container.coordinator.session_binding("pending-mount")
+    assert binding["channel_id"] == "telegram-bridge-g1"
+    assert binding["route_state"] == "pending"
+
+    with pytest.raises(BridgeError, match="pending route-generation"):
+        container.route_registry.wake_route_for_channel(pending["channel_id"])
+
+    with pytest.raises(BridgeError, match="unregistered route-generation"):
+        asyncio.run(tool.handler(
+            ctx,
+            SimpleNamespace(arguments={"channel_id": "telegram-bridge-g2"}),
+            SimpleNamespace(request_id="req-arbitrary-future-mount"),
+        ))
+
+
+def test_coordinator_pending_mount_cannot_wake_but_legacy_explicit_channel_can(
+    tmp_path: Path,
+):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    pending = container.route_registry.prepare_rollover("bridge")
+    registry = build_tool_registry(container)
+    continue_tool = registry.get("coordinator_continue")
+
+    with pytest.raises(BridgeError, match="pending route-generation"):
+        asyncio.run(continue_tool.handler(
+            None,
+            SimpleNamespace(arguments={
+                "channel_id": pending["channel_id"],
+                "message": "must not wake pending successor",
+                "delay_seconds": 0,
+            }),
+            SimpleNamespace(request_id="req-pending-wake"),
+        ))
+
+    legacy = asyncio.run(continue_tool.handler(
+        None,
+        SimpleNamespace(arguments={
+            "channel_id": "legacy-supervisor",
+            "message": "legacy wake remains supported",
+            "delay_seconds": 0,
+        }),
+        SimpleNamespace(request_id="req-legacy-wake"),
+    ))
+    legacy_data = json.loads(legacy.content[0].text)["data"]
+    assert legacy_data["channel_id"] == "legacy-supervisor"
+    assert legacy_data["state"] == "pending"
 
 
 def test_coordinator_route_takeover_hides_physical_route_identity(tmp_path: Path):

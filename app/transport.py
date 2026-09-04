@@ -416,27 +416,28 @@ def create_streamable_http_app(
             body = await request.json()
             if not isinstance(body, dict):
                 raise TypeError
-            route_id = body["route_id"]
+            route_id = container.route_registry.validate_route_id(body["route_id"])
             token = body["token"]
             action = request.path_params.get("action", "")
-            if action == "candidate":
-                result = container.route_registry.record_rollover_candidate(
-                    route_id, token, body["url"]
-                )
-            elif action == "commit":
-                result = container.route_registry.commit_rollover(route_id, token)
-            elif action == "complete":
-                result = container.route_registry.complete_rollover(route_id, token)
-            elif action == "abort":
-                result = container.route_registry.abort_rollover(
-                    route_id, token, body.get("reason")
-                )
-            else:
-                return JSONResponse(
-                    {"error": "Unknown rollover action"},
-                    status_code=404,
-                    headers=coordinator_ui_headers,
-                )
+            async with container.route_registry.route_lock(route_id):
+                if action == "candidate":
+                    result = container.route_registry.record_rollover_candidate(
+                        route_id, token, body["url"]
+                    )
+                elif action == "commit":
+                    result = container.route_registry.commit_rollover(route_id, token)
+                elif action == "complete":
+                    result = container.route_registry.complete_rollover(route_id, token)
+                elif action == "abort":
+                    result = container.route_registry.abort_rollover(
+                        route_id, token, body.get("reason")
+                    )
+                else:
+                    return JSONResponse(
+                        {"error": "Unknown rollover action"},
+                        status_code=404,
+                        headers=coordinator_ui_headers,
+                    )
             return JSONResponse(result, headers=coordinator_ui_headers)
         except BridgeError as error:
             status = 409 if error.code is ErrorCode.POLICY_VIOLATION else 400

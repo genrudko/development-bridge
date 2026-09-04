@@ -338,6 +338,46 @@ def test_coordinator_wake_on_jobs_rejects_unregistered_future_route_channel(tmp_
         ))
     assert registrations == []
 
+
+def test_coordinator_wake_on_jobs_rejects_registered_pending_route_channel(tmp_path):
+    repository_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate({
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "projects": [{"id": "project", "name": "Project", "repositories": [{
+            "id": "repository", "path": repository_path,
+            "capabilities": {"execute": True},
+        }]}],
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    pending = container.route_registry.prepare_rollover("bridge")
+    registrations = []
+
+    async def register(*args, **kwargs):
+        registrations.append((args, kwargs))
+        return {"state": "waiting", "durable": True}
+
+    container.jobs.wake_on_jobs_durable = register
+    tool = build_tool_registry(container).get("coordinator_wake_on_jobs")
+
+    with pytest.raises(BridgeError, match="pending route-generation"):
+        asyncio.run(tool.handler(
+            None,
+            SimpleNamespace(arguments={
+                "project_id": "project",
+                "repository_id": "repository",
+                "job_ids": ["job_00000000000000000000000000000001"],
+                "channel_id": pending["channel_id"],
+            }),
+            SimpleNamespace(request_id="req-pending-waiter"),
+        ))
+    assert registrations == []
+
 def test_coordinator_exec_and_wake_cancels_job_if_waiter_registration_fails(tmp_path):
     repository_path = create_git_repository(tmp_path, "repository")
     settings = BridgeSettings.model_validate({

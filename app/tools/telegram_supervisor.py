@@ -21,7 +21,7 @@ def telegram_supervisor_tools(
 
     async def status(ctx, params, request_context):
         return to_mcp_result(
-            success(request_context.request_id, await service().status())
+            success(request_context.request_id, await service().model_status())
         )
 
     async def send(ctx, params, request_context):

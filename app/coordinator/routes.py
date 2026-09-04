@@ -147,6 +147,20 @@ class RouteRegistry:
             items.append(item)
         return items
 
+    def list_safe_routes(self) -> list[dict]:
+        """Project route records onto fields safe for model-visible status."""
+        return [
+            {
+                "route_id": item["route_id"],
+                "title": item.get("title") or item["route_id"],
+                "binding_state": "bound" if self.is_bound(item) else "unbound",
+                "channel_id": item.get("channel_id"),
+                "generation": int(item.get("generation", 0)),
+                "default": bool(item.get("default", False)),
+            }
+            for item in self.list_routes()
+        ]
+
     def list_discovered_chats(self, limit: int = 20) -> list[dict]:
         path = self.path.parent / "chat-registry.json"
         try:
@@ -202,6 +216,19 @@ class RouteRegistry:
             raise BridgeError(
                 ErrorCode.POLICY_VIOLATION,
                 "An unregistered route-generation channel cannot be targeted",
+            )
+        return None
+
+    def mount_route_for_channel(self, channel_id: str) -> dict | None:
+        """Resolve an exact registered active or pending channel for MCP App mounting."""
+        channel = str(channel_id).strip()
+        route = self.route_for_channel(channel)
+        if route is not None:
+            return route
+        if _ROUTE_CHANNEL_RE.fullmatch(channel):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "An unregistered route-generation channel cannot be mounted",
             )
         return None
 
@@ -466,15 +493,35 @@ class RouteRegistry:
         if current_gen != int(expected_generation):
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "route generation changed before unbind")
 
+        now = datetime.now(UTC).isoformat()
+        unbound_generation = current_gen
+        unbound_channel = route.get("channel_id") or f"telegram-{route_id}-g{current_gen}"
+        rollovers = data.get("rollovers")
+        pending = rollovers.get(route_id) if isinstance(rollovers, dict) else None
+        if isinstance(pending, dict):
+            try:
+                reserved_generation = int(pending.get("target_generation", current_gen + 1))
+            except (TypeError, ValueError):
+                reserved_generation = current_gen + 1
+            unbound_generation = max(current_gen + 1, reserved_generation)
+            unbound_channel = f"telegram-{route_id}-g{unbound_generation}"
+            data.setdefault("last_rollover", {})[route_id] = {
+                **pending,
+                "state": "aborted",
+                "reason": "route unbound",
+                "aborted_at": now,
+            }
+            del rollovers[route_id]
+
         unbound_route = {
             "title": route.get("title") or route_id,
-            "channel_id": route.get("channel_id") or f"telegram-{route_id}-g{current_gen}",
-            "generation": current_gen,
+            "channel_id": unbound_channel,
+            "generation": unbound_generation,
             "binding_state": "unbound",
-            "updated_at": datetime.now(UTC).isoformat(),
+            "updated_at": now,
         }
         data["routes"][route_id] = unbound_route
-        data["requested_at"] = datetime.now(UTC).isoformat()
+        data["requested_at"] = now
         if "current_binds" in data and route_id in data["current_binds"]:
             del data["current_binds"][route_id]
         self._save(data)
@@ -492,6 +539,12 @@ class RouteRegistry:
         route = data["routes"].get(route_id)
         if route is None:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        if not self.is_bound(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route_id}' is unbound; rollover cannot be prepared",
+                details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
+            )
         rollovers = data.setdefault("rollovers", {})
         existing = rollovers.get(route_id)
         if isinstance(existing, dict):

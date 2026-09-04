@@ -94,6 +94,33 @@ def test_route_registry_rollover_rejects_wrong_project_and_can_abort(tmp_path: P
     assert registry.pending_rollover("ad5x") is None
 
 
+def test_unbind_invalidates_pending_rollover_and_consumes_reserved_generation(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    active = registry.bootstrap(
+        "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-a",
+        "telegram-ad5x-g0",
+    )
+    prepared = registry.prepare_rollover("ad5x")
+    registry.record_rollover_candidate(
+        "ad5x", prepared["token"],
+        "https://chatgpt.com/g/g-p-project/c/conv-b",
+    )
+
+    unbound = registry.unbind("ad5x", expected_generation=active["generation"])
+
+    assert registry.pending_rollover("ad5x") is None
+    assert unbound["generation"] == prepared["target_generation"]
+    assert unbound["channel_id"] == prepared["channel_id"]
+    with pytest.raises(BridgeError, match="invalid or stale"):
+        registry.commit_rollover("ad5x", prepared["token"])
+
+    rebound = registry.takeover(
+        "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-c"
+    )
+    assert rebound["generation"] == prepared["target_generation"] + 1
+    assert rebound["channel_id"] == "telegram-ad5x-g2"
+
+
 def test_manual_takeover_is_rejected_while_rollover_pending(tmp_path: Path):
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
