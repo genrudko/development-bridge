@@ -276,6 +276,17 @@ class RouteControlTraceStore:
                 continue
         return latest_diag
 
+    def get_return_target(self, diagnostic_id: str) -> str | None:
+        raw = self._load_raw(diagnostic_id)
+        if raw is None:
+            return None
+        for stage in raw.get("stages", []):
+            if stage.get("name") == "return_received" and stage.get("status") == "ok":
+                details = stage.get("details")
+                if isinstance(details, dict) and details.get("raw_redirect_url"):
+                    return str(details["raw_redirect_url"])
+        return None
+
     def purge_expired(self) -> int:
         if not self.state_dir.exists():
             return 0

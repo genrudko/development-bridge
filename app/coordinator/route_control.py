@@ -253,3 +253,6 @@ class RouteControlService:
             "target_probe": "not_checked",
             "last_operation": last_op,
         }
+
+    def resolve_return_target(self, diagnostic_id: str) -> str | None:
+        return self.trace_store.get_return_target(diagnostic_id)

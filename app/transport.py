@@ -21,8 +21,13 @@ from mcp.server.auth.settings import (
 )
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Route, request_response
 
 from app.api.context import new_request_context
@@ -34,8 +39,14 @@ from app.auth import (
     approval_route,
 )
 from app.container import ApplicationContainer
+from app.coordinator.chatgpt_target import parse_chatgpt_target
+from app.coordinator.route_control_html import (
+    ERROR_CODE_STAGE_MAP,
+    render_route_control_page,
+)
 from app.ops.routes import create_operator_dashboard_routes
 from app.settings import BridgeSettings
+
 
 
 def create_streamable_http_app(
@@ -488,11 +499,231 @@ def create_streamable_http_app(
         "/github-actions-artifacts/exports/{token}"
     )
     coordinator_base_path = settings.server.endpoint.rstrip("/") + "/x/coordinator"
+    route_control_base_path = settings.server.endpoint.rstrip("/") + "/x/route-control"
+
+    route_control_headers = {
+        "Cache-Control": "private, no-store",
+        "Content-Security-Policy": (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self'; "
+            "img-src 'self' data:; "
+            "form-action 'self'; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "frame-ancestors 'none'"
+        ),
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
+
+    route_control_redirect_headers = {
+        "Cache-Control": "private, no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+    }
+
+    async def route_control_bind_landing(request: Request):
+        operation_id = request.path_params.get("operation_id", "")
+        redirect_url = request.query_params.get("redirectUrl") or request.query_params.get("redirect_url")
+        service = container.route_control
+        if service is None:
+            return HTMLResponse("Route control is not configured", status_code=500)
+
+        diag_id = (
+            container.route_control_trace_store.find_by_operation_id(operation_id)
+            if container.route_control_trace_store
+            else None
+        )
+
+        try:
+            res = service.accept_bind_return(operation_id, redirect_url)
+            route_id = res["route_id"]
+            diag_id = res.get("diagnostic_id") or diag_id
+            route = container.route_registry.resolve(route_id) or {}
+            generation = int(route.get("generation", 0))
+
+            commit_url = f"{route_control_base_path}/bind/{operation_id}/commit"
+            return_base_url = f"{route_control_base_path}/return"
+
+            rendered = render_route_control_page(
+                mode="pending",
+                route_id=route_id,
+                generation=generation,
+                diagnostic_id=diag_id,
+                commit_url=commit_url,
+                return_base_url=return_base_url,
+            )
+            return HTMLResponse(rendered, status_code=200, headers=route_control_headers)
+
+        except BridgeError as error:
+            diag_id = (
+                container.route_control_trace_store.find_by_operation_id(operation_id)
+                if container.route_control_trace_store
+                else None
+            )
+            trace = (
+                container.route_control_trace_store.sanitized(diag_id)
+                if (container.route_control_trace_store and diag_id)
+                else None
+            )
+
+            if trace and trace.get("status") == "ok":
+                route_id = trace.get("route_id") or ""
+                route = container.route_registry.resolve(route_id) or {}
+                generation = int(route.get("generation", 0))
+                return_url = f"{route_control_base_path}/return/{diag_id}" if diag_id else None
+                rendered = render_route_control_page(
+                    mode="success",
+                    route_id=route_id,
+                    generation=generation,
+                    diagnostic_id=diag_id,
+                    return_url=return_url,
+                )
+                return HTMLResponse(rendered, status_code=200, headers=route_control_headers)
+
+            error_code = (trace.get("error_code") if trace else None) or error.code.value
+            stage_name = ERROR_CODE_STAGE_MAP.get(error_code, "Conversation identification")
+
+            return_url = None
+            if diag_id and container.route_control_trace_store:
+                raw_target = container.route_control_trace_store.get_return_target(diag_id)
+                if raw_target:
+                    return_url = f"{route_control_base_path}/return/{diag_id}"
+
+            rendered = render_route_control_page(
+                mode="failed",
+                stage_name=stage_name,
+                diagnostic_id=diag_id,
+                return_url=return_url,
+            )
+            status_code = 409 if error.code is ErrorCode.POLICY_VIOLATION else 400
+            return HTMLResponse(rendered, status_code=status_code, headers=route_control_headers)
+
+    async def route_control_bind_commit(request: Request):
+        operation_id = request.path_params.get("operation_id", "")
+        service = container.route_control
+        if service is None:
+            return JSONResponse({"ok": False, "error": "Route control is not configured"}, status_code=500)
+
+        wants_json = (
+            "application/json" in request.headers.get("accept", "")
+            or request.headers.get("content-type") == "application/json"
+        )
+
+        try:
+            res = service.commit_bind(operation_id)
+            diag_id = res.get("diagnostic_id")
+            route_id = res["route_id"]
+            state = res["state"]
+            generation = res["generation"]
+            changed = res.get("changed", True)
+
+            if wants_json:
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "route_id": route_id,
+                        "state": state,
+                        "generation": generation,
+                        "channel_id": res.get("channel_id"),
+                        "changed": changed,
+                        "diagnostic_id": diag_id,
+                        "pending_wakes": 0,
+                    },
+                    status_code=200,
+                    headers=route_control_headers,
+                )
+
+            return_url = f"{route_control_base_path}/return/{diag_id}" if diag_id else None
+            rendered = render_route_control_page(
+                mode="warning" if state == "already_bound" else "success",
+                route_id=route_id,
+                generation=generation,
+                diagnostic_id=diag_id,
+                return_url=return_url,
+            )
+            return HTMLResponse(rendered, status_code=200, headers=route_control_headers)
+
+        except BridgeError as error:
+            diag_id = (
+                container.route_control_trace_store.find_by_operation_id(operation_id)
+                if container.route_control_trace_store
+                else None
+            )
+            status_code = 409 if error.code is ErrorCode.POLICY_VIOLATION else 400
+            if wants_json:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": error.message,
+                        "code": error.code.value,
+                        "diagnostic_id": diag_id,
+                    },
+                    status_code=status_code,
+                    headers=route_control_headers,
+                )
+
+            trace = (
+                container.route_control_trace_store.sanitized(diag_id)
+                if (container.route_control_trace_store and diag_id)
+                else None
+            )
+            error_code = (trace.get("error_code") if trace else None) or error.code.value
+            stage_name = ERROR_CODE_STAGE_MAP.get(error_code, "Route binding commit")
+
+            return_url = None
+            if diag_id and container.route_control_trace_store:
+                raw_target = container.route_control_trace_store.get_return_target(diag_id)
+                if raw_target:
+                    return_url = f"{route_control_base_path}/return/{diag_id}"
+
+            rendered = render_route_control_page(
+                mode="failed",
+                stage_name=stage_name,
+                diagnostic_id=diag_id,
+                return_url=return_url,
+            )
+            return HTMLResponse(rendered, status_code=status_code, headers=route_control_headers)
+
+    async def route_control_return(request: Request):
+        diagnostic_id = request.path_params.get("diagnostic_id", "")
+        service = container.route_control
+        if service is None:
+            return JSONResponse({"error": "Route control is not configured"}, status_code=500)
+
+        target = service.resolve_return_target(diagnostic_id)
+        if not target:
+            return JSONResponse(
+                {"error": "Return target not found or expired"},
+                status_code=404,
+                headers=route_control_headers,
+            )
+
+        try:
+            parse_chatgpt_target(target)
+        except BridgeError:
+            return JSONResponse(
+                {"error": "Invalid return target format"},
+                status_code=400,
+                headers=route_control_headers,
+            )
+
+        return RedirectResponse(
+            url=target,
+            status_code=303,
+            headers=route_control_redirect_headers,
+        )
+
     artifact_endpoint = artifact_download
     auth_settings = None
     token_verifier = None
     auth_provider = None
     custom_routes = []
+
     custom_routes.append(Route(settings.server.endpoint.rstrip("/") + "/desktop-nodes/{node_id}/{action}", desktop_route, methods=["POST"], name="desktop_node_agent"))
     custom_routes.append(Route(settings.server.endpoint.rstrip("/") + "/desktop-nodes/{node_id}/operator/{action}", desktop_operator_route, methods=["POST"], name="desktop_node_operator"))
     custom_routes.append(Route(settings.server.endpoint.rstrip("/") + "/desktop-results/exports/{token}", desktop_result_export, methods=["GET", "HEAD"], name="desktop_result_export"))
@@ -639,7 +870,32 @@ def create_streamable_http_app(
             name="knowledge_attachment_export_download",
         )
     )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/bind/{operation_id}",
+            route_control_bind_landing,
+            methods=["GET"],
+            name="route_control_bind_landing",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/bind/{operation_id}/commit",
+            route_control_bind_commit,
+            methods=["POST"],
+            name="route_control_bind_commit",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/return/{diagnostic_id}",
+            route_control_return,
+            methods=["GET"],
+            name="route_control_return",
+        )
+    )
     custom_routes.extend(create_operator_dashboard_routes(container, settings))
+
     app = server.streamable_http_app(
         streamable_http_path=settings.server.endpoint,
         transport_security=TransportSecuritySettings(

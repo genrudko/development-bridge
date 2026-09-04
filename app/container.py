@@ -346,8 +346,9 @@ def build_container(
             if configured.server.public_base_url is not None
             else None
         ),
-        endpoint_prefix="/x/route-control",
+        endpoint_prefix=configured.server.endpoint.rstrip("/") + "/x/route-control",
     )
+
     coordinator = CoordinatorService(
         route_registry.path.parent / "coordinator-wakes.json",
         browser_preflight_required=True,

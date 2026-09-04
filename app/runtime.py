@@ -50,20 +50,26 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
     }
 
     connect_domains = []
+    redirect_domains = []
     if application.settings.server.public_base_url is not None:
-        connect_domains.append(str(application.settings.server.public_base_url).rstrip("/"))
+        base_url_str = str(application.settings.server.public_base_url).rstrip("/")
+        connect_domains.append(base_url_str)
+        redirect_domains.append(base_url_str)
     widget_meta = {
         "ui": {
             "csp": {
                 "connectDomains": connect_domains,
                 "resourceDomains": ["https://unpkg.com"],
+                "redirectDomains": redirect_domains,
             }
         },
         "openai/widgetCSP": {
             "connect_domains": connect_domains,
             "resource_domains": ["https://unpkg.com"],
+            "redirect_domains": redirect_domains,
         },
     }
+
     if application.settings.server.public_base_url is not None:
         domain = str(application.settings.server.public_base_url).rstrip("/")
         widget_meta["ui"]["domain"] = domain
