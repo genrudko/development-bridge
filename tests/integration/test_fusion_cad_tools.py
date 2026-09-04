@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,6 +12,7 @@ from mcp import types
 from app.api.context import RequestContext
 from app.api.errors import BridgeError, ErrorCode
 from app.container import ApplicationContainer, build_container
+from app.desktop_nodes.service import NodeState
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.service import FusionCadService
 from app.settings import BridgeSettings
@@ -45,7 +47,7 @@ def setup_desk1_capabilities(container: ApplicationContainer) -> None:
             "assembly.joints",
         )
     ]
-    container.fusion_cad.set_node_capabilities("desk-1", CapabilityMatrix.from_records(all_supported))
+    container.fusion_cad.set_node_capabilities("desk-1", CapabilityMatrix.from_records(all_supported), generation=1)
 
 
 @pytest.fixture
@@ -54,6 +56,14 @@ def mock_container() -> ApplicationContainer:
         "server": {"public_base_url": "https://127.0.0.1:8000"},
         "desktop_nodes": {"token": "test-desktop-token", "journal_path": ":memory:"}
     }))
+    container.desktop_nodes._nodes["desk-1"] = NodeState(
+        node_id="desk-1",
+        last_seen=time.monotonic(),
+        last_seen_wall=time.time(),
+        tools=[{"name": "fusion_mcp_execute"}],
+        fusion_available=True,
+        session_generation=1,
+    )
     setup_desk1_capabilities(container)
     return container
 

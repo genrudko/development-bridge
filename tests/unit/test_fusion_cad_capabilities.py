@@ -144,6 +144,88 @@ def test_capability_matrix_from_probe_truthful_states():
         "design.access",
         "timeline.access",
         "sketch.access",
+        "revision.mutation_indicators",
+    ):
+        rec = matrix.get(cap_name)
+        assert rec is not None, f"Capability {cap_name} missing from matrix"
+        assert rec.state == "supported", f"Capability {cap_name} state was {rec.state}, expected supported"
+
+    # Finding 2: hasattr/class existence alone must NOT produce supported claims;
+    # reports degraded with explicit limitations for camera, selection, preview, attributes, undo/redo, etc.
+    for degraded_cap, expected_kw in (
+        ("view.camera", "camera runtime context"),
+        ("view.viewport_conversion", "active viewport runtime context"),
+        ("selection.primitives", "interactive selection collection"),
+        ("transaction.preview_hooks", "runtime preview execution"),
+        ("metadata.attributes", "active document attribute collection"),
+        ("transaction.undo_redo", "undo/redo behavior"),
+        ("inspect.measure", "MeasureManager"),
+        ("style.sketch_text", "SketchText"),
+        ("view.pick", "live feasibility proof"),
+        ("transaction.preview_replay", "live feasibility proof"),
+        ("revision.external_change_detection", "atomicity"),
+    ):
+        rec = matrix.get(degraded_cap)
+        assert rec is not None, f"Capability {degraded_cap} missing from matrix"
+        assert rec.state == "degraded", f"Capability {degraded_cap} state was {rec.state}, expected degraded"
+        assert any(expected_kw in lim for lim in rec.limitations), f"Expected keyword '{expected_kw}' in limitations of {degraded_cap}: {rec.limitations}"
+
+    # Capability-gated P2 features are unavailable
+    for p2_cap in ("export.dxf", "view.section", "assembly.joints"):
+        rec = matrix.get(p2_cap)
+        assert rec is not None
+        assert rec.state == "unavailable"
+        assert "P2" in rec.limitations[0]
+
+
+def test_capability_matrix_from_probe_supported_with_direct_runtime_context_evidence():
+    probe = {
+        "application": "Autodesk Fusion",
+        "fusion_version": "2.0.18000",
+        "relay_version": "1.0.0",
+        "platform": "Windows",
+        "probe_facts": {
+            "has_app": True,
+            "has_active_document": True,
+            "has_adsk_fusion": True,
+            "has_design_access": True,
+            "has_timeline_access": True,
+            "has_entity_token_resolver": True,
+            "has_sketch_access": True,
+            "has_camera": True,
+            "has_viewport_conversion": True,
+            "has_selection_primitives": True,
+            "has_command_preview": True,
+            "has_attributes": True,
+            "has_undo_redo": True,
+            "has_mutation_indicators": True,
+            # Direct behavioral / runtime-context evidence
+            "camera_runtime_verified": True,
+            "has_active_camera": True,
+            "has_active_viewport": True,
+            "viewport_conversion_verified": True,
+            "has_viewport_conversion_context": True,
+            "selection_runtime_verified": True,
+            "has_active_selections_context": True,
+            "has_user_interface": True,
+            "preview_hooks_verified": True,
+            "attributes_runtime_verified": True,
+            "has_attributes_context": True,
+            "undo_redo_verified": True,
+            "has_undo_redo_context": True,
+            "mutation_indicators_verified": True,
+            "has_measure_manager": True,
+            "has_sketch_text": True,
+        },
+    }
+    matrix = CapabilityMatrix.from_probe(probe)
+
+    # With direct behavioral/runtime-context evidence, these become supported:
+    for cap_name in (
+        "entity.token_resolver",
+        "design.access",
+        "timeline.access",
+        "sketch.access",
         "view.camera",
         "view.viewport_conversion",
         "selection.primitives",
@@ -154,41 +236,54 @@ def test_capability_matrix_from_probe_truthful_states():
     ):
         rec = matrix.get(cap_name)
         assert rec is not None, f"Capability {cap_name} missing from matrix"
-        assert rec.state == "supported", f"Capability {cap_name} state was {rec.state}, expected supported"
+        assert rec.state == "supported", f"Capability {cap_name} was {rec.state}, expected supported with direct evidence"
 
-    # Finding 3: Do not claim contract-level supported from hasattr / object existence
-    # Load-bearing pick and transaction remain degraded until later live feasibility proof
-    pick = matrix.get("view.pick")
-    assert pick is not None
-    assert pick.state == "degraded"
-    assert "live feasibility proof" in pick.limitations[0]
+    # Conservative capabilities remain degraded pending later live feasibility gates / Task 4
+    for conservative_cap in (
+        "view.pick",
+        "transaction.preview_replay",
+        "inspect.measure",
+        "style.sketch_text",
+        "revision.external_change_detection",
+    ):
+        rec = matrix.get(conservative_cap)
+        assert rec is not None
+        assert rec.state == "degraded"
 
-    tx = matrix.get("transaction.preview_replay")
-    assert tx is not None
-    assert tx.state == "degraded"
-    assert "live feasibility proof" in tx.limitations[0]
-
-    inspect_meas = matrix.get("inspect.measure")
-    assert inspect_meas is not None
-    assert inspect_meas.state == "degraded"
-    assert "MeasureManager" in inspect_meas.limitations[0]
-
-    sketch_text = matrix.get("style.sketch_text")
-    assert sketch_text is not None
-    assert sketch_text.state == "degraded"
-    assert "SketchText" in sketch_text.limitations[0]
-
-    rev_ext = matrix.get("revision.external_change_detection")
-    assert rev_ext is not None
-    assert rev_ext.state == "degraded"
-    assert "atomicity" in rev_ext.limitations[0]
-
-    # Capability-gated P2 features are unavailable
+    # P2 capabilities remain unavailable
     for p2_cap in ("export.dxf", "view.section", "assembly.joints"):
         rec = matrix.get(p2_cap)
         assert rec is not None
         assert rec.state == "unavailable"
-        assert "P2" in rec.limitations[0]
+
+
+def test_falsify_hasattr_class_existence_never_claims_supported():
+    # Only class existence / hasattr facts are provided
+    probe = {
+        "probe_facts": {
+            "has_app": True,
+            "has_camera": True,
+            "has_viewport_conversion": True,
+            "has_selection_primitives": True,
+            "has_command_preview": True,
+            "has_attributes": True,
+            "has_undo_redo": True,
+        }
+    }
+    matrix = CapabilityMatrix.from_probe(probe)
+
+    for cap_name in (
+        "view.camera",
+        "view.viewport_conversion",
+        "selection.primitives",
+        "transaction.preview_hooks",
+        "metadata.attributes",
+        "transaction.undo_redo",
+    ):
+        rec = matrix.get(cap_name)
+        assert rec is not None
+        assert rec.state == "degraded", f"Capability {cap_name} must NOT be supported from hasattr alone; got {rec.state}"
+        assert len(rec.limitations) > 0
 
 
 def test_capability_matrix_from_probe_degraded_and_unavailable():

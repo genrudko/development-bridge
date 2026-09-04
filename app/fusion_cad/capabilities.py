@@ -158,7 +158,7 @@ def get_required_capability(
 class CapabilityMatrix:
     """Deterministic, immutable matrix of runtime capabilities and limitations."""
 
-    __slots__ = ("_records", "_identity", "_frozen")
+    __slots__ = ("_frozen", "_identity", "_records")
 
     def __init__(
         self,
@@ -296,11 +296,20 @@ class CapabilityMatrix:
             return tuple(limits)
 
         # 1. entity.token_resolver
-        if not probe_failed and facts.get("has_entity_token_resolver"):
+        if not probe_failed and facts.get("has_entity_token_resolver") and facts.get("has_design_access"):
             records.append(CapabilityRecord(
                 name="entity.token_resolver",
                 state="supported",
                 implementation="adsk.fusion.Design.findEntityByToken",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_entity_token_resolver"):
+            records.append(CapabilityRecord(
+                name="entity.token_resolver",
+                state="degraded",
+                implementation="adsk.fusion.Design.findEntityByToken",
+                limitations=("Native design entity-token resolver present on class but unverified without active design context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -322,6 +331,15 @@ class CapabilityMatrix:
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
+        elif not probe_failed and facts.get("has_design_class"):
+            records.append(CapabilityRecord(
+                name="design.access",
+                state="degraded",
+                implementation="adsk.fusion.Design",
+                limitations=("Design product class present but active design context unavailable on active document",),
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
         else:
             records.append(CapabilityRecord(
                 name="design.access",
@@ -332,11 +350,20 @@ class CapabilityMatrix:
             ))
 
         # 3. timeline.access
-        if not probe_failed and facts.get("has_timeline_access"):
+        if not probe_failed and facts.get("has_timeline_access") and facts.get("has_design_access"):
             records.append(CapabilityRecord(
                 name="timeline.access",
                 state="supported",
                 implementation="adsk.fusion.Timeline",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_timeline_access"):
+            records.append(CapabilityRecord(
+                name="timeline.access",
+                state="degraded",
+                implementation="adsk.fusion.Timeline",
+                limitations=("Timeline access unverified without active design context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -350,11 +377,20 @@ class CapabilityMatrix:
             ))
 
         # 4. sketch.access
-        if not probe_failed and facts.get("has_sketch_access"):
+        if not probe_failed and facts.get("has_sketch_access") and facts.get("has_design_access"):
             records.append(CapabilityRecord(
                 name="sketch.access",
                 state="supported",
                 implementation="adsk.fusion.Sketches",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and (facts.get("has_sketch_access") or facts.get("has_sketch_class")):
+            records.append(CapabilityRecord(
+                name="sketch.access",
+                state="degraded",
+                implementation="adsk.fusion.Sketches",
+                limitations=("Sketch collection access unverified without active root component context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -386,12 +422,21 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 6. view.camera
-        if not probe_failed and facts.get("has_camera"):
+        # 6. view.camera (Finding 2: do not claim contract-level supported from hasattr/class existence)
+        if not probe_failed and (facts.get("camera_runtime_verified") or facts.get("has_active_camera")):
             records.append(CapabilityRecord(
                 name="view.camera",
                 state="supported",
                 implementation="adsk.core.Camera",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_camera"):
+            records.append(CapabilityRecord(
+                name="view.camera",
+                state="degraded",
+                implementation="adsk.core.Camera",
+                limitations=("Camera class presence does not guarantee contract-level viewport camera control without active viewport and camera runtime context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -405,11 +450,20 @@ class CapabilityMatrix:
             ))
 
         # 7. view.viewport_conversion
-        if not probe_failed and facts.get("has_viewport_conversion"):
+        if not probe_failed and (facts.get("viewport_conversion_verified") or facts.get("has_viewport_conversion_context")):
             records.append(CapabilityRecord(
                 name="view.viewport_conversion",
                 state="supported",
                 implementation="adsk.core.Viewport",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_viewport_conversion"):
+            records.append(CapabilityRecord(
+                name="view.viewport_conversion",
+                state="degraded",
+                implementation="adsk.core.Viewport",
+                limitations=("Viewport screen/model coordinate conversion methods present on class but unverified without active viewport runtime context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -450,12 +504,21 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 9. selection.primitives
-        if not probe_failed and facts.get("has_selection_primitives"):
+        # 9. selection.primitives (Finding 2: do not claim contract-level supported from hasattr alone)
+        if not probe_failed and (facts.get("selection_runtime_verified") or facts.get("has_active_selections_context")):
             records.append(CapabilityRecord(
                 name="selection.primitives",
                 state="supported",
                 implementation="adsk.core.UserInterface.activeSelections",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_selection_primitives"):
+            records.append(CapabilityRecord(
+                name="selection.primitives",
+                state="degraded",
+                implementation="adsk.core.UserInterface.activeSelections",
+                limitations=("UserInterface activeSelections attribute present but interactive selection collection runtime behavior unverified without active selection context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -468,12 +531,21 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 10. transaction.preview_hooks
-        if not probe_failed and facts.get("has_command_preview"):
+        # 10. transaction.preview_hooks (Finding 2: do not claim contract-level supported from class existence)
+        if not probe_failed and facts.get("preview_hooks_verified"):
             records.append(CapabilityRecord(
                 name="transaction.preview_hooks",
                 state="supported",
                 implementation="adsk.core.Command.executePreview",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_command_preview"):
+            records.append(CapabilityRecord(
+                name="transaction.preview_hooks",
+                state="degraded",
+                implementation="adsk.core.Command.executePreview",
+                limitations=("Command execution preview hooks present on classes but runtime preview execution unverified without live command lifecycle",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -514,12 +586,21 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 12. metadata.attributes
-        if not probe_failed and facts.get("has_attributes"):
+        # 12. metadata.attributes (Finding 2: do not claim contract-level supported from hasattr alone)
+        if not probe_failed and (facts.get("attributes_runtime_verified") or facts.get("has_attributes_context")):
             records.append(CapabilityRecord(
                 name="metadata.attributes",
                 state="supported",
                 implementation="adsk.core.Attributes",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_attributes"):
+            records.append(CapabilityRecord(
+                name="metadata.attributes",
+                state="degraded",
+                implementation="adsk.core.Attributes",
+                limitations=("Custom attributes API present but active document attribute collection runtime access unverified",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -551,12 +632,21 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 14. transaction.undo_redo
-        if not probe_failed and facts.get("has_undo_redo"):
+        # 14. transaction.undo_redo (Finding 2: do not claim contract-level supported from class existence)
+        if not probe_failed and (facts.get("undo_redo_verified") or facts.get("has_undo_redo_context")):
             records.append(CapabilityRecord(
                 name="transaction.undo_redo",
                 state="supported",
                 implementation="adsk.core.Application",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_undo_redo"):
+            records.append(CapabilityRecord(
+                name="transaction.undo_redo",
+                state="degraded",
+                implementation="adsk.core.Application",
+                limitations=("Application executeTextCommand / Transaction presence does not guarantee contract-level undo/redo behavior without active transaction context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -569,12 +659,21 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 15. revision.mutation_indicators
-        if not probe_failed and facts.get("has_mutation_indicators"):
+        # 15. revision.mutation_indicators (Finding 2: require active document context)
+        if not probe_failed and (facts.get("mutation_indicators_verified") or (facts.get("has_mutation_indicators") and facts.get("has_active_document"))):
             records.append(CapabilityRecord(
                 name="revision.mutation_indicators",
                 state="supported",
                 implementation="adsk.core.Document.isModified",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_mutation_indicators"):
+            records.append(CapabilityRecord(
+                name="revision.mutation_indicators",
+                state="degraded",
+                implementation="adsk.core.Document.isModified",
+                limitations=("Document mutation modified indicator unverified without active document runtime context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))

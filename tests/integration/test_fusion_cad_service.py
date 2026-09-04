@@ -11,6 +11,7 @@ from app.fusion_cad.capabilities import CapabilityMatrix
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.models import CadResult, CapabilityRecord
 from app.fusion_cad.service import FusionCadService
+from app.settings import DesktopNodeSettings
 
 
 @pytest.fixture
@@ -258,3 +259,176 @@ async def test_falsify_all_p0_domains_capability_gating(
     # ZERO dispatch calls
     assert mock_desktop_service.call.call_count == 0
     assert mock_desktop_service.submit.call_count == 0
+
+
+@pytest.fixture
+def real_desktop_service(tmp_path) -> DesktopNodeService:
+    settings = DesktopNodeSettings.model_validate({
+        "token": "test-token",
+        "journal_path": str(tmp_path / "journal.jsonl"),
+        "call_timeout_seconds": 1.0,
+    })
+    return DesktopNodeService(settings)
+
+
+@pytest.mark.asyncio
+async def test_falsify_same_node_reconnect_invalidates_capabilities_real_service(real_desktop_service: DesktopNodeService):
+    # 1. Register desk-1
+    await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    assert real_desktop_service.get_session_generation("desk-1") == 1
+
+    cad_service = FusionCadService(real_desktop_service)
+
+    # 2. Set capability matrix for desk-1
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="design.access", state="supported", implementation="adsk.fusion.Design"),
+        CapabilityRecord(name="entity.token_resolver", state="supported", implementation="adsk.fusion.Design.findEntityByToken"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+    assert cad_service.get_node_capabilities("desk-1") is not None
+
+    # 3. Same-node reconnect: register() is called again for desk-1
+    await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    assert real_desktop_service.get_session_generation("desk-1") == 2
+
+    # 4. Cached capabilities must be invalidated immediately
+    assert cad_service.get_node_capabilities("desk-1") is None
+
+    # 5. Gated operation fails closed with CAPABILITY_UNAVAILABLE
+    with pytest.raises(BridgeError) as exc_info:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "model_snapshot"},
+            group="read",
+        )
+    assert exc_info.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert "unprobed" in exc_info.value.message
+
+    # 6. read:capabilities stays ungated even after reconnect
+    real_desktop_service.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Runtime capabilities probed",
+                "capabilities": [
+                    {"name": "design.access", "state": "supported", "implementation": "adsk.fusion.Design"},
+                ],
+            }),
+        }],
+        "isError": False,
+    })
+    res = await cad_service.execute({"node_id": "desk-1", "operation": "capabilities"}, group="read")
+    assert isinstance(res, CadResult)
+
+    # Now re-probed capabilities are cached with generation 2
+    assert cad_service.get_node_capabilities("desk-1") is not None
+    assert cad_service.get_node_capabilities("desk-1").get("design.access").state == "supported"
+
+
+@pytest.mark.asyncio
+async def test_falsify_tool_change_invalidates_capabilities_real_service(real_desktop_service: DesktopNodeService):
+    # 1. Register desk-1
+    await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    cad_service = FusionCadService(real_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="design.access", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+    assert cad_service.get_node_capabilities("desk-1") is not None
+
+    # 2. Node changes tools via heartbeat
+    await real_desktop_service.heartbeat(
+        "desk-1",
+        tools=[{"name": "fusion_mcp_execute"}, {"name": "other_tool"}],
+    )
+    assert real_desktop_service.get_session_generation("desk-1") == 2
+
+    # 3. Cache invalidated
+    assert cad_service.get_node_capabilities("desk-1") is None
+
+    # 4. Gated operation fails closed
+    with pytest.raises(BridgeError) as exc_info:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "model_snapshot"},
+            group="read",
+        )
+    assert exc_info.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_falsify_runtime_change_invalidates_capabilities_real_service(real_desktop_service: DesktopNodeService):
+    # 1. Register desk-1 with fusion_available=True
+    await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    cad_service = FusionCadService(real_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="design.access", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+    assert cad_service.get_node_capabilities("desk-1") is not None
+
+    # 2. Node reports fusion_available=False via heartbeat
+    await real_desktop_service.heartbeat("desk-1", fusion_available=False)
+    assert real_desktop_service.get_session_generation("desk-1") == 2
+
+    # 3. Cache invalidated
+    assert cad_service.get_node_capabilities("desk-1") is None
+
+    # 4. Gated operation fails closed
+    with pytest.raises(BridgeError) as exc_info:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "model_snapshot"},
+            group="read",
+        )
+    assert exc_info.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_falsify_cross_node_isolation_during_reconnect_real_service(real_desktop_service: DesktopNodeService):
+    # 1. Register desk-1 and desk-2
+    await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    await real_desktop_service.register("desk-2", [{"name": "fusion_mcp_execute"}], True)
+
+    cad_service = FusionCadService(real_desktop_service)
+    matrix1 = CapabilityMatrix.from_records([CapabilityRecord(name="design.access", state="supported")])
+    matrix2 = CapabilityMatrix.from_records([CapabilityRecord(name="design.access", state="supported")])
+    cad_service.set_node_capabilities("desk-1", matrix1)
+    cad_service.set_node_capabilities("desk-2", matrix2)
+
+    assert cad_service.get_node_capabilities("desk-1") is not None
+    assert cad_service.get_node_capabilities("desk-2") is not None
+
+    # 2. desk-1 reconnects
+    await real_desktop_service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+
+    # 3. desk-1 cache is invalidated; desk-2 remains VALID
+    assert cad_service.get_node_capabilities("desk-1") is None
+    assert cad_service.get_node_capabilities("desk-2") is not None
+
+    # 4. desk-1 gated operation fails closed
+    with pytest.raises(BridgeError) as exc_info:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "model_snapshot"},
+            group="read",
+        )
+    assert exc_info.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+
+    # 5. desk-2 gated operation proceeds to dispatch
+    real_desktop_service.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Executed model_snapshot",
+                "data": {"components": []},
+            }),
+        }],
+        "isError": False,
+    })
+    res2 = await cad_service.execute(
+        {"node_id": "desk-2", "operation": "model_snapshot"},
+        group="read",
+    )
+    assert isinstance(res2, CadResult)
+    assert res2.status == "succeeded"

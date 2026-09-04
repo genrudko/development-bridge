@@ -44,6 +44,7 @@ class NodeState:
     result_outbox_count: int = 0
     last_result_delivery: float | None = None
     last_claim: float | None = None
+    session_generation: int = 1
 
 
 @dataclass(slots=True)
@@ -459,8 +460,10 @@ class DesktopNodeService:
         async with self._condition:
             node = self._nodes.get(node_id)
             if node is None:
-                node = NodeState(node_id=node_id, last_seen=self._now(), last_seen_wall=time.time())
+                node = NodeState(node_id=node_id, last_seen=self._now(), last_seen_wall=time.time(), session_generation=1)
                 self._nodes[node_id] = node
+            else:
+                node.session_generation += 1
             self._touch(node)
             node.tools = tools
             node.fusion_available = fusion_available
@@ -476,13 +479,25 @@ class DesktopNodeService:
         async with self._condition:
             node = self._node(node_id)
             self._touch(node)
+            generation_bump = False
             if tools is not None:
+                if tools != node.tools:
+                    generation_bump = True
                 node.tools = tools
             if fusion_available is not None:
+                if fusion_available != node.fusion_available:
+                    generation_bump = True
                 node.fusion_available = fusion_available
+            if generation_bump:
+                node.session_generation += 1
             self._apply_telemetry(node, telemetry)
             self._condition.notify_all()
         return self.status(node_id)
+
+    def get_session_generation(self, node_id: str) -> int:
+        self._configured()
+        node = self._node(node_id)
+        return node.session_generation
 
     def status(self, node_id: str) -> dict[str, Any]:
         self._configured()
@@ -490,6 +505,7 @@ class DesktopNodeService:
         recent = self._journal.recent(node_id, 10)
         return {
             "node_id": node.node_id,
+            "session_generation": node.session_generation,
             "last_seen": node.last_seen_wall,
             "age_seconds": max(0.0, self._now() - node.last_seen),
             "online": self._online(node),

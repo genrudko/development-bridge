@@ -17,11 +17,46 @@ def probe_runtime():
             ui = getattr(app, "userInterface", None)
             if ui:
                 facts["has_selection_primitives"] = hasattr(ui, "activeSelections")
+                try:
+                    selections = getattr(ui, "activeSelections", None)
+                    if selections is not None and hasattr(selections, "count"):
+                        facts["has_active_selections_context"] = True
+                        facts["selection_runtime_verified"] = True
+                except Exception:
+                    pass
             doc = getattr(app, "activeDocument", None)
             if doc:
                 facts["has_active_document"] = True
                 facts["has_mutation_indicators"] = hasattr(doc, "isModified")
+                try:
+                    if isinstance(doc.isModified, bool):
+                        facts["mutation_indicators_verified"] = True
+                except Exception:
+                    pass
                 facts["has_attributes"] = hasattr(doc, "attributes")
+                try:
+                    attrs = getattr(doc, "attributes", None)
+                    if attrs is not None and hasattr(attrs, "count") and hasattr(attrs, "add"):
+                        facts["has_attributes_context"] = True
+                        facts["attributes_runtime_verified"] = True
+                except Exception:
+                    pass
+            viewport = getattr(app, "activeViewport", None)
+            if viewport:
+                facts["has_active_viewport"] = True
+                try:
+                    cam = getattr(viewport, "camera", None)
+                    if cam and hasattr(cam, "eye") and hasattr(cam, "target") and hasattr(cam, "upVector"):
+                        facts["has_active_camera"] = True
+                        facts["camera_runtime_verified"] = True
+                except Exception:
+                    pass
+                try:
+                    if hasattr(viewport, "modelToScreen") and hasattr(viewport, "screenToModel"):
+                        facts["has_viewport_conversion_context"] = True
+                        facts["viewport_conversion_verified"] = True
+                except Exception:
+                    pass
     except Exception as exc:
         facts["adsk_core_probe_error"] = str(exc)
 
@@ -104,7 +139,7 @@ def probe_runtime():
 
     records = []
     # 1. entity.token_resolver
-    if not probe_failed and facts.get("has_entity_token_resolver"):
+    if not probe_failed and facts.get("has_entity_token_resolver") and facts.get("has_design_access"):
         records.append({
             "name": "entity.token_resolver",
             "state": "supported",
@@ -112,6 +147,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_entity_token_resolver"):
+        records.append({
+            "name": "entity.token_resolver",
+            "state": "degraded",
+            "implementation": "adsk.fusion.Design.findEntityByToken",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Native design entity-token resolver present on class but unverified without active design context"],
         })
     else:
         records.append({
@@ -133,6 +177,15 @@ def probe_runtime():
             "relay_version": relay_version,
             "limitations": [],
         })
+    elif not probe_failed and facts.get("has_design_class"):
+        records.append({
+            "name": "design.access",
+            "state": "degraded",
+            "implementation": "adsk.fusion.Design",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Design product class present but active design context unavailable on active document"],
+        })
     else:
         records.append({
             "name": "design.access",
@@ -144,7 +197,7 @@ def probe_runtime():
         })
 
     # 3. timeline.access
-    if not probe_failed and facts.get("has_timeline_access"):
+    if not probe_failed and facts.get("has_timeline_access") and facts.get("has_design_access"):
         records.append({
             "name": "timeline.access",
             "state": "supported",
@@ -152,6 +205,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_timeline_access"):
+        records.append({
+            "name": "timeline.access",
+            "state": "degraded",
+            "implementation": "adsk.fusion.Timeline",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Timeline access unverified without active design context"],
         })
     else:
         records.append({
@@ -164,7 +226,7 @@ def probe_runtime():
         })
 
     # 4. sketch.access
-    if not probe_failed and facts.get("has_sketch_access"):
+    if not probe_failed and facts.get("has_sketch_access") and facts.get("has_design_access"):
         records.append({
             "name": "sketch.access",
             "state": "supported",
@@ -172,6 +234,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and (facts.get("has_sketch_access") or facts.get("has_sketch_class")):
+        records.append({
+            "name": "sketch.access",
+            "state": "degraded",
+            "implementation": "adsk.fusion.Sketches",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Sketch collection access unverified without active root component context"],
         })
     else:
         records.append({
@@ -203,8 +274,8 @@ def probe_runtime():
             "limitations": err_limits("MeasureManager API not available"),
         })
 
-    # 6. view.camera
-    if not probe_failed and facts.get("has_camera"):
+    # 6. view.camera (Finding 2: do not claim contract-level supported from hasattr/class existence)
+    if not probe_failed and (facts.get("camera_runtime_verified") or facts.get("has_active_camera")):
         records.append({
             "name": "view.camera",
             "state": "supported",
@@ -212,6 +283,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_camera"):
+        records.append({
+            "name": "view.camera",
+            "state": "degraded",
+            "implementation": "adsk.core.Camera",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Camera class presence does not guarantee contract-level viewport camera control without active viewport and camera runtime context"],
         })
     else:
         records.append({
@@ -224,7 +304,7 @@ def probe_runtime():
         })
 
     # 7. view.viewport_conversion
-    if not probe_failed and facts.get("has_viewport_conversion"):
+    if not probe_failed and (facts.get("viewport_conversion_verified") or facts.get("has_viewport_conversion_context")):
         records.append({
             "name": "view.viewport_conversion",
             "state": "supported",
@@ -232,6 +312,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_viewport_conversion"):
+        records.append({
+            "name": "view.viewport_conversion",
+            "state": "degraded",
+            "implementation": "adsk.core.Viewport",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Viewport screen/model coordinate conversion methods present on class but unverified without active viewport runtime context"],
         })
     else:
         records.append({
@@ -272,8 +361,8 @@ def probe_runtime():
             "limitations": err_limits("Neither selection primitives nor viewport projection methods available"),
         })
 
-    # 9. selection.primitives
-    if not probe_failed and facts.get("has_selection_primitives"):
+    # 9. selection.primitives (Finding 2: do not claim contract-level supported from hasattr alone)
+    if not probe_failed and (facts.get("selection_runtime_verified") or facts.get("has_active_selections_context")):
         records.append({
             "name": "selection.primitives",
             "state": "supported",
@@ -281,6 +370,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_selection_primitives"):
+        records.append({
+            "name": "selection.primitives",
+            "state": "degraded",
+            "implementation": "adsk.core.UserInterface.activeSelections",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["UserInterface activeSelections attribute present but interactive selection collection runtime behavior unverified without active selection context"],
         })
     else:
         records.append({
@@ -292,8 +390,8 @@ def probe_runtime():
             "limitations": err_limits("Interactive selection primitives not available"),
         })
 
-    # 10. transaction.preview_hooks
-    if not probe_failed and facts.get("has_command_preview"):
+    # 10. transaction.preview_hooks (Finding 2: do not claim contract-level supported from class existence)
+    if not probe_failed and facts.get("preview_hooks_verified"):
         records.append({
             "name": "transaction.preview_hooks",
             "state": "supported",
@@ -301,6 +399,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_command_preview"):
+        records.append({
+            "name": "transaction.preview_hooks",
+            "state": "degraded",
+            "implementation": "adsk.core.Command.executePreview",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Command execution preview hooks present on classes but runtime preview execution unverified without live command lifecycle"],
         })
     else:
         records.append({
@@ -341,8 +448,8 @@ def probe_runtime():
             "limitations": err_limits("Neither command preview nor undo/redo available for transaction replay"),
         })
 
-    # 12. metadata.attributes
-    if not probe_failed and facts.get("has_attributes"):
+    # 12. metadata.attributes (Finding 2: do not claim contract-level supported from hasattr alone)
+    if not probe_failed and (facts.get("attributes_runtime_verified") or facts.get("has_attributes_context")):
         records.append({
             "name": "metadata.attributes",
             "state": "supported",
@@ -350,6 +457,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_attributes"):
+        records.append({
+            "name": "metadata.attributes",
+            "state": "degraded",
+            "implementation": "adsk.core.Attributes",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Custom attributes API present but active document attribute collection runtime access unverified"],
         })
     else:
         records.append({
@@ -381,8 +497,8 @@ def probe_runtime():
             "limitations": err_limits("SketchText API not available"),
         })
 
-    # 14. transaction.undo_redo
-    if not probe_failed and facts.get("has_undo_redo"):
+    # 14. transaction.undo_redo (Finding 2: do not claim contract-level supported from class existence)
+    if not probe_failed and (facts.get("undo_redo_verified") or facts.get("has_undo_redo_context")):
         records.append({
             "name": "transaction.undo_redo",
             "state": "supported",
@@ -390,6 +506,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_undo_redo"):
+        records.append({
+            "name": "transaction.undo_redo",
+            "state": "degraded",
+            "implementation": "adsk.core.Application",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Application executeTextCommand / Transaction presence does not guarantee contract-level undo/redo behavior without active transaction context"],
         })
     else:
         records.append({
@@ -401,8 +526,8 @@ def probe_runtime():
             "limitations": err_limits("Application text command / transaction undo not available"),
         })
 
-    # 15. revision.mutation_indicators
-    if not probe_failed and facts.get("has_mutation_indicators"):
+    # 15. revision.mutation_indicators (Finding 2: require active document context)
+    if not probe_failed and (facts.get("mutation_indicators_verified") or (facts.get("has_mutation_indicators") and facts.get("has_active_document"))):
         records.append({
             "name": "revision.mutation_indicators",
             "state": "supported",
@@ -410,6 +535,15 @@ def probe_runtime():
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_mutation_indicators"):
+        records.append({
+            "name": "revision.mutation_indicators",
+            "state": "degraded",
+            "implementation": "adsk.core.Document.isModified",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Document mutation modified indicator unverified without active document runtime context"],
         })
     else:
         records.append({

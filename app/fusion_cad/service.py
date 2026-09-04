@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -117,6 +118,12 @@ _CAD_OPERATION_CLASSIFICATION: dict[tuple[str, str], tuple[bool, bool]] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _CachedNodeCapabilities:
+    matrix: CapabilityMatrix
+    session_generation: int
+
+
 class FusionCadService:
     """Domain service for Fusion CAD workstation operations.
 
@@ -132,13 +139,37 @@ class FusionCadService:
     ) -> None:
         self._desktop_nodes = desktop_nodes
         self._script_bundle = script_bundle or FusionCadScriptBundle()
-        self._node_capabilities: dict[str, CapabilityMatrix] = {}
+        self._node_capabilities: dict[str, _CachedNodeCapabilities] = {}
 
     def get_node_capabilities(self, node_id: str) -> CapabilityMatrix | None:
-        return self._node_capabilities.get(node_id)
+        cached = self._node_capabilities.get(node_id)
+        if cached is None:
+            return None
+        if not isinstance(cached, _CachedNodeCapabilities):
+            cached = _CachedNodeCapabilities(matrix=cached, session_generation=1)
+            self._node_capabilities[node_id] = cached
+        try:
+            current_gen = self._desktop_nodes.get_session_generation(node_id)
+        except (BridgeError, AttributeError):
+            self._node_capabilities.pop(node_id, None)
+            return None
+        if current_gen != cached.session_generation:
+            self._node_capabilities.pop(node_id, None)
+            return None
+        return cached.matrix
 
-    def set_node_capabilities(self, node_id: str, matrix: CapabilityMatrix) -> None:
-        self._node_capabilities[node_id] = matrix
+    def set_node_capabilities(
+        self,
+        node_id: str,
+        matrix: CapabilityMatrix,
+        generation: int | None = None,
+    ) -> None:
+        if generation is None:
+            try:
+                generation = self._desktop_nodes.get_session_generation(node_id)
+            except (BridgeError, AttributeError):
+                generation = 1
+        self._node_capabilities[node_id] = _CachedNodeCapabilities(matrix=matrix, session_generation=generation)
 
     def invalidate_node_capabilities(self, node_id: str | None = None) -> None:
         if node_id is None:
@@ -603,10 +634,11 @@ class FusionCadService:
                     identity = FusionRuntimeIdentity.model_validate(data_dict)
                 except (ValidationError, ValueError, TypeError):
                     identity = None
-            self._node_capabilities[node_id] = CapabilityMatrix.from_records(
+            matrix = CapabilityMatrix.from_records(
                 cad_result.capabilities,
                 identity=identity,
             )
+            self.set_node_capabilities(node_id, matrix)
 
         domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
         if has_binary_data(domain_payload):
