@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.errors import BridgeError
+from app.coordinator import RouteRegistry
 from app.tools.bridge_restart import bridge_restart_tools
 
 
@@ -39,7 +40,7 @@ async def test_explicit_restart_channel_overrides_default_route():
     container = SimpleNamespace(
         route_registry=SimpleNamespace(
             resolve=lambda route_id=None: {"route_id": "ad5x", "channel_id": "telegram-ad5x-g6"},
-            route_for_channel=lambda channel_id: None,
+            wake_route_for_channel=lambda channel_id: None,
         ),
         coordinator=coordinator,
         bridge_restart=FakeRestart(),
@@ -58,7 +59,7 @@ async def test_restart_without_binding_does_not_wake_default_route():
     container = SimpleNamespace(
         route_registry=SimpleNamespace(
             resolve=lambda route_id=None: {"route_id": "ad5x", "channel_id": "telegram-ad5x-g6"},
-            route_for_channel=lambda channel_id: None,
+            wake_route_for_channel=lambda channel_id: None,
         ),
         coordinator=coordinator,
         bridge_restart=FakeRestart(),
@@ -79,7 +80,10 @@ async def test_restart_rejects_stale_session_generation_instead_of_waking_succes
     }
     route = {"route_id": "ad5x", "channel_id": "telegram-ad5x-g6", "generation": 6}
     container = SimpleNamespace(
-        route_registry=SimpleNamespace(resolve=lambda route_id=None: route, route_for_channel=lambda channel_id: None),
+        route_registry=SimpleNamespace(
+            resolve=lambda route_id=None: route,
+            is_bound=lambda value: True,
+        ),
         coordinator=coordinator,
         bridge_restart=FakeRestart(),
     )
@@ -89,3 +93,69 @@ async def test_restart_rejects_stale_session_generation_instead_of_waking_succes
         await tool.handler(ctx, SimpleNamespace(arguments={}), SimpleNamespace(request_id="request-3"))
     assert "stale route generation" in str(exc.value)
     assert coordinator.armed == []
+
+
+@pytest.mark.asyncio
+async def test_restart_rejects_explicit_unbound_route(tmp_path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "ad5x",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-ad5x-g0",
+    )
+    registry.unbind("ad5x", expected_generation=0)
+    coordinator = FakeCoordinator()
+    container = SimpleNamespace(
+        route_registry=registry,
+        coordinator=coordinator,
+        bridge_restart=FakeRestart(),
+    )
+    tool = bridge_restart_tools(container)[0]
+
+    with pytest.raises(BridgeError, match="unbound"):
+        await tool.handler(
+            None,
+            SimpleNamespace(arguments={"route_id": "ad5x"}),
+            SimpleNamespace(request_id="request-unbound"),
+        )
+    assert coordinator.armed == []
+
+
+@pytest.mark.asyncio
+async def test_restart_arms_bound_route_under_route_lock(tmp_path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "ad5x",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-ad5x-g0",
+    )
+    route_lock = registry.route_lock("ad5x")
+    coordinator = FakeCoordinator()
+    lock_observations = []
+
+    async def observe_lock(message, *, channel_id, delay_seconds, conflict):
+        lock_observations.append(route_lock.locked())
+        return await FakeCoordinator.arm(
+            coordinator,
+            message,
+            channel_id=channel_id,
+            delay_seconds=delay_seconds,
+            conflict=conflict,
+        )
+
+    coordinator.arm = observe_lock
+    container = SimpleNamespace(
+        route_registry=registry,
+        coordinator=coordinator,
+        bridge_restart=FakeRestart(),
+    )
+    tool = bridge_restart_tools(container)[0]
+
+    result = await tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "ad5x"}),
+        SimpleNamespace(request_id="request-locked"),
+    )
+
+    assert json.loads(result.content[0].text)["data"]["restart_scheduled"] is True
+    assert lock_observations == [True]

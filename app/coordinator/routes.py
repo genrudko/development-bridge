@@ -13,6 +13,9 @@ from app.api.errors import BridgeError, ErrorCode
 from app.coordinator.chatgpt_target import parse_chatgpt_target
 
 _ROUTE_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+_ROUTE_CHANNEL_RE = re.compile(
+    r"^telegram-(?P<route_id>[a-z][a-z0-9-]{0,30})-g(?P<generation>[0-9]+)$"
+)
 
 _PROJECT_STABLE_ID_RE = re.compile(r"^(g-p-[0-9a-fA-F]{32})(?:-|$)")
 _CURRENT_BIND_TTL_SECONDS = 10 * 60
@@ -184,6 +187,24 @@ class RouteRegistry:
                 }
         return None
 
+    def wake_route_for_channel(self, channel_id: str) -> dict | None:
+        """Resolve only the current active route; reserve all route-generation aliases."""
+        channel = str(channel_id).strip()
+        route = self.route_for_channel(channel)
+        if route is not None:
+            if route.get("route_state") != "active":
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "A pending route-generation channel cannot be targeted before it is current",
+                )
+            return route
+        if _ROUTE_CHANNEL_RE.fullmatch(channel):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "An unregistered route-generation channel cannot be targeted",
+            )
+        return None
+
     def request(self, route_id: str) -> dict:
         route_id = self.validate_route_id(route_id)
         data = self._load()
@@ -232,7 +253,48 @@ class RouteRegistry:
         route_id = self.validate_route_id(route_id)
         data = self._load()
         pending = (data.get("current_binds") or {}).get(route_id)
-        return {**pending, "route_id": route_id} if isinstance(pending, dict) else None
+        if not isinstance(pending, dict):
+            return None
+        route = data["routes"].get(route_id)
+        if self._current_bind_is_stale(pending, route):
+            data.get("current_binds", {}).pop(route_id, None)
+            self._save(data)
+            return None
+        return {**pending, "route_id": route_id}
+
+    def route_id_for_current_bind_token(self, token: str) -> str | None:
+        data = self._load()
+        for route_id, pending in list((data.get("current_binds") or {}).items()):
+            if not isinstance(pending, dict) or pending.get("token") != token:
+                continue
+            if self._current_bind_is_stale(pending, data["routes"].get(route_id)):
+                data.get("current_binds", {}).pop(route_id, None)
+                self._save(data)
+                return None
+            return route_id
+        return None
+
+    @staticmethod
+    def _current_bind_is_stale(pending: dict, route: dict | None) -> bool:
+        if not isinstance(route, dict):
+            return True
+        try:
+            created_at = datetime.fromisoformat(str(pending.get("created_at") or ""))
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            expired = (
+                datetime.now(UTC) - created_at.astimezone(UTC)
+            ).total_seconds() > _CURRENT_BIND_TTL_SECONDS
+        except (TypeError, ValueError):
+            expired = True
+        if expired:
+            return True
+        try:
+            return int(pending.get("source_generation", -1)) != int(
+                route.get("generation", 0)
+            )
+        except (TypeError, ValueError):
+            return True
 
     def prepare_current_bind(self, route_id: str, *, session_id: str | None, allow_project_change: bool = False) -> dict:
         route_id = self.validate_route_id(route_id)

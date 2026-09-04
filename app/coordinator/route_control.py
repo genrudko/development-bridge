@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from secrets import token_urlsafe
 from typing import TYPE_CHECKING
 
@@ -88,12 +89,15 @@ class RouteControlService:
 
 
     def _find_route_id_for_token(self, token: str) -> str | None:
-        data = self.route_registry.snapshot()
-        current_binds = data.get("current_binds") or {}
-        for route_id, pending in current_binds.items():
-            if isinstance(pending, dict) and pending.get("token") == token:
-                return route_id
-        return None
+        return self.route_registry.route_id_for_current_bind_token(token)
+
+    def _stage_best_effort(self, diagnostic_id: str, *args, **kwargs) -> None:
+        with suppress(Exception):
+            self.trace_store.stage(diagnostic_id, *args, **kwargs)
+
+    def _finish_best_effort(self, diagnostic_id: str, *args, **kwargs) -> None:
+        with suppress(Exception):
+            self.trace_store.finish(diagnostic_id, *args, **kwargs)
 
     def prepare_bind(
         self,
@@ -114,7 +118,9 @@ class RouteControlService:
         )
         token = pending["token"]
 
-        diag_id = self.trace_store.start("bind", route_id=route_id, operation_id=token)
+        diag_id = self.trace_store.find_by_operation_id(token)
+        if diag_id is None:
+            diag_id = self.trace_store.start("bind", route_id=route_id, operation_id=token)
 
         base = self.public_base_url.rstrip("/") if self.public_base_url else ""
         operation_url = f"{base}{self.endpoint_prefix}/bind/{token}"
@@ -130,6 +136,10 @@ class RouteControlService:
         }
 
     def accept_bind_return(self, operation_id: str, redirect_url: str | None) -> dict:
+        route_id = self._find_route_id_for_token(operation_id)
+        if route_id is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+
         diag_id = self.trace_store.find_by_operation_id(operation_id)
         if diag_id is not None:
             existing_trace = self.trace_store.sanitized(diag_id)
@@ -139,7 +149,9 @@ class RouteControlService:
                 err = existing_trace.get("error_code") or "OPERATION_FAILED"
                 raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"current-chat bind operation already failed: {err}")
         else:
-            diag_id = self.trace_store.start("bind", operation_id=operation_id)
+            diag_id = self.trace_store.start(
+                "bind", route_id=route_id, operation_id=operation_id
+            )
 
         if not redirect_url or not str(redirect_url).strip():
             self.trace_store.stage(
@@ -173,17 +185,6 @@ class RouteControlService:
 
         self.trace_store.stage(diag_id, "target_parse", "ok")
 
-        route_id = self._find_route_id_for_token(operation_id)
-        if route_id is None:
-            self.trace_store.stage(
-                diag_id,
-                "token_check",
-                "failed",
-                error_code="TOKEN_INVALID",
-            )
-            self.trace_store.finish(diag_id, status="failed", error_code="TOKEN_INVALID")
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
-
         self.trace_store.stage(diag_id, "token_check", "ok")
 
         try:
@@ -192,25 +193,35 @@ class RouteControlService:
             msg = str(exc)
             if "different project" in msg:
                 err_code = "PROJECT_MISMATCH"
-                self.trace_store.stage(diag_id, "project_policy", "failed", error_code=err_code)
+                self._stage_best_effort(
+                    diag_id, "project_policy", "failed", error_code=err_code
+                )
             elif "active route changed" in msg:
                 err_code = "GENERATION_CHANGED"
-                self.trace_store.stage(diag_id, "generation_guard", "failed", error_code=err_code)
+                self._stage_best_effort(
+                    diag_id, "generation_guard", "failed", error_code=err_code
+                )
             elif "already recorded" in msg:
                 err_code = "TOKEN_REPLAYED"
-                self.trace_store.stage(diag_id, "candidate_store", "failed", error_code=err_code)
+                self._stage_best_effort(
+                    diag_id, "candidate_store", "failed", error_code=err_code
+                )
             elif "invalid or stale" in msg:
                 err_code = "TOKEN_EXPIRED"
-                self.trace_store.stage(diag_id, "token_check", "failed", error_code=err_code)
+                self._stage_best_effort(
+                    diag_id, "token_check", "failed", error_code=err_code
+                )
             else:
                 err_code = "REGISTRY_WRITE_FAILED"
-                self.trace_store.stage(diag_id, "candidate_store", "failed", error_code=err_code)
-            self.trace_store.finish(diag_id, status="failed", error_code=err_code)
+                self._stage_best_effort(
+                    diag_id, "candidate_store", "failed", error_code=err_code
+                )
+            self._finish_best_effort(diag_id, status="failed", error_code=err_code)
             raise
 
-        self.trace_store.stage(diag_id, "project_policy", "ok")
-        self.trace_store.stage(diag_id, "generation_guard", "ok")
-        self.trace_store.stage(diag_id, "candidate_store", "ok")
+        self._stage_best_effort(diag_id, "project_policy", "ok")
+        self._stage_best_effort(diag_id, "generation_guard", "ok")
+        self._stage_best_effort(diag_id, "candidate_store", "ok")
 
         return {
             "operation_id": operation_id,
@@ -232,13 +243,15 @@ class RouteControlService:
         route_id = self._find_route_id_for_token(operation_id)
         if route_id is None:
             if diag_id:
-                self.trace_store.stage(
+                self._stage_best_effort(
                     diag_id,
                     "registry_commit",
                     "failed",
                     error_code="TOKEN_EXPIRED",
                 )
-                self.trace_store.finish(diag_id, status="failed", error_code="TOKEN_EXPIRED")
+                self._finish_best_effort(
+                    diag_id, status="failed", error_code="TOKEN_EXPIRED"
+                )
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
 
         try:
@@ -248,30 +261,30 @@ class RouteControlService:
             if "candidate is not ready" in msg or "not ready" in msg:
                 err_code = "CANDIDATE_NOT_READY"
                 if diag_id:
-                    self.trace_store.stage(diag_id, "registry_commit", "failed", error_code=err_code)
+                    self._stage_best_effort(diag_id, "registry_commit", "failed", error_code=err_code)
             elif "different project" in msg:
                 err_code = "PROJECT_MISMATCH"
                 if diag_id:
-                    self.trace_store.stage(diag_id, "project_policy", "failed", error_code=err_code)
+                    self._stage_best_effort(diag_id, "project_policy", "failed", error_code=err_code)
             elif "active route changed" in msg:
                 err_code = "GENERATION_CHANGED"
                 if diag_id:
-                    self.trace_store.stage(diag_id, "generation_guard", "failed", error_code=err_code)
+                    self._stage_best_effort(diag_id, "generation_guard", "failed", error_code=err_code)
             elif "invalid or stale" in msg:
                 err_code = "TOKEN_EXPIRED"
                 if diag_id:
-                    self.trace_store.stage(diag_id, "registry_commit", "failed", error_code=err_code)
+                    self._stage_best_effort(diag_id, "registry_commit", "failed", error_code=err_code)
             else:
                 err_code = "REGISTRY_WRITE_FAILED"
                 if diag_id:
-                    self.trace_store.stage(diag_id, "registry_commit", "failed", error_code=err_code)
+                    self._stage_best_effort(diag_id, "registry_commit", "failed", error_code=err_code)
             if diag_id:
-                self.trace_store.finish(diag_id, status="failed", error_code=err_code)
+                self._finish_best_effort(diag_id, status="failed", error_code=err_code)
             raise
 
         if diag_id:
-            self.trace_store.stage(diag_id, "registry_commit", "ok")
-            self.trace_store.finish(diag_id, status="ok")
+            self._stage_best_effort(diag_id, "registry_commit", "ok")
+            self._finish_best_effort(diag_id, status="ok")
 
         changed = res.get("changed", True)
         return {
@@ -384,10 +397,12 @@ class RouteControlService:
                     coord_res = await self.coordinator.cancel_pending(channel_id)
                     coord_cancelled = 1 if coord_res.get("cancelled") else 0
                 except BridgeError:
-                    self.trace_store.stage(
+                    self._stage_best_effort(
                         diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
                     )
-                    self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                    self._finish_best_effort(
+                        diag_id, status="failed", error_code="WAKE_CANCEL_FAILED"
+                    )
                     raise
 
             waiters_cancelled = 0
@@ -399,14 +414,16 @@ class RouteControlService:
                     )
                     waiters_cancelled = int(job_res.get("cancelled_count", 0))
                 except BridgeError:
-                    self.trace_store.stage(
+                    self._stage_best_effort(
                         diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
                     )
-                    self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                    self._finish_best_effort(
+                        diag_id, status="failed", error_code="WAKE_CANCEL_FAILED"
+                    )
                     raise
 
-            self.trace_store.stage(diag_id, "wake_cancel", "ok")
-            self.trace_store.finish(diag_id, status="ok")
+            self._stage_best_effort(diag_id, "wake_cancel", "ok")
+            self._finish_best_effort(diag_id, status="ok")
 
             return {
                 "route_id": route_id,
@@ -449,10 +466,12 @@ class RouteControlService:
             if self.coordinator is not None:
                 coord_status = await self.coordinator.status(channel_id)
                 if coord_status.get("state") != "idle":
-                    self.trace_store.stage(
+                    self._stage_best_effort(
                         diag_id, "wake_cancel", "failed", error_code="PENDING_WAKES"
                     )
-                    self.trace_store.finish(diag_id, status="failed", error_code="PENDING_WAKES")
+                    self._finish_best_effort(
+                        diag_id, status="failed", error_code="PENDING_WAKES"
+                    )
                     raise BridgeError(
                         ErrorCode.POLICY_VIOLATION,
                         "Cannot unbind route with active or pending coordinator wakes; cancel wakes first",
@@ -468,29 +487,33 @@ class RouteControlService:
                     and self._matches_route_and_generation(w.get("payload"), route_id, generation)
                 ]
                 if waiters:
-                    self.trace_store.stage(
+                    self._stage_best_effort(
                         diag_id, "wake_cancel", "failed", error_code="PENDING_WAKES"
                     )
-                    self.trace_store.finish(diag_id, status="failed", error_code="PENDING_WAKES")
+                    self._finish_best_effort(
+                        diag_id, status="failed", error_code="PENDING_WAKES"
+                    )
                     raise BridgeError(
                         ErrorCode.POLICY_VIOLATION,
                         "Cannot unbind route with active durable waiters; cancel wakes first",
                         details={"route_id": route_id, "error_code": "PENDING_WAKES"},
                     )
 
-            self.trace_store.stage(diag_id, "wake_cancel", "ok")
+            self._stage_best_effort(diag_id, "wake_cancel", "ok")
 
             try:
                 res = self.route_registry.unbind(route_id, expected_generation=generation)
             except BridgeError:
-                self.trace_store.stage(
+                self._stage_best_effort(
                     diag_id, "registry_commit", "failed", error_code="REGISTRY_WRITE_FAILED"
                 )
-                self.trace_store.finish(diag_id, status="failed", error_code="REGISTRY_WRITE_FAILED")
+                self._finish_best_effort(
+                    diag_id, status="failed", error_code="REGISTRY_WRITE_FAILED"
+                )
                 raise
 
-            self.trace_store.stage(diag_id, "registry_commit", "ok")
-            self.trace_store.finish(diag_id, status="ok")
+            self._stage_best_effort(diag_id, "registry_commit", "ok")
+            self._finish_best_effort(diag_id, status="ok")
 
             return {
                 "route_id": route_id,
@@ -534,10 +557,12 @@ class RouteControlService:
                     coord_res = await self.coordinator.cancel_pending(channel_id)
                     coord_cancelled = 1 if coord_res.get("cancelled") else 0
                 except BridgeError:
-                    self.trace_store.stage(
+                    self._stage_best_effort(
                         diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
                     )
-                    self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                    self._finish_best_effort(
+                        diag_id, status="failed", error_code="WAKE_CANCEL_FAILED"
+                    )
                     raise
 
             # 2. Cancel durable waiters
@@ -550,20 +575,24 @@ class RouteControlService:
                     )
                     waiters_cancelled = int(job_res.get("cancelled_count", 0))
                 except BridgeError:
-                    self.trace_store.stage(
+                    self._stage_best_effort(
                         diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
                     )
-                    self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                    self._finish_best_effort(
+                        diag_id, status="failed", error_code="WAKE_CANCEL_FAILED"
+                    )
                     raise
 
             # 3. Verify zero wake-producing state
             if self.coordinator is not None:
                 coord_status = await self.coordinator.status(channel_id)
                 if coord_status.get("state") != "idle":
-                    self.trace_store.stage(
+                    self._stage_best_effort(
                         diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
                     )
-                    self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                    self._finish_best_effort(
+                        diag_id, status="failed", error_code="WAKE_CANCEL_FAILED"
+                    )
                     raise BridgeError(
                         ErrorCode.POLICY_VIOLATION,
                         "Coordinator wake state is still active after cancellation attempt",
@@ -578,30 +607,34 @@ class RouteControlService:
                     and self._matches_route_and_generation(w.get("payload"), route_id, generation)
                 ]
                 if remaining_waiters:
-                    self.trace_store.stage(
+                    self._stage_best_effort(
                         diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
                     )
-                    self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                    self._finish_best_effort(
+                        diag_id, status="failed", error_code="WAKE_CANCEL_FAILED"
+                    )
                     raise BridgeError(
                         ErrorCode.POLICY_VIOLATION,
                         "Durable waiters still active after cancellation attempt",
                         details={"route_id": route_id, "error_code": "WAKE_CANCEL_FAILED"},
                     )
 
-            self.trace_store.stage(diag_id, "wake_cancel", "ok")
+            self._stage_best_effort(diag_id, "wake_cancel", "ok")
 
             # 4. Perform registry unbind
             try:
                 res = self.route_registry.unbind(route_id, expected_generation=generation)
             except BridgeError:
-                self.trace_store.stage(
+                self._stage_best_effort(
                     diag_id, "registry_commit", "failed", error_code="REGISTRY_WRITE_FAILED"
                 )
-                self.trace_store.finish(diag_id, status="failed", error_code="REGISTRY_WRITE_FAILED")
+                self._finish_best_effort(
+                    diag_id, status="failed", error_code="REGISTRY_WRITE_FAILED"
+                )
                 raise
 
-            self.trace_store.stage(diag_id, "registry_commit", "ok")
-            self.trace_store.finish(diag_id, status="ok")
+            self._stage_best_effort(diag_id, "registry_commit", "ok")
+            self._finish_best_effort(diag_id, status="ok")
 
             return {
                 "route_id": route_id,

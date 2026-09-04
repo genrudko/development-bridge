@@ -182,6 +182,69 @@ async def test_external_trigger_is_unavailable_unset_and_token_protected(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_external_trigger_rejects_unbound_route_channel(tmp_path):
+    settings = load_settings(environ={
+        "DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN": "secret",
+        "DEVELOPMENT_BRIDGE_ROUTE_REGISTRY_PATH": str(tmp_path / "routes.json"),
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    container.route_registry.unbind("bridge", expected_generation=0)
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.post(
+            "/mcp/x/coordinator/trigger",
+            headers={"Authorization": "Bearer secret"},
+            json={"channel_id": "telegram-bridge-g0", "message": "stale wake"},
+        )
+
+    assert response.status_code == 409
+    assert (await container.coordinator.status("telegram-bridge-g0"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_external_trigger_arms_route_channel_under_route_lock(tmp_path):
+    settings = load_settings(environ={
+        "DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN": "secret",
+        "DEVELOPMENT_BRIDGE_ROUTE_REGISTRY_PATH": str(tmp_path / "routes.json"),
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    route_lock = container.route_registry.route_lock("bridge")
+    original_arm = container.coordinator.arm
+    lock_observations = []
+
+    async def observe_lock(*args, **kwargs):
+        lock_observations.append(route_lock.locked())
+        return await original_arm(*args, **kwargs)
+
+    container.coordinator.arm = observe_lock
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.post(
+            "/mcp/x/coordinator/trigger",
+            headers={"Authorization": "Bearer secret"},
+            json={"channel_id": "telegram-bridge-g0", "message": "current wake"},
+        )
+
+    assert response.status_code == 202
+    assert lock_observations == [True]
+
+
+@pytest.mark.asyncio
 async def test_rollover_control_keeps_active_route_until_commit(tmp_path):
     settings = BridgeSettings.model_validate(
         {"coordinator": {"route_registry_path": tmp_path / "routes.json"}}

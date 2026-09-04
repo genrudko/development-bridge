@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from app.api.errors import BridgeError
 from app.container import build_container
 from app.jobs import JobStatus
 from app.settings import BridgeSettings
@@ -263,7 +266,7 @@ def test_exec_and_wake_self_mount_requests_active_route_and_owns_lease(tmp_path)
     assert other_session.structured_content["delivery_lease"] != first_sc["delivery_lease"]
 
 
-def test_exec_and_wake_self_mount_does_not_request_pending_rollover(tmp_path):
+def test_exec_and_wake_rejects_pending_rollover_channel(tmp_path):
     repository_path = create_git_repository(tmp_path, "repository")
     settings = BridgeSettings.model_validate({
         "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
@@ -285,19 +288,55 @@ def test_exec_and_wake_self_mount_does_not_request_pending_rollover(tmp_path):
     container.route_registry.request("bridge-dev")
     pending = container.route_registry.prepare_rollover("ad5x")
     tool = build_tool_registry(container).get("coordinator_exec_and_wake")
-    result = asyncio.run(tool.handler(
-        _mcp_ctx("pending-session"),
-        SimpleNamespace(arguments={
-            "project_id": "project", "repository_id": "repository",
-            "executable": sys.executable, "arguments": ["-c", "print('pending')"],
-            "channel_id": pending["channel_id"], "message": "pending",
-        }),
-        SimpleNamespace(request_id="req-pending"),
-    ))
-    assert result.structured_content["channel_id"] == pending["channel_id"]
-    assert result.structured_content["route_id"] == "ad5x"
-    assert result.structured_content["route_state"] == "pending"
+    with pytest.raises(BridgeError, match="route-generation"):
+        asyncio.run(tool.handler(
+            _mcp_ctx("pending-session"),
+            SimpleNamespace(arguments={
+                "project_id": "project", "repository_id": "repository",
+                "executable": sys.executable, "arguments": ["-c", "print('pending')"],
+                "channel_id": pending["channel_id"], "message": "pending",
+            }),
+            SimpleNamespace(request_id="req-pending"),
+        ))
     assert container.route_registry.snapshot()["requested_route"] == "bridge-dev"
+
+
+def test_coordinator_wake_on_jobs_rejects_unregistered_future_route_channel(tmp_path):
+    repository_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate({
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "projects": [{"id": "project", "name": "Project", "repositories": [{
+            "id": "repository", "path": repository_path, "capabilities": {"execute": True}
+        }]}],
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    registrations = []
+
+    async def register(*args, **kwargs):
+        registrations.append((args, kwargs))
+        return {"state": "waiting", "durable": True}
+
+    container.jobs.wake_on_jobs_durable = register
+    tool = build_tool_registry(container).get("coordinator_wake_on_jobs")
+
+    with pytest.raises(BridgeError, match="route-generation"):
+        asyncio.run(tool.handler(
+            None,
+            SimpleNamespace(arguments={
+                "project_id": "project",
+                "repository_id": "repository",
+                "job_ids": ["job_00000000000000000000000000000001"],
+                "channel_id": "telegram-bridge-g1",
+            }),
+            SimpleNamespace(request_id="req-future-waiter"),
+        ))
+    assert registrations == []
 
 def test_coordinator_exec_and_wake_cancels_job_if_waiter_registration_fails(tmp_path):
     repository_path = create_git_repository(tmp_path, "repository")

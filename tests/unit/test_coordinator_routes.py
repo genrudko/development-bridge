@@ -92,6 +92,123 @@ def test_coordinator_route_context_get_returns_content_without_bootstrap_duplica
     assert content not in data["bootstrap_message"]
 
 
+def _assert_model_surfaces_exclude(result, forbidden: tuple[str, ...]) -> None:
+    model_text = result.content[0].text
+    structured = json.dumps(result.structured_content, sort_keys=True)
+    for value in forbidden:
+        assert value not in model_text
+        assert value not in structured
+
+
+def test_coordinator_route_context_get_hides_physical_route_identity(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-sensitive-project/c/conv-sensitive-context",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    tool = build_tool_registry(container).get("coordinator_route_context_get")
+
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-context-safe"),
+    ))
+
+    _assert_model_surfaces_exclude(
+        result,
+        ("https://chatgpt.com", "g-p-sensitive-project", "conv-sensitive-context"),
+    )
+
+
+def test_coordinator_route_rollover_prepare_hides_physical_identity_and_token(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-sensitive-project/c/conv-sensitive-rollover",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    tool = build_tool_registry(container).get("coordinator_route_rollover_prepare")
+
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-rollover-safe"),
+    ))
+    pending = container.route_registry.pending_rollover("bridge")
+
+    assert pending is not None
+    assert result.structured_content["channel_id"] == "telegram-bridge-g0"
+    _assert_model_surfaces_exclude(
+        result,
+        (
+            "https://chatgpt.com",
+            "g-p-sensitive-project",
+            "conv-sensitive-rollover",
+            pending["token"],
+        ),
+    )
+
+
+def test_coordinator_route_takeover_hides_physical_route_identity(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-sensitive-project/c/conv-old",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    tool = build_tool_registry(container).get("coordinator_route_takeover")
+
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={
+            "route_id": "bridge",
+            "url": "https://chatgpt.com/g/g-p-sensitive-project/c/conv-sensitive-takeover",
+        }),
+        SimpleNamespace(request_id="req-takeover-safe"),
+    ))
+
+    _assert_model_surfaces_exclude(
+        result,
+        ("https://chatgpt.com", "g-p-sensitive-project", "conv-sensitive-takeover"),
+    )
+
+
+def test_coordinator_continue_rejects_unregistered_future_route_channel(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    tool = build_tool_registry(container).get("coordinator_continue")
+
+    with pytest.raises(BridgeError, match="route-generation"):
+        asyncio.run(tool.handler(
+            None,
+            SimpleNamespace(arguments={
+                "channel_id": "telegram-bridge-g1",
+                "message": "wake a future route",
+            }),
+            SimpleNamespace(request_id="req-future-channel"),
+        ))
+
+
 def test_coordinator_route_list_returns_bounded_metadata_without_mutating_state(tmp_path: Path):
     settings = BridgeSettings.model_validate({
         "coordinator": {"route_registry_path": tmp_path / "routes.json"},
@@ -337,8 +454,10 @@ def test_bind_current_repeated_prepare_updates_operation_and_meta(tmp_path: Path
     }
     second_meta = second.meta["route_control"]
     assert second_meta["action"] == "bind"
-    assert second_meta["operation_id"]
-    assert second_meta["operation_url"]
+    assert second_meta["operation_id"] == first_meta["operation_id"]
+    assert second_meta["diagnostic_id"] == first_meta["diagnostic_id"]
+    assert second_meta["operation_url"] == first_meta["operation_url"]
+    assert len(list((tmp_path / "traces").glob("*.json"))) == 1
 
 
 

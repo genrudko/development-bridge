@@ -385,6 +385,12 @@ def build_container(
                 )
         else:
             channel_id = str(payload["channel_id"])
+            try:
+                route = route_registry.wake_route_for_channel(channel_id)
+            except BridgeError:
+                return
+            if route is not None:
+                return
             await coordinator.arm_job_continuation(
                 records,
                 reason,

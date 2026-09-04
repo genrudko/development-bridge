@@ -86,6 +86,35 @@ def test_accept_bind_return_records_candidate_without_mutating_active_route(test
     assert "g-p-infra" not in dumped
 
 
+def test_accept_bind_return_unknown_operation_does_not_allocate_trace(test_setup):
+    _registry, trace_store, service = test_setup
+
+    with pytest.raises(BridgeError, match="invalid or stale"):
+        service.accept_bind_return(
+            "bind_attacker_supplied_operation",
+            "https://chatgpt.com/g/g-p-infra/c/conv-attacker",
+        )
+
+    assert not trace_store.state_dir.exists()
+
+
+def test_accept_bind_return_expired_operation_does_not_reallocate_trace(test_setup):
+    registry, trace_store, service = test_setup
+    prepared = service.prepare_bind("bridge", session_id="session-1")
+    trace_store._trace_path(prepared["diagnostic_id"]).unlink()
+    data = registry._load()
+    data["current_binds"]["bridge"]["created_at"] = "2020-01-01T00:00:00+00:00"
+    registry._save(data)
+
+    with pytest.raises(BridgeError, match="invalid or stale"):
+        service.accept_bind_return(
+            prepared["operation_id"],
+            "https://chatgpt.com/g/g-p-infra/c/conv-expired",
+        )
+
+    assert list(trace_store.state_dir.glob("*.json")) == []
+
+
 def test_commit_bind_consumes_candidate_and_mutates_route(test_setup):
     registry, trace_store, service = test_setup
 
@@ -111,6 +140,24 @@ def test_commit_bind_consumes_candidate_and_mutates_route(test_setup):
     # Trace is completed with ok status
     sanitized = trace_store.sanitized(result["diagnostic_id"])
     assert sanitized["status"] == "ok"
+
+
+def test_commit_bind_result_survives_post_commit_diagnostic_failure(test_setup, monkeypatch):
+    registry, trace_store, service = test_setup
+    prepared = service.prepare_bind("bridge", session_id="session-1")
+    service.accept_bind_return(
+        prepared["operation_id"],
+        "https://chatgpt.com/g/g-p-infra/c/conv-new-target",
+    )
+
+    def fail_finish(*_args, **_kwargs):
+        raise OSError("diagnostic storage unavailable")
+
+    monkeypatch.setattr(trace_store, "finish", fail_finish)
+    result = service.commit_bind(prepared["operation_id"])
+
+    assert result["state"] == "bound"
+    assert registry.resolve("bridge")["conversation_id"] == "conv-new-target"
 
 
 def test_commit_bind_is_single_use_replay_fails(test_setup):
@@ -297,6 +344,61 @@ def test_safe_status_reports_bind_pending_and_unbound(test_setup):
     registry.unbind("bridge", expected_generation=0)
     status_unbound = service.safe_status("bridge")
     assert status_unbound["state"] == "unbound"
+
+
+def test_safe_status_does_not_report_expired_bind_as_pending(test_setup):
+    registry, _trace_store, service = test_setup
+    service.prepare_bind("bridge", session_id="session-1")
+    data = registry._load()
+    data["current_binds"]["bridge"]["created_at"] = "2020-01-01T00:00:00+00:00"
+    registry._save(data)
+
+    status = service.safe_status("bridge")
+
+    assert status["state"] == "bound"
+    assert registry.pending_current_bind("bridge") is None
+
+
+class _RecordingCancellationCoordinator:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def cancel_pending(self, _channel_id: str) -> dict:
+        self.cancelled = True
+        return {"cancelled": True}
+
+
+@pytest.mark.asyncio
+async def test_cancel_result_survives_post_mutation_diagnostic_failure(test_setup, monkeypatch):
+    registry, trace_store, _service = test_setup
+    coordinator = _RecordingCancellationCoordinator()
+    service = RouteControlService(registry, trace_store, coordinator=coordinator)
+
+    def fail_finish(*_args, **_kwargs):
+        raise OSError("diagnostic storage unavailable")
+
+    monkeypatch.setattr(trace_store, "finish", fail_finish)
+    result = await service.cancel_wakes("bridge")
+
+    assert result["state"] == "wakes_cancelled"
+    assert coordinator.cancelled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["unbind", "unbind_and_cancel"])
+async def test_unbind_result_survives_post_commit_diagnostic_failure(
+    test_setup, monkeypatch, operation
+):
+    registry, trace_store, service = test_setup
+
+    def fail_finish(*_args, **_kwargs):
+        raise OSError("diagnostic storage unavailable")
+
+    monkeypatch.setattr(trace_store, "finish", fail_finish)
+    result = await getattr(service, operation)("bridge")
+
+    assert result["state"] == "unbound"
+    assert registry.is_bound(registry.resolve("bridge")) is False
 
 
 def test_container_builds_route_control(tmp_path: Path):
@@ -667,7 +769,15 @@ async def test_resume_coordinator_waiter_stale_generation_or_unbound_is_safe_noo
     assert (await container.coordinator.status("telegram-bridge-g0"))["state"] == "idle"
     assert (await container.coordinator.status("telegram-bridge-g1"))["state"] == "idle"
 
-    # 2. Unbound route -> must be safe no-op
+    # 2. A legacy channel-only waiter must not wake a route channel that later became current.
+    await handler(
+        {"channel_id": "telegram-bridge-g1", "message": "unpinned future wake"},
+        (job,),
+        "all_terminal",
+    )
+    assert (await container.coordinator.status("telegram-bridge-g1"))["state"] == "idle"
+
+    # 3. Unbound route -> must be safe no-op
     container.route_registry.unbind("bridge", expected_generation=1)
     await handler(
         {"route_id": "bridge", "generation": 1, "channel_id": "telegram-bridge-g1"},

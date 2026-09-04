@@ -84,7 +84,7 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
 
     if channel_id is not None:
         channel = container.coordinator.validate_channel(channel_id)
-        route = container.route_registry.route_for_channel(channel)
+        route = container.route_registry.wake_route_for_channel(channel)
         if route is None:
             return _bind_session(container, ctx, {"channel_id": channel, "route_state": "explicit"})
         resolved_logical = container.route_registry.resolve(route["route_id"])
@@ -318,11 +318,18 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 retryable=True,
             )
         pending = container.route_registry.prepare_rollover(route_id)
-        result = to_mcp_result(success(request_context.request_id, {"route": route, "rollover": pending, "state": "prepared"}))
+        safe_data = {
+            "route_id": route_id,
+            "state": "prepared",
+            "generation": int(route.get("generation", 0)),
+            "target_generation": int(pending["target_generation"]),
+            "channel_id": route["channel_id"],
+        }
+        result = to_mcp_result(success(request_context.request_id, safe_data))
         trigger_path = container.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
         public_base = container.settings.server.public_base_url
         trigger_url = str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
-        result.structured_content = {"channel_id": route["channel_id"], "trigger_url": trigger_url, "rollover": pending}
+        result.structured_content = {**safe_data, "trigger_url": trigger_url}
         result.meta = dict(COORDINATOR_UI_META)
         return result
 

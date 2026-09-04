@@ -470,12 +470,42 @@ def create_streamable_http_app(
                 raise TypeError
             if "message" not in body:
                 raise BridgeError(ErrorCode.INVALID_ARGUMENT, "message is required")
-            result = await container.coordinator.arm(
-                body["message"],
-                channel_id=body.get("channel_id", "coordinator"),
-                delay_seconds=body.get("delay", 0),
-                conflict=body.get("conflict", "coalesce"),
+            channel_id = container.coordinator.validate_channel(
+                body.get("channel_id", "coordinator")
             )
+            route = container.route_registry.wake_route_for_channel(channel_id)
+            if route is None:
+                result = await container.coordinator.arm(
+                    body["message"],
+                    channel_id=channel_id,
+                    delay_seconds=body.get("delay", 0),
+                    conflict=body.get("conflict", "coalesce"),
+                )
+            else:
+                route_id = str(route["route_id"])
+                expected_generation = int(route.get("generation", 0))
+                async with container.route_registry.route_lock(route_id):
+                    current = container.route_registry.resolve(route_id)
+                    if current is None or not container.route_registry.is_bound(current):
+                        raise BridgeError(
+                            ErrorCode.POLICY_VIOLATION,
+                            f"Route '{route_id}' is unbound; cannot arm external wake",
+                        )
+                    if (
+                        int(current.get("generation", -1)) != expected_generation
+                        or str(current.get("channel_id")) != channel_id
+                    ):
+                        raise BridgeError(
+                            ErrorCode.POLICY_VIOLATION,
+                            "Route generation or channel changed before external wake",
+                            retryable=True,
+                        )
+                    result = await container.coordinator.arm(
+                        body["message"],
+                        channel_id=channel_id,
+                        delay_seconds=body.get("delay", 0),
+                        conflict=body.get("conflict", "coalesce"),
+                    )
             return JSONResponse(result, status_code=202)
         except BridgeError as error:
             status = 409 if error.code is ErrorCode.POLICY_VIOLATION else 400
