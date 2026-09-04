@@ -49,15 +49,15 @@ def probe_runtime():
                 root = getattr(design, "rootComponent", None)
                 facts["has_sketch_access"] = hasattr(root, "sketches") if root else False
             else:
-                facts["has_design_access"] = facts["has_design_class"]
-                facts["has_timeline_access"] = hasattr(adsk.fusion, "Timeline")
-                facts["has_entity_token_resolver"] = hasattr(adsk.fusion.Design, "findEntityByToken") if hasattr(adsk.fusion, "Design") else False
-                facts["has_sketch_access"] = facts["has_sketch_class"]
+                facts["has_design_access"] = False
+                facts["has_timeline_access"] = False
+                facts["has_entity_token_resolver"] = False
+                facts["has_sketch_access"] = False
         else:
-            facts["has_design_access"] = facts.get("has_design_class", False)
-            facts["has_timeline_access"] = hasattr(adsk.fusion, "Timeline") if hasattr(adsk, "fusion") else False
-            facts["has_entity_token_resolver"] = hasattr(adsk.fusion.Design, "findEntityByToken") if hasattr(adsk, "fusion") and hasattr(adsk.fusion, "Design") else False
-            facts["has_sketch_access"] = facts.get("has_sketch_class", False)
+            facts["has_design_access"] = False
+            facts["has_timeline_access"] = False
+            facts["has_entity_token_resolver"] = False
+            facts["has_sketch_access"] = False
     except Exception as exc:
         facts["adsk_fusion_probe_error"] = str(exc)
 
@@ -81,124 +81,186 @@ def probe_runtime():
     except Exception:
         pass
 
-    # If adsk not present (e.g. running in testing stub or relay container)
-    if not facts.get("has_app") and not facts.get("has_adsk_fusion"):
-        # Fallback to payload facts if provided, otherwise default basic facts
-        if "probe_facts" in PAYLOAD and isinstance(PAYLOAD["probe_facts"], dict):
-            facts.update(PAYLOAD["probe_facts"])
-        else:
-            facts["standalone_runtime"] = True
-            facts["has_app"] = True
-            facts["has_measure_manager"] = True
-            facts["has_selection_primitives"] = True
-            facts["has_active_document"] = True
-            facts["has_mutation_indicators"] = True
-            facts["has_attributes"] = True
-            facts["has_adsk_fusion"] = True
-            facts["has_design_access"] = True
-            facts["has_timeline_access"] = True
-            facts["has_entity_token_resolver"] = True
-            facts["has_sketch_access"] = True
-            facts["has_sketch_text"] = True
-            facts["has_export_manager"] = True
-            facts["has_joint_access"] = True
-            facts["has_camera"] = True
-            facts["has_viewport_conversion"] = True
-            facts["has_command_preview"] = True
-            facts["has_undo_redo"] = True
+    if "probe_facts" in PAYLOAD and isinstance(PAYLOAD["probe_facts"], dict):
+        facts.update(PAYLOAD["probe_facts"])
+
+    probe_err = facts.get("adsk_core_probe_error") or facts.get("adsk_fusion_probe_error")
+    probe_failed = bool(probe_err) or (
+        not facts.get("has_app")
+        and not facts.get("has_adsk_fusion")
+        and not facts.get("has_design_access")
+    )
 
     resolved_version = fusion_version or PAYLOAD.get("fusion_version")
-    relay_version = PAYLOAD.get("relay_version", "1.0.0")
+    relay_version = PAYLOAD.get("relay_version")
+
+    def err_limits(default_msg):
+        limits = [default_msg]
+        if facts.get("adsk_core_probe_error"):
+            limits.append("adsk.core probe error: " + str(facts["adsk_core_probe_error"]))
+        if facts.get("adsk_fusion_probe_error"):
+            limits.append("adsk.fusion probe error: " + str(facts["adsk_fusion_probe_error"]))
+        return limits
 
     records = []
     # 1. entity.token_resolver
-    records.append({
-        "name": "entity.token_resolver",
-        "state": "supported" if facts.get("has_entity_token_resolver") else "unavailable",
-        "implementation": "adsk.fusion.Design.findEntityByToken" if facts.get("has_entity_token_resolver") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_entity_token_resolver") else ["Native design entity-token resolver not available on this Fusion runtime"],
-    })
-
-    # 2. design.access
-    records.append({
-        "name": "design.access",
-        "state": "supported" if facts.get("has_design_access") else "unavailable",
-        "implementation": "adsk.fusion.Design" if facts.get("has_design_access") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_design_access") else ["Design product access not available"],
-    })
-
-    # 3. timeline.access
-    records.append({
-        "name": "timeline.access",
-        "state": "supported" if facts.get("has_timeline_access") else "unavailable",
-        "implementation": "adsk.fusion.Timeline" if facts.get("has_timeline_access") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_timeline_access") else ["Timeline access not available"],
-    })
-
-    # 4. sketch.access
-    records.append({
-        "name": "sketch.access",
-        "state": "supported" if facts.get("has_sketch_access") else "unavailable",
-        "implementation": "adsk.fusion.Sketches" if facts.get("has_sketch_access") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_sketch_access") else ["Sketch collection access not available"],
-    })
-
-    # 5. inspect.measure
-    records.append({
-        "name": "inspect.measure",
-        "state": "supported" if facts.get("has_measure_manager") else "unavailable",
-        "implementation": "adsk.core.MeasureManager" if facts.get("has_measure_manager") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_measure_manager") else ["MeasureManager API not available"],
-    })
-
-    # 6. view.camera
-    records.append({
-        "name": "view.camera",
-        "state": "supported" if facts.get("has_camera") else "unavailable",
-        "implementation": "adsk.core.Camera" if facts.get("has_camera") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_camera") else ["Camera control API not available"],
-    })
-
-    # 7. view.viewport_conversion
-    records.append({
-        "name": "view.viewport_conversion",
-        "state": "supported" if facts.get("has_viewport_conversion") else "unavailable",
-        "implementation": "adsk.core.Viewport" if facts.get("has_viewport_conversion") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_viewport_conversion") else ["Viewport screen/model coordinate conversion methods not available"],
-    })
-
-    # 8. view.pick
-    if facts.get("has_selection_primitives"):
+    if not probe_failed and facts.get("has_entity_token_resolver"):
         records.append({
-            "name": "view.pick",
+            "name": "entity.token_resolver",
             "state": "supported",
-            "implementation": "native-preselect",
+            "implementation": "adsk.fusion.Design.findEntityByToken",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
         })
-    elif facts.get("has_viewport_conversion"):
+    else:
+        records.append({
+            "name": "entity.token_resolver",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Native design entity-token resolver not available on this Fusion runtime"),
+        })
+
+    # 2. design.access
+    if not probe_failed and facts.get("has_design_access"):
+        records.append({
+            "name": "design.access",
+            "state": "supported",
+            "implementation": "adsk.fusion.Design",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    else:
+        records.append({
+            "name": "design.access",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Design product access not available on active document"),
+        })
+
+    # 3. timeline.access
+    if not probe_failed and facts.get("has_timeline_access"):
+        records.append({
+            "name": "timeline.access",
+            "state": "supported",
+            "implementation": "adsk.fusion.Timeline",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    else:
+        records.append({
+            "name": "timeline.access",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Timeline access not available on active design"),
+        })
+
+    # 4. sketch.access
+    if not probe_failed and facts.get("has_sketch_access"):
+        records.append({
+            "name": "sketch.access",
+            "state": "supported",
+            "implementation": "adsk.fusion.Sketches",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    else:
+        records.append({
+            "name": "sketch.access",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Sketch collection access not available on active root component"),
+        })
+
+    # 5. inspect.measure (Finding 3: do not claim contract-level supported from hasattr alone)
+    if not probe_failed and facts.get("has_measure_manager"):
+        records.append({
+            "name": "inspect.measure",
+            "state": "degraded",
+            "implementation": "adsk.core.MeasureManager",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["MeasureManager object presence does not guarantee contract-level geometric measurement without active document and entity context"],
+        })
+    else:
+        records.append({
+            "name": "inspect.measure",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("MeasureManager API not available"),
+        })
+
+    # 6. view.camera
+    if not probe_failed and facts.get("has_camera"):
+        records.append({
+            "name": "view.camera",
+            "state": "supported",
+            "implementation": "adsk.core.Camera",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    else:
+        records.append({
+            "name": "view.camera",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Camera control API not available"),
+        })
+
+    # 7. view.viewport_conversion
+    if not probe_failed and facts.get("has_viewport_conversion"):
+        records.append({
+            "name": "view.viewport_conversion",
+            "state": "supported",
+            "implementation": "adsk.core.Viewport",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    else:
+        records.append({
+            "name": "view.viewport_conversion",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Viewport screen/model coordinate conversion methods not available"),
+        })
+
+    # 8. view.pick (Finding 3: load-bearing pick remains degraded/unavailable until later live feasibility proof)
+    if not probe_failed and facts.get("has_selection_primitives"):
+        records.append({
+            "name": "view.pick",
+            "state": "degraded",
+            "implementation": "native-preselect",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Visual pick requires live feasibility proof; load-bearing pick remains degraded pending live verification"],
+        })
+    elif not probe_failed and facts.get("has_viewport_conversion"):
         records.append({
             "name": "view.pick",
             "state": "degraded",
             "implementation": "viewport-raycast",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Raycast geometry intersection without native preselection"],
+            "limitations": ["Raycast geometry intersection without native preselection; load-bearing pick remains degraded pending live verification"],
         })
     else:
         records.append({
@@ -207,47 +269,67 @@ def probe_runtime():
             "implementation": None,
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Neither selection primitives nor viewport projection methods available"],
+            "limitations": err_limits("Neither selection primitives nor viewport projection methods available"),
         })
 
     # 9. selection.primitives
-    records.append({
-        "name": "selection.primitives",
-        "state": "supported" if facts.get("has_selection_primitives") else "unavailable",
-        "implementation": "adsk.core.UserInterface.activeSelections" if facts.get("has_selection_primitives") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_selection_primitives") else ["Interactive selection primitives not available"],
-    })
-
-    # 10. transaction.preview_hooks
-    records.append({
-        "name": "transaction.preview_hooks",
-        "state": "supported" if facts.get("has_command_preview") else "unavailable",
-        "implementation": "adsk.core.Command.executePreview" if facts.get("has_command_preview") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_command_preview") else ["Command execution preview hooks not available"],
-    })
-
-    # 11. transaction.preview_replay
-    if facts.get("has_command_preview") and facts.get("has_undo_redo"):
+    if not probe_failed and facts.get("has_selection_primitives"):
         records.append({
-            "name": "transaction.preview_replay",
+            "name": "selection.primitives",
             "state": "supported",
-            "implementation": "command-preview-replay",
+            "implementation": "adsk.core.UserInterface.activeSelections",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
         })
-    elif facts.get("has_undo_redo"):
+    else:
+        records.append({
+            "name": "selection.primitives",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Interactive selection primitives not available"),
+        })
+
+    # 10. transaction.preview_hooks
+    if not probe_failed and facts.get("has_command_preview"):
+        records.append({
+            "name": "transaction.preview_hooks",
+            "state": "supported",
+            "implementation": "adsk.core.Command.executePreview",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    else:
+        records.append({
+            "name": "transaction.preview_hooks",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Command execution preview hooks not available"),
+        })
+
+    # 11. transaction.preview_replay (Finding 3: load-bearing transaction remains degraded/unavailable until later live feasibility proof)
+    if not probe_failed and facts.get("has_command_preview") and facts.get("has_undo_redo"):
+        records.append({
+            "name": "transaction.preview_replay",
+            "state": "degraded",
+            "implementation": "command-preview-replay",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Staged transaction preview and replay semantics require live feasibility proof; load-bearing transaction remains degraded pending live verification"],
+        })
+    elif not probe_failed and facts.get("has_undo_redo"):
         records.append({
             "name": "transaction.preview_replay",
             "state": "degraded",
             "implementation": "undo-redo-fallback",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Command preview hooks not available; rollback relies on active transaction undo"],
+            "limitations": ["Command preview hooks not available; rollback relies on active transaction undo; load-bearing transaction remains degraded pending live verification"],
         })
     else:
         records.append({
@@ -256,67 +338,107 @@ def probe_runtime():
             "implementation": None,
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Neither command preview nor undo/redo available for transaction replay"],
+            "limitations": err_limits("Neither command preview nor undo/redo available for transaction replay"),
         })
 
     # 12. metadata.attributes
-    records.append({
-        "name": "metadata.attributes",
-        "state": "supported" if facts.get("has_attributes") else "unavailable",
-        "implementation": "adsk.core.Attributes" if facts.get("has_attributes") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_attributes") else ["Custom attributes API not available"],
-    })
-
-    # 13. style.sketch_text
-    records.append({
-        "name": "style.sketch_text",
-        "state": "supported" if facts.get("has_sketch_text") else "unavailable",
-        "implementation": "adsk.fusion.SketchTexts" if facts.get("has_sketch_text") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_sketch_text") else ["SketchText creation and extrusion not available"],
-    })
-
-    # 14. transaction.undo_redo
-    records.append({
-        "name": "transaction.undo_redo",
-        "state": "supported" if facts.get("has_undo_redo") else "unavailable",
-        "implementation": "adsk.core.Application" if facts.get("has_undo_redo") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_undo_redo") else ["Application text command / transaction undo not available"],
-    })
-
-    # 15. revision.mutation_indicators
-    records.append({
-        "name": "revision.mutation_indicators",
-        "state": "supported" if facts.get("has_mutation_indicators") else "unavailable",
-        "implementation": "adsk.core.Document.isModified" if facts.get("has_mutation_indicators") else None,
-        "fusion_version": resolved_version,
-        "relay_version": relay_version,
-        "limitations": [] if facts.get("has_mutation_indicators") else ["Document mutation modified indicator not available"],
-    })
-
-    # 16. revision.external_change_detection
-    if facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+    if not probe_failed and facts.get("has_attributes"):
         records.append({
-            "name": "revision.external_change_detection",
+            "name": "metadata.attributes",
             "state": "supported",
-            "implementation": "timeline-fingerprint-guard",
+            "implementation": "adsk.core.Attributes",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
             "limitations": [],
         })
-    elif facts.get("has_mutation_indicators"):
+    else:
+        records.append({
+            "name": "metadata.attributes",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Custom attributes API not available"),
+        })
+
+    # 13. style.sketch_text (Finding 3: do not claim contract-level supported from hasattr alone)
+    if not probe_failed and facts.get("has_sketch_text"):
+        records.append({
+            "name": "style.sketch_text",
+            "state": "degraded",
+            "implementation": "adsk.fusion.SketchTexts",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["SketchText creation and extrusion contract semantics unverified from object existence alone; requires active sketch context and text engine validation"],
+        })
+    else:
+        records.append({
+            "name": "style.sketch_text",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("SketchText API not available"),
+        })
+
+    # 14. transaction.undo_redo
+    if not probe_failed and facts.get("has_undo_redo"):
+        records.append({
+            "name": "transaction.undo_redo",
+            "state": "supported",
+            "implementation": "adsk.core.Application",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    else:
+        records.append({
+            "name": "transaction.undo_redo",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Application text command / transaction undo not available"),
+        })
+
+    # 15. revision.mutation_indicators
+    if not probe_failed and facts.get("has_mutation_indicators"):
+        records.append({
+            "name": "revision.mutation_indicators",
+            "state": "supported",
+            "implementation": "adsk.core.Document.isModified",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    else:
+        records.append({
+            "name": "revision.mutation_indicators",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Document mutation modified indicator not available"),
+        })
+
+    # 16. revision.external_change_detection (Finding 3: do not claim contract-level supported from hasattr alone)
+    if not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "degraded",
+            "implementation": "timeline-fingerprint-guard",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime atomicity proof"],
+        })
+    elif not probe_failed and facts.get("has_mutation_indicators"):
         records.append({
             "name": "revision.external_change_detection",
             "state": "degraded",
             "implementation": "document-modified-indicator",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Heuristic document change detection without granular timeline markers"],
+            "limitations": ["Heuristic document change detection without granular timeline markers; atomicity not guaranteed"],
         })
     else:
         records.append({
@@ -325,44 +447,45 @@ def probe_runtime():
             "implementation": None,
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["No reliable mutation indicators available for external change detection"],
+            "limitations": err_limits("No reliable mutation indicators available for external change detection"),
         })
 
-    # 17. export.dxf
+    # 17. export.dxf (Finding 3: DXF is capability-gated until P2)
     records.append({
         "name": "export.dxf",
-        "state": "supported" if facts.get("has_export_manager") else "unavailable",
-        "implementation": "adsk.fusion.ExportManager" if facts.get("has_export_manager") else None,
+        "state": "unavailable",
+        "implementation": None,
         "fusion_version": resolved_version,
         "relay_version": relay_version,
-        "limitations": [] if facts.get("has_export_manager") else ["DXF export options not available on this runtime"],
+        "limitations": err_limits("DXF export contract semantics not supported on this runtime; capability-gated until P2"),
     })
 
-    # 18. view.section
+    # 18. view.section (Finding 3: section analysis is capability-gated until P2)
     records.append({
         "name": "view.section",
-        "state": "supported" if facts.get("has_section_view") else "unavailable",
-        "implementation": "adsk.fusion.SectionAnalysis" if facts.get("has_section_view") else None,
+        "state": "unavailable",
+        "implementation": None,
         "fusion_version": resolved_version,
         "relay_version": relay_version,
-        "limitations": [] if facts.get("has_section_view") else ["Section view/analysis API not available on this runtime"],
+        "limitations": err_limits("Section view analysis contract semantics not available on this runtime; capability-gated until P2"),
     })
 
-    # 19. assembly.joints
+    # 19. assembly.joints (Finding 3: assembly joints are capability-gated until P2)
     records.append({
         "name": "assembly.joints",
-        "state": "supported" if facts.get("has_joint_access") else "unavailable",
-        "implementation": "adsk.fusion.Joints" if facts.get("has_joint_access") else None,
+        "state": "unavailable",
+        "implementation": None,
         "fusion_version": resolved_version,
         "relay_version": relay_version,
-        "limitations": [] if facts.get("has_joint_access") else ["Joint creation and assembly operations not available on this runtime"],
+        "limitations": err_limits("Assembly joint operations not supported on this runtime; capability-gated until P2"),
     })
 
     data_payload = {
-        "application": "Autodesk Fusion",
+        "application": "Autodesk Fusion" if facts.get("has_app") else PAYLOAD.get("application"),
         "fusion_version": resolved_version,
         "relay_version": relay_version,
-        "platform": PAYLOAD.get("platform", "Windows"),
+        "platform": PAYLOAD.get("platform"),
+        "local_tool": PAYLOAD.get("local_tool"),
         "probe_facts": facts,
     }
     return make_result(data=data_payload, summary="Runtime capabilities probed", capabilities=records)

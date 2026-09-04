@@ -28,8 +28,8 @@ async def test_service_executes_capabilities_read_and_persists_matrix(mock_deskt
 
     records = [
         CapabilityRecord(name="design.access", state="supported", implementation="adsk.fusion.Design"),
-        CapabilityRecord(name="view.pick", state="supported", implementation="native-preselect"),
-        CapabilityRecord(name="export.dxf", state="unavailable", limitations=("DXF export options not available on this runtime",)),
+        CapabilityRecord(name="view.pick", state="degraded", implementation="native-preselect", limitations=("Visual pick requires live feasibility proof",)),
+        CapabilityRecord(name="export.dxf", state="unavailable", limitations=("DXF export contract semantics not supported on this runtime; capability-gated until P2",)),
     ]
     mock_desktop_service.call = AsyncMock(return_value={
         "content": [{
@@ -43,6 +43,7 @@ async def test_service_executes_capabilities_read_and_persists_matrix(mock_deskt
                     "fusion_version": "2.0.18000",
                     "relay_version": "1.0.0",
                     "platform": "Windows",
+                    "probe_facts": {"has_app": True},
                 },
                 "capabilities": [r.model_dump(mode="json") for r in records],
             }),
@@ -64,40 +65,109 @@ async def test_service_executes_capabilities_read_and_persists_matrix(mock_deskt
     assert saved_matrix is not None
     assert saved_matrix.identity is not None
     assert saved_matrix.identity.fusion_version == "2.0.18000"
-    assert saved_matrix.get("view.pick").state == "supported"
+    assert saved_matrix.identity.local_tool == "fusion_mcp_execute"
+    assert saved_matrix.identity.probe_details.get("has_app") is True
+    assert saved_matrix.get("view.pick").state == "degraded"
     assert saved_matrix.get("export.dxf").state == "unavailable"
 
 
 @pytest.mark.asyncio
-async def test_capability_first_dispatch_blocks_unavailable_before_script_dispatch(mock_desktop_service: DesktopNodeService):
+async def test_falsify_finding_1_unprobed_node_fails_closed_before_script_dispatch(mock_desktop_service: DesktopNodeService):
     cad_service = FusionCadService(mock_desktop_service)
 
-    unavailable_matrix = CapabilityMatrix.from_records([
-        CapabilityRecord(
-            name="view.pick",
-            state="unavailable",
-            limitations=("Pick not supported in headless mode",),
-        )
-    ])
-    cad_service.set_node_capabilities("desk-1", unavailable_matrix)
+    # Node has never been probed
+    assert cad_service.get_node_capabilities("desk-unprobed") is None
 
     with pytest.raises(BridgeError) as exc_info:
         await cad_service.execute(
-            {"node_id": "desk-1", "operation": "pick", "view_ref": "view_1234", "x": 0.5, "y": 0.5},
-            group="view",
+            {"node_id": "desk-unprobed", "operation": "entity", "ref": "ent_1"},
+            group="read",
         )
 
     assert exc_info.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
     assert isinstance(exc_info.value, FusionCadError)
-    assert exc_info.value.retryable is False
-
-    # CRITICAL: Verify NO script dispatch occurred
+    assert "unprobed" in exc_info.value.message
     assert mock_desktop_service.call.call_count == 0
     assert mock_desktop_service.submit.call_count == 0
 
 
 @pytest.mark.asyncio
-async def test_capability_first_dispatch_blocks_degraded_without_opt_in_before_script_dispatch(
+async def test_falsify_finding_1_read_capabilities_stays_ungated_on_unprobed_node(mock_desktop_service: DesktopNodeService):
+    cad_service = FusionCadService(mock_desktop_service)
+
+    mock_desktop_service.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Runtime capabilities probed",
+                "capabilities": [
+                    {"name": "design.access", "state": "supported"},
+                ],
+            }),
+        }],
+        "isError": False,
+    })
+
+    # read:capabilities must NOT be gated and can probe unprobed node
+    result = await cad_service.execute(
+        {"node_id": "desk-new", "operation": "capabilities"},
+        group="read",
+    )
+    assert isinstance(result, CadResult)
+    assert mock_desktop_service.call.call_count == 1
+    assert cad_service.get_node_capabilities("desk-new") is not None
+
+
+@pytest.mark.asyncio
+async def test_falsify_finding_1_no_cross_node_leakage(mock_desktop_service: DesktopNodeService):
+    cad_service = FusionCadService(mock_desktop_service)
+
+    # Configure matrix ONLY for desk-1
+    cad_service.set_node_capabilities("desk-1", CapabilityMatrix.from_records([
+        CapabilityRecord(name="entity.token_resolver", state="supported"),
+    ]))
+
+    # desk-2 has NOT been probed
+    with pytest.raises(BridgeError) as exc_info:
+        await cad_service.execute(
+            {"node_id": "desk-2", "operation": "entity", "ref": "ent_1"},
+            group="read",
+        )
+    assert exc_info.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert "desk-2" in exc_info.value.details.get("node_id")
+
+
+@pytest.mark.asyncio
+async def test_falsify_finding_1_cache_invalidation_fails_closed(mock_desktop_service: DesktopNodeService):
+    cad_service = FusionCadService(mock_desktop_service)
+
+    cad_service.set_node_capabilities("desk-1", CapabilityMatrix.from_records([
+        CapabilityRecord(name="entity.token_resolver", state="supported"),
+    ]))
+    assert cad_service.get_node_capabilities("desk-1") is not None
+
+    # Invalidate cache for desk-1
+    cad_service.invalidate_node_capabilities("desk-1")
+    assert cad_service.get_node_capabilities("desk-1") is None
+
+    # Gated operation now fails closed
+    with pytest.raises(BridgeError) as exc_info:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "entity", "ref": "ent_1"},
+            group="read",
+        )
+    assert exc_info.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+
+
+def test_falsify_finding_1_no_default_supported_fabrication():
+    # Assert CapabilityMatrix has no default_supported fabrication method
+    assert not hasattr(CapabilityMatrix, "default_supported")
+
+
+@pytest.mark.asyncio
+async def test_falsify_finding_4_degraded_capability_blocks_without_generic_bypass(
     mock_desktop_service: DesktopNodeService,
 ):
     cad_service = FusionCadService(mock_desktop_service)
@@ -107,17 +177,16 @@ async def test_capability_first_dispatch_blocks_degraded_without_opt_in_before_s
             name="view.pick",
             state="degraded",
             implementation="viewport-raycast",
-            limitations=("Raycast geometry intersection without native preselection",),
+            limitations=("Visual pick requires live feasibility proof",),
         )
     ])
     cad_service.set_node_capabilities("desk-1", degraded_matrix)
 
-    # 1. Without opt-in (allow_degraded=False), execution fails before script dispatch
+    # 1. Calling execute fails closed with CAPABILITY_DEGRADED
     with pytest.raises(BridgeError) as exc_info:
         await cad_service.execute(
             {"node_id": "desk-1", "operation": "pick", "view_ref": "view_1234", "x": 0.5, "y": 0.5},
             group="view",
-            allow_degraded=False,
         )
 
     assert exc_info.value.code == ErrorCode.CAPABILITY_DEGRADED
@@ -126,28 +195,25 @@ async def test_capability_first_dispatch_blocks_degraded_without_opt_in_before_s
     assert mock_desktop_service.call.call_count == 0
     assert mock_desktop_service.submit.call_count == 0
 
-    # 2. With explicit opt-in (allow_degraded=True), execution proceeds to script dispatch
-    mock_desktop_service.call = AsyncMock(return_value={
-        "content": [{
-            "type": "text",
-            "text": json.dumps({
-                "api_version": "fusion.cad/v1",
-                "status": "succeeded",
-                "summary": "Picked face via raycast",
-                "data": {"ref": "ent_face_1"},
-            }),
-        }],
-        "isError": False,
-    })
+    # 2. execute has NO allow_degraded parameter (inspect signature)
+    import inspect
+    sig = inspect.signature(cad_service.execute)
+    assert "allow_degraded" not in sig.parameters
 
-    result = await cad_service.execute(
-        {"node_id": "desk-1", "operation": "pick", "view_ref": "view_1234", "x": 0.5, "y": 0.5},
-        group="view",
-        allow_degraded=True,
-    )
-    assert isinstance(result, CadResult)
-    assert result.status == "succeeded"
-    assert mock_desktop_service.call.call_count == 1
+    # 3. Payload with {"allow_degraded": True} is rejected by strict schema (extra="forbid")
+    with pytest.raises(BridgeError) as exc_schema:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "pick",
+                "view_ref": "view_1234",
+                "x": 0.5,
+                "y": 0.5,
+                "allow_degraded": True,
+            },
+            group="view",
+        )
+    assert exc_schema.value.code == ErrorCode.INVALID_ARGUMENT
 
 
 @pytest.mark.parametrize("group, operation, payload, required_cap", [

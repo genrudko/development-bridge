@@ -1,0 +1,27 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-09-04-fusion-cad-agent-api-v1-p0.md
+BASE: e9bb1ec2c30b8302ec982b9f6f3f9e7ff19be6f3
+Executor policy: Antigravity implementation; Codex review; wake best-effort only.
+Baseline: clean worktree at e9bb1ec; baseline pytest gate completed before Task 1.
+Task 1: implemented 6c12d01; review pending
+Task 1 review: CHANGES_REQUIRED by Codex — 7 Important findings + whitespace minor.
+Ruling: Antigravity fix attempted after terminal review, remained POLICY_VIOLATION busy across separated attempts; temporarily unavailable, so Codex fallback implementation authorized per master executor policy. Re-review must be independent (prefer Antigravity when available).
+Task 1 fix round 1: Antigravity commit 7b2efa6; full suite 796 passed; re-review CHANGES_REQUIRED (3 Important remained).
+Task 1 fix round 2: Antigravity commit c5b6436; targeted 31 passed; full suite 797 passed; Ruff PASS; diff-check PASS.
+Task 1 final review: APPROVED by Codex job_a7bcbfcc107644e7a0dcc3cfb710b845; 31 focused tests + schema/runtime probes passed; no Critical/Important findings.
+Task 1: complete e9bb1ec..c5b6436.
+Ruling: Task 1 accepted after independent Codex approval; proceed to Task 2 on same branch/worktree; no push/merge/deploy authorized.
+Task 2: dispatched Antigravity job_fc0c09cd48ae481e8306bb2544e1545b from accepted HEAD c5b6436.
+Task 2 review: CHANGES_REQUIRED by Codex job_610314e879d84fae902334b536edac2d — 3 Important: sync/async+journal classification, inline binary/base64 exclusion, group fragment execution order/fail-closed.
+Task 2 fix round 1: dispatched Antigravity job_d4b573e182694ba99f3d6fe799f4c35d from HEAD 4c0ea11; scoped to the three review findings only; no Task 3/push/deploy authorized.
+Task 2 re-review: CHANGES_REQUIRED by Codex job_a1a52eb1dad94268a27eba9ef47d3fbe — 4 Important: malformed/native error fail-closed, exhaustive mutation/async classification, exact script marker, comprehensive binary/base64 exclusion.
+Task 2 fix round 2: Antigravity job_3d52cdfe9eec418d994e489223126ce4 commit 3757d4bc07e0e83bc4c5a01f85894b4d55adb9c2; targeted 168 passed; full suite 932 passed; Ruff PASS; diff-check PASS.
+Task 2 fix round 4: Antigravity job_c756de1ae3e54e62a66d170d04aead38 commit c6897ba; targeted 177 passed; full suite 1003 passed; Ruff PASS; diff-check PASS.
+Task 2 fix round 5: Antigravity commit 06d7a9a45f08c7d609daddf59736451abb5e6649 after Codex re-review job_d512fcd0911f4d1f9c740a4c3b845cdd; explicit binary detection recognizes unambiguous keys blob, bytes, base64 for arbitrary base64 payloads without magic/MIME while generic semantic strings remain model-visible; targeted 218 passed; full suite 1008 passed; Ruff PASS; diff-check PASS.
+Task 2 fix round 6: Antigravity commit 67384e804eb401ba53b19fc148615cf0c43c2340 after Codex re-review job_7b34b4d3d48b45e1849e8b8ef551b1e8; classify transaction begin, stage, abort as async mutations (True, True) using DesktopNodeService.submit retained lifecycle; status remains sync read (False, False); targeted 187 passed; full suite 1014 passed; Ruff PASS; diff-check PASS.
+
+Task 2 final review: APPROVED by Codex job_1d0fdd093feb4ce186a6ba9aad7d5176 at HEAD 67384e804eb401ba53b19fc148615cf0c43c2340; no Critical/Important/Minor findings; focused falsification 141 passed; broad run 227 passed with 12 read-only-sandbox artifact-write failures independently reproduced via /tmp retention probes; git diff --check clean; worktree clean.
+Task 2: complete c5b6436..67384e804eb401ba53b19fc148615cf0c43c2340.
+Ruling: Task 2 accepted after independent Codex approval; proceed to Task 3 on same branch/worktree; no push/merge/deploy authorized.
+Task 3: implemented Antigravity commit d8250f963b84ab11f9df96eefbd2658caef69399; focused 24 passed; targeted 271 passed; full suite 1038 passed; Ruff PASS; diff-check PASS; review pending.
+Task 3 review: CHANGES_REQUIRED by Codex job_c1ce13b81b664f0897b73127d0f0ec6a — 5 Important + 1 Minor: fail-open default_supported for unprobed nodes/cache invalidation; fabricated support when adsk probe unavailable; contract-level overclaim from hasattr/object existence (pick/transaction/revision/etc.); generic allow_degraded bypass outside strict public schemas; runtime identity normalization drops probe facts; CapabilityMatrix mutability/duplicate overwrite minor. Focused review 253 passed; diff-check/status clean.
+Task 3 fix pass: Antigravity repaired all 6 findings from Codex review job_c1ce13b81b664f0897b73127d0f0ec6a: (1) fail closed for unprobed/stale nodes by removing default_supported fallback, keeping read:capabilities ungated, and isolating node capability cache with explicit invalidate_node_capabilities; (2) fail closed with explicit probe errors and unavailable/degraded states when adsk probe or runtime script fails; (3) removed contract-level overclaiming from object existence/hasattr—view.pick, transaction.preview_replay, inspect.measure, style.sketch_text, revision.external_change_detection remain degraded, and export.dxf, view.section, assembly.joints remain unavailable; (4) removed generic allow_degraded execute bypass; (5) truthfully normalized FusionRuntimeIdentity with no fake defaults while preserving probe facts/details and local_tool identity; (6) made CapabilityMatrix immutable/read-only with MappingProxyType and rejected duplicate capability records. Unit + integration 220 passed; targeted 280 passed; full suite 1047 passed; diff-check PASS.

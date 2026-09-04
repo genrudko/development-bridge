@@ -134,11 +134,17 @@ class FusionCadService:
         self._script_bundle = script_bundle or FusionCadScriptBundle()
         self._node_capabilities: dict[str, CapabilityMatrix] = {}
 
-    def get_node_capabilities(self, node_id: str) -> CapabilityMatrix:
-        return self._node_capabilities.get(node_id, CapabilityMatrix.default_supported())
+    def get_node_capabilities(self, node_id: str) -> CapabilityMatrix | None:
+        return self._node_capabilities.get(node_id)
 
     def set_node_capabilities(self, node_id: str, matrix: CapabilityMatrix) -> None:
         self._node_capabilities[node_id] = matrix
+
+    def invalidate_node_capabilities(self, node_id: str | None = None) -> None:
+        if node_id is None:
+            self._node_capabilities.clear()
+        else:
+            self._node_capabilities.pop(node_id, None)
 
     @staticmethod
     def is_domain_summary(summary: str | None) -> bool:
@@ -507,7 +513,6 @@ class FusionCadService:
         self,
         request: BaseModel | dict[str, Any],
         group: str | None = None,
-        allow_degraded: bool = False,
     ) -> CadResult | dict[str, Any]:
         if isinstance(request, _StrictCadBase):
             domain_group = group or self._resolve_group(request)
@@ -542,8 +547,14 @@ class FusionCadService:
         required_cap = get_required_capability(domain_group, op, payload)
         if required_cap is not None:
             matrix = self.get_node_capabilities(node_id)
-            effective_allow_degraded = allow_degraded or bool(payload.get("allow_degraded", False))
-            matrix.require(required_cap, allow_degraded=effective_allow_degraded)
+            if matrix is None:
+                raise FusionCadError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    f"Node '{node_id}' capability state is unprobed; invoke fusion_read(operation='capabilities') first",
+                    retryable=False,
+                    details={"node_id": node_id, "capability": required_cap},
+                )
+            matrix.require(required_cap, allow_degraded=False)
 
         is_async, is_mutation, summary = self._classify_operation(effective_bundle_group, payload)
         script = self._script_bundle.build(effective_bundle_group, payload)
@@ -582,9 +593,14 @@ class FusionCadService:
         # If operation was capabilities read, persist the probed capability matrix
         if effective_bundle_group == "read" and op == "capabilities" and cad_result.capabilities:
             identity = None
-            if isinstance(cad_result.data, (dict, Mapping)) and "application" in cad_result.data:
+            if isinstance(cad_result.data, (dict, Mapping)):
                 try:
-                    identity = FusionRuntimeIdentity.model_validate(dict(cad_result.data))
+                    data_dict = dict(cad_result.data)
+                    if "local_tool" not in data_dict or data_dict["local_tool"] is None:
+                        data_dict["local_tool"] = "fusion_mcp_execute"
+                    if "implementation" not in data_dict or data_dict["implementation"] is None:
+                        data_dict["implementation"] = "fusion-desktop-mcp"
+                    identity = FusionRuntimeIdentity.model_validate(data_dict)
                 except (ValidationError, ValueError, TypeError):
                     identity = None
             self._node_capabilities[node_id] = CapabilityMatrix.from_records(

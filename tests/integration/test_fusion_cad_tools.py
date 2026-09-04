@@ -17,12 +17,45 @@ from app.settings import BridgeSettings
 from app.tools.registry import build_tool_registry
 
 
+def setup_desk1_capabilities(container: ApplicationContainer) -> None:
+    from app.fusion_cad.capabilities import CapabilityMatrix
+    from app.fusion_cad.models import CapabilityRecord
+
+    all_supported = [
+        CapabilityRecord(name=name, state="supported")
+        for name in (
+            "entity.token_resolver",
+            "design.access",
+            "timeline.access",
+            "sketch.access",
+            "inspect.measure",
+            "view.camera",
+            "view.viewport_conversion",
+            "view.pick",
+            "selection.primitives",
+            "transaction.preview_hooks",
+            "transaction.preview_replay",
+            "metadata.attributes",
+            "style.sketch_text",
+            "transaction.undo_redo",
+            "revision.mutation_indicators",
+            "revision.external_change_detection",
+            "export.dxf",
+            "view.section",
+            "assembly.joints",
+        )
+    ]
+    container.fusion_cad.set_node_capabilities("desk-1", CapabilityMatrix.from_records(all_supported))
+
+
 @pytest.fixture
 def mock_container() -> ApplicationContainer:
-    return build_container(BridgeSettings.model_validate({
+    container = build_container(BridgeSettings.model_validate({
         "server": {"public_base_url": "https://127.0.0.1:8000"},
         "desktop_nodes": {"token": "test-desktop-token", "journal_path": ":memory:"}
     }))
+    setup_desk1_capabilities(container)
+    return container
 
 
 def test_fusion_tools_registration(mock_container: ApplicationContainer):
@@ -428,6 +461,7 @@ async def test_state_changing_operations_marked_mutating_and_non_replayable_on_t
             "call_timeout_seconds": 0.05,
         },
     }))
+    setup_desk1_capabilities(container)
     registry = build_tool_registry(container)
     tool = registry.get(tool_name)
     assert tool is not None
@@ -807,6 +841,7 @@ async def test_async_domain_operation_result_fails_closed(
             "result_artifact_directory": str(tmp_path / "artifacts"),
         },
     }))
+    setup_desk1_capabilities(container)
     registry = build_tool_registry(container)
     op_result_tool = registry.get("fusion_operation_result")
     assert op_result_tool is not None
@@ -864,6 +899,7 @@ async def test_async_domain_operation_result_succeeds_for_valid_cad_result(tmp_p
             "result_artifact_directory": str(tmp_path / "artifacts"),
         },
     }))
+    setup_desk1_capabilities(container)
     registry = build_tool_registry(container)
     op_result_tool = registry.get("fusion_operation_result")
     assert op_result_tool is not None
@@ -1057,6 +1093,7 @@ async def test_async_transaction_mutations_lifecycle_operation_result_and_uncert
         },
     })
     container = build_container(settings)
+    setup_desk1_capabilities(container)
     registry = build_tool_registry(container)
     tool = registry.get("fusion_transaction")
     op_result_tool = registry.get("fusion_operation_result")
@@ -1143,6 +1180,14 @@ async def test_sync_read_timeout_preserves_retryable_and_timed_out_status(tmp_pa
         "desk-1",
         [{"name": "fusion_mcp_execute"}],
         fusion_available=True,
+    )
+    from app.fusion_cad.capabilities import CapabilityMatrix
+    from app.fusion_cad.models import CapabilityRecord
+    container.fusion_cad.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records([
+            CapabilityRecord(name="entity.token_resolver", state="supported"),
+        ]),
     )
 
     req_ctx = RequestContext(request_id="req_read_timeout")
@@ -1462,6 +1507,7 @@ async def test_retained_async_domain_operation_result_is_error_matrix(
             "result_artifact_directory": str(tmp_path / "artifacts"),
         },
     }))
+    setup_desk1_capabilities(container)
     registry = build_tool_registry(container)
     op_result_tool = registry.get("fusion_operation_result")
     assert op_result_tool is not None

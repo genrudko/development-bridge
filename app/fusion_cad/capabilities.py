@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.errors import ErrorCode
 from app.fusion_cad.errors import FusionCadError
@@ -15,13 +16,36 @@ class FusionRuntimeIdentity(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    application: str = "Autodesk Fusion"
+    application: str | None = None
     fusion_version: str | None = None
     relay_version: str | None = None
     platform: str | None = None
     api_version: str = "fusion.cad/v1"
-    implementation: str = "fusion-desktop-mcp"
+    implementation: str | None = None
+    local_tool: str | None = None
     probe_details: ImmutableMapping = Field(default_factory=ImmutableMapping)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: Any) -> Any:
+        if isinstance(data, (dict, Mapping)):
+            d = dict(data)
+            facts: dict[str, Any] = {}
+            if "probe_facts" in d:
+                raw_facts = d.pop("probe_facts")
+                if isinstance(raw_facts, (dict, Mapping)):
+                    facts.update(dict(raw_facts))
+            if "facts" in d:
+                raw_facts = d.pop("facts")
+                if isinstance(raw_facts, (dict, Mapping)):
+                    facts.update(dict(raw_facts))
+            if "probe_details" in d:
+                raw_details = d.pop("probe_details")
+                if isinstance(raw_details, (dict, Mapping)):
+                    facts.update(dict(raw_details))
+            d["probe_details"] = ImmutableMapping(facts)
+            return d
+        return data
 
 
 # Canonical operation to prerequisite capability mapping:
@@ -132,18 +156,35 @@ def get_required_capability(
 
 
 class CapabilityMatrix:
-    """Deterministic matrix of runtime capabilities and limitations."""
+    """Deterministic, immutable matrix of runtime capabilities and limitations."""
+
+    __slots__ = ("_records", "_identity", "_frozen")
 
     def __init__(
         self,
         records: Iterable[CapabilityRecord] | Mapping[str, CapabilityRecord],
         identity: FusionRuntimeIdentity | None = None,
     ) -> None:
-        if isinstance(records, Mapping):
-            self._records: dict[str, CapabilityRecord] = dict(records)
-        else:
-            self._records = {r.name: r for r in records}
-        self._identity = identity
+        seen: set[str] = set()
+        records_dict: dict[str, CapabilityRecord] = {}
+        record_items = records.values() if isinstance(records, Mapping) else records
+        for r in record_items:
+            if r.name in seen:
+                raise ValueError(f"Duplicate capability record name: '{r.name}'")
+            seen.add(r.name)
+            records_dict[r.name] = r
+
+        object.__setattr__(self, "_records", MappingProxyType(records_dict))
+        object.__setattr__(self, "_identity", identity)
+        object.__setattr__(self, "_frozen", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_frozen", False):
+            raise TypeError("CapabilityMatrix is immutable and read-only")
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        raise TypeError("CapabilityMatrix is immutable and read-only")
 
     @property
     def identity(self) -> FusionRuntimeIdentity | None:
@@ -189,6 +230,21 @@ class CapabilityMatrix:
 
         return record
 
+    def __contains__(self, name: object) -> bool:
+        return name in self._records
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def __iter__(self):
+        return iter(self._records)
+
+    def __getitem__(self, name: str) -> CapabilityRecord:
+        rec = self._records.get(name)
+        if rec is None:
+            raise KeyError(name)
+        return rec
+
     @classmethod
     def from_records(
         cls,
@@ -203,23 +259,44 @@ class CapabilityMatrix:
         probe_data: dict[str, Any],
         identity: FusionRuntimeIdentity | None = None,
     ) -> CapabilityMatrix:
-        facts = probe_data.get("probe_facts", {}) if isinstance(probe_data.get("probe_facts"), dict) else probe_data
+        facts = probe_data.get("probe_facts") or probe_data.get("probe_details") or {}
+        if not isinstance(facts, dict):
+            facts = {}
         fusion_version = probe_data.get("fusion_version")
-        relay_version = probe_data.get("relay_version", "1.0.0")
+        relay_version = probe_data.get("relay_version")
+
+        probe_err = facts.get("adsk_core_probe_error") or facts.get("adsk_fusion_probe_error")
+        probe_failed = bool(probe_err) or (
+            not facts.get("has_app")
+            and not facts.get("has_adsk_fusion")
+            and not facts.get("has_design_access")
+        )
 
         if identity is None:
-            identity = FusionRuntimeIdentity(
-                application=str(probe_data.get("application", "Autodesk Fusion")),
-                fusion_version=str(fusion_version) if fusion_version is not None else None,
-                relay_version=str(relay_version) if relay_version is not None else None,
-                platform=str(probe_data.get("platform", "Windows")) if probe_data.get("platform") is not None else None,
-                probe_details=ImmutableMapping(facts),
-            )
+            identity_data: dict[str, Any] = {
+                "application": probe_data.get("application"),
+                "fusion_version": str(fusion_version) if fusion_version is not None else None,
+                "relay_version": str(relay_version) if relay_version is not None else None,
+                "platform": str(probe_data["platform"]) if probe_data.get("platform") is not None else None,
+                "api_version": str(probe_data.get("api_version", "fusion.cad/v1")),
+                "implementation": str(probe_data["implementation"]) if probe_data.get("implementation") is not None else None,
+                "local_tool": str(probe_data["local_tool"]) if probe_data.get("local_tool") is not None else None,
+                "probe_details": facts,
+            }
+            identity = FusionRuntimeIdentity.model_validate(identity_data)
 
         records: list[CapabilityRecord] = []
 
+        def err_limits(default_msg: str) -> tuple[str, ...]:
+            limits = [default_msg]
+            if facts.get("adsk_core_probe_error"):
+                limits.append(f"adsk.core probe error: {facts['adsk_core_probe_error']}")
+            if facts.get("adsk_fusion_probe_error"):
+                limits.append(f"adsk.fusion probe error: {facts['adsk_fusion_probe_error']}")
+            return tuple(limits)
+
         # 1. entity.token_resolver
-        if facts.get("has_entity_token_resolver"):
+        if not probe_failed and facts.get("has_entity_token_resolver"):
             records.append(CapabilityRecord(
                 name="entity.token_resolver",
                 state="supported",
@@ -231,13 +308,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="entity.token_resolver",
                 state="unavailable",
-                limitations=("Native design entity-token resolver not available on this Fusion runtime",),
+                limitations=err_limits("Native design entity-token resolver not available on this Fusion runtime"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 2. design.access
-        if facts.get("has_design_access"):
+        if not probe_failed and facts.get("has_design_access"):
             records.append(CapabilityRecord(
                 name="design.access",
                 state="supported",
@@ -249,13 +326,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="design.access",
                 state="unavailable",
-                limitations=("Design product access not available",),
+                limitations=err_limits("Design product access not available on active document"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 3. timeline.access
-        if facts.get("has_timeline_access"):
+        if not probe_failed and facts.get("has_timeline_access"):
             records.append(CapabilityRecord(
                 name="timeline.access",
                 state="supported",
@@ -267,13 +344,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="timeline.access",
                 state="unavailable",
-                limitations=("Timeline access not available",),
+                limitations=err_limits("Timeline access not available on active design"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 4. sketch.access
-        if facts.get("has_sketch_access"):
+        if not probe_failed and facts.get("has_sketch_access"):
             records.append(CapabilityRecord(
                 name="sketch.access",
                 state="supported",
@@ -285,17 +362,18 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="sketch.access",
                 state="unavailable",
-                limitations=("Sketch collection access not available",),
+                limitations=err_limits("Sketch collection access not available on active root component"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
-        # 5. inspect.measure
-        if facts.get("has_measure_manager"):
+        # 5. inspect.measure (Finding 3: do not claim contract-level supported from hasattr alone)
+        if not probe_failed and facts.get("has_measure_manager"):
             records.append(CapabilityRecord(
                 name="inspect.measure",
-                state="supported",
+                state="degraded",
                 implementation="adsk.core.MeasureManager",
+                limitations=("MeasureManager object presence does not guarantee contract-level geometric measurement without active document and entity context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -303,13 +381,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="inspect.measure",
                 state="unavailable",
-                limitations=("MeasureManager API not available",),
+                limitations=err_limits("MeasureManager API not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 6. view.camera
-        if facts.get("has_camera"):
+        if not probe_failed and facts.get("has_camera"):
             records.append(CapabilityRecord(
                 name="view.camera",
                 state="supported",
@@ -321,13 +399,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="view.camera",
                 state="unavailable",
-                limitations=("Camera control API not available",),
+                limitations=err_limits("Camera control API not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 7. view.viewport_conversion
-        if facts.get("has_viewport_conversion"):
+        if not probe_failed and facts.get("has_viewport_conversion"):
             records.append(CapabilityRecord(
                 name="view.viewport_conversion",
                 state="supported",
@@ -339,26 +417,27 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="view.viewport_conversion",
                 state="unavailable",
-                limitations=("Viewport screen/model coordinate conversion methods not available",),
+                limitations=err_limits("Viewport screen/model coordinate conversion methods not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
-        # 8. view.pick
-        if facts.get("has_selection_primitives"):
+        # 8. view.pick (Finding 3: load-bearing pick remains degraded/unavailable until later live feasibility proof)
+        if not probe_failed and facts.get("has_selection_primitives"):
             records.append(CapabilityRecord(
                 name="view.pick",
-                state="supported",
+                state="degraded",
                 implementation="native-preselect",
+                limitations=("Visual pick requires live feasibility proof; load-bearing pick remains degraded pending live verification",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
-        elif facts.get("has_viewport_conversion"):
+        elif not probe_failed and facts.get("has_viewport_conversion"):
             records.append(CapabilityRecord(
                 name="view.pick",
                 state="degraded",
                 implementation="viewport-raycast",
-                limitations=("Raycast geometry intersection without native preselection",),
+                limitations=("Raycast geometry intersection without native preselection; load-bearing pick remains degraded pending live verification",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -366,13 +445,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="view.pick",
                 state="unavailable",
-                limitations=("Neither selection primitives nor viewport projection methods available",),
+                limitations=err_limits("Neither selection primitives nor viewport projection methods available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 9. selection.primitives
-        if facts.get("has_selection_primitives"):
+        if not probe_failed and facts.get("has_selection_primitives"):
             records.append(CapabilityRecord(
                 name="selection.primitives",
                 state="supported",
@@ -384,13 +463,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="selection.primitives",
                 state="unavailable",
-                limitations=("Interactive selection primitives not available",),
+                limitations=err_limits("Interactive selection primitives not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 10. transaction.preview_hooks
-        if facts.get("has_command_preview"):
+        if not probe_failed and facts.get("has_command_preview"):
             records.append(CapabilityRecord(
                 name="transaction.preview_hooks",
                 state="supported",
@@ -402,26 +481,27 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="transaction.preview_hooks",
                 state="unavailable",
-                limitations=("Command execution preview hooks not available",),
+                limitations=err_limits("Command execution preview hooks not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
-        # 11. transaction.preview_replay
-        if facts.get("has_command_preview") and facts.get("has_undo_redo"):
+        # 11. transaction.preview_replay (Finding 3: load-bearing transaction remains degraded/unavailable until later live feasibility proof)
+        if not probe_failed and facts.get("has_command_preview") and facts.get("has_undo_redo"):
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
-                state="supported",
+                state="degraded",
                 implementation="command-preview-replay",
+                limitations=("Staged transaction preview and replay semantics require live feasibility proof; load-bearing transaction remains degraded pending live verification",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
-        elif facts.get("has_undo_redo"):
+        elif not probe_failed and facts.get("has_undo_redo"):
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
                 state="degraded",
                 implementation="undo-redo-fallback",
-                limitations=("Command preview hooks not available; rollback relies on active transaction undo",),
+                limitations=("Command preview hooks not available; rollback relies on active transaction undo; load-bearing transaction remains degraded pending live verification",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -429,13 +509,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
                 state="unavailable",
-                limitations=("Neither command preview nor undo/redo available for transaction replay",),
+                limitations=err_limits("Neither command preview nor undo/redo available for transaction replay"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 12. metadata.attributes
-        if facts.get("has_attributes"):
+        if not probe_failed and facts.get("has_attributes"):
             records.append(CapabilityRecord(
                 name="metadata.attributes",
                 state="supported",
@@ -447,17 +527,18 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="metadata.attributes",
                 state="unavailable",
-                limitations=("Custom attributes API not available",),
+                limitations=err_limits("Custom attributes API not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
-        # 13. style.sketch_text
-        if facts.get("has_sketch_text"):
+        # 13. style.sketch_text (Finding 3: do not claim contract-level supported from hasattr alone)
+        if not probe_failed and facts.get("has_sketch_text"):
             records.append(CapabilityRecord(
                 name="style.sketch_text",
-                state="supported",
+                state="degraded",
                 implementation="adsk.fusion.SketchTexts",
+                limitations=("SketchText creation and extrusion contract semantics unverified from object existence alone; requires active sketch context and text engine validation",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -465,13 +546,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="style.sketch_text",
                 state="unavailable",
-                limitations=("SketchText creation and extrusion not available",),
+                limitations=err_limits("SketchText API not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 14. transaction.undo_redo
-        if facts.get("has_undo_redo"):
+        if not probe_failed and facts.get("has_undo_redo"):
             records.append(CapabilityRecord(
                 name="transaction.undo_redo",
                 state="supported",
@@ -483,13 +564,13 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="transaction.undo_redo",
                 state="unavailable",
-                limitations=("Application text command / transaction undo not available",),
+                limitations=err_limits("Application text command / transaction undo not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
         # 15. revision.mutation_indicators
-        if facts.get("has_mutation_indicators"):
+        if not probe_failed and facts.get("has_mutation_indicators"):
             records.append(CapabilityRecord(
                 name="revision.mutation_indicators",
                 state="supported",
@@ -501,26 +582,27 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="revision.mutation_indicators",
                 state="unavailable",
-                limitations=("Document mutation modified indicator not available",),
+                limitations=err_limits("Document mutation modified indicator not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
-        # 16. revision.external_change_detection
-        if facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+        # 16. revision.external_change_detection (Finding 3: do not claim contract-level supported from hasattr alone)
+        if not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
             records.append(CapabilityRecord(
                 name="revision.external_change_detection",
-                state="supported",
+                state="degraded",
                 implementation="timeline-fingerprint-guard",
+                limitations=("Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime atomicity proof",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
-        elif facts.get("has_mutation_indicators"):
+        elif not probe_failed and facts.get("has_mutation_indicators"):
             records.append(CapabilityRecord(
                 name="revision.external_change_detection",
                 state="degraded",
                 implementation="document-modified-indicator",
-                limitations=("Heuristic document change detection without granular timeline markers",),
+                limitations=("Heuristic document change detection without granular timeline markers; atomicity not guaranteed",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -528,100 +610,36 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="revision.external_change_detection",
                 state="unavailable",
-                limitations=("No reliable mutation indicators available for external change detection",),
+                limitations=err_limits("No reliable mutation indicators available for external change detection"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
 
-        # 17. export.dxf
-        if facts.get("has_export_manager"):
-            records.append(CapabilityRecord(
-                name="export.dxf",
-                state="supported",
-                implementation="adsk.fusion.ExportManager",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        else:
-            records.append(CapabilityRecord(
-                name="export.dxf",
-                state="unavailable",
-                limitations=("DXF export options not available on this runtime",),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
+        # 17. export.dxf (Finding 3: DXF is capability-gated until P2)
+        records.append(CapabilityRecord(
+            name="export.dxf",
+            state="unavailable",
+            limitations=err_limits("DXF export contract semantics not supported on this runtime; capability-gated until P2"),
+            fusion_version=fusion_version,
+            relay_version=relay_version,
+        ))
 
-        # 18. view.section
-        if facts.get("has_section_view"):
-            records.append(CapabilityRecord(
-                name="view.section",
-                state="supported",
-                implementation="adsk.fusion.SectionAnalysis",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        else:
-            records.append(CapabilityRecord(
-                name="view.section",
-                state="unavailable",
-                limitations=("Section view/analysis API not available on this runtime",),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
+        # 18. view.section (Finding 3: section analysis is capability-gated until P2)
+        records.append(CapabilityRecord(
+            name="view.section",
+            state="unavailable",
+            limitations=err_limits("Section view analysis contract semantics not available on this runtime; capability-gated until P2"),
+            fusion_version=fusion_version,
+            relay_version=relay_version,
+        ))
 
-        # 19. assembly.joints
-        if facts.get("has_joint_access"):
-            records.append(CapabilityRecord(
-                name="assembly.joints",
-                state="supported",
-                implementation="adsk.fusion.Joints",
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        else:
-            records.append(CapabilityRecord(
-                name="assembly.joints",
-                state="unavailable",
-                limitations=("Joint creation and assembly operations not available on this runtime",),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
+        # 19. assembly.joints (Finding 3: assembly joints are capability-gated until P2)
+        records.append(CapabilityRecord(
+            name="assembly.joints",
+            state="unavailable",
+            limitations=err_limits("Assembly joint operations not supported on this runtime; capability-gated until P2"),
+            fusion_version=fusion_version,
+            relay_version=relay_version,
+        ))
 
         return cls(records, identity=identity)
-
-    @classmethod
-    def default_supported(
-        cls,
-        fusion_version: str | None = None,
-        relay_version: str | None = None,
-    ) -> CapabilityMatrix:
-        all_facts = {
-            "has_app": True,
-            "has_measure_manager": True,
-            "has_selection_primitives": True,
-            "has_active_document": True,
-            "has_mutation_indicators": True,
-            "has_attributes": True,
-            "has_adsk_fusion": True,
-            "has_design_access": True,
-            "has_timeline_access": True,
-            "has_entity_token_resolver": True,
-            "has_sketch_access": True,
-            "has_sketch_text": True,
-            "has_export_manager": True,
-            "has_joint_access": True,
-            "has_camera": True,
-            "has_viewport_conversion": True,
-            "has_command_preview": True,
-            "has_undo_redo": True,
-            "has_section_view": True,
-        }
-        return cls.from_probe(
-            {
-                "application": "Autodesk Fusion",
-                "fusion_version": fusion_version or "2.0.18000",
-                "relay_version": relay_version or "1.0.0",
-                "platform": "Windows",
-                "probe_facts": all_facts,
-            }
-        )
