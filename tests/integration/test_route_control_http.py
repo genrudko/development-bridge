@@ -663,3 +663,224 @@ async def test_route_control_endpoints_leakage_scan(tmp_path):
             assert "g-p-infra" not in text
             assert "https://chatgpt.com" not in text
             assert token not in text
+
+
+@pytest.mark.asyncio
+async def test_route_control_query_token_fails_closed(tmp_path):
+    app, container, _settings = create_test_app(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        # 1. Query param 'token' fails closed without header
+        r1 = await client.get(f"/mcp/x/route-control/status?route_id=bridge&token={token}")
+        assert r1.status_code == 401
+        assert r1.json()["ok"] is False
+
+        # 2. Query param 'control_token' fails closed without header
+        r2 = await client.get(f"/mcp/x/route-control/status?route_id=bridge&control_token={token}")
+        assert r2.status_code == 401
+        assert r2.json()["ok"] is False
+
+        # 3. Query credentials fail closed even if valid Bearer header is present
+        r3 = await client.get(
+            f"/mcp/x/route-control/status?route_id=bridge&token={token}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r3.status_code == 401
+        assert r3.json()["ok"] is False
+
+        # 4. POST with query param fails closed
+        r4 = await client.post(
+            f"/mcp/x/route-control/cancel-wakes?token={token}",
+            json={"route_id": "bridge"},
+        )
+        assert r4.status_code == 401
+        assert r4.json()["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_route_control_body_token_fails_closed(tmp_path):
+    app, container, _settings = create_test_app(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        # 1. Body 'token' fails closed without header
+        r1 = await client.post(
+            "/mcp/x/route-control/cancel-wakes",
+            json={"route_id": "bridge", "token": token},
+        )
+        assert r1.status_code == 401
+        assert r1.json()["ok"] is False
+
+        # 2. Body 'control_token' fails closed without header
+        r2 = await client.post(
+            "/mcp/x/route-control/cancel-wakes",
+            json={"route_id": "bridge", "control_token": token},
+        )
+        assert r2.status_code == 401
+        assert r2.json()["ok"] is False
+
+        # 3. Body credentials fail closed even if valid Bearer header is present
+        r3 = await client.post(
+            "/mcp/x/route-control/cancel-wakes",
+            json={"route_id": "bridge", "token": token},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r3.status_code == 401
+        assert r3.json()["ok"] is False
+
+        # 4. Body token on unbind fails closed
+        r4 = await client.post(
+            "/mcp/x/route-control/unbind",
+            json={"route_id": "bridge", "token": token},
+        )
+        assert r4.status_code == 401
+        assert r4.json()["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_route_control_custom_header_token_fails_closed(tmp_path):
+    app, container, _settings = create_test_app(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        # 1. X-Route-Control-Token fails closed without Authorization header
+        r1 = await client.get(
+            "/mcp/x/route-control/status?route_id=bridge",
+            headers={"X-Route-Control-Token": token},
+        )
+        assert r1.status_code == 401
+        assert r1.json()["ok"] is False
+
+        # 2. X-Route-Control-Token on POST fails closed
+        r2 = await client.post(
+            "/mcp/x/route-control/cancel-wakes",
+            json={"route_id": "bridge"},
+            headers={"X-Route-Control-Token": token},
+        )
+        assert r2.status_code == 401
+        assert r2.json()["ok"] is False
+
+        # 3. Custom header fails closed even if valid Bearer header is present
+        r3 = await client.get(
+            "/mcp/x/route-control/status?route_id=bridge",
+            headers={"Authorization": f"Bearer {token}", "X-Route-Control-Token": token},
+        )
+        assert r3.status_code == 401
+        assert r3.json()["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_route_control_post_status_method_not_allowed(tmp_path):
+    app, container, _settings = create_test_app(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        r = await client.post(
+            "/mcp/x/route-control/status",
+            json={"route_id": "bridge"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 405
+
+
+@pytest.mark.asyncio
+async def test_route_control_underscore_aliases_not_found(tmp_path):
+    app, container, _settings = create_test_app(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        # /cancel_wakes is removed
+        r1 = await client.post(
+            "/mcp/x/route-control/cancel_wakes",
+            json={"route_id": "bridge"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r1.status_code == 404
+
+        # /unbind_and_cancel is removed
+        r2 = await client.post(
+            "/mcp/x/route-control/unbind_and_cancel",
+            json={"route_id": "bridge"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r2.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_route_control_route_id_path_variants_not_found(tmp_path):
+    app, container, _settings = create_test_app(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        # /{route_id}/status is removed
+        r1 = await client.get(
+            "/mcp/x/route-control/bridge/status",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r1.status_code == 404
+
+        # /{route_id}/unbind is removed
+        r2 = await client.post(
+            "/mcp/x/route-control/bridge/unbind",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r2.status_code == 404
+
+        # /{route_id}/cancel-wakes is removed
+        r3 = await client.post(
+            "/mcp/x/route-control/bridge/cancel-wakes",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r3.status_code == 404
+
+        # /{route_id}/unbind-and-cancel is removed
+        r4 = await client.post(
+            "/mcp/x/route-control/bridge/unbind-and-cancel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r4.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_route_control_error_schema_does_not_reflect_arbitrary_details(tmp_path):
+    app, container, _settings = create_test_app_with_jobs(tmp_path)
+    # Arm a wake so unbind returns an error
+    await container.coordinator.arm("wake 1", channel_id="telegram-bridge-g0", delay_seconds=10)
+
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        r = await client.post(
+            "/mcp/x/route-control/unbind",
+            json={"route_id": "bridge"},
+            headers=headers,
+        )
+        assert r.status_code == 409
+        data = r.json()
+        assert data["ok"] is False
+        assert data["code"] == "POLICY_VIOLATION"
+        assert "error" in data
+        assert isinstance(data["error"], str)
+        # Explicit safe error schema: details must ONLY contain safe known keys like error_code
+        assert "details" in data
+        assert set(data["details"].keys()) == {"error_code"}
+        assert data["details"]["error_code"] == "PENDING_WAKES"
+        # Must not reflect arbitrary route_id, internal state, or URLs in details
+        assert "route_id" not in data["details"]
+        assert "raw_redirect_url" not in data["details"]
