@@ -19,12 +19,19 @@ from app.coordinator import (
     CoordinatorService,
     CoordinatorWakeDeliveryService,
     ReviewGptWakeTransport,
+    RouteControlService,
+    RouteControlTraceStore,
     RouteRegistry,
     WakeTransport,
 )
 from app.desktop_nodes import DesktopNodeService
+from app.executors import (
+    AntigravityExecutor,
+    AsyncioProcessRunner,
+    ExecutorSelector,
+    ExecutorService,
+)
 from app.files import FileService
-from app.executors import AntigravityExecutor, AsyncioProcessRunner, ExecutorSelector, ExecutorService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
     GitHubActionsArtifactExportService,
@@ -94,6 +101,8 @@ class ApplicationContainer:
     bridge_restart: BridgeRestartService
     desktop_nodes: DesktopNodeService
     coordinator_wake_delivery: CoordinatorWakeDeliveryService | None = None
+    route_control: RouteControlService | None = None
+    route_control_trace_store: RouteControlTraceStore | None = None
 
 
 def build_container(
@@ -326,6 +335,19 @@ def build_container(
         configured.github.artifact_max_bytes,
     )
     route_registry = RouteRegistry(configured.coordinator.route_registry_path)
+    route_control_trace_store = RouteControlTraceStore(
+        route_registry.path.parent / "traces"
+    )
+    route_control = RouteControlService(
+        route_registry,
+        route_control_trace_store,
+        public_base_url=(
+            str(configured.server.public_base_url)
+            if configured.server.public_base_url is not None
+            else None
+        ),
+        endpoint_prefix="/x/route-control",
+    )
     coordinator = CoordinatorService(
         route_registry.path.parent / "coordinator-wakes.json",
         browser_preflight_required=True,
@@ -429,6 +451,7 @@ def build_container(
         ),
         coordinator=coordinator,
         route_registry=route_registry,
+        route_control=route_control,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
         desktop_nodes=DesktopNodeService(
@@ -437,4 +460,5 @@ def build_container(
             configured.server.endpoint,
         ),
         coordinator_wake_delivery=coordinator_wake_delivery,
+        route_control_trace_store=route_control_trace_store,
     )
