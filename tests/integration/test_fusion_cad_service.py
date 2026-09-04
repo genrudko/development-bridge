@@ -545,3 +545,446 @@ async def test_falsify_in_flight_capability_probe_race_cross_node_isolation(real
     # desk-1 discarded, desk-2 unaffected
     assert cad_service.get_node_capabilities("desk-1") is None
     assert cad_service.get_node_capabilities("desk-2") is not None
+
+
+# =========================================================================
+# Task 4: Model revision tracking, Bridge precheck, and Fusion-side guard
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_service_assert_fresh_for_mutation_interface(mock_desktop_service: DesktopNodeService):
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.revision_tracker.observe("doc_1", "hash-v1")
+
+    # 1. Matching expected_revision via dict payload succeeds
+    rec1 = cad_service.assert_fresh_for_mutation(
+        {"document_ref": "doc_1", "expected_revision": "rev_1"}
+    )
+    assert rec1.revision == "rev_1"
+
+    # 2. Matching expected_revision via explicit arguments succeeds
+    rec2 = cad_service.assert_fresh_for_mutation(document_ref="doc_1", expected_revision="rev_1")
+    assert rec2.revision == "rev_1"
+
+    # 3. Advance revision via external change
+    cad_service.revision_tracker.observe("doc_1", "hash-v2")
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+    # 4. Stale expected_revision raises REVISION_CONFLICT
+    with pytest.raises(FusionCadError) as exc_stale:
+        cad_service.assert_fresh_for_mutation(
+            {"document_ref": "doc_1", "expected_revision": "rev_1"}
+        )
+    assert exc_stale.value.code == ErrorCode.REVISION_CONFLICT
+    assert exc_stale.value.details.get("expected_revision") == "rev_1"
+    assert exc_stale.value.details.get("current_revision") == "rev_2"
+
+    # 5. Missing expected_revision raises REVISION_CONFLICT
+    with pytest.raises(FusionCadError) as exc_none:
+        cad_service.assert_fresh_for_mutation(
+            {"document_ref": "doc_1"}
+        )
+    assert exc_none.value.code == ErrorCode.REVISION_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_falsify_stale_expected_revision_blocks_at_bridge_precheck(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # Observe doc_1 at rev_1 and advance to rev_2
+    cad_service.revision_tracker.observe("doc_1", "hash-v1")
+    cad_service.revision_tracker.observe("doc_1", "hash-v2")
+
+    # Mutation request with stale rev_1
+    stale_request = {
+        "node_id": "desk-1",
+        "operation": "set",
+        "target": "ent_1",
+        "name": "status",
+        "value": "active",
+        "expected_revision": "rev_1",
+    }
+
+    # Bridge precheck blocks before calling executor / desktop node
+    with pytest.raises(BridgeError) as exc_info:
+        await cad_service.execute(stale_request, group="metadata")
+
+    assert exc_info.value.code == ErrorCode.REVISION_CONFLICT
+    assert isinstance(exc_info.value, FusionCadError)
+    assert exc_info.value.details.get("expected_revision") == "rev_1"
+    assert exc_info.value.details.get("current_revision") == "rev_2"
+    # Proves desktop node call was never dispatched (fail fast)
+    assert mock_desktop_service.call.call_count == 0
+    assert mock_desktop_service.submit.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_falsify_synthetic_mutation_fake_guards_against_external_change_no_apply(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves changed baseline triggers Fusion-side REVISION_CONFLICT, no apply, and advances tracker."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # Initial state: Bridge knows doc_1 at rev_1 ("hash-baseline")
+    cad_service.revision_tracker.observe("doc_1", "hash-baseline")
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+    # Synthetic Fusion state: Model was modified externally in Fusion to "hash-diverged"
+    fusion_model_state = {"current_fingerprint": "hash-diverged", "mutation_applied": False}
+
+    async def fake_fusion_mcp_execute(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        line = next(l for l in arguments["script"].splitlines() if l.startswith("PAYLOAD_RAW = "))
+        raw_json = json.loads(line.split("PAYLOAD_RAW = ", 1)[1])
+        payload = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+
+        expected_fp = payload.get("expected_fingerprint")
+        expected_rev = payload.get("expected_revision")
+
+        # Authoritative Fusion-side guard in same command execution
+        if expected_fp is not None and expected_fp != fusion_model_state["current_fingerprint"]:
+            # Baseline diverged! Reject mutation WITHOUT applying changes
+            fusion_model_state["mutation_applied"] = False
+            raise FusionCadError(
+                ErrorCode.REVISION_CONFLICT,
+                "Authoritative Fusion-side guard: model fingerprint diverged from baseline",
+                details={
+                    "document_ref": "doc_1",
+                    "expected_revision": expected_rev,
+                    "expected_fingerprint": expected_fp,
+                    "current_fingerprint": fusion_model_state["current_fingerprint"],
+                    "applied": False,
+                },
+            )
+
+        # Guard passed: apply mutation
+        fusion_model_state["mutation_applied"] = True
+        fusion_model_state["current_fingerprint"] = "hash-after-mutation"
+        return {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "operation_id": "op_test_1",
+            "summary": "Metadata set applied",
+            "document": {
+                "document_ref": "doc_1",
+                "model_revision": "rev_3",
+                "name": "Part1",
+                "units": "mm",
+            },
+            "data": {
+                "fingerprint": "hash-after-mutation",
+                "applied": True,
+            },
+            "changed_refs": ["ent_1"],
+        }
+
+    mock_desktop_service.submit = fake_fusion_mcp_execute  # type: ignore[assignment]
+    mock_desktop_service.call = fake_fusion_mcp_execute  # type: ignore[assignment]
+
+    # Attempt mutation with expected_revision="rev_1"
+    # Precheck passes (Bridge thought doc_1 was rev_1), but Fusion-side guard rejects!
+    with pytest.raises(BridgeError) as exc_guard:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": "ent_1",
+                "name": "tag",
+                "value": "v1",
+                        "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+
+    # 1. Authoritative error returned
+    assert exc_guard.value.code == ErrorCode.REVISION_CONFLICT
+    assert exc_guard.value.details.get("applied") is False
+    # 2. Synthetic model proves mutation was NOT applied
+    assert fusion_model_state["mutation_applied"] is False
+
+    # 3. Bridge observed the new fingerprint ("hash-diverged") and advanced revision to rev_2!
+    current_rec = cad_service.revision_tracker.current("doc_1")
+    assert current_rec is not None
+    assert current_rec.sequence == 2
+    assert current_rec.revision == "rev_2"
+    assert current_rec.fingerprint == "hash-diverged"
+
+    # 4. Immediate second call with rev_1 now blocks at Bridge precheck!
+    with pytest.raises(BridgeError) as exc_precheck:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": "ent_1",
+                "name": "tag",
+                "value": "v1",
+                        "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    assert exc_precheck.value.code == ErrorCode.REVISION_CONFLICT
+    assert exc_precheck.value.details.get("current_revision") == "rev_2"
+
+    # 5. Mutation with fresh expected_revision="rev_2" succeeds
+    success_result = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set",
+            "target": "ent_1",
+            "name": "tag",
+            "value": "v1",
+                "expected_revision": "rev_2",
+        },
+        group="metadata",
+    )
+    if isinstance(success_result, CadResult):
+        assert success_result.status == "succeeded"
+    else:
+        assert success_result.get("status") == "succeeded"
+    assert fusion_model_state["mutation_applied"] is True
+    # Bridge tracker advanced to rev_3 after successful mutation
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_3"
+
+
+@pytest.mark.asyncio
+async def test_service_read_observes_document_and_populates_tracker(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="design.access", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    mock_desktop_service.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Model snapshot read",
+                "document": {
+                    "document_ref": "doc_imported",
+                    "model_revision": "rev_1",
+                    "name": "ImportedDesign",
+                    "units": "mm",
+                },
+                "data": {
+                    "fingerprint": "hash-imported-model",
+                },
+            }),
+        }],
+        "isError": False,
+    })
+
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "model_snapshot", "detail": "compact"},
+        group="read",
+    )
+    assert isinstance(result, CadResult)
+    rec = cad_service.revision_tracker.current("doc_imported")
+    assert rec is not None
+    assert rec.revision == "rev_1"
+    assert rec.fingerprint == "hash-imported-model"
+
+
+@pytest.mark.asyncio
+async def test_falsify_same_command_guard_no_apply_on_transaction_commit(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves transaction commit fails closed with REVISION_CONFLICT Fusion-side when baseline changed."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    cad_service.revision_tracker.observe("doc_1", "hash-baseline")
+    fusion_state = {"current_fingerprint": "hash-external-user-edit", "committed": False}
+
+    async def fake_tx_execute(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        line = next(l for l in arguments["script"].splitlines() if l.startswith("PAYLOAD_RAW = "))
+        raw_json = json.loads(line.split("PAYLOAD_RAW = ", 1)[1])
+        payload = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+
+        expected_fp = payload.get("expected_fingerprint")
+        if expected_fp is not None and expected_fp != fusion_state["current_fingerprint"]:
+            fusion_state["committed"] = False
+            raise FusionCadError(
+                ErrorCode.REVISION_CONFLICT,
+                "Authoritative Fusion-side guard: transaction baseline diverged before commit",
+                details={
+                    "document_ref": "doc_1",
+                    "expected_fingerprint": expected_fp,
+                    "current_fingerprint": fusion_state["current_fingerprint"],
+                    "applied": False,
+                },
+            )
+        fusion_state["committed"] = True
+        return {"api_version": "fusion.cad/v1", "status": "succeeded", "summary": "Transaction committed"}
+
+    mock_desktop_service.submit = fake_tx_execute  # type: ignore[assignment]
+    mock_desktop_service.call = fake_tx_execute  # type: ignore[assignment]
+
+    with pytest.raises(BridgeError) as exc:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "commit",
+                "transaction_id": "tx_1234",
+                "expected_revision": "rev_1",
+            },
+            group="transaction",
+        )
+
+    assert exc.value.code == ErrorCode.REVISION_CONFLICT
+    assert exc.value.details.get("applied") is False
+    assert fusion_state["committed"] is False
+    # Proves tracker advanced
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+
+@pytest.mark.asyncio
+async def test_falsify_conservative_revision_and_p0_p2_capabilities(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves conservative capability states: revision.external_change_detection degraded, P2 unavailable."""
+    cad_service = FusionCadService(mock_desktop_service)
+
+    mock_desktop_service.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Runtime capabilities probed",
+                "capabilities": [
+                    {
+                        "name": "revision.external_change_detection",
+                        "state": "degraded",
+                        "implementation": "timeline-fingerprint-guard",
+                        "limitations": ["Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime atomicity proof"],
+                    },
+                    {
+                        "name": "view.pick",
+                        "state": "degraded",
+                        "implementation": "native-preselect",
+                        "limitations": ["Visual pick requires live feasibility proof"],
+                    },
+                    {
+                        "name": "transaction.preview_replay",
+                        "state": "degraded",
+                        "implementation": "manual-replay",
+                        "limitations": ["Transaction preview replay requires live feasibility proof"],
+                    },
+                    {
+                        "name": "export.dxf",
+                        "state": "unavailable",
+                        "limitations": ["DXF export contract semantics not supported on this runtime; capability-gated until P2"],
+                    },
+                    {
+                        "name": "view.section",
+                        "state": "unavailable",
+                        "limitations": ["Section view analysis contract semantics not available on this runtime; capability-gated until P2"],
+                    },
+                    {
+                        "name": "assembly.joints",
+                        "state": "unavailable",
+                        "limitations": ["Assembly joint operations not supported on this runtime; capability-gated until P2"],
+                    },
+                ],
+            }),
+        }],
+        "isError": False,
+    })
+
+    result = await cad_service.execute({"node_id": "desk-1", "operation": "capabilities"}, group="read")
+    assert isinstance(result, CadResult)
+
+    matrix = cad_service.get_node_capabilities("desk-1")
+    assert matrix is not None
+
+    # 1. revision.external_change_detection must be degraded, not supported
+    rev_cap = matrix.get("revision.external_change_detection")
+    assert rev_cap is not None
+    assert rev_cap.state == "degraded"
+    assert "Fusion-side revision freshness guard" in rev_cap.limitations[0]
+
+    # 2. Conservative capabilities remain degraded
+    assert matrix.get("view.pick").state == "degraded"
+    assert matrix.get("transaction.preview_replay").state == "degraded"
+
+    # 3. P2 capabilities remain unavailable
+    assert matrix.get("export.dxf").state == "unavailable"
+    assert matrix.get("view.section").state == "unavailable"
+    assert matrix.get("assembly.joints").state == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_falsify_service_document_switch_and_multi_document_isolation(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves multiple documents maintain distinct revisions and don't corrupt each other."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="design.access", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # Read doc_1
+    mock_desktop_service.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Read doc_1",
+                "document": {"document_ref": "doc_1", "model_revision": "rev_1", "name": "Doc1", "units": "mm"},
+                "data": {"fingerprint": "hash-doc-1-v1"},
+            }),
+        }],
+        "isError": False,
+    })
+    await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
+
+    # Read doc_2
+    mock_desktop_service.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Read doc_2",
+                "document": {"document_ref": "doc_2", "model_revision": "rev_1", "name": "Doc2", "units": "mm"},
+                "data": {"fingerprint": "hash-doc-2-v1"},
+            }),
+        }],
+        "isError": False,
+    })
+    await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
+
+    # Assert both documents tracked independently at rev_1
+    assert cad_service.assert_fresh_for_mutation(document_ref="doc_1", expected_revision="rev_1").revision == "rev_1"
+    assert cad_service.assert_fresh_for_mutation(document_ref="doc_2", expected_revision="rev_1").revision == "rev_1"
+
+    # External change advances doc_1 to rev_2
+    cad_service.revision_tracker.observe("doc_1", "hash-doc-1-v2")
+    assert cad_service.assert_fresh_for_mutation(document_ref="doc_1", expected_revision="rev_2").revision == "rev_2"
+
+    # doc_2 is still at rev_1
+    assert cad_service.assert_fresh_for_mutation(document_ref="doc_2", expected_revision="rev_1").revision == "rev_1"
+    with pytest.raises(FusionCadError):
+        cad_service.assert_fresh_for_mutation(document_ref="doc_2", expected_revision="rev_2")

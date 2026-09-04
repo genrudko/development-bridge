@@ -26,6 +26,7 @@ from app.fusion_cad.requests import (
     FusionViewRequest,
     _StrictCadBase,
 )
+from app.fusion_cad.revisions import RevisionRecord, RevisionTracker
 from app.fusion_cad.scripts import FusionCadScriptBundle
 
 _GROUP_REQUEST_ADAPTERS: dict[str, TypeAdapter[Any]] = {
@@ -136,10 +137,46 @@ class FusionCadService:
         self,
         desktop_nodes: DesktopNodeService,
         script_bundle: FusionCadScriptBundle | None = None,
+        revision_tracker: RevisionTracker | None = None,
     ) -> None:
         self._desktop_nodes = desktop_nodes
         self._script_bundle = script_bundle or FusionCadScriptBundle()
+        self._revision_tracker = revision_tracker or RevisionTracker()
         self._node_capabilities: dict[str, _CachedNodeCapabilities] = {}
+
+    @property
+    def revision_tracker(self) -> RevisionTracker:
+        return self._revision_tracker
+
+    def assert_fresh_for_mutation(
+        self,
+        target: Any = None,
+        expected_revision: str | None = None,
+        *,
+        document_ref: str | None = None,
+        node_id: str | None = None,
+    ) -> RevisionRecord:
+        """Assert that the model revision is fresh for mutation (Bridge precheck optimization)."""
+        doc_ref = document_ref
+        exp_rev = expected_revision
+        if isinstance(target, dict):
+            doc_ref = doc_ref or target.get("document_ref") or target.get("document")
+            if exp_rev is None:
+                exp_rev = target.get("expected_revision")
+        elif isinstance(target, BaseModel):
+            doc_ref = doc_ref or getattr(target, "document_ref", None)
+            if exp_rev is None:
+                exp_rev = getattr(target, "expected_revision", None)
+        elif isinstance(target, str):
+            if target.startswith("doc_"):
+                doc_ref = target
+            elif exp_rev is None:
+                exp_rev = target
+
+        if doc_ref is None:
+            doc_ref = self._revision_tracker.active_document_ref or "doc_1"
+
+        return self._revision_tracker.assert_expected(doc_ref, exp_rev)
 
     def get_node_capabilities(self, node_id: str) -> CapabilityMatrix | None:
         cached = self._node_capabilities.get(node_id)
@@ -593,6 +630,19 @@ class FusionCadService:
             matrix.require(required_cap, allow_degraded=False)
 
         is_async, is_mutation, summary = self._classify_operation(effective_bundle_group, payload)
+
+        # Bridge revision freshness precheck (fail-fast optimization)
+        if is_mutation or "expected_revision" in payload or (effective_bundle_group == "transaction" and op in ("commit", "preview")):
+            exp_rev = payload.get("expected_revision")
+            doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+            if exp_rev is not None:
+                if doc_ref and self._revision_tracker.current(doc_ref) is not None:
+                    self.assert_fresh_for_mutation(payload, document_ref=doc_ref)
+                if doc_ref:
+                    known_fp = self._revision_tracker.get_fingerprint(doc_ref, exp_rev)
+                    if known_fp is not None and "expected_fingerprint" not in payload:
+                        payload["expected_fingerprint"] = known_fp
+
         script = self._script_bundle.build(effective_bundle_group, payload)
         journal = {"mutation": is_mutation, "summary": summary}
 
@@ -605,19 +655,44 @@ class FusionCadService:
                 probe_generation = None
 
         if is_async:
-            return await self._desktop_nodes.submit(
+            try:
+                sub_result = await self._desktop_nodes.submit(
+                    node_id,
+                    "fusion_mcp_execute",
+                    {"script": script},
+                    journal=journal,
+                )
+                if isinstance(sub_result, dict) and "document" in sub_result and isinstance(sub_result["document"], dict):
+                    doc_d = sub_result["document"]
+                    doc_r = doc_d.get("document_ref")
+                    if doc_r:
+                        fp = sub_result.get("data", {}).get("fingerprint") if isinstance(sub_result.get("data"), dict) else None
+                        self._revision_tracker.observe(doc_r, fp or doc_d.get("model_revision", "rev_1"))
+                return sub_result
+            except FusionCadError as exc:
+                if exc.code == ErrorCode.REVISION_CONFLICT:
+                    cur_fp = exc.details.get("current_fingerprint") if isinstance(exc.details, (dict, Mapping)) else None
+                    doc_ref = exc.details.get("document_ref") if isinstance(exc.details, (dict, Mapping)) else None
+                    doc_ref = doc_ref or self._revision_tracker.active_document_ref
+                    if cur_fp and doc_ref:
+                        self._revision_tracker.observe(doc_ref, cur_fp)
+                raise
+
+        try:
+            raw_result = await self._desktop_nodes.call(
                 node_id,
                 "fusion_mcp_execute",
                 {"script": script},
                 journal=journal,
             )
-
-        raw_result = await self._desktop_nodes.call(
-            node_id,
-            "fusion_mcp_execute",
-            {"script": script},
-            journal=journal,
-        )
+        except FusionCadError as exc:
+            if exc.code == ErrorCode.REVISION_CONFLICT:
+                cur_fp = exc.details.get("current_fingerprint") if isinstance(exc.details, (dict, Mapping)) else None
+                doc_ref = exc.details.get("document_ref") if isinstance(exc.details, (dict, Mapping)) else None
+                doc_ref = doc_ref or self._revision_tracker.active_document_ref
+                if cur_fp and doc_ref:
+                    self._revision_tracker.observe(doc_ref, cur_fp)
+            raise
 
         if not isinstance(raw_result, dict):
             raise FusionCadError(
@@ -632,7 +707,30 @@ class FusionCadService:
             self.decode_domain_result(full)
             return raw_result
 
-        cad_result = self.decode_domain_result(raw_result)
+        try:
+            cad_result = self.decode_domain_result(raw_result)
+        except FusionCadError as exc:
+            if exc.code == ErrorCode.REVISION_CONFLICT:
+                cur_fp = exc.details.get("current_fingerprint") if isinstance(exc.details, (dict, Mapping)) else None
+                doc_ref = exc.details.get("document_ref") if isinstance(exc.details, (dict, Mapping)) else None
+                doc_ref = doc_ref or self._revision_tracker.active_document_ref
+                if cur_fp and doc_ref:
+                    self._revision_tracker.observe(doc_ref, cur_fp)
+            raise
+
+        # Observe document revision state if returned
+        if cad_result.document:
+            doc_state = cad_result.document
+            fp = None
+            if isinstance(cad_result.data, (dict, Mapping)):
+                fp = cad_result.data.get("fingerprint")
+            if fp:
+                self._revision_tracker.observe(doc_state.document_ref, fp)
+            elif doc_state.model_revision:
+                self._revision_tracker.observe(doc_state.document_ref, doc_state.model_revision)
+        elif isinstance(cad_result.data, (dict, Mapping)) and "fingerprint" in cad_result.data:
+            doc_ref = self._revision_tracker.active_document_ref or "doc_1"
+            self._revision_tracker.observe(doc_ref, cad_result.data["fingerprint"])
 
         # If operation was capabilities read, persist the probed capability matrix
         # only if the authoritative session_generation is still current.
