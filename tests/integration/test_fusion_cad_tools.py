@@ -1175,3 +1175,194 @@ async def test_execute_accepts_valid_dict_and_dispatches_cleanly(mock_container:
     })
     assert result.status == "succeeded"
     assert result.summary == "Read entity ok"
+
+
+@pytest.mark.parametrize("bad_is_error", ["true", 1, {}, {"nested": "value"}, "false", 0, None, [True]])
+def test_decode_domain_result_fails_closed_on_non_bool_is_error_direct(bad_is_error):
+    # Direct domain dict with malformed isError
+    raw = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Should fail",
+        "data": {"key": "val"},
+        "isError": bad_is_error,
+    }
+    with pytest.raises(FusionCadError) as exc_info:
+        FusionCadService.decode_domain_result(raw)
+    assert exc_info.value.code == ErrorCode.FUSION_API_ERROR
+
+
+@pytest.mark.parametrize("bad_is_error", ["true", 1, {}, {"nested": "value"}, "false", 0, None, [True]])
+def test_decode_domain_result_fails_closed_on_non_bool_is_error_wrapped_content(bad_is_error):
+    # Content block with inner JSON containing malformed isError
+    inner = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Should fail",
+        "data": {"key": "val"},
+        "isError": bad_is_error,
+    }
+    raw = {
+        "content": [{"type": "text", "text": json.dumps(inner)}],
+        "isError": False,
+    }
+    with pytest.raises(FusionCadError) as exc_info:
+        FusionCadService.decode_domain_result(raw)
+    assert exc_info.value.code == ErrorCode.FUSION_API_ERROR
+
+    # Content block with top-level malformed isError
+    raw_top_bad = {
+        "content": [{"type": "text", "text": json.dumps({"api_version": "fusion.cad/v1", "summary": "ok", "status": "succeeded", "data": {}})}],
+        "isError": bad_is_error,
+    }
+    with pytest.raises(FusionCadError) as exc_info_top:
+        FusionCadService.decode_domain_result(raw_top_bad)
+    assert exc_info_top.value.code == ErrorCode.FUSION_API_ERROR
+
+
+def test_decode_domain_result_is_error_control_cases():
+    # isError=True fails
+    with pytest.raises(FusionCadError):
+        FusionCadService.decode_domain_result({
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Error control",
+            "data": {},
+            "isError": True,
+        })
+
+    # isError=False succeeds for direct dict
+    res_direct = FusionCadService.decode_domain_result({
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Success control",
+        "data": {"foo": "bar"},
+        "isError": False,
+    })
+    assert res_direct.summary == "Success control"
+    assert res_direct.status == "succeeded"
+
+    # isError=False succeeds for wrapped content
+    res_wrapped = FusionCadService.decode_domain_result({
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Success wrapped control",
+                "data": {"foo": "bar"},
+                "isError": False,
+            }),
+        }],
+        "isError": False,
+    })
+    assert res_wrapped.summary == "Success wrapped control"
+    assert res_wrapped.status == "succeeded"
+
+
+@pytest.mark.parametrize("is_error_val, should_succeed", [
+    ("true", False),
+    (1, False),
+    ({}, False),
+    ({"error": "detail"}, False),
+    (True, False),
+    (False, True),
+])
+@pytest.mark.asyncio
+async def test_service_execute_direct_sync_is_error_matrix(
+    mock_container: ApplicationContainer,
+    is_error_val,
+    should_succeed: bool,
+):
+    service: FusionCadService = mock_container.fusion_cad
+    mock_container.desktop_nodes.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Sync matrix test",
+                "data": {"result": 42},
+                "isError": is_error_val,
+            }),
+        }],
+        "isError": is_error_val if isinstance(is_error_val, bool) else False,
+    })
+
+    req = {"node_id": "desk-1", "operation": "camera_read"}
+    if should_succeed:
+        res = await service.execute(req)
+        assert res.summary == "Sync matrix test"
+    else:
+        with pytest.raises((FusionCadError, BridgeError)):
+            await service.execute(req)
+
+
+@pytest.mark.parametrize("is_error_val, should_succeed", [
+    ("true", False),
+    (1, False),
+    ({}, False),
+    (True, False),
+    (False, True),
+])
+@pytest.mark.asyncio
+async def test_retained_async_domain_operation_result_is_error_matrix(
+    tmp_path,
+    is_error_val,
+    should_succeed: bool,
+):
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(tmp_path / "artifacts"),
+        },
+    }))
+    registry = build_tool_registry(container)
+    op_result_tool = registry.get("fusion_operation_result")
+    assert op_result_tool is not None
+
+    await container.desktop_nodes.register(
+        "desk-1",
+        [{"name": "fusion_mcp_execute"}],
+        fusion_available=True,
+    )
+
+    submit_res = await container.fusion_cad.execute({
+        "node_id": "desk-1",
+        "operation": "run",
+    }, group="validate")
+    op_id = submit_res["operation_id"]
+
+    claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
+    cmd_id = claimed["command_id"]
+
+    payload = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Async matrix test",
+        "data": {"checked": True},
+        "isError": is_error_val,
+    }
+    node_result = {
+        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "isError": is_error_val,
+    }
+    await container.desktop_nodes.submit_result("desk-1", cmd_id, node_result)
+
+    req_ctx = RequestContext(request_id="req_async_matrix")
+    params = types.CallToolRequestParams(
+        name="fusion_operation_result",
+        arguments={"node_id": "desk-1", "operation_id": op_id},
+    )
+
+    if should_succeed:
+        res = await op_result_tool.handler(None, params, req_ctx)
+        assert isinstance(res, types.CallToolResult)
+        assert not res.is_error
+        parsed = json.loads(res.content[0].text)
+        assert parsed["ok"] is True
+    else:
+        with pytest.raises((FusionCadError, BridgeError)):
+            await op_result_tool.handler(None, params, req_ctx)

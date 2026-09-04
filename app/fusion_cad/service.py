@@ -140,7 +140,9 @@ class FusionCadService:
     def _is_error_payload(cls, payload: Any) -> bool:
         if not isinstance(payload, dict):
             return True
-        if payload.get("isError") is True or payload.get("status") in ("failed", "error") or "error" in payload:
+        if "isError" in payload and payload["isError"] is not False:
+            return True
+        if payload.get("status") in ("failed", "error") or "error" in payload:
             return True
         if isinstance(payload.get("content"), list):
             for block in payload["content"]:
@@ -149,7 +151,7 @@ class FusionCadService:
                     try:
                         parsed = json.loads(text)
                         if isinstance(parsed, dict) and (
-                            parsed.get("isError") is True
+                            ("isError" in parsed and parsed["isError"] is not False)
                             or parsed.get("status") in ("failed", "error")
                             or "error" in parsed
                         ):
@@ -173,7 +175,7 @@ class FusionCadService:
                         if isinstance(parsed, dict) and (
                             parsed.get("status") in ("failed", "error")
                             or "error" in parsed
-                            or parsed.get("isError") is True
+                            or ("isError" in parsed and parsed["isError"] is not False)
                         ):
                             err = parsed.get("error") if isinstance(parsed.get("error"), dict) else {}
                             code_str = err.get("code") or parsed.get("code")
@@ -221,7 +223,7 @@ class FusionCadService:
     def decode_domain_result(cls, raw_result: Any) -> CadResult:
         """Decode and validate a domain result against fusion.cad/v1 CadResult schema.
 
-        Fails closed on malformed JSON, isError=True, failed/error status,
+        Fails closed on malformed JSON, isError=True, non-bool isError, failed/error status,
         missing or incorrect api_version, invalid CadResult schema, or non-dict structures.
         """
         if not isinstance(raw_result, dict):
@@ -231,7 +233,7 @@ class FusionCadService:
                 details={"raw_result": str(raw_result)},
             )
 
-        if raw_result.get("isError") is True:
+        if "isError" in raw_result and raw_result["isError"] is not False:
             err_code, err_msg, err_details = cls._extract_error_info(raw_result)
             raise FusionCadError(err_code, err_msg, details=err_details)
 
@@ -271,7 +273,11 @@ class FusionCadService:
                             details={"raw_output": text},
                         )
 
-                    if parsed.get("isError") is True or parsed.get("status") in ("failed", "error") or "error" in parsed:
+                    if (
+                        ("isError" in parsed and parsed["isError"] is not False)
+                        or parsed.get("status") in ("failed", "error")
+                        or "error" in parsed
+                    ):
                         err_code, err_msg, err_details = cls._extract_error_info(parsed)
                         raise FusionCadError(err_code, err_msg, details=err_details)
 
@@ -282,8 +288,10 @@ class FusionCadService:
                             details={"parsed": parsed},
                         )
 
+                    candidate = dict(parsed)
+                    candidate.pop("isError", None)
                     try:
-                        return CadResult.model_validate(parsed)
+                        return CadResult.model_validate(candidate)
                     except ValidationError as exc:
                         raise FusionCadError(
                             ErrorCode.FUSION_API_ERROR,

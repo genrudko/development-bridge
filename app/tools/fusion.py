@@ -35,9 +35,9 @@ from app.fusion_cad.service import FusionCadService
 def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     def external_result_response(full, metadata, request_id):
         is_error = bool(
-            full.get("isError", False)
-            or full.get("status") in ("failed", "error")
-            or "error" in full
+            (("isError" in full and full["isError"] is not False) if isinstance(full, dict) else False)
+            or (full.get("status") in ("failed", "error") if isinstance(full, dict) else False)
+            or ("error" in full if isinstance(full, dict) else False)
             or FusionCadService._is_error_payload(full)
         )
         if is_error:

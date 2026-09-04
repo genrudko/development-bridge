@@ -682,8 +682,9 @@ class DesktopNodeService:
             and isinstance(external.get("sha256"), str)
             else self._json_hash(result)
         )
+        has_is_error = "isError" in result and result.get("isError") is not False
         result_failed = bool(
-            result.get("isError", False)
+            has_is_error
             or result.get("status") in ("failed", "error")
             or "error" in result
         )
@@ -694,7 +695,7 @@ class DesktopNodeService:
                     try:
                         parsed = json.loads(text)
                         if isinstance(parsed, dict) and (
-                            parsed.get("isError") is True
+                            ("isError" in parsed and parsed.get("isError") is not False)
                             or parsed.get("status") in ("failed", "error")
                             or "error" in parsed
                         ):
@@ -794,7 +795,7 @@ class DesktopNodeService:
                 "size_bytes": item["size_bytes"],
                 "sha256": item["sha256"],
             },
-            "isError": bool(value.get("isError", False)),
+            "isError": (value.get("isError") is not False) if "isError" in value else False,
         }
 
     def _extract_image_resources(self, result_id: str, value: dict[str, Any], created_at: float) -> None:
@@ -918,7 +919,7 @@ class DesktopNodeService:
                 "size_bytes": upload.size_bytes,
                 "sha256": upload.sha256,
             },
-            "isError": bool(value.get("isError", False)),
+            "isError": (value.get("isError") is not False) if "isError" in value else False,
         }
 
     def _recover_external_result(self, result_id: Any) -> dict[str, Any] | None:
