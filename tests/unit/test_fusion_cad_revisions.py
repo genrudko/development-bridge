@@ -272,3 +272,60 @@ def test_reset_behavior():
     tracker.reset()
     assert tracker.current() is None
     assert tracker.current("doc_2") is None
+
+
+def test_exact_prefix_handling_does_not_corrupt_names():
+    # If lstrip("doc_") was used, "doc_document1" would become "doc_ument1"
+    # Exact prefix removal preserves the underlying name "document1"
+    raw1 = {"document": {"document_ref": "doc_document1"}}
+    canon1 = canonicalize_fingerprint_payload(raw1)
+    assert canon1["document"]["document_ref"] == "doc_document1"
+
+    raw2 = {"document_ref": "document1"}
+    canon2 = canonicalize_fingerprint_payload(raw2)
+    assert canon2["document"]["document_ref"] == "doc_document1"
+
+
+def test_effective_visibility_changes_fingerprint():
+    base = {
+        "document_ref": "doc_1",
+        "bodies": [{"name": "Body1", "is_visible": True, "effective_visibility": True}],
+    }
+    hidden_parent = {
+        "document_ref": "doc_1",
+        "bodies": [{"name": "Body1", "is_visible": True, "effective_visibility": False}],
+    }
+    fp1 = compute_model_fingerprint(base)
+    fp2 = compute_model_fingerprint(hidden_parent)
+    assert fp1 != fp2
+
+
+def test_sketch_constraints_and_dimensions_change_fingerprint():
+    sketch_plain = {
+        "document_ref": "doc_1",
+        "sketches": [{"name": "Sketch1", "constraints": [], "dimensions": []}],
+    }
+    sketch_constrained = {
+        "document_ref": "doc_1",
+        "sketches": [{
+            "name": "Sketch1",
+            "constraints": [{"type": "ParallelConstraint", "is_deletable": True}],
+            "dimensions": [],
+        }],
+    }
+    sketch_dimensioned = {
+        "document_ref": "doc_1",
+        "sketches": [{
+            "name": "Sketch1",
+            "constraints": [],
+            "dimensions": [{"name": "d1", "value": 25.4, "expression": "1 in"}],
+        }],
+    }
+
+    fp_plain = compute_model_fingerprint(sketch_plain)
+    fp_cons = compute_model_fingerprint(sketch_constrained)
+    fp_dim = compute_model_fingerprint(sketch_dimensioned)
+
+    assert fp_plain != fp_cons
+    assert fp_plain != fp_dim
+    assert fp_cons != fp_dim

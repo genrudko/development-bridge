@@ -48,6 +48,7 @@ def setup_desk1_capabilities(container: ApplicationContainer) -> None:
         )
     ]
     container.fusion_cad.set_node_capabilities("desk-1", CapabilityMatrix.from_records(all_supported), generation=1)
+    container.fusion_cad.revision_tracker.observe("doc_1", "hash-desk1-seed")
 
 
 @pytest.fixture
@@ -173,9 +174,9 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
 
 
 @pytest.mark.parametrize("tool_name, valid_payload, expected_mutation", [
-    ("fusion_metadata", {"node_id": "desk-1", "operation": "tag", "target": "ent_body_1", "tag_name": "bolt"}, True),
-    ("fusion_style", {"node_id": "desk-1", "operation": "show", "target": "ent_body_1"}, True),
-    ("fusion_style", {"node_id": "desk-1", "operation": "text_create", "text": "Label", "height_mm": 5.0, "position": {"x": 0, "y": 0, "z": 0, "frame": {"space": "world"}}}, True),
+    ("fusion_metadata", {"node_id": "desk-1", "operation": "tag", "target": "ent_body_1", "tag_name": "bolt", "expected_revision": "rev_1"}, True),
+    ("fusion_style", {"node_id": "desk-1", "operation": "show", "target": "ent_body_1", "expected_revision": "rev_1"}, True),
+    ("fusion_style", {"node_id": "desk-1", "operation": "text_create", "text": "Label", "height_mm": 5.0, "position": {"x": 0, "y": 0, "z": 0, "frame": {"space": "world"}}, "expected_revision": "rev_1"}, True),
     ("fusion_validate", {"node_id": "desk-1", "operation": "run"}, False),
     ("fusion_view", {"node_id": "desk-1", "operation": "screenshot"}, False),
     ("fusion_view", {"node_id": "desk-1", "operation": "camera_set", "fov": 45.0}, True),
@@ -185,8 +186,8 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
     ("fusion_transaction", {"node_id": "desk-1", "operation": "begin"}, True),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "stage", "transaction_id": "tx_1234", "action": {"action_type": "show", "target": "ent_1"}}, True),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_1234"}, True),
-    ("fusion_transaction", {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_1234"}, True),
-    ("fusion_transaction", {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_1234"}, True),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_1234", "expected_revision": "rev_1"}, True),
+    ("fusion_transaction", {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_1234", "expected_revision": "rev_1"}, True),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "rollback", "transaction_id": "tx_1234"}, True),
     ("fusion_read", {"node_id": "desk-1", "operation": "model_snapshot", "detail": "full"}, False),
 ])
@@ -424,23 +425,23 @@ def test_exhaustive_operation_classification(
     ("fusion_view", {"node_id": "desk-1", "operation": "zoom_entity", "target": "ent_1"}),
     ("fusion_view", {"node_id": "desk-1", "operation": "orient_to_face", "target": "ent_1"}),
     ("fusion_view", {"node_id": "desk-1", "operation": "standard_view", "view_type": "top"}),
-    ("fusion_metadata", {"node_id": "desk-1", "operation": "set", "target": "ent_1", "name": "k", "value": "v"}),
-    ("fusion_metadata", {"node_id": "desk-1", "operation": "remove", "target": "ent_1", "name": "k"}),
-    ("fusion_metadata", {"node_id": "desk-1", "operation": "tag", "target": "ent_1", "tag_name": "t"}),
-    ("fusion_metadata", {"node_id": "desk-1", "operation": "untag", "target": "ent_1", "tag_name": "t"}),
-    ("fusion_metadata", {"node_id": "desk-1", "operation": "set_role", "target": "ent_1", "role": "r"}),
-    ("fusion_metadata", {"node_id": "desk-1", "operation": "clear_role", "target": "ent_1"}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "text_create", "text": "t", "height_mm": 5.0, "position": {"x": 0, "y": 0, "z": 0, "frame": {"space": "world"}}}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "text_update", "text_ref": "text_1"}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "text_delete", "text_ref": "text_1"}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "text_extrude", "text_ref": "text_1", "distance_mm": 2.0}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "text_cut", "text_ref": "text_1", "distance_mm": 2.0, "target_body": "ent_1"}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "show", "target": "ent_1"}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "hide", "target": "ent_1"}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "set", "target": "ent_1", "visible": True}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "show_only", "target": "ent_1"}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "isolate", "target": "ent_1"}),
-    ("fusion_style", {"node_id": "desk-1", "operation": "restore"}),
+    ("fusion_metadata", {"node_id": "desk-1", "operation": "set", "target": "ent_1", "name": "k", "value": "v", "expected_revision": "rev_1"}),
+    ("fusion_metadata", {"node_id": "desk-1", "operation": "remove", "target": "ent_1", "name": "k", "expected_revision": "rev_1"}),
+    ("fusion_metadata", {"node_id": "desk-1", "operation": "tag", "target": "ent_1", "tag_name": "t", "expected_revision": "rev_1"}),
+    ("fusion_metadata", {"node_id": "desk-1", "operation": "untag", "target": "ent_1", "tag_name": "t", "expected_revision": "rev_1"}),
+    ("fusion_metadata", {"node_id": "desk-1", "operation": "set_role", "target": "ent_1", "role": "r", "expected_revision": "rev_1"}),
+    ("fusion_metadata", {"node_id": "desk-1", "operation": "clear_role", "target": "ent_1", "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "text_create", "text": "t", "height_mm": 5.0, "position": {"x": 0, "y": 0, "z": 0, "frame": {"space": "world"}}, "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "text_update", "text_ref": "text_1", "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "text_delete", "text_ref": "text_1", "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "text_extrude", "text_ref": "text_1", "distance_mm": 2.0, "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "text_cut", "text_ref": "text_1", "distance_mm": 2.0, "target_body": "ent_1", "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "show", "target": "ent_1", "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "hide", "target": "ent_1", "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "set", "target": "ent_1", "visible": True, "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "show_only", "target": "ent_1", "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "isolate", "target": "ent_1", "expected_revision": "rev_1"}),
+    ("fusion_style", {"node_id": "desk-1", "operation": "restore", "expected_revision": "rev_1"}),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "begin"}),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "stage", "transaction_id": "tx_1", "action": {"action_type": "show", "target": "ent_1"}}),
     ("fusion_transaction", {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_1"}),

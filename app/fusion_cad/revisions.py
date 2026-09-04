@@ -49,15 +49,29 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
     # 1. Document identity / modified marker
     if "document" in payload and isinstance(payload["document"], Mapping):
         doc = payload["document"]
+        raw_ref = str(doc.get("document_ref") or doc.get("id") or "")
+        if raw_ref.startswith("doc_"):
+            doc_ref = "doc_" + raw_ref[4:]
+        elif raw_ref:
+            doc_ref = "doc_" + raw_ref
+        else:
+            doc_ref = ""
         canonical["document"] = {
-            "document_ref": str(doc.get("document_ref") or doc.get("id") or ""),
+            "document_ref": doc_ref,
             "name": str(doc.get("name") or "") if doc.get("name") is not None else None,
             "is_modified": bool(doc.get("is_modified", False)),
             "saved_version": doc.get("saved_version"),
         }
     elif "document_ref" in payload or "is_modified" in payload:
+        raw_ref = str(payload.get("document_ref", ""))
+        if raw_ref.startswith("doc_"):
+            doc_ref = "doc_" + raw_ref[4:]
+        elif raw_ref:
+            doc_ref = "doc_" + raw_ref
+        else:
+            doc_ref = ""
         canonical["document"] = {
-            "document_ref": str(payload.get("document_ref", "")),
+            "document_ref": doc_ref,
             "name": str(payload.get("name", "")) if payload.get("name") is not None else None,
             "is_modified": bool(payload.get("is_modified", False)),
             "saved_version": payload.get("saved_version"),
@@ -98,10 +112,12 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
             if isinstance(occ, Mapping):
                 transform = occ.get("transform")
                 canonical_transform = _canonicalize_value(transform) if transform is not None else None
+                is_vis = bool(occ.get("is_visible", True))
                 occ_items.append({
                     "name": str(occ.get("name", "")),
                     "full_path_name": str(occ.get("full_path_name") or occ.get("name", "")),
-                    "is_visible": bool(occ.get("is_visible", True)),
+                    "is_visible": is_vis,
+                    "effective_visibility": bool(occ.get("effective_visibility", is_vis)),
                     "transform": canonical_transform,
                 })
         occ_items.sort(key=lambda x: x["full_path_name"])
@@ -113,11 +129,13 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
         for b in payload["bodies"]:
             if isinstance(b, Mapping):
                 bbox = b.get("bounding_box")
+                is_vis = bool(b.get("is_visible", True))
                 body_items.append({
                     "name": str(b.get("name", "")),
                     "component": str(b.get("component")) if b.get("component") is not None else None,
                     "is_solid": bool(b.get("is_solid", True)),
-                    "is_visible": bool(b.get("is_visible", True)),
+                    "is_visible": is_vis,
+                    "effective_visibility": bool(b.get("effective_visibility", is_vis)),
                     "volume": _canonicalize_value(float(b.get("volume", 0.0))),
                     "area": _canonicalize_value(float(b.get("area", 0.0))),
                     "faces_count": int(b.get("faces_count", 0)),
@@ -133,14 +151,21 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
         for s in payload["sketches"]:
             if isinstance(s, Mapping):
                 constraints = s.get("constraints")
+                dimensions = s.get("dimensions")
+                is_vis = bool(s.get("is_visible", True))
+                cons_count = int(s.get("constraints_count", len(constraints) if isinstance(constraints, (list, tuple)) else 0))
+                dim_count = int(s.get("dimensions_count", len(dimensions) if isinstance(dimensions, (list, tuple)) else 0))
                 sketch_items.append({
                     "name": str(s.get("name", "")),
                     "component": str(s.get("component")) if s.get("component") is not None else None,
-                    "is_visible": bool(s.get("is_visible", True)),
+                    "is_visible": is_vis,
+                    "effective_visibility": bool(s.get("effective_visibility", is_vis)),
                     "profiles_count": int(s.get("profiles_count", 0)),
                     "curves_count": int(s.get("curves_count", 0)),
-                    "constraints_count": int(s.get("constraints_count", 0)),
+                    "constraints_count": cons_count,
                     "constraints": _canonicalize_value(constraints) if constraints is not None else None,
+                    "dimensions_count": dim_count,
+                    "dimensions": _canonicalize_value(dimensions) if dimensions is not None else None,
                 })
         sketch_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
         canonical["sketches"] = sketch_items

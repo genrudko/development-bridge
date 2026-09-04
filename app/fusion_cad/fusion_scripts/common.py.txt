@@ -41,6 +41,315 @@ def make_error(error_code, message, details=None):
     }
 
 
+def canonicalize_value(val):
+    if val is None or isinstance(val, (bool, int, str)):
+        return val
+    if isinstance(val, float):
+        rounded = round(val, 6)
+        return 0.0 if rounded == 0.0 else rounded
+    if isinstance(val, dict):
+        return {k: canonicalize_value(val[k]) for k in sorted(val.keys())}
+    if isinstance(val, (list, tuple, set)):
+        items = [canonicalize_value(x) for x in val]
+        try:
+            return sorted(
+                items,
+                key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")) if isinstance(item, (dict, list, tuple)) else str(item)
+            )
+        except Exception:
+            return items
+    return str(val)
+
+
+def collect_model_fingerprint(payload=None):
+    payload = payload or {}
+    import hashlib
+    import re
+
+    # Support mock_model_state for tests and synthetic simulation
+    if "mock_model_state" in payload:
+        raw_state = payload["mock_model_state"]
+        canonical = {}
+        for k in sorted(raw_state.keys()):
+            canonical[k] = canonicalize_value(raw_state[k])
+        serialized = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        fp = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        doc_info = canonical.get("document", {})
+        doc_ref = doc_info.get("document_ref") or payload.get("document_ref") or "doc_1"
+        return fp, canonical, doc_ref
+
+    app = None
+    doc = None
+    design = None
+    try:
+        import adsk.core
+        app = adsk.core.Application.get()
+        if app:
+            doc = getattr(app, "activeDocument", None)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to access adsk.core Application: {exc}") from exc
+
+    try:
+        import adsk.fusion
+        if doc and hasattr(doc, "products"):
+            design = doc.products.itemByClass("adsk::fusion::Design")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to access adsk.fusion Design product: {exc}") from exc
+
+    if not doc and not design:
+        if payload.get("document_ref"):
+            doc_ref = str(payload["document_ref"])
+            canonical = {"document": {"document_ref": doc_ref, "is_modified": False}}
+            serialized = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+            return hashlib.sha256(serialized.encode("utf-8")).hexdigest(), canonical, doc_ref
+        raise RuntimeError("No active document or design found in Fusion runtime context")
+
+    canonical = {}
+
+    # 1. Document identity / modified marker (stable identity required, fail closed on mutable name)
+    data_file = getattr(doc, "dataFile", None)
+    doc_id = (
+        getattr(doc, "dataId", None)
+        or getattr(doc, "creationId", None)
+        or (data_file and getattr(data_file, "id", None))
+        or payload.get("document_ref")
+    )
+    if not doc_id:
+        raise RuntimeError(
+            "Document lacks stable identity (dataId/creationId/dataFile.id); "
+            "mutable document name cannot be used as authoritative identity"
+        )
+
+    doc_id_str = str(doc_id)
+    if doc_id_str.startswith("doc_"):
+        safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str[4:])
+    else:
+        safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str)
+
+    canonical["document"] = {
+        "document_ref": safe_doc_ref,
+        "name": getattr(doc, "name", None),
+        "is_modified": bool(getattr(doc, "isModified", False)),
+        "saved_version": getattr(doc, "savedVersion", None),
+    }
+
+    # 2. Timeline feature identity / health / suppression
+    timeline = getattr(design, "timeline", None) if design else None
+    if timeline and hasattr(timeline, "count"):
+        t_items = []
+        for i in range(timeline.count):
+            try:
+                item = timeline.item(i)
+                t_items.append({
+                    "index": i,
+                    "id": str(getattr(item, "entityToken", None) or getattr(item, "id", None) or i),
+                    "name": str(getattr(item, "name", "")),
+                    "is_suppressed": bool(getattr(item, "isSuppressed", False)),
+                    "is_valid": bool(getattr(item, "isValid", True)),
+                    "is_rolled_back": bool(getattr(item, "isRolledBack", False)),
+                    "health_status": str(getattr(item, "healthStatus", None)) if getattr(item, "healthStatus", None) is not None else None,
+                })
+            except Exception as exc:
+                raise RuntimeError(f"Failed to read timeline item {i}: {exc}") from exc
+        t_items.sort(key=lambda x: (x["index"], x["id"], x["name"]))
+        canonical["timeline"] = t_items
+
+    # 3. Components / occurrences / transforms
+    comps_list = []
+    if design:
+        all_comps = getattr(design, "allComponents", None)
+        if all_comps and hasattr(all_comps, "count"):
+            for i in range(all_comps.count):
+                try:
+                    c = all_comps.item(i)
+                    comps_list.append(c)
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to read component {i}: {exc}") from exc
+        root = getattr(design, "rootComponent", None)
+        if root and root not in comps_list:
+            comps_list.insert(0, root)
+
+        c_items = []
+        for c in comps_list:
+            try:
+                c_items.append({
+                    "name": str(getattr(c, "name", "")),
+                    "id": str(getattr(c, "id", "") or getattr(c, "entityToken", "")),
+                })
+            except Exception as exc:
+                raise RuntimeError(f"Failed to read component data: {exc}") from exc
+        c_items.sort(key=lambda x: (x["name"], x["id"]))
+        canonical["components"] = c_items
+
+        if root:
+            all_occs = getattr(root, "allOccurrences", None)
+            occ_items = []
+            if all_occs and hasattr(all_occs, "count"):
+                for i in range(all_occs.count):
+                    try:
+                        occ = all_occs.item(i)
+                        t_mat = None
+                        transform = getattr(occ, "transform", None)
+                        if transform and hasattr(transform, "asArray"):
+                            t_mat = [round(float(v), 6) for v in transform.asArray()]
+                        is_local_vis = bool(getattr(occ, "isLightBulbOn", getattr(occ, "isVisible", True)))
+                        is_eff_vis = bool(getattr(occ, "isVisible", True))
+                        occ_items.append({
+                            "name": str(getattr(occ, "name", "")),
+                            "full_path_name": str(getattr(occ, "fullPathName", getattr(occ, "name", ""))),
+                            "is_visible": is_local_vis,
+                            "effective_visibility": is_eff_vis,
+                            "transform": t_mat,
+                        })
+                    except Exception as exc:
+                        raise RuntimeError(f"Failed to read occurrence {i}: {exc}") from exc
+            occ_items.sort(key=lambda x: x["full_path_name"])
+            canonical["occurrences"] = occ_items
+
+        # 4. Bodies and geometry summary across all components
+        b_items = []
+        for c in comps_list:
+            c_name = str(getattr(c, "name", ""))
+            bodies = getattr(c, "bRepBodies", None)
+            if bodies and hasattr(bodies, "count"):
+                for b_idx in range(bodies.count):
+                    try:
+                        b = bodies.item(b_idx)
+                        bbox = None
+                        bb = getattr(b, "boundingBox", None)
+                        if bb:
+                            min_pt = getattr(bb, "minPoint", None)
+                            max_pt = getattr(bb, "maxPoint", None)
+                            if min_pt and max_pt:
+                                bbox = {
+                                    "min": [round(float(min_pt.x), 6), round(float(min_pt.y), 6), round(float(min_pt.z), 6)],
+                                    "max": [round(float(max_pt.x), 6), round(float(max_pt.y), 6), round(float(max_pt.z), 6)],
+                                }
+                        faces = getattr(b, "faces", None)
+                        edges = getattr(b, "edges", None)
+                        is_local_vis = bool(getattr(b, "isLightBulbOn", getattr(b, "isVisible", True)))
+                        is_eff_vis = bool(getattr(b, "isVisible", True))
+                        b_items.append({
+                            "name": str(getattr(b, "name", "")),
+                            "component": c_name,
+                            "is_solid": bool(getattr(b, "isSolid", True)),
+                            "is_visible": is_local_vis,
+                            "effective_visibility": is_eff_vis,
+                            "volume": canonicalize_value(float(getattr(b, "volume", 0.0))),
+                            "area": canonicalize_value(float(getattr(b, "area", 0.0))),
+                            "faces_count": getattr(faces, "count", 0) if faces else 0,
+                            "edges_count": getattr(edges, "count", 0) if edges else 0,
+                            "bounding_box": bbox,
+                        })
+                    except Exception as exc:
+                        raise RuntimeError(f"Failed to read body {b_idx} in component '{c_name}': {exc}") from exc
+        b_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
+        canonical["bodies"] = b_items
+
+        # 5. Sketches, constraints, and dimensions across all components
+        s_items = []
+        for c in comps_list:
+            c_name = str(getattr(c, "name", ""))
+            sketches = getattr(c, "sketches", None)
+            if sketches and hasattr(sketches, "count"):
+                for s_idx in range(sketches.count):
+                    try:
+                        s = sketches.item(s_idx)
+                        prof = getattr(s, "profiles", None)
+                        curves = getattr(s, "sketchCurves", None)
+                        geom_cons = getattr(s, "geometricConstraints", None)
+                        sketch_dims = getattr(s, "sketchDimensions", None)
+
+                        cons_items = []
+                        if geom_cons and hasattr(geom_cons, "count"):
+                            for ci in range(geom_cons.count):
+                                try:
+                                    con = geom_cons.item(ci)
+                                    cons_items.append({
+                                        "type": str(getattr(con, "objectType", None) or type(con).__name__),
+                                        "is_deletable": bool(getattr(con, "isDeletable", True)),
+                                    })
+                                except Exception as exc:
+                                    raise RuntimeError(f"Failed to read constraint {ci} on sketch '{getattr(s, 'name', '')}': {exc}") from exc
+                        cons_items.sort(key=lambda x: x["type"])
+
+                        dim_items = []
+                        if sketch_dims and hasattr(sketch_dims, "count"):
+                            for di in range(sketch_dims.count):
+                                try:
+                                    dim = sketch_dims.item(di)
+                                    param = getattr(dim, "parameter", None)
+                                    dim_items.append({
+                                        "name": str(getattr(param, "name", "") if param else getattr(dim, "name", "")),
+                                        "value": canonicalize_value(float(getattr(param, "value", getattr(dim, "value", 0.0)))) if (param or hasattr(dim, "value")) else None,
+                                        "expression": str(getattr(param, "expression", "")) if param else None,
+                                    })
+                                except Exception as exc:
+                                    raise RuntimeError(f"Failed to read dimension {di} on sketch '{getattr(s, 'name', '')}': {exc}") from exc
+                        dim_items.sort(key=lambda x: (x["name"], str(x.get("value"))))
+
+                        is_local_vis = bool(getattr(s, "isLightBulbOn", getattr(s, "isVisible", True)))
+                        is_eff_vis = bool(getattr(s, "isVisible", True))
+                        s_items.append({
+                            "name": str(getattr(s, "name", "")),
+                            "component": c_name,
+                            "is_visible": is_local_vis,
+                            "effective_visibility": is_eff_vis,
+                            "profiles_count": getattr(prof, "count", 0) if prof else 0,
+                            "curves_count": getattr(curves, "count", 0) if curves else 0,
+                            "constraints_count": len(cons_items),
+                            "constraints": cons_items,
+                            "dimensions_count": len(dim_items),
+                            "dimensions": dim_items,
+                        })
+                    except Exception as exc:
+                        raise RuntimeError(f"Failed to read sketch {s_idx} in component '{c_name}': {exc}") from exc
+        s_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
+        canonical["sketches"] = s_items
+
+        # 6. Parameters
+        params = getattr(design, "allParameters", None)
+        if params and hasattr(params, "count"):
+            p_items = []
+            for i in range(params.count):
+                try:
+                    p = params.item(i)
+                    p_items.append({
+                        "name": str(getattr(p, "name", "")),
+                        "expression": str(getattr(p, "expression", "")),
+                        "value": canonicalize_value(float(getattr(p, "value", 0.0))),
+                        "unit": str(getattr(p, "unit", "")),
+                        "is_favorite": bool(getattr(p, "isFavorite", False)),
+                    })
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to read parameter {i}: {exc}") from exc
+            p_items.sort(key=lambda x: x["name"])
+            canonical["parameters"] = p_items
+
+    # 7. Bridge attributes
+    attrs = getattr(doc, "attributes", None) if doc else None
+    if attrs and hasattr(attrs, "count"):
+        attr_items = []
+        for i in range(attrs.count):
+            try:
+                a = attrs.item(i)
+                grp = getattr(a, "groupName", "")
+                if grp == "bridge.cad/v1":
+                    attr_items.append({
+                        "group": grp,
+                        "name": str(getattr(a, "name", "")),
+                        "value": str(getattr(a, "value", "")),
+                    })
+            except Exception as exc:
+                raise RuntimeError(f"Failed to read attribute {i}: {exc}") from exc
+        attr_items.sort(key=lambda x: (x["group"], x["name"]))
+        canonical["attributes"] = attr_items
+
+    serialized = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    fp = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return fp, canonical, safe_doc_ref
+
+
 # __GROUP_SCRIPT__
 
 
@@ -52,4 +361,5 @@ if __name__ == "__main__" or True:
         print(json.dumps(_output, ensure_ascii=False, separators=(",", ":")))
     except Exception as _exc:
         _err = make_error("FUSION_API_ERROR", str(_exc), {"traceback": traceback.format_exc()})
+        _output = _err
         print(json.dumps(_err, ensure_ascii=False, separators=(",", ":")))

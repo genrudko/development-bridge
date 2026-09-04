@@ -596,6 +596,7 @@ async def test_falsify_stale_expected_revision_blocks_at_bridge_precheck(
     matrix = CapabilityMatrix.from_records([
         CapabilityRecord(name="metadata.attributes", state="supported"),
         CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
     ])
     cad_service.set_node_capabilities("desk-1", matrix)
 
@@ -626,136 +627,307 @@ async def test_falsify_stale_expected_revision_blocks_at_bridge_precheck(
     assert mock_desktop_service.submit.call_count == 0
 
 
+import sys
+import types
+
+
+class AdskFakeContext:
+    """Sets up a realistic fake Autodesk Fusion runtime in sys.modules for rendered script execution."""
+
+    def __init__(self, doc_ref="doc_1", initial_volume=100.0):
+        self.doc_ref = doc_ref
+        self.volume = initial_volume
+        self.mutated = False
+        self.tx_committed = False
+        self.tx_previewed = False
+        self.attributes = []
+
+    def __enter__(self):
+        ctx = self
+        adsk = types.ModuleType("adsk")
+        adsk_core = types.ModuleType("adsk.core")
+        adsk_fusion = types.ModuleType("adsk.fusion")
+
+        class FakePoint:
+            def __init__(self, x=0.0, y=0.0, z=0.0):
+                self.x = float(x)
+                self.y = float(y)
+                self.z = float(z)
+
+        class FakeBoundingBox:
+            def __init__(self, min_pt, max_pt):
+                self.minPoint = min_pt
+                self.maxPoint = max_pt
+
+        class FakeCollection:
+            def __init__(self, items=None):
+                self._items = list(items or [])
+
+            @property
+            def count(self):
+                return len(self._items)
+
+            def item(self, idx):
+                return self._items[idx]
+
+            def add(self, *args, **kwargs):
+                pass
+
+        class FakeAttributes:
+            def __init__(self, ctx):
+                self._ctx = ctx
+
+            @property
+            def count(self):
+                return len(self._ctx.attributes)
+
+            def item(self, idx):
+                return self._ctx.attributes[idx]
+
+            def add(self, group_name, name, value):
+                class Attr:
+                    def __init__(self, g, n, v):
+                        self.groupName = g
+                        self.name = n
+                        self.value = v
+                self._ctx.attributes.append(Attr(group_name, name, value))
+
+        class FakeBody:
+            def __init__(self, ctx):
+                self._ctx = ctx
+                self.name = "Body1"
+                self.isSolid = True
+                self.isVisible = True
+                self.isLightBulbOn = True
+                self.area = 50.0
+                self.faces = FakeCollection([object() for _ in range(6)])
+                self.edges = FakeCollection([object() for _ in range(12)])
+                self.boundingBox = FakeBoundingBox(FakePoint(0, 0, 0), FakePoint(10, 10, 10))
+
+            @property
+            def volume(self):
+                return float(self._ctx.volume)
+
+        class FakeConstraint:
+            def __init__(self, obj_type="HorizontalConstraint", is_deletable=True):
+                self.objectType = obj_type
+                self.isDeletable = is_deletable
+
+        class FakeDimension:
+            def __init__(self, name="d1", val=10.0, expr="10 mm"):
+                class Param:
+                    def __init__(self, n, v, e):
+                        self.name = n
+                        self.value = v
+                        self.expression = e
+                self.name = name
+                self.value = val
+                self.parameter = Param(name, val, expr)
+
+        class FakeSketch:
+            def __init__(self):
+                self.name = "Sketch1"
+                self.isVisible = True
+                self.isLightBulbOn = True
+                self.profiles = FakeCollection([object()])
+                self.sketchCurves = FakeCollection([object(), object(), object(), object()])
+                self.geometricConstraints = FakeCollection([FakeConstraint()])
+                self.sketchDimensions = FakeCollection([FakeDimension()])
+
+        class FakeComponent:
+            def __init__(self, ctx):
+                self._ctx = ctx
+                self.name = "Root"
+                self.id = "comp_root"
+                self.bRepBodies = FakeCollection([FakeBody(ctx)])
+                self.sketches = FakeCollection([FakeSketch()])
+                self.allOccurrences = FakeCollection([])
+
+        class FakeTimelineItem:
+            def __init__(self):
+                self.index = 0
+                self.entityToken = "feat_extrude_1"
+                self.name = "Extrude1"
+                self.isSuppressed = False
+                self.isValid = True
+                self.isRolledBack = False
+                self.healthStatus = "ok"
+
+        class FakeParameter:
+            def __init__(self):
+                self.name = "length"
+                self.expression = "100 mm"
+                self.value = 100.0
+                self.unit = "mm"
+                self.isFavorite = False
+
+        class FakeDesign:
+            def __init__(self, ctx):
+                self._ctx = ctx
+                self.rootComponent = FakeComponent(ctx)
+                self.allComponents = FakeCollection([self.rootComponent])
+                self.timeline = FakeCollection([FakeTimelineItem()])
+                self.allParameters = FakeCollection([FakeParameter()])
+
+        class FakeDocument:
+            def __init__(self, ctx):
+                self._ctx = ctx
+                self.dataId = ctx.doc_ref
+                self.name = "TestDoc"
+                self.isModified = False
+                self.savedVersion = 1
+                self.attributes = FakeAttributes(ctx)
+                self._design = FakeDesign(ctx)
+
+                class Products:
+                    def __init__(self, design):
+                        self._design = design
+
+                    def itemByClass(self, cls_name):
+                        if "Design" in cls_name:
+                            return self._design
+                        return None
+
+                self.products = Products(self._design)
+
+        class FakeApplication:
+            def __init__(self, ctx):
+                self._doc = FakeDocument(ctx)
+
+            @property
+            def activeDocument(self):
+                return self._doc
+
+            @classmethod
+            def get(cls):
+                return cls._instance
+
+        FakeApplication._instance = FakeApplication(ctx)
+        adsk_core.Application = FakeApplication
+        adsk.core = adsk_core
+        adsk.fusion = adsk_fusion
+
+        self._saved_modules = {
+            "adsk": sys.modules.get("adsk"),
+            "adsk.core": sys.modules.get("adsk.core"),
+            "adsk.fusion": sys.modules.get("adsk.fusion"),
+        }
+        sys.modules["adsk"] = adsk
+        sys.modules["adsk.core"] = adsk_core
+        sys.modules["adsk.fusion"] = adsk_fusion
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for mod, val in self._saved_modules.items():
+            if val is None:
+                sys.modules.pop(mod, None)
+            else:
+                sys.modules[mod] = val
+
+
 @pytest.mark.asyncio
-async def test_falsify_synthetic_mutation_fake_guards_against_external_change_no_apply(
+async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_applies(
     mock_desktop_service: DesktopNodeService,
 ):
-    """Proves changed baseline triggers Fusion-side REVISION_CONFLICT, no apply, and advances tracker."""
-    cad_service = FusionCadService(mock_desktop_service)
-    matrix = CapabilityMatrix.from_records([
-        CapabilityRecord(name="metadata.attributes", state="supported"),
-        CapabilityRecord(name="design.access", state="supported"),
-    ])
-    cad_service.set_node_capabilities("desk-1", matrix)
+    """Exercises rendered production mutate script against adsk fake: stale baseline blocks, fresh applies."""
+    with AdskFakeContext("doc_1", initial_volume=100.0) as fake_adsk:
+        cad_service = FusionCadService(mock_desktop_service)
+        matrix = CapabilityMatrix.from_records([
+            CapabilityRecord(name="metadata.attributes", state="supported"),
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(name="revision.external_change_detection", state="supported"),
+        ])
+        cad_service.set_node_capabilities("desk-1", matrix)
 
-    # Initial state: Bridge knows doc_1 at rev_1 ("hash-baseline")
-    cad_service.revision_tracker.observe("doc_1", "hash-baseline")
-    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+        # Execute rendered script directly inside desktop node submit/call
+        async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+            script = arguments["script"]
+            scope = {
+                "__name__": "__main__",
+                "_mutation_primitive": lambda payload: setattr(fake_adsk, "mutated", True),
+            }
+            exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+            return scope["_output"]
 
-    # Synthetic Fusion state: Model was modified externally in Fusion to "hash-diverged"
-    fusion_model_state = {"current_fingerprint": "hash-diverged", "mutation_applied": False}
+        mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+        mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
 
-    async def fake_fusion_mcp_execute(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
-        line = next(l for l in arguments["script"].splitlines() if l.startswith("PAYLOAD_RAW = "))
-        raw_json = json.loads(line.split("PAYLOAD_RAW = ", 1)[1])
-        payload = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+        # 1. Initial snapshot read: exercises production read script and seeds Bridge tracker with baseline
+        snap_res = await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
+        assert isinstance(snap_res, CadResult)
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+        initial_fp = cad_service.revision_tracker.current("doc_1").fingerprint
 
-        expected_fp = payload.get("expected_fingerprint")
-        expected_rev = payload.get("expected_revision")
+        # 2. External change occurs in Fusion (body geometry mutated)
+        fake_adsk.volume = 200.0
 
-        # Authoritative Fusion-side guard in same command execution
-        if expected_fp is not None and expected_fp != fusion_model_state["current_fingerprint"]:
-            # Baseline diverged! Reject mutation WITHOUT applying changes
-            fusion_model_state["mutation_applied"] = False
-            raise FusionCadError(
-                ErrorCode.REVISION_CONFLICT,
-                "Authoritative Fusion-side guard: model fingerprint diverged from baseline",
-                details={
-                    "document_ref": "doc_1",
-                    "expected_revision": expected_rev,
-                    "expected_fingerprint": expected_fp,
-                    "current_fingerprint": fusion_model_state["current_fingerprint"],
-                    "applied": False,
+        # 3. Attempt standalone mutation with stale expected_revision="rev_1"
+        # Bridge precheck passes (Bridge still recorded rev_1), but authoritative Fusion-side guard in rendered script catches it!
+        with pytest.raises(BridgeError) as exc_guard:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": "ent_1",
+                    "name": "tag",
+                    "value": "v1",
+                    "expected_revision": "rev_1",
                 },
+                group="metadata",
             )
 
-        # Guard passed: apply mutation
-        fusion_model_state["mutation_applied"] = True
-        fusion_model_state["current_fingerprint"] = "hash-after-mutation"
-        return {
-            "api_version": "fusion.cad/v1",
-            "status": "succeeded",
-            "operation_id": "op_test_1",
-            "summary": "Metadata set applied",
-            "document": {
-                "document_ref": "doc_1",
-                "model_revision": "rev_3",
-                "name": "Part1",
-                "units": "mm",
-            },
-            "data": {
-                "fingerprint": "hash-after-mutation",
-                "applied": True,
-            },
-            "changed_refs": ["ent_1"],
-        }
+        assert exc_guard.value.code == ErrorCode.REVISION_CONFLICT
+        assert exc_guard.value.details.get("applied") is False
+        # Proves mutation primitive in rendered script was NOT reached
+        assert fake_adsk.mutated is False
+        # Proves current_fingerprint diverged from initial_fp
+        diverged_fp = exc_guard.value.details.get("current_fingerprint")
+        assert diverged_fp != initial_fp
 
-    mock_desktop_service.submit = fake_fusion_mcp_execute  # type: ignore[assignment]
-    mock_desktop_service.call = fake_fusion_mcp_execute  # type: ignore[assignment]
+        # Proves Bridge tracker observed diverged_fp and advanced to rev_2
+        current_rec = cad_service.revision_tracker.current("doc_1")
+        assert current_rec.revision == "rev_2"
+        assert current_rec.fingerprint == diverged_fp
 
-    # Attempt mutation with expected_revision="rev_1"
-    # Precheck passes (Bridge thought doc_1 was rev_1), but Fusion-side guard rejects!
-    with pytest.raises(BridgeError) as exc_guard:
-        await cad_service.execute(
+        # 4. Immediate second call with rev_1 now blocks at Bridge precheck (no executor dispatch)
+        with pytest.raises(BridgeError) as exc_precheck:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": "ent_1",
+                    "name": "tag",
+                    "value": "v1",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+        assert exc_precheck.value.code == ErrorCode.REVISION_CONFLICT
+        assert exc_precheck.value.details.get("current_revision") == "rev_2"
+
+        # 5. Standalone mutation with fresh expected_revision="rev_2" succeeds
+        success_res = await cad_service.execute(
             {
                 "node_id": "desk-1",
                 "operation": "set",
                 "target": "ent_1",
                 "name": "tag",
                 "value": "v1",
-                        "expected_revision": "rev_1",
-            },
-            group="metadata",
-        )
-
-    # 1. Authoritative error returned
-    assert exc_guard.value.code == ErrorCode.REVISION_CONFLICT
-    assert exc_guard.value.details.get("applied") is False
-    # 2. Synthetic model proves mutation was NOT applied
-    assert fusion_model_state["mutation_applied"] is False
-
-    # 3. Bridge observed the new fingerprint ("hash-diverged") and advanced revision to rev_2!
-    current_rec = cad_service.revision_tracker.current("doc_1")
-    assert current_rec is not None
-    assert current_rec.sequence == 2
-    assert current_rec.revision == "rev_2"
-    assert current_rec.fingerprint == "hash-diverged"
-
-    # 4. Immediate second call with rev_1 now blocks at Bridge precheck!
-    with pytest.raises(BridgeError) as exc_precheck:
-        await cad_service.execute(
-            {
-                "node_id": "desk-1",
-                "operation": "set",
-                "target": "ent_1",
-                "name": "tag",
-                "value": "v1",
-                        "expected_revision": "rev_1",
-            },
-            group="metadata",
-        )
-    assert exc_precheck.value.code == ErrorCode.REVISION_CONFLICT
-    assert exc_precheck.value.details.get("current_revision") == "rev_2"
-
-    # 5. Mutation with fresh expected_revision="rev_2" succeeds
-    success_result = await cad_service.execute(
-        {
-            "node_id": "desk-1",
-            "operation": "set",
-            "target": "ent_1",
-            "name": "tag",
-            "value": "v1",
                 "expected_revision": "rev_2",
-        },
-        group="metadata",
-    )
-    if isinstance(success_result, CadResult):
-        assert success_result.status == "succeeded"
-    else:
-        assert success_result.get("status") == "succeeded"
-    assert fusion_model_state["mutation_applied"] is True
-    # Bridge tracker advanced to rev_3 after successful mutation
-    assert cad_service.revision_tracker.current("doc_1").revision == "rev_3"
+            },
+            group="metadata",
+        )
+        if isinstance(success_res, CadResult):
+            assert success_res.status == "succeeded"
+            assert success_res.data.get("applied") is True
+        else:
+            assert success_res.get("status") == "succeeded"
+            assert success_res.get("data", {}).get("applied") is True
+
+        # Proves mutation primitive WAS reached and executed
+        assert fake_adsk.mutated is True
+        # Proves Bridge tracker advanced to rev_3
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_3"
 
 
 @pytest.mark.asyncio
@@ -801,60 +973,204 @@ async def test_service_read_observes_document_and_populates_tracker(
 
 
 @pytest.mark.asyncio
-async def test_falsify_same_command_guard_no_apply_on_transaction_commit(
+async def test_falsify_rendered_script_transaction_preview_and_commit_stale_blocks_fresh_applies(
     mock_desktop_service: DesktopNodeService,
 ):
-    """Proves transaction commit fails closed with REVISION_CONFLICT Fusion-side when baseline changed."""
-    cad_service = FusionCadService(mock_desktop_service)
-    matrix = CapabilityMatrix.from_records([
-        CapabilityRecord(name="transaction.preview_replay", state="supported"),
-        CapabilityRecord(name="design.access", state="supported"),
-    ])
-    cad_service.set_node_capabilities("desk-1", matrix)
+    """Exercises rendered production transaction script against adsk fake: stale blocks, fresh applies."""
+    with AdskFakeContext("doc_1", initial_volume=100.0) as fake_adsk:
+        cad_service = FusionCadService(mock_desktop_service)
+        matrix = CapabilityMatrix.from_records([
+            CapabilityRecord(name="transaction.preview_replay", state="supported"),
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(name="revision.external_change_detection", state="supported"),
+        ])
+        cad_service.set_node_capabilities("desk-1", matrix)
 
-    cad_service.revision_tracker.observe("doc_1", "hash-baseline")
-    fusion_state = {"current_fingerprint": "hash-external-user-edit", "committed": False}
+        async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+            script = arguments["script"]
+            scope = {
+                "__name__": "__main__",
+                "_transaction_commit_primitive": lambda payload: setattr(fake_adsk, "tx_committed", True),
+                "_transaction_preview_primitive": lambda payload: setattr(fake_adsk, "tx_previewed", True),
+            }
+            exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+            return scope["_output"]
 
-    async def fake_tx_execute(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
-        line = next(l for l in arguments["script"].splitlines() if l.startswith("PAYLOAD_RAW = "))
-        raw_json = json.loads(line.split("PAYLOAD_RAW = ", 1)[1])
-        payload = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+        mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+        mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
 
-        expected_fp = payload.get("expected_fingerprint")
-        if expected_fp is not None and expected_fp != fusion_state["current_fingerprint"]:
-            fusion_state["committed"] = False
-            raise FusionCadError(
-                ErrorCode.REVISION_CONFLICT,
-                "Authoritative Fusion-side guard: transaction baseline diverged before commit",
-                details={
-                    "document_ref": "doc_1",
-                    "expected_fingerprint": expected_fp,
-                    "current_fingerprint": fusion_state["current_fingerprint"],
-                    "applied": False,
+        # 1. Initial read seeds Bridge tracker
+        await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+        # 2. External change occurs in Fusion
+        fake_adsk.volume = 300.0
+
+        # 3. Transaction commit with stale rev_1: rendered script freshness guard rejects before apply
+        with pytest.raises(BridgeError) as exc_commit:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "commit",
+                    "transaction_id": "tx_1234",
+                    "expected_revision": "rev_1",
                 },
+                group="transaction",
             )
-        fusion_state["committed"] = True
-        return {"api_version": "fusion.cad/v1", "status": "succeeded", "summary": "Transaction committed"}
+        assert exc_commit.value.code == ErrorCode.REVISION_CONFLICT
+        assert exc_commit.value.details.get("applied") is False
+        assert fake_adsk.tx_committed is False
+        # Proves Bridge tracker observed new fingerprint and advanced to rev_2
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
 
-    mock_desktop_service.submit = fake_tx_execute  # type: ignore[assignment]
-    mock_desktop_service.call = fake_tx_execute  # type: ignore[assignment]
+        # 4. Another external change occurs
+        fake_adsk.volume = 400.0
 
-    with pytest.raises(BridgeError) as exc:
-        await cad_service.execute(
+        # 5. Transaction preview with stale rev_2: rendered script freshness guard rejects before preview
+        with pytest.raises(BridgeError) as exc_preview:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "preview",
+                    "transaction_id": "tx_1234",
+                    "expected_revision": "rev_2",
+                },
+                group="transaction",
+            )
+        assert exc_preview.value.code == ErrorCode.REVISION_CONFLICT
+        assert exc_preview.value.details.get("applied") is False
+        assert fake_adsk.tx_previewed is False
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_3"
+
+        # 6. Transaction preview with fresh rev_3 succeeds
+        res_preview = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "preview",
+                "transaction_id": "tx_1234",
+                "expected_revision": "rev_3",
+            },
+            group="transaction",
+        )
+        data = res_preview.data if isinstance(res_preview, CadResult) else res_preview.get("data", {})
+        assert data.get("preview") is True
+        assert fake_adsk.tx_previewed is True
+
+        # 7. Transaction commit with fresh rev_3 succeeds
+        res_commit = await cad_service.execute(
             {
                 "node_id": "desk-1",
                 "operation": "commit",
                 "transaction_id": "tx_1234",
-                "expected_revision": "rev_1",
+                "expected_revision": "rev_3",
             },
             group="transaction",
         )
+        commit_data = res_commit.data if isinstance(res_commit, CadResult) else res_commit.get("data", {})
+        assert commit_data.get("applied") is True
+        assert fake_adsk.tx_committed is True
+
+
+@pytest.mark.asyncio
+async def test_falsify_missing_expected_revision_rejected_before_dispatch(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves standalone mutation requires expected_revision and rejects before script generation/dispatch."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # Standalone mutation without expected_revision
+    req = {
+        "node_id": "desk-1",
+        "operation": "set",
+        "target": "ent_1",
+        "name": "tag",
+        "value": "v1",
+    }
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(req, group="metadata")
 
     assert exc.value.code == ErrorCode.REVISION_CONFLICT
-    assert exc.value.details.get("applied") is False
-    assert fusion_state["committed"] is False
-    # Proves tracker advanced
-    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+    assert "expected_revision is required" in exc.value.message
+    # Proves desktop node was never dispatched
+    assert mock_desktop_service.call.call_count == 0
+    assert mock_desktop_service.submit.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_falsify_degraded_or_unavailable_revision_capability_blocks_mutation(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves every mutation/preview/commit blocks if revision.external_change_detection is degraded or unavailable."""
+    cad_service = FusionCadService(mock_desktop_service)
+
+    # Case A: Degraded revision capability (conservative runtime state)
+    matrix_degraded = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="degraded", limitations=["Unverified"]),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix_degraded)
+    cad_service.revision_tracker.observe("doc_1", "hash-1")
+
+    # 1. Standalone mutation blocks with CAPABILITY_DEGRADED
+    with pytest.raises(FusionCadError) as exc_mut:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "set", "target": "ent_1", "name": "t", "value": "v", "expected_revision": "rev_1"},
+            group="metadata",
+        )
+    assert exc_mut.value.code == ErrorCode.CAPABILITY_DEGRADED
+
+    # 2. Transaction preview blocks with CAPABILITY_DEGRADED
+    with pytest.raises(FusionCadError) as exc_prev:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_1", "expected_revision": "rev_1"},
+            group="transaction",
+        )
+    assert exc_prev.value.code == ErrorCode.CAPABILITY_DEGRADED
+
+    # 3. Transaction commit blocks with CAPABILITY_DEGRADED
+    with pytest.raises(FusionCadError) as exc_comm:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_1", "expected_revision": "rev_1"},
+            group="transaction",
+        )
+    assert exc_comm.value.code == ErrorCode.CAPABILITY_DEGRADED
+
+    # Case B: Unavailable revision capability
+    matrix_unavail = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="unavailable", limitations=["Not supported"]),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix_unavail)
+
+    with pytest.raises(FusionCadError) as exc_unavail:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "set", "target": "ent_1", "name": "t", "value": "v", "expected_revision": "rev_1"},
+            group="metadata",
+        )
+    assert exc_unavail.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+
+    # Transaction staging does NOT require revision.external_change_detection
+    mock_desktop_service.submit = AsyncMock(return_value={"status": "queued", "operation_id": "op_stage"})
+    stage_res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "stage",
+            "transaction_id": "tx_1",
+            "action": {"action_type": "show", "target": "ent_1"},
+        },
+        group="transaction",
+    )
+    assert stage_res is not None
 
 
 @pytest.mark.asyncio

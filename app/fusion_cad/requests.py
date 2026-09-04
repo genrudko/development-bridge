@@ -693,6 +693,7 @@ class TransactionPreviewRequest(_StrictCadBase):
     include_diff: bool = True
     include_validation: bool = True
     include_screenshot: bool = False
+    expected_revision: str | None = Field(default=None, pattern=MODEL_REVISION_PATTERN)
 
 
 class TransactionCommitRequest(_StrictCadBase):

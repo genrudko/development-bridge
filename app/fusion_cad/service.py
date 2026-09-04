@@ -631,17 +631,47 @@ class FusionCadService:
 
         is_async, is_mutation, summary = self._classify_operation(effective_bundle_group, payload)
 
+        is_standalone_mutation = (effective_bundle_group == "mutate") and is_mutation
+        is_transaction_preview_commit = (effective_bundle_group == "transaction") and (op in ("preview", "commit"))
+
+        # Every mutation/preview/commit must require supported atomic revision safety
+        if is_standalone_mutation or is_transaction_preview_commit:
+            matrix = self.get_node_capabilities(node_id)
+            if matrix is None:
+                raise FusionCadError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    f"Node '{node_id}' capability state is unprobed; invoke fusion_read(operation='capabilities') first",
+                    retryable=False,
+                    details={"node_id": node_id, "capability": "revision.external_change_detection"},
+                )
+            matrix.require("revision.external_change_detection", allow_degraded=False)
+
+        # Every standalone mutation must require expected_revision and reject missing revision
+        if is_standalone_mutation and not payload.get("expected_revision"):
+                raise FusionCadError(
+                    ErrorCode.REVISION_CONFLICT,
+                    f"expected_revision is required for standalone mutation '{op}'",
+                    details={
+                        "document_ref": payload.get("document_ref") or self._revision_tracker.active_document_ref,
+                        "expected_revision": None,
+                        "operation": op,
+                    },
+                )
+
         # Bridge revision freshness precheck (fail-fast optimization)
-        if is_mutation or "expected_revision" in payload or (effective_bundle_group == "transaction" and op in ("commit", "preview")):
+        if is_standalone_mutation or is_transaction_preview_commit:
             exp_rev = payload.get("expected_revision")
             doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
             if exp_rev is not None:
-                if doc_ref and self._revision_tracker.current(doc_ref) is not None:
-                    self.assert_fresh_for_mutation(payload, document_ref=doc_ref)
-                if doc_ref:
-                    known_fp = self._revision_tracker.get_fingerprint(doc_ref, exp_rev)
-                    if known_fp is not None and "expected_fingerprint" not in payload:
-                        payload["expected_fingerprint"] = known_fp
+                if not doc_ref:
+                    raise FusionCadError(
+                        ErrorCode.NO_ACTIVE_DESIGN,
+                        "No active design or document_ref provided for mutation freshness check",
+                    )
+                self.assert_fresh_for_mutation(payload, document_ref=doc_ref)
+                known_fp = self._revision_tracker.get_fingerprint(doc_ref, exp_rev)
+                if known_fp is not None and "expected_fingerprint" not in payload:
+                    payload["expected_fingerprint"] = known_fp
 
         script = self._script_bundle.build(effective_bundle_group, payload)
         journal = {"mutation": is_mutation, "summary": summary}
@@ -662,12 +692,23 @@ class FusionCadService:
                     {"script": script},
                     journal=journal,
                 )
-                if isinstance(sub_result, dict) and "document" in sub_result and isinstance(sub_result["document"], dict):
-                    doc_d = sub_result["document"]
-                    doc_r = doc_d.get("document_ref")
-                    if doc_r:
-                        fp = sub_result.get("data", {}).get("fingerprint") if isinstance(sub_result.get("data"), dict) else None
-                        self._revision_tracker.observe(doc_r, fp or doc_d.get("model_revision", "rev_1"))
+                if isinstance(sub_result, dict):
+                    if self._is_error_payload(sub_result):
+                        err_code, err_msg, err_details = self._extract_error_info(sub_result)
+                        if err_code == ErrorCode.REVISION_CONFLICT:
+                            cur_fp = err_details.get("current_fingerprint") if isinstance(err_details, (dict, Mapping)) else None
+                            doc_ref = err_details.get("document_ref") if isinstance(err_details, (dict, Mapping)) else None
+                            doc_ref = doc_ref or self._revision_tracker.active_document_ref
+                            if cur_fp and doc_ref:
+                                self._revision_tracker.observe(doc_ref, cur_fp)
+                        raise FusionCadError(err_code, err_msg, retryable=False, details=err_details)
+
+                    if "document" in sub_result and isinstance(sub_result["document"], dict):
+                        doc_d = sub_result["document"]
+                        doc_r = doc_d.get("document_ref")
+                        if doc_r:
+                            fp = sub_result.get("data", {}).get("fingerprint") if isinstance(sub_result.get("data"), dict) else None
+                            self._revision_tracker.observe(doc_r, fp or doc_d.get("model_revision", "rev_1"))
                 return sub_result
             except FusionCadError as exc:
                 if exc.code == ErrorCode.REVISION_CONFLICT:

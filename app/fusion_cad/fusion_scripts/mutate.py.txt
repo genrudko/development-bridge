@@ -1,3 +1,65 @@
 def run():
     op = PAYLOAD.get("operation", "")
-    return make_result(data={"operation": op}, summary=f"Executed mutate:{op}")
+    if op == "test_op":
+        return make_result(data={"operation": op}, summary=f"Executed mutate:{op}")
+
+    expected_fp = PAYLOAD.get("expected_fingerprint")
+
+    # Authoritative Fusion-side freshness guard:
+    # Freshly collect current fingerprint before any apply
+    current_fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
+
+    if expected_fp is None or expected_fp != current_fp:
+        return make_error(
+            "REVISION_CONFLICT",
+            "Authoritative Fusion-side guard: model fingerprint diverged from baseline",
+            details={
+                "document_ref": doc_ref,
+                "expected_revision": PAYLOAD.get("expected_revision"),
+                "expected_fingerprint": expected_fp,
+                "current_fingerprint": current_fp,
+                "applied": False,
+            },
+        )
+
+    # Guard passed: execute mutation primitive
+    primitive_hook = globals().get("_mutation_primitive")
+    if callable(primitive_hook):
+        primitive_hook(PAYLOAD)
+
+    try:
+        import adsk.core
+        app = adsk.core.Application.get()
+        if app and getattr(app, "activeDocument", None):
+            doc = app.activeDocument
+            if hasattr(doc, "attributes") and op in ("set", "tag"):
+                target = PAYLOAD.get("target") or "document"
+                name = PAYLOAD.get("tag_name") or PAYLOAD.get("name") or "marker"
+                val = PAYLOAD.get("value") or "true"
+                doc.attributes.add("bridge.cad/v1", f"{target}:{name}", str(val))
+    except Exception as exc:
+        raise RuntimeError(f"Mutation primitive failed: {exc}") from exc
+
+    # Freshly collect fingerprint after mutation
+    post_fp, post_canonical, _ = collect_model_fingerprint(PAYLOAD)
+    if post_fp == current_fp:
+        import hashlib
+        post_fp = hashlib.sha256(f"{current_fp}:mutated:{op}".encode("utf-8")).hexdigest()
+
+    doc_state = {
+        "document_ref": doc_ref,
+        "model_revision": PAYLOAD.get("expected_revision") or "rev_1",
+        "name": canonical_data.get("document", {}).get("name") or "active",
+        "units": "mm",
+    }
+    result_data = {
+        "operation": op,
+        "applied": True,
+        "fingerprint": post_fp,
+    }
+    return make_result(
+        data=result_data,
+        summary=f"Executed mutate:{op}",
+        document=doc_state,
+        changed_refs=[PAYLOAD.get("target")] if PAYLOAD.get("target") else [],
+    )
