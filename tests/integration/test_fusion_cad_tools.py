@@ -549,6 +549,18 @@ async def test_fusion_tool_renders_external_result(mock_container: ApplicationCo
         "nested_in_artifacts_list",
         {"artifacts": [{"type": "image", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "mimeType": "image/png"}]},
     ),
+    (
+        "blob_arbitrary_binary_base64",
+        {"blob": "AAECAwQFBgcICQ=="},
+    ),
+    (
+        "bytes_arbitrary_binary_base64",
+        {"bytes": "EBEiM0RVZnd4eXo="},
+    ),
+    (
+        "base64_arbitrary_binary_base64",
+        {"base64": "ICElJicoKSorLC0="},
+    ),
 ])
 @pytest.mark.asyncio
 async def test_comprehensive_binary_and_base64_shapes_externalization(
@@ -602,9 +614,89 @@ async def test_comprehensive_binary_and_base64_shapes_externalization(
             assert "/9j/" not in block.text
             assert "JVBERi0" not in block.text
             assert "UEsDB" not in block.text
+            assert "AAECAwQFBgcICQ==" not in block.text
+            assert "EBEiM0RVZnd4eXo=" not in block.text
+            assert "ICElJicoKSorLC0=" not in block.text
 
     resource_links = [b for b in result.content if isinstance(b, types.ResourceLink)]
     assert len(resource_links) >= 1
+
+
+@pytest.mark.asyncio
+async def test_unambiguous_binary_keys_externalization_and_semantic_visibility(
+    mock_container: ApplicationContainer,
+):
+    registry = build_tool_registry(mock_container)
+    tool = registry.get("fusion_read")
+    assert tool is not None
+
+    blob_b64 = base64.b64encode(b"\x01\x02\x03\x04\x05\x06\x07\x08").decode("ascii")
+    bytes_b64 = base64.b64encode(b"\x11\x12\x13\x14\x15\x16\x17\x18").decode("ascii")
+    base64_b64 = base64.b64encode(b"\x21\x22\x23\x24\x25\x26\x27\x28").decode("ascii")
+
+    for key_name, b64_val in [("blob", blob_b64), ("bytes", bytes_b64), ("base64", base64_b64)]:
+        mock_container.desktop_nodes.call = AsyncMock(return_value={
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": f"result for {key_name}",
+                    "data": {key_name: b64_val},
+                }),
+            }],
+            "isError": False,
+        })
+        req_ctx = RequestContext(request_id=f"req_unambiguous_{key_name}")
+        params = types.CallToolRequestParams(
+            name="fusion_read",
+            arguments={"node_id": "desk-1", "operation": "entity", "ref": "ent_1234"},
+        )
+        result = await tool.handler(None, params, req_ctx)
+        assert isinstance(result, types.CallToolResult)
+        assert not result.is_error
+        text_blocks = [b for b in result.content if isinstance(b, types.TextContent)]
+        assert len(text_blocks) == 1
+        parsed = json.loads(text_blocks[0].text)
+        assert "external_result" in parsed["data"]
+        assert b64_val not in text_blocks[0].text
+        resource_links = [b for b in result.content if isinstance(b, types.ResourceLink)]
+        assert len(resource_links) == 2
+        assert any(link.name.endswith(".bin") for link in resource_links)
+        assert any(link.mime_type == "application/json" for link in resource_links)
+
+    # Contrast with non-binary generic data and semantic strings without magic: remains model-visible
+    mock_container.desktop_nodes.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "generic payload",
+                "data": {
+                    "data": blob_b64,
+                    "description": "Just regular text describing model",
+                },
+            }),
+        }],
+        "isError": False,
+    })
+    req_ctx = RequestContext(request_id="req_generic_visible")
+    params = types.CallToolRequestParams(
+        name="fusion_read",
+        arguments={"node_id": "desk-1", "operation": "entity", "ref": "ent_1234"},
+    )
+    result = await tool.handler(None, params, req_ctx)
+    assert isinstance(result, types.CallToolResult)
+    assert not result.is_error
+    text_blocks = [b for b in result.content if isinstance(b, types.TextContent)]
+    assert len(text_blocks) == 1
+    parsed = json.loads(text_blocks[0].text)
+    assert "external_result" not in parsed["data"]
+    assert parsed["data"]["data"]["data"] == blob_b64
+    assert parsed["data"]["data"]["description"] == "Just regular text describing model"
+    resource_links = [b for b in result.content if isinstance(b, types.ResourceLink)]
+    assert len(resource_links) == 0
 
 
 @pytest.mark.asyncio

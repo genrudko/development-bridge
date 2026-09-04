@@ -100,6 +100,9 @@ _EXPLICIT_BINARY_KEYS: frozenset[str] = frozenset({
     "stl_base64",
     "step_base64",
     "mesh_data",
+    "blob",
+    "bytes",
+    "base64",
 })
 
 _EXPLICIT_BINARY_SUFFIXES: tuple[str, ...] = (
