@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.api.errors import BridgeError, ErrorCode
 from app.coordinator.chatgpt_target import parse_chatgpt_target
 from app.coordinator.route_control_diagnostics import RouteControlTraceStore
 from app.coordinator.routes import RouteRegistry
+if TYPE_CHECKING:
+    from app.coordinator.service import CoordinatorService
+
+    from app.jobs.service import JobService
 
 
 class RouteControlService:
@@ -12,13 +18,18 @@ class RouteControlService:
         route_registry: RouteRegistry,
         trace_store: RouteControlTraceStore,
         *,
+        coordinator: CoordinatorService | None = None,
+        jobs: JobService | None = None,
         public_base_url: str | None = None,
         endpoint_prefix: str = "/x/route-control",
     ) -> None:
         self.route_registry = route_registry
         self.trace_store = trace_store
+        self.coordinator = coordinator
+        self.jobs = jobs
         self.public_base_url = public_base_url.rstrip("/") if public_base_url else None
         self.endpoint_prefix = endpoint_prefix.rstrip("/")
+
 
     def _find_route_id_for_token(self, token: str) -> str | None:
         data = self.route_registry.snapshot()
@@ -256,3 +267,262 @@ class RouteControlService:
 
     def resolve_return_target(self, diagnostic_id: str) -> str | None:
         return self.trace_store.get_return_target(diagnostic_id)
+
+    async def cancel_wakes(
+        self,
+        route_id: str,
+        *,
+        operation_id: str | None = None,
+    ) -> dict:
+        route_id = self.route_registry.validate_route_id(route_id)
+        route = self.route_registry.resolve(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+
+        diag_id = (
+            self.trace_store.find_by_operation_id(operation_id)
+            if operation_id
+            else None
+        )
+        if diag_id is None:
+            diag_id = self.trace_store.start("cancel_wakes", route_id=route_id, operation_id=operation_id)
+
+        generation = int(route.get("generation", 0))
+        channel_id = route.get("channel_id") or f"telegram-{route_id}-g{generation}"
+
+        coord_cancelled = 0
+        if self.coordinator is not None:
+            try:
+                coord_res = await self.coordinator.cancel_pending(channel_id)
+                coord_cancelled = 1 if coord_res.get("cancelled") else 0
+            except BridgeError:
+                self.trace_store.stage(
+                    diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
+                )
+                self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                raise
+
+        waiters_cancelled = 0
+        if self.jobs is not None:
+            try:
+                job_res = await self.jobs.cancel_durable_waiters(
+                    handler_name="coordinator",
+                    payload_match={"route_id": route_id, "generation": generation},
+                )
+                waiters_cancelled = int(job_res.get("cancelled_count", 0))
+            except BridgeError:
+                self.trace_store.stage(
+                    diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
+                )
+                self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                raise
+
+        self.trace_store.stage(diag_id, "wake_cancel", "ok")
+        self.trace_store.finish(diag_id, status="ok")
+
+        return {
+            "route_id": route_id,
+            "state": "wakes_cancelled",
+            "generation": generation,
+            "channel_id": channel_id,
+            "cancelled_coordinator_wakes": coord_cancelled,
+            "cancelled_durable_waiters": waiters_cancelled,
+            "diagnostic_id": diag_id,
+        }
+
+    async def unbind(
+        self,
+        route_id: str,
+        *,
+        expected_generation: int | None = None,
+        operation_id: str | None = None,
+    ) -> dict:
+        route_id = self.route_registry.validate_route_id(route_id)
+        route = self.route_registry.resolve(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+
+        generation = int(route.get("generation", 0))
+        if expected_generation is not None and int(expected_generation) != generation:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "route generation changed before unbind")
+
+        diag_id = (
+            self.trace_store.find_by_operation_id(operation_id)
+            if operation_id
+            else None
+        )
+        if diag_id is None:
+            diag_id = self.trace_store.start("unbind", route_id=route_id, operation_id=operation_id)
+
+        channel_id = route.get("channel_id") or f"telegram-{route_id}-g{generation}"
+
+        # 1. Guard against coordinator wake-producing state
+        if self.coordinator is not None:
+            coord_status = await self.coordinator.status(channel_id)
+            if coord_status.get("state") != "idle":
+                self.trace_store.stage(
+                    diag_id, "wake_cancel", "failed", error_code="PENDING_WAKES"
+                )
+                self.trace_store.finish(diag_id, status="failed", error_code="PENDING_WAKES")
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Cannot unbind route with active or pending coordinator wakes; cancel wakes first",
+                    details={"route_id": route_id, "error_code": "PENDING_WAKES"},
+                )
+
+        # 2. Guard against durable waiter wake-producing state
+        if self.jobs is not None and self.jobs.store is not None:
+            waiters = [
+                w
+                for w in self.jobs.store.terminal_waiters()
+                if w.get("handler_name") == "coordinator"
+                and isinstance(w.get("payload"), dict)
+                and w["payload"].get("route_id") == route_id
+                and int(w["payload"].get("generation", -1)) == generation
+            ]
+            if waiters:
+                self.trace_store.stage(
+                    diag_id, "wake_cancel", "failed", error_code="PENDING_WAKES"
+                )
+                self.trace_store.finish(diag_id, status="failed", error_code="PENDING_WAKES")
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Cannot unbind route with active durable waiters; cancel wakes first",
+                    details={"route_id": route_id, "error_code": "PENDING_WAKES"},
+                )
+
+        self.trace_store.stage(diag_id, "wake_cancel", "ok")
+
+        try:
+            res = self.route_registry.unbind(route_id, expected_generation=generation)
+        except BridgeError:
+            self.trace_store.stage(
+                diag_id, "registry_commit", "failed", error_code="REGISTRY_WRITE_FAILED"
+            )
+            self.trace_store.finish(diag_id, status="failed", error_code="REGISTRY_WRITE_FAILED")
+            raise
+
+        self.trace_store.stage(diag_id, "registry_commit", "ok")
+        self.trace_store.finish(diag_id, status="ok")
+
+        return {
+            "route_id": route_id,
+            "state": "unbound",
+            "generation": res["generation"],
+            "channel_id": res["channel_id"],
+            "diagnostic_id": diag_id,
+        }
+
+    async def unbind_and_cancel(
+        self,
+        route_id: str,
+        *,
+        expected_generation: int | None = None,
+        operation_id: str | None = None,
+    ) -> dict:
+        route_id = self.route_registry.validate_route_id(route_id)
+        route = self.route_registry.resolve(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+
+        generation = int(route.get("generation", 0))
+        if expected_generation is not None and int(expected_generation) != generation:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "route generation changed before unbind")
+
+        diag_id = (
+            self.trace_store.find_by_operation_id(operation_id)
+            if operation_id
+            else None
+        )
+        if diag_id is None:
+            diag_id = self.trace_store.start("unbind_and_cancel", route_id=route_id, operation_id=operation_id)
+
+        channel_id = route.get("channel_id") or f"telegram-{route_id}-g{generation}"
+
+        # 1. Cancel coordinator pending state
+        coord_cancelled = 0
+        if self.coordinator is not None:
+            try:
+                coord_res = await self.coordinator.cancel_pending(channel_id)
+                coord_cancelled = 1 if coord_res.get("cancelled") else 0
+            except BridgeError:
+                self.trace_store.stage(
+                    diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
+                )
+                self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                raise
+
+        # 2. Cancel durable waiters
+        waiters_cancelled = 0
+        if self.jobs is not None:
+            try:
+                job_res = await self.jobs.cancel_durable_waiters(
+                    handler_name="coordinator",
+                    payload_match={"route_id": route_id, "generation": generation},
+                )
+                waiters_cancelled = int(job_res.get("cancelled_count", 0))
+            except BridgeError:
+                self.trace_store.stage(
+                    diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
+                )
+                self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                raise
+
+        # 3. Verify zero wake-producing state
+        if self.coordinator is not None:
+            coord_status = await self.coordinator.status(channel_id)
+            if coord_status.get("state") != "idle":
+                self.trace_store.stage(
+                    diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
+                )
+                self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Coordinator wake state is still active after cancellation attempt",
+                    details={"route_id": route_id, "error_code": "WAKE_CANCEL_FAILED"},
+                )
+
+        if self.jobs is not None and self.jobs.store is not None:
+            remaining_waiters = [
+                w
+                for w in self.jobs.store.terminal_waiters()
+                if w.get("handler_name") == "coordinator"
+                and isinstance(w.get("payload"), dict)
+                and w["payload"].get("route_id") == route_id
+                and int(w["payload"].get("generation", -1)) == generation
+            ]
+            if remaining_waiters:
+                self.trace_store.stage(
+                    diag_id, "wake_cancel", "failed", error_code="WAKE_CANCEL_FAILED"
+                )
+                self.trace_store.finish(diag_id, status="failed", error_code="WAKE_CANCEL_FAILED")
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Durable waiters still active after cancellation attempt",
+                    details={"route_id": route_id, "error_code": "WAKE_CANCEL_FAILED"},
+                )
+
+        self.trace_store.stage(diag_id, "wake_cancel", "ok")
+
+        # 4. Perform registry unbind
+        try:
+            res = self.route_registry.unbind(route_id, expected_generation=generation)
+        except BridgeError:
+            self.trace_store.stage(
+                diag_id, "registry_commit", "failed", error_code="REGISTRY_WRITE_FAILED"
+            )
+            self.trace_store.finish(diag_id, status="failed", error_code="REGISTRY_WRITE_FAILED")
+            raise
+
+        self.trace_store.stage(diag_id, "registry_commit", "ok")
+        self.trace_store.finish(diag_id, status="ok")
+
+        return {
+            "route_id": route_id,
+            "state": "unbound",
+            "generation": res["generation"],
+            "channel_id": res["channel_id"],
+            "cancelled_coordinator_wakes": coord_cancelled,
+            "cancelled_durable_waiters": waiters_cancelled,
+            "diagnostic_id": diag_id,
+        }

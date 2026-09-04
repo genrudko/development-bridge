@@ -5,12 +5,17 @@ from mcp import types
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
-from app.coordinator.context import MAX_CONTEXT_CHARS, RouteContextStore, default_route_context_path
 from app.container import ApplicationContainer
+from app.coordinator.context import (
+    MAX_CONTEXT_CHARS,
+    RouteContextStore,
+    default_route_context_path,
+)
 from app.settings import ArtifactSettings
 from app.tools.jobs import JOB_ID_SCHEMA
 
 COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v5.html"
+
 COORDINATOR_UI_ALIASES = (
     "ui://development-bridge/coordinator-x-v4.html",
     "ui://development-bridge/coordinator-x-v3.html",
@@ -343,7 +348,15 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         repository = container.projects.repositories.get(
             arguments["project_id"], arguments["repository_id"]
         )
-        payload = ({"route_id": str(destination["route_id"])} if destination.get("route_id") is not None else {"channel_id": channel_id})
+        payload = (
+            {
+                "route_id": str(destination["route_id"]),
+                "generation": int(destination.get("generation", 0)),
+                "channel_id": channel_id,
+            }
+            if destination.get("route_id") is not None
+            else {"channel_id": channel_id}
+        )
         if message is not None:
             payload["message"] = message
         data = await container.jobs.wake_on_jobs_durable(
@@ -371,9 +384,18 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             artifacts=arguments.get("artifacts", []), stdin=arguments.get("stdin"),
             idempotency_key=arguments.get("idempotency_key"),
         )
-        payload = ({"route_id": str(destination["route_id"])} if destination.get("route_id") is not None else {"channel_id": channel_id})
+        payload = (
+            {
+                "route_id": str(destination["route_id"]),
+                "generation": int(destination.get("generation", 0)),
+                "channel_id": channel_id,
+            }
+            if destination.get("route_id") is not None
+            else {"channel_id": channel_id}
+        )
         if arguments.get("message") is not None:
             payload["message"] = arguments["message"]
+
         try:
             waiter = await container.jobs.wake_on_jobs_durable(
                 repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload

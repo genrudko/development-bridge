@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from app.coordinator.routes import RouteRegistry
 
 
 @pytest.fixture
+
 def test_setup(tmp_path: Path):
     reg_path = tmp_path / "routes.json"
     registry = RouteRegistry(reg_path)
@@ -337,3 +339,418 @@ def test_persistence_reload(tmp_path: Path):
     assert commit_res["state"] == "bound"
     assert commit_res["generation"] == 1
     assert registry2.resolve("bridge")["conversation_id"] == "conv-2"
+
+
+@pytest.mark.asyncio
+async def test_cancel_wakes_clears_coordinator_and_durable_waiters(tmp_path: Path):
+    from app.capabilities import CapabilityPolicy
+    from app.coordinator import CoordinatorService
+    from app.jobs import JobService, JobStore
+    from app.projects import ProjectRegistry
+    from app.settings import BridgeSettings
+    from app.tasks import TaskRegistry
+    from tests.fixtures.repositories import create_git_repository
+
+    repo_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "projects": [{
+                "id": "project",
+                "name": "Project",
+                "repositories": [{
+                    "id": "repository",
+                    "path": repo_path,
+                    "capabilities": {"execute": True},
+                    "tasks": [{
+                        "id": "task",
+                        "name": "Task",
+                        "executable": "/bin/echo",
+                        "arguments": ["done"],
+                    }],
+                }],
+            }],
+        }
+    )
+    projects = ProjectRegistry.from_settings(settings)
+    job_store = JobStore(settings.jobs.database_path)
+    job_store.initialize()
+    jobs = JobService(
+        job_store,
+        TaskRegistry.from_settings(settings),
+        projects,
+        CapabilityPolicy(),
+        None,
+    )
+    jobs.register_durable_terminal_handler("coordinator", lambda p, r, s: None)
+    coordinator = CoordinatorService(tmp_path / "coordinator-wakes.json")
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service = RouteControlService(
+        registry,
+        trace_store,
+        coordinator=coordinator,
+        jobs=jobs,
+    )
+
+    # 1. Arm coordinator wake
+    await coordinator.arm("test wake", channel_id="telegram-bridge-g0", delay_seconds=10)
+    assert (await coordinator.status("telegram-bridge-g0"))["state"] == "pending"
+
+    # 2. Arm durable job waiter
+    repo = projects.repositories.get("project", "repository")
+    job = await jobs.start_task(repo, "task", "req-1")
+    await jobs.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+    )
+    assert len(job_store.terminal_waiters()) == 1
+
+    # 3. Cancel wakes
+    res = await service.cancel_wakes("bridge")
+    assert res["route_id"] == "bridge"
+    assert res["state"] == "wakes_cancelled"
+    assert res["generation"] == 0
+    assert res["cancelled_coordinator_wakes"] == 1
+    assert res["cancelled_durable_waiters"] == 1
+    assert "conv-1" not in json.dumps(res)
+
+    # Invariants: coordinator is idle, durable waiters are 0, job is NOT cancelled
+    assert (await coordinator.status("telegram-bridge-g0"))["state"] == "idle"
+    assert len(job_store.terminal_waiters()) == 0
+    assert jobs.status(repo, job.job_id).status.value == "queued"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_unbind_refuses_when_wake_producing_state_exists(tmp_path: Path):
+    from app.capabilities import CapabilityPolicy
+    from app.coordinator import CoordinatorService
+    from app.jobs import JobService, JobStore
+    from app.projects import ProjectRegistry
+    from app.settings import BridgeSettings
+    from app.tasks import TaskRegistry
+    from tests.fixtures.repositories import create_git_repository
+
+    repo_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "projects": [{
+                "id": "project",
+                "name": "Project",
+                "repositories": [{
+                    "id": "repository",
+                    "path": repo_path,
+                    "capabilities": {"execute": True},
+                    "tasks": [{
+                        "id": "task",
+                        "name": "Task",
+                        "executable": "/bin/echo",
+                        "arguments": ["done"],
+                    }],
+                }],
+            }],
+        }
+    )
+    projects = ProjectRegistry.from_settings(settings)
+    job_store = JobStore(settings.jobs.database_path)
+    job_store.initialize()
+    jobs = JobService(
+        job_store,
+        TaskRegistry.from_settings(settings),
+        projects,
+        CapabilityPolicy(),
+        None,
+    )
+    jobs.register_durable_terminal_handler("coordinator", lambda p, r, s: None)
+    coordinator = CoordinatorService(tmp_path / "coordinator-wakes.json")
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service = RouteControlService(
+        registry,
+        trace_store,
+        coordinator=coordinator,
+        jobs=jobs,
+    )
+
+    # Coordinator wake exists -> unbind must fail closed
+    await coordinator.arm("test wake", channel_id="telegram-bridge-g0", delay_seconds=10)
+    with pytest.raises(BridgeError) as exc_info:
+        await service.unbind("bridge")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+    assert exc_info.value.details.get("error_code") == "PENDING_WAKES"
+    assert registry.is_bound(registry.resolve("bridge"))
+
+    # Cancel coordinator wake
+    await coordinator.cancel_pending("telegram-bridge-g0")
+
+    # Durable waiter exists -> unbind must fail closed
+    repo = projects.repositories.get("project", "repository")
+    job = await jobs.start_task(repo, "task", "req-1")
+    await jobs.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+    )
+    with pytest.raises(BridgeError) as exc_info:
+        await service.unbind("bridge")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+    assert exc_info.value.details.get("error_code") == "PENDING_WAKES"
+    assert registry.is_bound(registry.resolve("bridge"))
+
+    # Clean state -> unbind succeeds
+    await jobs.cancel_durable_waiters(handler_name="coordinator", payload_match={"route_id": "bridge", "generation": 0})
+    unbound = await service.unbind("bridge")
+    assert unbound["state"] == "unbound"
+    assert unbound["generation"] == 0
+    assert not registry.is_bound(registry.resolve("bridge"))
+
+
+@pytest.mark.asyncio
+async def test_unbind_and_cancel_clears_wakes_and_unbinds_cleanly(tmp_path: Path):
+    from app.capabilities import CapabilityPolicy
+    from app.coordinator import CoordinatorService
+    from app.jobs import JobService, JobStore
+    from app.projects import ProjectRegistry
+    from app.settings import BridgeSettings
+    from app.tasks import TaskRegistry
+    from tests.fixtures.repositories import create_git_repository
+
+    repo_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "projects": [{
+                "id": "project",
+                "name": "Project",
+                "repositories": [{
+                    "id": "repository",
+                    "path": repo_path,
+                    "capabilities": {"execute": True},
+                    "tasks": [{
+                        "id": "task",
+                        "name": "Task",
+                        "executable": "/bin/echo",
+                        "arguments": ["done"],
+                    }],
+                }],
+            }],
+        }
+    )
+    projects = ProjectRegistry.from_settings(settings)
+    job_store = JobStore(settings.jobs.database_path)
+    job_store.initialize()
+    jobs = JobService(
+        job_store,
+        TaskRegistry.from_settings(settings),
+        projects,
+        CapabilityPolicy(),
+        None,
+    )
+    jobs.register_durable_terminal_handler("coordinator", lambda p, r, s: None)
+    coordinator = CoordinatorService(tmp_path / "coordinator-wakes.json")
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service = RouteControlService(
+        registry,
+        trace_store,
+        coordinator=coordinator,
+        jobs=jobs,
+    )
+
+
+    # Arm both coordinator wake and durable job waiter
+    await coordinator.arm("test wake", channel_id="telegram-bridge-g0", delay_seconds=10)
+    repo = projects.repositories.get("project", "repository")
+    job = await jobs.start_task(repo, "task", "req-1")
+    await jobs.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+    )
+
+    result = await service.unbind_and_cancel("bridge")
+    assert result["route_id"] == "bridge"
+    assert result["state"] == "unbound"
+    assert result["cancelled_coordinator_wakes"] == 1
+    assert result["cancelled_durable_waiters"] == 1
+
+    # Verify state in all subsystems
+    assert not registry.is_bound(registry.resolve("bridge"))
+    assert (await coordinator.status("telegram-bridge-g0"))["state"] == "idle"
+    assert len(job_store.terminal_waiters()) == 0
+
+    # Idempotent repeat call
+    repeat = await service.unbind_and_cancel("bridge")
+    assert repeat["state"] == "unbound"
+    assert repeat["cancelled_coordinator_wakes"] == 0
+    assert repeat["cancelled_durable_waiters"] == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_coordinator_waiter_stale_generation_or_unbound_is_safe_noop(tmp_path: Path):
+    from app.container import build_container
+    from app.settings import BridgeSettings
+    from tests.fixtures.repositories import create_git_repository
+
+    repo_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate(
+        {
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "projects": [{
+                "id": "project",
+                "name": "Project",
+                "repositories": [{
+                    "id": "repository",
+                    "path": repo_path,
+                    "capabilities": {"execute": True},
+                    "tasks": [{
+                        "id": "task",
+                        "name": "Task",
+                        "executable": "/bin/echo",
+                        "arguments": ["done"],
+                    }],
+                }],
+            }],
+        }
+    )
+    container = build_container(settings)
+    container.jobs._store.initialize()
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    # Rebind to generation 1
+    container.route_registry.takeover("bridge", "https://chatgpt.com/g/g-p-infra/c/conv-2")
+    route_g1 = container.route_registry.resolve("bridge")
+    assert route_g1["generation"] == 1
+    assert route_g1["channel_id"] == "telegram-bridge-g1"
+
+    # Now simulate a waiter from generation 0 firing
+    repo = container.projects.repositories.get("project", "repository")
+    job = await container.jobs.start_task(repo, "task", "req-stale")
+
+    # Call resume_coordinator_waiter directly via registered handler
+    handler = container.jobs._durable_terminal_handlers["coordinator"]
+
+    # 1. Stale generation waiter (gen 0 vs current gen 1) -> must be safe no-op
+    await handler(
+        {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+        (job,),
+        "all_terminal",
+    )
+    # Check that NO wake was armed on either channel
+    assert (await container.coordinator.status("telegram-bridge-g0"))["state"] == "idle"
+    assert (await container.coordinator.status("telegram-bridge-g1"))["state"] == "idle"
+
+    # 2. Unbound route -> must be safe no-op
+    container.route_registry.unbind("bridge", expected_generation=1)
+    await handler(
+        {"route_id": "bridge", "generation": 1, "channel_id": "telegram-bridge-g1"},
+        (job,),
+        "all_terminal",
+    )
+    assert (await container.coordinator.status("telegram-bridge-g1"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_job_finishes_after_unbind_and_cancel_without_wake_and_remains_queryable(tmp_path: Path):
+    import sys
+
+    from app.container import build_container
+    from app.jobs import JobStatus
+    from app.settings import BridgeSettings
+    from tests.fixtures.repositories import create_git_repository
+
+    repo_path = create_git_repository(tmp_path, "repository")
+
+    settings = BridgeSettings.model_validate(
+        {
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+            "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+            "projects": [{
+                "id": "project",
+                "name": "Project",
+                "repositories": [{
+                    "id": "repository",
+                    "path": repo_path,
+                    "capabilities": {"execute": True},
+                    "tasks": [{
+                        "id": "task",
+                        "name": "Task",
+                        "executable": sys.executable,
+                        "arguments": ["-c", "print('queryable-output')"],
+                        "timeout_seconds": 5,
+                    }],
+                }],
+            }],
+        }
+    )
+    container = build_container(settings)
+    container.jobs._store.initialize()
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    repo = container.projects.repositories.get("project", "repository")
+    job = await container.jobs.start_task(repo, "task", "req-test-e2e")
+
+    # Register durable waiter for route bridge
+    await container.jobs.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+    )
+    assert len(container.jobs._store.terminal_waiters()) == 1
+
+    # Unbind + cancel
+    res = await container.route_control.unbind_and_cancel("bridge")
+    assert res["state"] == "unbound"
+    assert res["cancelled_durable_waiters"] == 1
+    assert len(container.jobs._store.terminal_waiters()) == 0
+    assert not container.route_registry.is_bound(container.route_registry.resolve("bridge"))
+
+    # Start job worker to execute the task
+    await container.jobs.start()
+    try:
+        for _ in range(300):
+            status = container.jobs.status(repo, job.job_id)
+            if status.status == JobStatus.SUCCEEDED:
+                break
+            await asyncio.sleep(0.01)
+        assert container.jobs.status(repo, job.job_id).status == JobStatus.SUCCEEDED
+        # Verify output is queryable
+        assert b"queryable-output" in container.jobs.output(repo, job.job_id).stdout
+
+        # Verify NO coordinator wake was created
+        coord_status = await container.coordinator.status("telegram-bridge-g0")
+        assert coord_status["state"] == "idle"
+    finally:
+        await container.jobs.stop()

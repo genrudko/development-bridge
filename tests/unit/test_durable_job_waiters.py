@@ -156,3 +156,96 @@ async def test_durable_waiter_observes_interrupted_running_job(tmp_path):
         assert second._store.terminal_waiters() == ()
     finally:
         await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_durable_waiters_removes_waiter_without_cancelling_jobs(tmp_path):
+    settings = settings_for(tmp_path)
+    service, repo = service_for(settings)
+    service._store.initialize()
+    seen = []
+
+    async def handler(payload, records, reason):
+        seen.append((payload, records[0].job_id, reason))
+
+    service.register_durable_terminal_handler("coordinator", handler)
+    job1 = await service.start_task(repo, "task", "req-cancel-1")
+    job2 = await service.start_task(repo, "task", "req-cancel-2")
+
+    await service.wake_on_jobs_durable(
+        repo,
+        (job1.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 1, "channel_id": "telegram-bridge-g1"},
+    )
+    await service.wake_on_jobs_durable(
+        repo,
+        (job2.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "other", "generation": 1, "channel_id": "telegram-other-g1"},
+    )
+
+    assert len(service._store.terminal_waiters()) == 2
+
+    # Cancel only route_id="bridge"
+    res = await service.cancel_durable_waiters(
+        handler_name="coordinator",
+        payload_match={"route_id": "bridge", "generation": 1},
+    )
+    assert res["cancelled_count"] == 1
+    assert len(service._store.terminal_waiters()) == 1
+    remaining = service._store.terminal_waiters()[0]
+    assert remaining["payload"]["route_id"] == "other"
+
+    # Crucial Invariant: Jobs are NOT cancelled!
+    assert service.status(repo, job1.job_id).status is JobStatus.QUEUED
+    assert service.status(repo, job2.job_id).status is JobStatus.QUEUED
+
+    # Run the worker to finish both jobs
+    await service.start()
+    try:
+        await wait_until(lambda: bool(seen))
+        assert len(seen) == 1
+        assert seen[0][0]["route_id"] == "other"
+        # job1 is SUCCEEDED and queryable
+        await wait_until(lambda: service.status(repo, job1.job_id).status is JobStatus.SUCCEEDED)
+        assert service.status(repo, job1.job_id).status is JobStatus.SUCCEEDED
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_durable_waiters_persists_across_restart(tmp_path):
+    settings = settings_for(tmp_path)
+    first, repo = service_for(settings)
+    first._store.initialize()
+    seen = []
+
+    async def handler(payload, records, reason):
+        seen.append(payload)
+
+    first.register_durable_terminal_handler("coordinator", handler)
+    job = await first.start_task(repo, "task", "req-persist-cancel")
+    await first.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 1, "channel_id": "telegram-bridge-g1"},
+    )
+    await first.cancel_durable_waiters(
+        handler_name="coordinator",
+        payload_match={"route_id": "bridge", "generation": 1},
+    )
+
+    second, repo2 = service_for(settings)
+    second.register_durable_terminal_handler("coordinator", handler)
+    await second.start()
+    try:
+        await wait_until(lambda: second.status(repo2, job.job_id).status is JobStatus.SUCCEEDED)
+        assert seen == []
+        assert second._store.terminal_waiters() == ()
+    finally:
+        await second.stop()

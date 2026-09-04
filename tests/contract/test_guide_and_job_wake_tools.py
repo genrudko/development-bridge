@@ -333,3 +333,38 @@ def test_coordinator_exec_and_wake_cancels_job_if_waiter_registration_fails(tmp_
     assert len(cancelled) == 1
     job = container.jobs._store.get_by_id(cancelled[0])
     assert job is not None and job.status == JobStatus.CANCELLED
+
+
+def test_coordinator_wake_on_jobs_pins_route_id_generation_and_channel(tmp_path):
+    repository_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate({
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "projects": [{"id": "project", "name": "Project", "repositories": [{
+            "id": "repository", "path": repository_path, "capabilities": {"execute": True}
+        }]}],
+    })
+    container = build_container(settings)
+    container.jobs._store.initialize()
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    repo = container.projects.repositories.get("project", "repository")
+    job = asyncio.run(container.jobs.start_task(repo, "task", "req-pin")) if hasattr(container.tasks, "get") and container.tasks.list("project", "repository") else asyncio.run(container.jobs.start_execution(repo, sys.executable, ["-c", "print(1)"], "req-pin"))
+
+    tool = build_tool_registry(container).get("coordinator_wake_on_jobs")
+    asyncio.run(tool.handler(None, SimpleNamespace(arguments={
+        "project_id": "project",
+        "repository_id": "repository",
+        "job_ids": [job.job_id],
+        "route_id": "bridge",
+    }), SimpleNamespace(request_id="req-wake-pin")))
+
+    waiters = container.jobs._store.terminal_waiters()
+    assert len(waiters) == 1
+    payload = waiters[0]["payload"]
+    assert payload["route_id"] == "bridge"
+    assert payload["generation"] == 0
+    assert payload["channel_id"] == "telegram-bridge-g0"

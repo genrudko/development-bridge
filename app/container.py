@@ -335,12 +335,18 @@ def build_container(
         configured.github.artifact_max_bytes,
     )
     route_registry = RouteRegistry(configured.coordinator.route_registry_path)
+    coordinator = CoordinatorService(
+        route_registry.path.parent / "coordinator-wakes.json",
+        browser_preflight_required=True,
+    )
     route_control_trace_store = RouteControlTraceStore(
         route_registry.path.parent / "traces"
     )
     route_control = RouteControlService(
         route_registry,
         route_control_trace_store,
+        coordinator=coordinator,
+        jobs=jobs,
         public_base_url=(
             str(configured.server.public_base_url)
             if configured.server.public_base_url is not None
@@ -349,30 +355,40 @@ def build_container(
         endpoint_prefix=configured.server.endpoint.rstrip("/") + "/x/route-control",
     )
 
-    coordinator = CoordinatorService(
-        route_registry.path.parent / "coordinator-wakes.json",
-        browser_preflight_required=True,
-    )
-
     async def resume_coordinator_waiter(payload, records, reason):
         route_id = payload.get("route_id")
         if route_id is not None:
             route = route_registry.resolve(str(route_id))
-            if route is None:
-                raise BridgeError(
-                    ErrorCode.POLICY_VIOLATION,
-                    f"durable coordinator waiter route no longer exists: {route_id}",
-                    retryable=True,
-                )
+            if route is None or not route_registry.is_bound(route):
+                return
+            expected_generation = payload.get("generation")
+            if (
+                expected_generation is not None
+                and int(route.get("generation", 0)) != int(expected_generation)
+            ):
+                return
+            expected_channel = payload.get("channel_id")
+            if (
+                expected_channel is not None
+                and str(route.get("channel_id")) != str(expected_channel)
+            ):
+                return
             channel_id = str(route["channel_id"])
         else:
             channel_id = str(payload["channel_id"])
         await coordinator.arm_job_continuation(
-            records, reason, channel_id=channel_id,
-            message=(str(payload["message"]) if payload.get("message") is not None else None),
+            records,
+            reason,
+            channel_id=channel_id,
+            message=(
+                str(payload["message"])
+                if payload.get("message") is not None
+                else None
+            ),
         )
 
     jobs.register_durable_terminal_handler("coordinator", resume_coordinator_waiter)
+
     supervisor_settings = configured.telegram_supervisor
     telegram_supervisor = None
     if supervisor_settings.enabled:

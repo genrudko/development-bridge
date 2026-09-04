@@ -1151,6 +1151,39 @@ class CoordinatorService:
                 }
             return {"continuation_id": continuation_id, "resolved": False}
 
+    async def cancel_pending(self, channel_id: str = DEFAULT_CHANNEL) -> dict:
+        """Cancel a pending coordinator wake for channel_id. Idempotent on idle; fails closed if claimed/in-flight/uncertain."""
+        channel_id = self.validate_channel(channel_id)
+        now = time.time()
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if wake is None:
+                return {
+                    "channel_id": channel_id,
+                    "cancelled": False,
+                    "state": "idle",
+                    "pending_wakes": 0,
+                }
+            if (
+                self._lease_active(wake, now)
+                or wake.transport_delivered
+                or self._automatic_delivery_blocked(wake)
+            ):
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Wake is actively claimed, in-flight, or in an uncertain transport state",
+                    retryable=False,
+                    details={"channel_id": channel_id},
+                )
+            del self._pending[channel_id]
+            self._save_state()
+            return {
+                "channel_id": channel_id,
+                "cancelled": True,
+                "state": "cancelled",
+                "pending_wakes": 0,
+            }
+
     @staticmethod
     def _lease_active(wake: PendingWake, now: float) -> bool:
         return wake.claim_id is not None and (wake.lease_expires_at or 0) > now

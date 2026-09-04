@@ -35,6 +35,9 @@ class TerminalWaiter:
     policy: str
     callback: TerminalCallback
     durable: bool = False
+    handler_name: str | None = None
+    payload: dict[str, object] | None = None
+
 
 
 class JobService:
@@ -177,7 +180,13 @@ class JobService:
                         retryable=True,
                     )
                 waiter = TerminalWaiter(
-                    waiter_id, job_ids, policy, callback, durable=durable
+                    waiter_id,
+                    job_ids,
+                    policy,
+                    callback,
+                    durable=durable,
+                    handler_name=durable_handler,
+                    payload=durable_payload,
                 )
                 if durable:
                     assert durable_handler is not None
@@ -296,9 +305,48 @@ class JobService:
                     policy,
                     callback,
                     durable=True,
+                    handler_name=handler_name,
+                    payload=payload,
                 )
             ready = self._collect_terminal_callbacks(store)
         await self._invoke_terminal_callbacks(ready)
+
+    async def cancel_durable_waiters(
+        self,
+        *,
+        handler_name: str,
+        payload_match: dict[str, object],
+    ) -> dict[str, object]:
+        if not isinstance(handler_name, str) or not handler_name:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "handler_name is invalid")
+        if not isinstance(payload_match, dict):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "payload_match is invalid")
+        async with self._terminal_lock:
+            store = self._require_store()
+            deleted_ids = set(
+                store.delete_matching_terminal_waiters(
+                    handler_name=handler_name, payload_match=payload_match
+                )
+            )
+            for waiter_id in deleted_ids:
+                self._terminal_waiters.pop(waiter_id, None)
+            to_remove = [
+                waiter_id
+                for waiter_id, waiter in self._terminal_waiters.items()
+                if waiter.durable
+                and waiter.handler_name == handler_name
+                and isinstance(waiter.payload, dict)
+                and all(waiter.payload.get(k) == v for k, v in payload_match.items())
+            ]
+            for waiter_id in to_remove:
+                self._terminal_waiters.pop(waiter_id, None)
+            total_cancelled = len(deleted_ids | set(to_remove))
+        return {
+            "cancelled": total_cancelled > 0,
+            "cancelled_count": total_cancelled,
+            "handler_name": handler_name,
+        }
+
 
     @staticmethod
     def _waiter_reason(jobs: tuple[JobRecord, ...], policy: str) -> str | None:

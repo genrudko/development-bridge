@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app.api.errors import BridgeError
+from app.api.errors import BridgeError, ErrorCode
 from app.coordinator import CoordinatorService
 
 
@@ -614,3 +614,54 @@ async def test_authorize_browser_preflight_refuses_blocked_wakes(disposition):
         "route-blocked", armed["continuation_id"]
     )
     assert authorized["authorized"] is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_clears_pending_wake_and_persists(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    service1 = CoordinatorService(path)
+    await service1.arm("wake message", channel_id="route-cancel", delay_seconds=10)
+    assert (await service1.status("route-cancel"))["state"] == "pending"
+
+    res = await service1.cancel_pending("route-cancel")
+    assert res["channel_id"] == "route-cancel"
+    assert res["cancelled"] is True
+    assert (await service1.status("route-cancel"))["state"] == "idle"
+
+    service2 = CoordinatorService(path)
+    assert (await service2.status("route-cancel"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_is_idempotent_on_idle_channel():
+    service = CoordinatorService()
+    res = await service.cancel_pending("route-idle")
+    assert res["channel_id"] == "route-idle"
+    assert res["cancelled"] is False
+    assert (await service.status("route-idle"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_fails_closed_when_claimed():
+    service = CoordinatorService()
+    await service.arm("wake message", channel_id="route-claimed", delay_seconds=0)
+    claim = await service.claim("route-claimed")
+    assert claim["claimed"] is True
+    with pytest.raises(BridgeError) as exc_info:
+        await service.cancel_pending("route-claimed")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["delivered", "uncertain", "owner_input_required"])
+async def test_cancel_pending_fails_closed_when_in_flight_or_uncertain(disposition):
+    service = CoordinatorService()
+    await service.arm_resilient("wake", channel_id="route-flight", delay_seconds=0)
+    claim = await service.claim("route-flight")
+    if disposition == "delivered":
+        await service.ack("route-flight", claim["claim_id"])
+    else:
+        await service.finalize_transport("route-flight", claim["claim_id"], "review-gpt", disposition)
+    with pytest.raises(BridgeError) as exc_info:
+        await service.cancel_pending("route-flight")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
