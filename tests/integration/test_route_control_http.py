@@ -654,7 +654,7 @@ async def test_route_control_cors_allows_chatgpt_sandbox_control_requests(tmp_pa
     app, container, _settings = create_test_app_with_jobs(tmp_path)
     descriptor = container.route_control.issue_control_descriptor("bridge")
     token = descriptor["control_token"]
-    origin = "https://web-sandbox.oaiusercontent.com"
+    origin = "https://bridge-example-com.web-sandbox.oaiusercontent.com"
 
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
@@ -693,6 +693,17 @@ async def test_route_control_cors_allows_chatgpt_sandbox_control_requests(tmp_pa
         assert status.status_code == 200
         assert status.headers["access-control-allow-origin"] == origin
         assert status.json()["ok"] is True
+
+        foreign_preflight = await client.options(
+            "/mcp/x/route-control/status?route_id=bridge",
+            headers={
+                "Origin": "https://other-app.web-sandbox.oaiusercontent.com",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert foreign_preflight.status_code == 400
+        assert "access-control-allow-origin" not in foreign_preflight.headers
 
 
 @pytest.mark.asyncio

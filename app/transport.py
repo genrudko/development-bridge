@@ -4,6 +4,7 @@ import hmac
 import time
 from contextlib import suppress
 from pathlib import PurePosixPath
+from urllib.parse import urlsplit
 
 from mcp.server import Server
 from mcp.server.auth.handlers.metadata import MetadataHandler
@@ -50,7 +51,6 @@ from app.coordinator.route_control_html import (
 from app.ops.routes import create_operator_dashboard_routes
 from app.settings import BridgeSettings
 
-_ROUTE_CONTROL_SANDBOX_ORIGINS = ["https://web-sandbox.oaiusercontent.com"]
 _ROUTE_CONTROL_CORS_HEADERS = ["Authorization", "Content-Type"]
 
 
@@ -69,10 +69,20 @@ class _RouteControlCorsApp:
         await self.app(scope, receive, send)
 
 
-def _route_control_cors(handler, allow_methods: list[str]):
+def _route_control_sandbox_origins(public_base_url: object | None) -> list[str]:
+    if public_base_url is None:
+        return []
+    host = urlsplit(str(public_base_url)).hostname
+    if not host:
+        return []
+    scoped_host = host.casefold().replace(".", "-")
+    return [f"https://{scoped_host}.web-sandbox.oaiusercontent.com"]
+
+
+def _route_control_cors(handler, allow_methods: list[str], allow_origins: list[str]):
     cors_app = CORSMiddleware(
         app=request_response(handler),
-        allow_origins=_ROUTE_CONTROL_SANDBOX_ORIGINS,
+        allow_origins=allow_origins,
         allow_methods=allow_methods,
         allow_headers=_ROUTE_CONTROL_CORS_HEADERS,
     )
@@ -566,6 +576,7 @@ def create_streamable_http_app(
     )
     coordinator_base_path = settings.server.endpoint.rstrip("/") + "/x/coordinator"
     route_control_base_path = settings.server.endpoint.rstrip("/") + "/x/route-control"
+    route_control_sandbox_origins = _route_control_sandbox_origins(settings.server.public_base_url)
 
     route_control_headers = {
         "Cache-Control": "private, no-store",
@@ -1149,7 +1160,7 @@ def create_streamable_http_app(
     custom_routes.append(
         Route(
             route_control_base_path + "/status",
-            endpoint=_route_control_cors(route_control_status, ["GET"]),
+            endpoint=_route_control_cors(route_control_status, ["GET"], route_control_sandbox_origins),
             methods=["GET", "OPTIONS"],
             name="route_control_status",
         )
@@ -1157,7 +1168,7 @@ def create_streamable_http_app(
     custom_routes.append(
         Route(
             route_control_base_path + "/unbind",
-            endpoint=_route_control_cors(route_control_unbind, ["POST"]),
+            endpoint=_route_control_cors(route_control_unbind, ["POST"], route_control_sandbox_origins),
             methods=["POST", "OPTIONS"],
             name="route_control_unbind",
         )
@@ -1165,7 +1176,7 @@ def create_streamable_http_app(
     custom_routes.append(
         Route(
             route_control_base_path + "/cancel-wakes",
-            endpoint=_route_control_cors(route_control_cancel_wakes, ["POST"]),
+            endpoint=_route_control_cors(route_control_cancel_wakes, ["POST"], route_control_sandbox_origins),
             methods=["POST", "OPTIONS"],
             name="route_control_cancel_wakes",
         )
@@ -1173,7 +1184,7 @@ def create_streamable_http_app(
     custom_routes.append(
         Route(
             route_control_base_path + "/unbind-and-cancel",
-            endpoint=_route_control_cors(route_control_unbind_and_cancel, ["POST"]),
+            endpoint=_route_control_cors(route_control_unbind_and_cancel, ["POST"], route_control_sandbox_origins),
             methods=["POST", "OPTIONS"],
             name="route_control_unbind_and_cancel",
         )
