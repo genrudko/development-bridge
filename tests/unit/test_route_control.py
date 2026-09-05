@@ -1431,3 +1431,66 @@ async def test_rollover_prepare_rejects_in_flight_route_durable_waiter(tmp_path:
             SimpleNamespace(request_id="req-rollover-in-flight"),
         )
     assert container.route_registry.pending_rollover("bridge") is None
+
+
+def test_route_control_prepare_missing_route_without_flag_fails(test_setup):
+    _registry, _trace_store, service = test_setup
+    with pytest.raises(BridgeError) as exc_info:
+        service.prepare_bind("missing-route", session_id="session-1")
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+
+
+def test_route_control_bootstrap_flow_end_to_end_commits_generation_0(test_setup):
+    registry, trace_store, service = test_setup
+    prepared = service.prepare_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+    assert prepared["route_id"] == "newroute"
+    assert prepared["state"] == "bind_pending"
+    assert prepared["generation"] == 0
+    assert prepared["channel_id"] == "telegram-newroute-g0"
+    op_id = prepared["operation_id"]
+    diag_id = prepared["diagnostic_id"]
+
+    # Pre-commit invariants
+    assert registry.resolve("newroute") is None
+
+    # Safe status reports bind_pending
+    status = service.safe_status("newroute")
+    assert status["route_id"] == "newroute"
+    assert status["state"] == "bind_pending"
+    assert status["generation"] == 0
+
+    # Accept return target
+    return_target = "https://chatgpt.com/g/g-p-infra/c/conv-bootstrap-target"
+    accepted = service.accept_bind_return(op_id, return_target)
+    assert accepted["state"] == "candidate"
+    assert registry.resolve("newroute") is None
+
+    # Commit
+    result = service.commit_bind(op_id)
+    assert result["route_id"] == "newroute"
+    assert result["state"] == "bound"
+    assert result["generation"] == 0
+    assert result["channel_id"] == "telegram-newroute-g0"
+    assert result["changed"] is True
+
+    # Post-commit check
+    route = registry.resolve("newroute")
+    assert route is not None
+    assert route["generation"] == 0
+    assert route["conversation_id"] == "conv-bootstrap-target"
+
+    # Status is now bound
+    status_after = service.safe_status("newroute")
+    assert status_after["state"] == "bound"
+
+
+def test_route_control_bootstrap_failed_return_leaves_no_route(test_setup):
+    registry, trace_store, service = test_setup
+    prepared = service.prepare_bind("badroute", session_id="session-1", bootstrap_if_missing=True)
+    op_id = prepared["operation_id"]
+
+    with pytest.raises(BridgeError) as exc_info:
+        service.accept_bind_return(op_id, "https://not-chatgpt.com/target")
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+    assert registry.resolve("badroute") is None
+    assert registry.pending_current_bind("badroute") is None

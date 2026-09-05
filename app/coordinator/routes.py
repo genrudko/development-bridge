@@ -381,6 +381,10 @@ class RouteRegistry:
             expired = True
         if expired:
             return "expired"
+        if pending.get("bootstrap"):
+            if isinstance(route, dict):
+                return "generation_changed"
+            return None
         if not isinstance(route, dict):
             return "generation_changed"
         try:
@@ -394,28 +398,37 @@ class RouteRegistry:
     def _current_bind_is_stale(cls, pending: dict, route: dict | None) -> bool:
         return cls._current_bind_stale_reason(pending, route) is not None
 
-    def prepare_current_bind(self, route_id: str, *, session_id: str | None, allow_project_change: bool = False) -> dict:
+    def prepare_current_bind(
+        self,
+        route_id: str,
+        *,
+        session_id: str | None,
+        allow_project_change: bool = False,
+        bootstrap_if_missing: bool = False,
+    ) -> dict:
         route_id = self.validate_route_id(route_id)
         data = self._load()
         route = data["routes"].get(route_id)
-        if route is None:
+        if route is None and not bootstrap_if_missing:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        is_bootstrap = route is None
+
         binds = data.setdefault("current_binds", {})
         existing = binds.get(route_id)
         if isinstance(existing, dict):
-            try:
-                created_at = datetime.fromisoformat(str(existing.get("created_at") or ""))
-                if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=UTC)
-                stale = (datetime.now(UTC) - created_at.astimezone(UTC)).total_seconds() > _CURRENT_BIND_TTL_SECONDS
-            except (TypeError, ValueError):
-                stale = True
-            if stale or int(existing.get("source_generation", -1)) != int(route.get("generation", 0)):
+            stale = self._current_bind_is_stale(existing, route)
+            if stale:
                 del binds[route_id]
                 existing = None
             elif (
-                int(existing.get("source_generation", -1)) == int(route.get("generation", 0))
-                and existing.get("session_id") == session_id
+                (is_bootstrap and existing.get("bootstrap"))
+                or (
+                    not is_bootstrap
+                    and not existing.get("bootstrap")
+                    and int(existing.get("source_generation", -1)) == int(route.get("generation", 0))
+                )
+            ) and (
+                existing.get("session_id") == session_id
                 and bool(existing.get("allow_project_change", False)) is bool(allow_project_change)
                 and existing.get("state") in {"prepared", "candidate"}
             ):
@@ -427,16 +440,24 @@ class RouteRegistry:
                     retryable=True,
                 )
         token = f"bind_{token_urlsafe(24)}"
-        channel_id = route.get("channel_id") or f"telegram-{route_id}-g{int(route.get('generation', 0))}"
+        if is_bootstrap:
+            channel_id = f"telegram-{route_id}-g0"
+            source_generation = 0
+        else:
+            channel_id = route.get("channel_id") or f"telegram-{route_id}-g{int(route.get('generation', 0))}"
+            source_generation = int(route.get("generation", 0))
+
         pending = {
             "token": token,
             "state": "prepared",
-            "source_generation": int(route.get("generation", 0)),
+            "source_generation": source_generation,
             "channel_id": channel_id,
             "session_id": session_id,
             "allow_project_change": bool(allow_project_change),
             "created_at": datetime.now(UTC).isoformat(),
         }
+        if is_bootstrap:
+            pending["bootstrap"] = True
         binds[route_id] = pending
         self._save(data)
         return {**pending, "route_id": route_id}
@@ -466,33 +487,35 @@ class RouteRegistry:
         data = self._load()
         route = data["routes"].get(route_id)
         pending = (data.get("current_binds") or {}).get(route_id)
-        if route is None or not isinstance(pending, dict) or pending.get("token") != token:
+        if not isinstance(pending, dict) or pending.get("token") != token:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
-        try:
-            created_at = datetime.fromisoformat(str(pending.get("created_at") or ""))
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-            stale = (datetime.now(UTC) - created_at.astimezone(UTC)).total_seconds() > _CURRENT_BIND_TTL_SECONDS
-        except (TypeError, ValueError):
-            stale = True
-        if stale:
+        is_bootstrap = bool(pending.get("bootstrap"))
+        if not is_bootstrap and route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+
+        stale_reason = self._current_bind_stale_reason(pending, route)
+        if stale_reason == "expired":
             data.get("current_binds", {}).pop(route_id, None)
             self._save(data)
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+        if stale_reason == "generation_changed" and not is_bootstrap:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
         if pending.get("state") != "prepared":
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate already recorded")
-        if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
-            raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
-        if not self._current_bind_project_allowed(
-            route,
-            candidate_project_id=project_id,
-            candidate_conversation_id=conversation_id,
-            allow_project_change=bool(pending.get("allow_project_change", False)),
-        ):
-            raise BridgeError(
-                ErrorCode.POLICY_VIOLATION,
-                "current-chat bind candidate belongs to a different project",
-            )
+
+        if not is_bootstrap:
+            if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
+            if not self._current_bind_project_allowed(
+                route,
+                candidate_project_id=project_id,
+                candidate_conversation_id=conversation_id,
+                allow_project_change=bool(pending.get("allow_project_change", False)),
+            ):
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "current-chat bind candidate belongs to a different project",
+                )
         pending.update({
             "state": "candidate",
             "candidate_url": canonical,
@@ -508,51 +531,99 @@ class RouteRegistry:
         data = self._load()
         route = data["routes"].get(route_id)
         pending = (data.get("current_binds") or {}).get(route_id)
-        if route is None or not isinstance(pending, dict) or pending.get("token") != token:
+        if not isinstance(pending, dict) or pending.get("token") != token:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
-        try:
-            created_at = datetime.fromisoformat(str(pending.get("created_at") or ""))
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=UTC)
-            stale = (datetime.now(UTC) - created_at.astimezone(UTC)).total_seconds() > _CURRENT_BIND_TTL_SECONDS
-        except (TypeError, ValueError):
-            stale = True
-        if stale:
+
+        is_bootstrap = bool(pending.get("bootstrap"))
+        if not is_bootstrap and route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+
+        stale_reason = self._current_bind_stale_reason(pending, route)
+        if stale_reason == "expired":
             data.get("current_binds", {}).pop(route_id, None)
             self._save(data)
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
-        if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
+        if stale_reason == "generation_changed" and not is_bootstrap:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
+
+        if not is_bootstrap:
+            if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
 
         if url is not None:
             canonical = canonical_chat_url(url)
             project_id, conversation_id = conversation_parts(canonical)
-            if not self._current_bind_project_allowed(
-                route,
-                candidate_project_id=project_id,
-                candidate_conversation_id=conversation_id,
-                allow_project_change=bool(pending.get("allow_project_change", False)),
-            ):
-                raise BridgeError(
-                    ErrorCode.POLICY_VIOLATION,
-                    "current-chat bind candidate belongs to a different project",
-                )
         else:
             if pending.get("state") != "candidate" or not pending.get("candidate_url"):
                 raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate is not ready")
             canonical = pending["candidate_url"]
             conversation_id = pending["candidate_conversation_id"]
             project_id = pending.get("candidate_project_id")
-            if not self._current_bind_project_allowed(
-                route,
-                candidate_project_id=project_id,
-                candidate_conversation_id=conversation_id,
-                allow_project_change=bool(pending.get("allow_project_change", False)),
-            ):
-                raise BridgeError(
-                    ErrorCode.POLICY_VIOLATION,
-                    "current-chat bind candidate belongs to a different project",
+
+        if is_bootstrap:
+            if route is not None:
+                is_same_target = (
+                    self.is_bound(route)
+                    and int(route.get("generation", 0)) == 0
+                    and route.get("conversation_id") == conversation_id
+                    and (
+                        project_identity(route.get("project_id")) == project_identity(project_id)
+                        or (route.get("project_id") is not None and project_id is None)
+                    )
                 )
+                if is_same_target:
+                    data.get("current_binds", {}).pop(route_id, None)
+                    self._save(data)
+                    return {
+                        **self._normalize_route_record(route),
+                        "route_id": route_id,
+                        "changed": False,
+                        "session_id": pending.get("session_id"),
+                    }
+                else:
+                    data.get("current_binds", {}).pop(route_id, None)
+                    self._save(data)
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "concurrent conflicting route creation",
+                    )
+
+            generation = 0
+            channel_id = f"telegram-{route_id}-g0"
+            route = {
+                "title": route_id,
+                "url": canonical,
+                "project_id": project_id,
+                "conversation_id": conversation_id,
+                "channel_id": channel_id,
+                "generation": 0,
+                "binding_state": "bound",
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+            data["routes"][route_id] = route
+            if not data.get("default_route"):
+                data["default_route"] = route_id
+            data["requested_route"] = route_id
+            data["requested_at"] = datetime.now(UTC).isoformat()
+            data.get("current_binds", {}).pop(route_id, None)
+            self._save(data)
+            return {
+                **self._normalize_route_record(route),
+                "route_id": route_id,
+                "changed": True,
+                "session_id": pending.get("session_id"),
+            }
+
+        if not self._current_bind_project_allowed(
+            route,
+            candidate_project_id=project_id,
+            candidate_conversation_id=conversation_id,
+            allow_project_change=bool(pending.get("allow_project_change", False)),
+        ):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "current-chat bind candidate belongs to a different project",
+            )
 
         is_already_bound = (
             self.is_bound(route)

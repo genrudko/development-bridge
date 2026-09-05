@@ -38,9 +38,14 @@ class RouteControlService:
         route_id = self.route_registry.validate_route_id(route_id)
         route = self.route_registry.resolve(route_id)
         if route is None:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+            pending = self.route_registry.pending_current_bind(route_id)
+            if pending and pending.get("bootstrap"):
+                generation = 0
+            else:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        else:
+            generation = int(route.get("generation", 0))
         token = f"rc_{token_urlsafe(32)}"
-        generation = int(route.get("generation", 0))
         now = time.time()
         record = {
             "token": token,
@@ -65,8 +70,13 @@ class RouteControlService:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "route control token mismatch")
         route = self.route_registry.resolve(target_route_id)
         if route is None:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {target_route_id}")
-        current_gen = int(route.get("generation", 0))
+            pending = self.route_registry.pending_current_bind(target_route_id)
+            if pending and pending.get("bootstrap"):
+                current_gen = 0
+            else:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {target_route_id}")
+        else:
+            current_gen = int(route.get("generation", 0))
         if record["generation"] != current_gen:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "stale route control authorization for previous generation")
         return record
@@ -123,16 +133,18 @@ class RouteControlService:
         *,
         session_id: str | None = None,
         allow_project_change: bool = False,
+        bootstrap_if_missing: bool = False,
     ) -> dict:
         route_id = self.route_registry.validate_route_id(route_id)
         route = self.route_registry.resolve(route_id)
-        if route is None:
+        if route is None and not bootstrap_if_missing:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
 
         pending = self.route_registry.prepare_current_bind(
             route_id,
             session_id=session_id,
             allow_project_change=allow_project_change,
+            bootstrap_if_missing=bootstrap_if_missing,
         )
         token = pending["token"]
 
@@ -143,11 +155,18 @@ class RouteControlService:
         base = self.public_base_url.rstrip("/") if self.public_base_url else ""
         operation_url = f"{base}{self.endpoint_prefix}/bind/{token}"
 
+        generation = int(route.get("generation", 0)) if route else 0
+        channel_id = (
+            (route.get("channel_id") or f"telegram-{route_id}-g{generation}")
+            if route
+            else f"telegram-{route_id}-g0"
+        )
+
         return {
             "route_id": route_id,
             "state": "bind_pending",
-            "generation": int(route.get("generation", 0)),
-            "channel_id": route.get("channel_id") or f"telegram-{route_id}-g{int(route.get('generation', 0))}",
+            "generation": generation,
+            "channel_id": channel_id,
             "operation_id": token,
             "diagnostic_id": diag_id,
             "operation_url": operation_url,
@@ -356,15 +375,25 @@ class RouteControlService:
         route_id = self.route_registry.validate_route_id(route_id)
         route = self.route_registry.resolve(route_id)
         if route is None:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
-
-        pending = self.route_registry.pending_current_bind(route_id)
-        if pending is not None:
-            state = "bind_pending"
-        elif self.route_registry.is_bound(route):
-            state = "bound"
+            pending = self.route_registry.pending_current_bind(route_id)
+            if pending and pending.get("bootstrap"):
+                state = "bind_pending"
+                generation = 0
+                channel_id = f"telegram-{route_id}-g0"
+                title = route_id
+            else:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
         else:
-            state = "unbound"
+            pending = self.route_registry.pending_current_bind(route_id)
+            if pending is not None:
+                state = "bind_pending"
+            elif self.route_registry.is_bound(route):
+                state = "bound"
+            else:
+                state = "unbound"
+            generation = int(route.get("generation", 0))
+            channel_id = route.get("channel_id") or f"telegram-{route_id}-g{generation}"
+            title = route.get("title") or route_id
 
         last_diag = self.trace_store.latest_diagnostic_id_for_route(route_id)
         last_op = None
@@ -377,9 +406,6 @@ class RouteControlService:
                     "status": st.get("status"),
                     "error_code": st.get("error_code"),
                 }
-
-        generation = int(route.get("generation", 0))
-        channel_id = route.get("channel_id") or f"telegram-{route_id}-g{generation}"
 
         pending_coord: int | str = "not_checked"
         if self.coordinator is not None:
@@ -397,7 +423,7 @@ class RouteControlService:
 
         return {
             "route_id": route_id,
-            "title": route.get("title") or route_id,
+            "title": title,
             "state": state,
             "generation": generation,
             "channel_id": channel_id,

@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -1053,3 +1054,181 @@ async def test_rollover_prepare_freezes_source_generation_against_concurrent_con
         await wake_task
     assert container.route_registry.pending_rollover("bridge") is not None
     assert (await original_status("telegram-bridge-g0"))["state"] == "idle"
+
+
+def test_missing_route_prepare_without_bootstrap_flag_fails(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    with pytest.raises(BridgeError) as exc:
+        registry.prepare_current_bind("newroute", session_id="session-1")
+    assert exc.value.code is ErrorCode.INVALID_ARGUMENT
+    assert "unknown route" in str(exc.value)
+
+
+def test_missing_route_prepare_with_bootstrap_creates_pending_without_mutating_registry(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    pending = registry.prepare_current_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+    assert pending["route_id"] == "newroute"
+    assert pending["state"] == "prepared"
+    assert pending["token"].startswith("bind_")
+    assert pending["source_generation"] == 0
+    assert pending["channel_id"] == "telegram-newroute-g0"
+    assert pending.get("bootstrap") is True
+
+    # Pre-commit zero route mutation invariants
+    data = registry.snapshot()
+    assert "newroute" not in data.get("routes", {})
+    assert data.get("default_route") is None
+    assert data.get("requested_route") is None
+    assert registry.resolve("newroute") is None
+    assert registry.list_routes() == []
+    assert registry.route_for_channel("telegram-newroute-g0") is None
+    assert registry.pending_current_bind("newroute") is not None
+
+
+def test_missing_route_candidate_recording_preserves_zero_route_mutation(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    pending = registry.prepare_current_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+    target_url = "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-bootstrap"
+
+    cand = registry.record_current_bind_candidate("newroute", pending["token"], target_url)
+    assert cand["state"] == "candidate"
+    assert cand["candidate_conversation_id"] == "conv-bootstrap"
+    assert cand["candidate_project_id"] == "g-p-11111111111111111111111111111111"
+
+    # Crucial invariant: Still zero mutation in routes before commit
+    data = registry.snapshot()
+    assert "newroute" not in data.get("routes", {})
+    assert registry.resolve("newroute") is None
+
+
+def test_missing_route_complete_commits_generation_0_atomically(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    pending = registry.prepare_current_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+    target_url = "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-bootstrap"
+    registry.record_current_bind_candidate("newroute", pending["token"], target_url)
+
+    bound = registry.complete_current_bind("newroute", pending["token"])
+    assert bound["route_id"] == "newroute"
+    assert bound["generation"] == 0
+    assert bound["channel_id"] == "telegram-newroute-g0"
+    assert bound["binding_state"] == "bound"
+    assert bound["conversation_id"] == "conv-bootstrap"
+    assert bound["project_id"] == "g-p-11111111111111111111111111111111"
+    assert bound["changed"] is True
+    assert registry.pending_current_bind("newroute") is None
+
+    # Registry now has exactly one route, generation 0, default set
+    resolved = registry.resolve("newroute")
+    assert resolved is not None
+    assert resolved["generation"] == 0
+    assert resolved["binding_state"] == "bound"
+    data = registry.snapshot()
+    assert data.get("default_route") == "newroute"
+    assert data.get("requested_route") == "newroute"
+
+
+def test_missing_route_bootstrap_idempotent_prepare_and_concurrent_fail_closed(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    first = registry.prepare_current_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+    # Same session repeated prepare is idempotent
+    second = registry.prepare_current_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+    assert first["token"] == second["token"]
+
+    # Different session concurrent prepare fails closed
+    with pytest.raises(BridgeError) as exc:
+        registry.prepare_current_bind("newroute", session_id="session-2", bootstrap_if_missing=True)
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
+
+
+def test_missing_route_concurrent_commit_conflict_fails_closed_and_preserves_first_target(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    pending1 = registry.prepare_current_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+    registry.record_current_bind_candidate("newroute", pending1["token"], "https://chatgpt.com/c/conv-first")
+
+    # Simulate creator 2 also had a prepared bootstrap token before creator 1 committed
+    data = registry.snapshot()
+    token2 = "bind_creator2"
+    simulated_pending = {
+        "token": token2,
+        "state": "candidate",
+        "source_generation": 0,
+        "channel_id": "telegram-newroute-g0",
+        "session_id": "session-2",
+        "bootstrap": True,
+        "candidate_url": "https://chatgpt.com/c/conv-second",
+        "candidate_conversation_id": "conv-second",
+        "candidate_project_id": None,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    # Creator 1 commits successfully
+    bound1 = registry.complete_current_bind("newroute", pending1["token"])
+    assert bound1["conversation_id"] == "conv-first"
+
+    # Now creator 2 attempts to commit with different target
+    data = registry.snapshot()
+    data.setdefault("current_binds", {})["newroute"] = simulated_pending
+    registry._save(data)
+
+    with pytest.raises(BridgeError) as exc:
+        registry.complete_current_bind("newroute", token2)
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
+    # Existing route was not overwritten, generation remained 0
+    current = registry.resolve("newroute")
+    assert current["conversation_id"] == "conv-first"
+    assert current["generation"] == 0
+
+
+def test_missing_route_concurrent_commit_same_target_converges(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    pending1 = registry.prepare_current_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+    target_url = "https://chatgpt.com/c/conv-shared"
+    registry.record_current_bind_candidate("newroute", pending1["token"], target_url)
+
+    # Creator 1 commits
+    bound1 = registry.complete_current_bind("newroute", pending1["token"])
+    assert bound1["changed"] is True
+
+    # Creator 2 had prepared same target
+    data = registry.snapshot()
+    token2 = "bind_creator2"
+    data["current_binds"]["newroute"] = {
+        "token": token2,
+        "state": "candidate",
+        "source_generation": 0,
+        "channel_id": "telegram-newroute-g0",
+        "session_id": "session-2",
+        "bootstrap": True,
+        "candidate_url": target_url,
+        "candidate_conversation_id": "conv-shared",
+        "candidate_project_id": None,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    registry._save(data)
+
+    # Creator 2 commits same target -> converges without error, changed=False, gen 0
+    bound2 = registry.complete_current_bind("newroute", token2)
+    assert bound2["changed"] is False
+    assert bound2["generation"] == 0
+    assert bound2["conversation_id"] == "conv-shared"
+
+
+def test_missing_route_uncommitted_expired_or_failed_leaves_no_route(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    pending = registry.prepare_current_bind("newroute", session_id="session-1", bootstrap_if_missing=True)
+
+    # Discard before commit
+    registry.discard_current_bind("newroute", pending["token"])
+    assert registry.resolve("newroute") is None
+    assert registry.snapshot().get("routes", {}) == {}
+
+    # Expired token
+    pending2 = registry.prepare_current_bind("newroute", session_id="session-2", bootstrap_if_missing=True)
+    data = registry.snapshot()
+    data["current_binds"]["newroute"]["created_at"] = "2000-01-01T00:00:00+00:00"
+    registry._save(data)
+
+    with pytest.raises(BridgeError) as exc:
+        registry.record_current_bind_candidate("newroute", pending2["token"], "https://chatgpt.com/c/conv-new")
+    assert exc.value.code is ErrorCode.INVALID_ARGUMENT
+    assert registry.resolve("newroute") is None
+    assert registry.snapshot().get("routes", {}) == {}
