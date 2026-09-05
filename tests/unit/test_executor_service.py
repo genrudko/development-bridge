@@ -72,7 +72,7 @@ async def test_explicit_codex_submits_durable_execution(repository):
     assert kwargs["executor_quota_state"] == "unknown"
     assert kwargs["executor_model"] is None
     assert kwargs["environment_keys"] == ("HOME", "SSH_CONNECTION")
-    assert kwargs["require_repository_idle"] is True
+    assert kwargs["require_repository_idle"] is False
 
 
 @pytest.mark.asyncio
@@ -88,9 +88,45 @@ async def test_automatic_selection_codex_submits_durable_execution(repository):
 
 
 @pytest.mark.asyncio
-async def test_busy_and_exhausted_create_no_job(repository):
-    for state in (status(busy=True), status(QuotaState.EXHAUSTED)):
-        jobs = Jobs()
-        with pytest.raises(BridgeError):
-            await ExecutorService(jobs, Antigravity(state), ExecutorSelector()).start(repository, request(), "req")
-        assert jobs.calls == []
+async def test_busy_explicit_antigravity_submits_queueable_job(repository):
+    jobs = Jobs(busy=True)
+    antigravity = Antigravity(status(busy=True))
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector()).start(repository, request(), "req")
+    assert job.job_id == "job_1"
+    assert len(jobs.calls) == 1
+    assert jobs.calls[0][1]["executor"] == "antigravity"
+    assert jobs.calls[0][1]["require_repository_idle"] is False
+
+
+@pytest.mark.asyncio
+async def test_exhausted_antigravity_still_creates_no_job(repository):
+    jobs = Jobs()
+    with pytest.raises(BridgeError):
+        await ExecutorService(
+            jobs, Antigravity(status(QuotaState.EXHAUSTED)), ExecutorSelector()
+        ).start(repository, request(), "req")
+    assert jobs.calls == []
+
+
+@pytest.mark.asyncio
+async def test_busy_explicit_codex_submits_queueable_job(repository):
+    jobs = Jobs(busy=True)
+    antigravity = Antigravity(status(busy=True, quota=QuotaState.OK))
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector()).start(
+        repository, request(ExecutorName.CODEX), "req"
+    )
+    assert job.job_id == "job_1"
+    assert jobs.calls[0][1]["executor"] == "codex"
+    assert jobs.calls[0][1]["require_repository_idle"] is False
+
+
+@pytest.mark.asyncio
+async def test_busy_automatic_selection_keeps_antigravity_when_quota_ok(repository):
+    jobs = Jobs(busy=True)
+    antigravity = Antigravity(status(busy=True, quota=QuotaState.OK))
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector()).start(
+        repository, request(None), "req"
+    )
+    assert job.job_id == "job_1"
+    assert jobs.calls[0][1]["executor"] == "antigravity"
+    assert jobs.calls[0][1]["require_repository_idle"] is False

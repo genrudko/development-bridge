@@ -56,6 +56,8 @@ Call `executor_start` exactly once with explicit `executor="antigravity"`, `task
 
 Wait using the existing durable wake/status flow. Verify terminal output, no worktree changes, and `executor="antigravity"` attribution. Do not repeat the live acceptance if it passes.
 
+Queue semantics: an explicit `executor="antigravity"` request may be accepted as `queued` while the same repository already has an active durable job. `busy` remains visible in status but is not an admission error by itself. Bridge preserves the selected executor/model attribution and the existing `JobService` per-repository scheduler starts the queued job after the active one becomes terminal. Do not create a second executor queue or retry loop.
+
 ## 6. Failure handling
 
 - Missing binary: `binary_missing`.

@@ -37,6 +37,8 @@ Repeat only when at least one of these is true:
 
 Do not repeatedly discover an unchanged schema/capability, poll a durable job at short intervals, reread unchanged files, or issue multiple equivalent log/status queries. Use event-driven wake where available and combine VPS-side evidence gathering into bounded commands.
 
+`executor_start` submits into the existing durable `JobService` queue. `queued` is a normal accepted state. If an executor was explicitly selected, repository busy alone must not reject the request or cause a silent executor change; the selected executor/model attribution stays pinned on the queued job and the existing per-repository scheduler starts it when eligible. Availability, authentication, and known exhausted quota remain hard gates. Automatic routing may still choose another executor for its documented suitability/quota reasons, but not merely because the repository is busy.
+
 ## 4. Minimal-change implementation
 
 Read `AGENTS.md` first. Inspect only relevant source, tests, configuration, and nearby call sites. Make the smallest change that satisfies the accepted design and tests. Do not refactor unrelated code or modify repository topology as a diagnostic shortcut.

@@ -17,8 +17,6 @@ class ExecutorSelector:
             reason = "automatic_unavailable"
         elif not antigravity.authenticated:
             reason = "automatic_auth_required"
-        elif antigravity.busy:
-            reason = "automatic_busy"
         elif antigravity.quota_state is QuotaState.EXHAUSTED:
             reason = "automatic_quota_exhausted"
         elif antigravity.quota_state is QuotaState.LOW:
@@ -33,7 +31,6 @@ class ExecutorSelector:
     def _validate_antigravity(status: ExecutorStatus) -> None:
         gates = ((not status.available, "unavailable", "Antigravity executor is unavailable"),
                  (not status.authenticated, "auth_required", "Antigravity authentication is required"),
-                 (status.busy, "busy", "Antigravity executor is busy"),
                  (status.quota_state is QuotaState.EXHAUSTED, "quota_exhausted", "Antigravity quota is exhausted"))
         for blocked, reason, message in gates:
             if blocked:

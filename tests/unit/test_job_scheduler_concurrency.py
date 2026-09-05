@@ -82,6 +82,41 @@ async def test_scheduler_runs_different_repositories_in_parallel_but_serializes_
 
 
 @pytest.mark.asyncio
+async def test_scheduler_queues_attributed_executor_jobs_for_same_repository(tmp_path):
+    jobs, (repo_a, _, _) = configured_scheduler(tmp_path)
+    await jobs.start()
+    try:
+        script = (
+            "import time; time.sleep(.25); "
+            "print('{\"status\":\"SUCCESS\",\"response\":\"done\"}')"
+        )
+        first = await jobs.start_execution(
+            repo_a, sys.executable, ["-c", script], "exec-a1",
+            executor="antigravity", executor_model="gemini",
+            executor_quota_state="ok", require_repository_idle=False,
+        )
+        second = await jobs.start_execution(
+            repo_a, sys.executable, ["-c", script], "exec-a2",
+            executor="antigravity", executor_model="gemini",
+            executor_quota_state="ok", require_repository_idle=False,
+        )
+
+        running = await wait_status(jobs, repo_a, first.job_id, {JobStatus.RUNNING})
+        queued = jobs.status(repo_a, second.job_id)
+        assert running.executor == "antigravity"
+        assert queued.status is JobStatus.QUEUED
+        assert queued.executor == "antigravity"
+
+        await wait_status(jobs, repo_a, first.job_id, {JobStatus.SUCCEEDED})
+        await wait_status(jobs, repo_a, second.job_id, {JobStatus.RUNNING, JobStatus.SUCCEEDED})
+        final = await wait_status(jobs, repo_a, second.job_id, {JobStatus.SUCCEEDED})
+        assert final.executor == "antigravity"
+        assert final.executor_model == "gemini"
+    finally:
+        await jobs.stop()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_respects_global_concurrency_limit(tmp_path):
     jobs, repositories = configured_scheduler(tmp_path, max_concurrency=2)
     await jobs.start()

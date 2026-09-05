@@ -25,7 +25,7 @@ def status(available=True, authenticated=True, busy=False, quota="ok"):
     (None, True, True, False, "unknown", "implementation", "codex", "automatic_quota_unknown"),
     (None, False, False, False, "unknown", "implementation", "codex", "automatic_unavailable"),
     (None, True, False, False, "unknown", "implementation", "codex", "automatic_auth_required"),
-    (None, True, True, True, "ok", "implementation", "codex", "automatic_busy"),
+    (None, True, True, True, "ok", "implementation", "antigravity", "automatic_suitable"),
     ("codex", True, True, False, "ok", "implementation", "codex", "explicit_override"),
 ])
 def test_selector_matrix(override, available, authenticated, busy, quota, kind, expected, reason):
@@ -35,9 +35,16 @@ def test_selector_matrix(override, available, authenticated, busy, quota, kind, 
 
 @pytest.mark.parametrize(("changes", "reason"), [
     ({"available": False}, "unavailable"), ({"authenticated": False}, "auth_required"),
-    ({"busy": True}, "busy"), ({"quota": "exhausted"}, "quota_exhausted"),
+    ({"quota": "exhausted"}, "quota_exhausted"),
 ])
 def test_explicit_antigravity_rejects_hard_gate(changes, reason):
     with pytest.raises(BridgeError) as caught:
         ExecutorSelector().select(request("antigravity"), status(**changes))
     assert caught.value.details["reason"] == reason
+
+
+def test_explicit_antigravity_busy_is_queueable():
+    selected = ExecutorSelector().select(
+        request("antigravity"), status(available=True, authenticated=True, busy=True, quota="ok")
+    )
+    assert (selected.executor.value, selected.reason) == ("antigravity", "explicit_override")

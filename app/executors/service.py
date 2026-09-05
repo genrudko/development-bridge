@@ -47,4 +47,4 @@ class ExecutorService:
             output_limit_bytes=request.output_limit_bytes, stdin=launch.stdin,
             idempotency_key=request.idempotency_key, executor=launch.executor.value,
             executor_model=launch.model, executor_quota_state=launch.quota_state.value,
-            environment_keys=launch.environment_keys, require_repository_idle=True)
+            environment_keys=launch.environment_keys, require_repository_idle=False)

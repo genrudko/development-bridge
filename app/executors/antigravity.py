@@ -147,7 +147,6 @@ class AntigravityExecutor:
     def launch(self, repository: Repository, request: ExecutorRequest, status: ExecutorStatus) -> ExecutorLaunch:
         gates = ((not status.available, "unavailable", "Antigravity executor is unavailable"),
                  (not status.authenticated, "auth_required", "Antigravity authentication is required"),
-                 (status.busy, "busy", "Antigravity executor is busy"),
                  (status.quota_state is QuotaState.EXHAUSTED, "quota_exhausted", "Antigravity quota is exhausted"))
         for blocked, reason, message in gates:
             if blocked:

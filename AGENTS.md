@@ -26,6 +26,7 @@ Treat model/tool round-trips, coordinator chat context, and live ChatGPT Web tra
 - Do not repeat the same tool call, schema lookup, status read, log query, or capability probe without a new reason. A repeat is justified only by a state-changing event, new evidence, a documented retryable failure, or an explicit need for data the previous result did not contain.
 - Batch reads and diagnostics that share one decision boundary. Prefer one bounded `repository_exec`/`run_command` that gathers the exact Git state, filtered logs, relevant files, and test evidence over a sequence of near-identical calls.
 - A generic busy signal is not proof that a particular job is still running. Inspect the durable job by ID before attributing repository occupancy to it.
+- `executor_start` uses the existing durable job queue. A repository/executor `busy` state is not by itself a reason to reject an explicit executor request or silently switch executors; queue the bounded job with its selected executor attribution and let the existing per-repository scheduler serialize execution. Auth/unavailable/quota hard gates still apply.
 
 ### Coding-executor operating contract
 

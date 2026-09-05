@@ -157,7 +157,7 @@ def test_review_launch_does_not_force_test_suite(tmp_path):
 
 @pytest.mark.parametrize(("changes", "reason"), [
     ({"available": False}, "unavailable"), ({"authenticated": False}, "auth_required"),
-    ({"busy": True}, "busy"), ({"quota_state": QuotaState.EXHAUSTED}, "quota_exhausted"),
+    ({"quota_state": QuotaState.EXHAUSTED}, "quota_exhausted"),
 ])
 def test_launch_rejects_hard_gates(tmp_path, changes, reason):
     executor, _ = make_executor(tmp_path)
@@ -174,3 +174,12 @@ def test_launch_rejects_invalid_task_size(tmp_path, task):
     repository = Repository("p", "r", tmp_path, CapabilitySet.from_mapping({"execute": True}))
     with pytest.raises(BridgeError):
         executor.launch(repository, ExecutorRequest(task, TaskKind.OTHER, None, 20, 1024, None), callable_status())
+
+
+def test_launch_allows_busy_status_for_durable_queue_submission(tmp_path):
+    executor, _ = make_executor(tmp_path)
+    repository = Repository("p", "r", tmp_path, CapabilitySet.from_mapping({"execute": True}))
+    request = ExecutorRequest("task", TaskKind.REVIEW, ExecutorName.ANTIGRAVITY, 20, 1024, None)
+    launch = executor.launch(repository, request, callable_status(busy=True))
+    assert launch.executor is ExecutorName.ANTIGRAVITY
+    assert launch.arguments[0] == "-p"
