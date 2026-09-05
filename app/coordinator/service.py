@@ -1056,6 +1056,9 @@ class CoordinatorService:
     ) -> dict:
         "Acknowledge one iframe transport delivery attempt."
         channel_id = self.validate_channel(channel_id)
+        prelock_current_lease = self._delivery_lease_is_current(channel_id, delivery_lease)
+        if prelock_current_lease:
+            self._touch_delivery_lease(channel_id, delivery_lease, time.time())
         if not self._delivery_lease_matches(channel_id, delivery_lease, delivery_mode="x"):
             return {
                 "channel_id": channel_id,
@@ -1063,8 +1066,22 @@ class CoordinatorService:
                 "state": "standby",
                 "delivery_lease_required": True,
             }
-        now = time.time()
         async with self._lock:
+            now = time.time()
+            explicit_current_lease = self._delivery_lease_is_current(
+                channel_id, delivery_lease
+            )
+            if not self._delivery_lease_matches(
+                channel_id, delivery_lease, delivery_mode="x"
+            ):
+                return {
+                    "channel_id": channel_id,
+                    "acknowledged": False,
+                    "state": "standby",
+                    "delivery_lease_required": True,
+                }
+            if explicit_current_lease:
+                self._touch_delivery_lease(channel_id, delivery_lease, now)
             wake = self._pending.get(channel_id)
             if wake is None or wake.claim_id != claim_id:
                 return {"channel_id": channel_id, "acknowledged": False}

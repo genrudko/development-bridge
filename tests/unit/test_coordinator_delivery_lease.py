@@ -346,3 +346,67 @@ async def test_direct_status_uses_lock_time_when_x_heartbeat_expires_while_waiti
     direct = await direct_status_task
     assert direct["state"] == "pending"
     assert direct["ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_x_ack_revalidates_explicit_lease_after_waiting_for_coordinator_lock(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    clock = [6000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(tmp_path / "wakes-ack-race.json", browser_preflight_required=True)
+    service.MIN_WEB_TURN_INTERVAL_SECONDS = 0
+    old = service.issue_delivery_lease(
+        "route-g9", session_id="session-old", route_id="route", generation=9
+    )
+    await service.arm_resilient(
+        "wake-ack",
+        channel_id="route-g9",
+        delay_seconds=0,
+        retry_delays_seconds=[0.0, 0.0],
+    )
+
+    old_claim = await service.claim(
+        "route-g9", delivery_lease=old["lease_id"], delivery_mode="x"
+    )
+    assert old_claim["claimed"] is True
+    claim_id = old_claim["claim_id"]
+
+    async with service._lock:
+        old_ack_task = asyncio.create_task(
+            service.ack("route-g9", claim_id, delivery_lease=old["lease_id"])
+        )
+        await asyncio.sleep(0)
+        new = service.issue_delivery_lease(
+            "route-g9", session_id="session-new", route_id="route", generation=10
+        )
+        assert new["lease_id"] != old["lease_id"]
+
+    old_ack = await old_ack_task
+    assert old_ack["acknowledged"] is False
+    assert old_ack.get("state") == "standby"
+    assert old_ack.get("delivery_lease_required") is True
+
+    wake = service._pending.get("route-g9")
+    assert wake is not None
+    assert wake.transport_delivered is False
+    assert wake.transport_delivered_at is None
+    assert wake.claim_id == claim_id
+    assert wake.lease_expires_at is not None
+
+    clock[0] = wake.lease_expires_at + 1.0
+    current_claim = await service.claim(
+        "route-g9", delivery_lease=new["lease_id"], delivery_mode="x"
+    )
+    assert current_claim["claimed"] is True
+    current_ack = await service.ack(
+        "route-g9", current_claim["claim_id"], delivery_lease=new["lease_id"]
+    )
+    assert current_ack["acknowledged"] is True
+    assert current_ack.get("transport_delivered") is True
+
+    wake_after = service._pending.get("route-g9")
+    assert wake_after is not None
+    assert wake_after.transport_delivered is True
