@@ -626,61 +626,20 @@ async def test_new_mount_invalidates_old_physical_chat_delivery_lease(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_current_chat_discovery_endpoint_delegates_to_wake_service(tmp_path):
+async def test_legacy_current_chat_discovery_endpoint_is_removed(tmp_path):
     settings = BridgeSettings.model_validate({
         "coordinator": {"route_registry_path": tmp_path / "routes.json"},
     })
     container = build_container(settings)
-    container.route_registry.bootstrap(
-        "bridge",
-        "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old",
-        "telegram-bridge-g4",
-    )
-    pending = container.route_registry.prepare_current_bind("bridge", session_id="session-1")
-
-    class FakeDiscoveryService:
-        async def start(self):
-            return None
-
-        async def stop(self):
-            return None
-
-        async def discover_and_bind_current_route(self, route_id, token):
-            assert route_id == "bridge"
-            assert token == pending["token"]
-            return {
-                "route_id": "bridge",
-                "conversation_id": "conv-new",
-                "channel_id": "telegram-bridge-g5",
-                "generation": 5,
-                "changed": True,
-            }
-
-    object.__setattr__(container, "coordinator_wake_delivery", FakeDiscoveryService())
     app = create_streamable_http_app(create_server(container), settings, container)
-    async with app.router.lifespan_context(app):
-        async with httpx2.AsyncClient(
-            transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
-        ) as client:
-            response = await client.post(
-                "/mcp/x/coordinator/discover",
-                json={"route_id": "bridge", "token": pending["token"]},
-            )
-            assert response.status_code == 200
-            assert response.json()["conversation_id"] == "conv-new"
-            assert response.headers["access-control-allow-origin"] == "*"
-            preflight = await client.options(
-                "/mcp/x/coordinator/discover",
-                headers={
-                    "Origin": "https://chatgpt.com",
-                    "Access-Control-Request-Method": "POST",
-                    "Access-Control-Request-Headers": "content-type",
-                },
-            )
-            assert preflight.status_code == 204
-            assert preflight.headers["access-control-allow-origin"] == "*"
-            assert "POST" in preflight.headers["access-control-allow-methods"]
-            assert "Content-Type" in preflight.headers["access-control-allow-headers"]
+    async with app.router.lifespan_context(app), httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+    ) as client:
+        response = await client.post(
+            "/mcp/x/coordinator/discover",
+            json={"route_id": "bridge", "token": "legacy"},
+        )
+        assert response.status_code == 404
 
 
 @pytest.mark.asyncio

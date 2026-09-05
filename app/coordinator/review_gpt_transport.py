@@ -14,11 +14,9 @@ from app.coordinator.chatgpt_target import (
     canonical_conversation_url,
     parse_chatgpt_target,
 )
-from app.coordinator.routes import project_identity
 from app.coordinator.wake_transport import (
     WakeDeliveryRequest,
     WakeDeliveryResult,
-    WakeDiscoveryResult,
     WakeProbeResult,
     WakeTarget,
 )
@@ -279,93 +277,6 @@ class ReviewGptWakeTransport:
         except Exception as exc:
             return f"Browser endpoint readiness probe failed after stop: {_bound_detail(str(exc))}"
         return None
-
-    async def _discover_connected(self, marker: str, target: WakeTarget) -> WakeDiscoveryResult:
-        marker = str(marker).strip()
-        if not re.fullmatch(r"DBRIDGE_ROUTE_BIND_[A-Za-z0-9_-]{20,120}", marker):
-            return WakeDiscoveryResult(found=False, detail="Discovery marker is invalid")
-        try:
-            expected = parse_chatgpt_target(target.route_url)
-        except BridgeError as exc:
-            return WakeDiscoveryResult(found=False, detail=str(exc))
-        temp_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
-        temp_path = Path(temp_file.name)
-        temp_file.close()
-        helper = Path(__file__).with_name("review_gpt_discovery.mjs")
-        argv = [
-            str(self._node_path), str(helper),
-            "--browser-endpoint", self._browser_endpoint,
-            "--marker", marker,
-            "--route-url", expected.route_url,
-            "--allow-project-change", "1" if target.allow_project_change else "0",
-            "--output", str(temp_path),
-            "--timeout-ms", str(int(min(max(self._timeout_seconds, 5.0), 90.0) * 1000)),
-        ]
-        try:
-            try:
-                result = await self._runner(argv, max(self._timeout_seconds, 5.0) + 5.0)
-            except Exception as exc:
-                detail = str(exc)
-                return WakeDiscoveryResult(
-                    found=False, owner_input_required=is_owner_input_required_error(detail),
-                    detail=f"Discovery process error: {_bound_detail(detail)}",
-                )
-            if result.exit_code != 0 and not temp_path.is_file():
-                detail = result.stderr or result.stdout
-                return WakeDiscoveryResult(
-                    found=False, owner_input_required=is_owner_input_required_error(detail),
-                    detail=f"Discovery failed with exit code {result.exit_code}: {_bound_detail(detail)}",
-                )
-            try:
-                payload = json.loads(temp_path.read_text(encoding="utf-8"))
-            except Exception:
-                return WakeDiscoveryResult(found=False, detail="Discovery output is missing or malformed")
-            if not isinstance(payload, dict):
-                return WakeDiscoveryResult(found=False, detail="Discovery output format is invalid")
-            if not payload.get("found"):
-                return WakeDiscoveryResult(
-                    found=False,
-                    owner_input_required=bool(payload.get("owner_input_required", False)),
-                    detail=_bound_detail(str(payload.get("detail") or "Current chat was not found")),
-                )
-            if payload.get("marker_verified") is not True or payload.get("match_count") != 1:
-                return WakeDiscoveryResult(found=False, detail="Discovery result was not uniquely marker-verified")
-            route_url = str(payload.get("route_url") or "").strip()
-            conversation_id = str(payload.get("conversation_id") or "").strip()
-            try:
-                discovered = parse_chatgpt_target(route_url)
-            except BridgeError:
-                return WakeDiscoveryResult(found=False, detail="Discovered route URL is invalid")
-            if discovered.conversation_id != conversation_id:
-                return WakeDiscoveryResult(found=False, detail="Discovered route URL and conversation_id disagree")
-            if (
-                project_identity(discovered.project_id) != project_identity(expected.project_id)
-                and not target.allow_project_change
-            ):
-                return WakeDiscoveryResult(found=False, detail="Discovered conversation belongs to a different project")
-            return WakeDiscoveryResult(found=True, route_url=discovered.route_url, conversation_id=conversation_id)
-        finally:
-            temp_path.unlink(missing_ok=True)
-
-    async def _discover_current_chat_unlocked(self, marker: str, target: WakeTarget) -> WakeDiscoveryResult:
-        if not self.on_demand_browser:
-            return await self._discover_connected(marker, target)
-        start_error = await self._start_browser()
-        if start_error is not None:
-            cleanup_error = await self._stop_browser()
-            detail = start_error + (f"; cleanup also failed: {cleanup_error}" if cleanup_error else "")
-            return WakeDiscoveryResult(found=False, detail=detail)
-        try:
-            result = await self._discover_connected(marker, target)
-        finally:
-            cleanup_error = await self._stop_browser()
-        if cleanup_error:
-            return WakeDiscoveryResult(found=False, detail=f"Browser cleanup failed after discovery: {cleanup_error}")
-        return result
-
-    async def discover_current_chat(self, marker: str, target: WakeTarget) -> WakeDiscoveryResult:
-        async with self._operation_lock:
-            return await self._discover_current_chat_unlocked(marker, target)
 
     async def _probe_connected(self, target: WakeTarget) -> WakeProbeResult:
         _, probe_url = target_urls(target)

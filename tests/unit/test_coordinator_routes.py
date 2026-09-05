@@ -693,7 +693,7 @@ def test_candidate_based_current_bind_flow_does_not_mutate_on_record_and_commits
     pending = registry.prepare_current_bind("bridge", session_id="session-1")
     assert pending["state"] == "prepared"
     assert pending["token"].startswith("bind_")
-    assert pending["marker"].startswith("DBRIDGE_ROUTE_BIND_")
+    assert "marker" not in pending
 
     before = registry.resolve("bridge")
     candidate_url = "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-new"

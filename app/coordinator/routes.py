@@ -427,11 +427,9 @@ class RouteRegistry:
                     retryable=True,
                 )
         token = f"bind_{token_urlsafe(24)}"
-        marker = "DBRIDGE_ROUTE_BIND_" + token.removeprefix("bind_")
         channel_id = route.get("channel_id") or f"telegram-{route_id}-g{int(route.get('generation', 0))}"
         pending = {
             "token": token,
-            "marker": marker,
             "state": "prepared",
             "source_generation": int(route.get("generation", 0)),
             "channel_id": channel_id,

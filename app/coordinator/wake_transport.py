@@ -18,21 +18,11 @@ class WakeTarget:
     channel_id: str
     conversation_id: str
     route_url: str
-    allow_project_change: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class WakeProbeResult:
     ready: bool
-    owner_input_required: bool = False
-    detail: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class WakeDiscoveryResult:
-    found: bool
-    route_url: str | None = None
-    conversation_id: str | None = None
     owner_input_required: bool = False
     detail: str | None = None
 
@@ -61,7 +51,4 @@ class WakeTransport(Protocol):
         ...
 
     async def deliver(self, request: WakeDeliveryRequest) -> WakeDeliveryResult:
-        ...
-
-    async def discover_current_chat(self, marker: str, target: WakeTarget) -> WakeDiscoveryResult:
         ...

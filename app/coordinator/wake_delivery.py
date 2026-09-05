@@ -9,7 +9,6 @@ from app.coordinator.routes import RouteRegistry
 from app.coordinator.service import CoordinatorService
 from app.coordinator.wake_transport import (
     WakeDeliveryRequest,
-    WakeDiscoveryResult,
     WakeTarget,
     WakeTransport,
 )
@@ -93,35 +92,6 @@ class CoordinatorWakeDeliveryService:
             except Exception as exc:
                 logger.warning("Error during coordinator wake delivery cycle: %s", exc)
             await asyncio.sleep(self._poll_interval_seconds)
-
-    async def discover_and_bind_current_route(self, route_id: str, token: str) -> dict:
-        if self._transport is None:
-            raise BridgeError(ErrorCode.POLICY_VIOLATION, "Current-chat discovery requires a configured wake transport")
-        route = self._route_registry.resolve(route_id)
-        pending = self._route_registry.pending_current_bind(route_id)
-        if route is None or pending is None or pending.get("token") != token:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
-        target = WakeTarget(
-            route_id=route_id,
-            channel_id=str(route["channel_id"]),
-            conversation_id=str(route["conversation_id"]),
-            route_url=str(route["url"]),
-            allow_project_change=bool(pending.get("allow_project_change", False)),
-        )
-        discovery: WakeDiscoveryResult = await self._transport.discover_current_chat(str(pending["marker"]), target)
-        if not discovery.found or not discovery.route_url or not discovery.conversation_id:
-            raise BridgeError(ErrorCode.POLICY_VIOLATION, discovery.detail or "Current ChatGPT conversation could not be discovered unambiguously")
-        bound = self._route_registry.complete_current_bind(route_id, token, discovery.route_url)
-        session_id = bound.pop("session_id", None)
-        if session_id:
-            self._coordinator.bind_session(
-                str(session_id),
-                str(bound["channel_id"]),
-                route_id=route_id,
-                generation=int(bound.get("generation", 0)),
-                route_state="active",
-            )
-        return bound
 
     async def complete_rollover_bootstrap(self, route_id: str, token: str) -> dict:
         """Validate, deliver and complete under the same fence as route mutations."""

@@ -49,6 +49,12 @@ def test_bridge_guide_is_short_structured_runtime_summary():
     assert "route" in coordinator["summary"].lower()
     assert "ack" in coordinator["summary"].lower()
 
+    route_binding = data["route_binding"]["summary"]
+    assert "coordinator_route_bind_current" in route_binding
+    assert "openExternal" in route_binding
+    assert "model-visible" in route_binding
+    assert "marker/search fallback" in route_binding
+
     economy = data["economy_mode"]
     assert economy["enabled"] is True
     assert "bounded" in economy["summary"].lower()
@@ -447,3 +453,20 @@ def test_coordinator_wake_on_jobs_pins_route_id_generation_and_channel(tmp_path)
     assert payload["route_id"] == "bridge"
     assert payload["generation"] == 0
     assert payload["channel_id"] == "telegram-bridge-g0"
+
+
+def test_route_binding_guidance_forbids_model_visible_physical_identity_and_legacy_discovery():
+    root = Path(__file__).parents[2]
+    agent_rules = (root / "AGENTS.md").read_text(encoding="utf-8")
+    contract = (root / "docs/operations/executor-operating-contract.md").read_text(encoding="utf-8")
+    wake_runbook = (root / "docs/operations/review-gpt-coordinator-wake.md").read_text(encoding="utf-8")
+    combined = f"{agent_rules}\n{contract}\n{wake_runbook}"
+
+    assert "Never ask the owner to paste or copy a physical ChatGPT conversation URL" in combined
+    assert "conversation_id" in combined
+    assert "project_id" in combined
+    assert "bind/rollover/control token" in combined
+    assert "model-visible" in combined
+    assert "marker/search fallback" in combined
+    assert "openExternal" in combined
+    assert "native mobile" in combined.lower()

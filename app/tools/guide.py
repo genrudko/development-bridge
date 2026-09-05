@@ -40,6 +40,14 @@ def guide_tools(registry: ToolRegistry, *, tool_surface: str = "full") -> tuple[
                     "continuation ACK are available."
                 ),
             },
+            "route_binding": {
+                "summary": (
+                    "Current-chat binding uses direct coordinator_route_bind_current plus the "
+                    "OOB bind-card/openExternal flow. Physical ChatGPT URLs, IDs, sessions, and "
+                    "control tokens stay outside model-visible chat; marker/search fallback is "
+                    "retired. Native mobile new-bind is currently unsupported; use desktop/Web."
+                ),
+            },
             "economy_mode": {
                 "enabled": True,
                 "summary": (

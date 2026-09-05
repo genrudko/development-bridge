@@ -614,7 +614,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_route_bind_current",
-                description="Bind an existing logical route to this exact physical ChatGPT conversation without asking the owner for a URL; by default it fails closed across projects, while explicit allow_project_change=true authorizes this one route migration",
+                description="Bind an existing logical route to this exact physical ChatGPT conversation through the OOB bind-card/openExternal flow. Invoke this session-bound tool directly, not through bridge_call; physical ChatGPT URLs, IDs, sessions, and control tokens stay outside model-visible chat. Cross-project changes fail closed unless allow_project_change=true explicitly authorizes this one migration.",
                 inputSchema={
                     "type": "object",
                     "properties": {
