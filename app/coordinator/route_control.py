@@ -99,6 +99,10 @@ class RouteControlService:
         with suppress(Exception):
             self.trace_store.finish(diagnostic_id, *args, **kwargs)
 
+    def _discard_bind_best_effort(self, route_id: str, operation_id: str) -> None:
+        with suppress(Exception):
+            self.route_registry.discard_current_bind(route_id, operation_id)
+
     def prepare_bind(
         self,
         route_id: str,
@@ -147,6 +151,7 @@ class RouteControlService:
                 if existing_trace.get("status") == "ok":
                     raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind operation already completed")
                 err = existing_trace.get("error_code") or "OPERATION_FAILED"
+                self._discard_bind_best_effort(route_id, operation_id)
                 raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"current-chat bind operation already failed: {err}")
         else:
             diag_id = self.trace_store.start(
@@ -161,6 +166,7 @@ class RouteControlService:
                 error_code="RETURN_TARGET_MISSING",
             )
             self.trace_store.finish(diag_id, status="failed", error_code="RETURN_TARGET_MISSING")
+            self._discard_bind_best_effort(route_id, operation_id)
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "return target is missing")
 
         self.trace_store.stage(
@@ -181,6 +187,7 @@ class RouteControlService:
                 details={"error": str(exc)},
             )
             self.trace_store.finish(diag_id, status="failed", error_code="TARGET_PARSE_FAILED")
+            self._discard_bind_best_effort(route_id, operation_id)
             raise
 
         self.trace_store.stage(diag_id, "target_parse", "ok")
@@ -217,6 +224,7 @@ class RouteControlService:
                     diag_id, "candidate_store", "failed", error_code=err_code
                 )
             self._finish_best_effort(diag_id, status="failed", error_code=err_code)
+            self._discard_bind_best_effort(route_id, operation_id)
             raise
 
         self._stage_best_effort(diag_id, "project_policy", "ok")

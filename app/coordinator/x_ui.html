@@ -257,7 +257,7 @@ function handleRouteControl(control) {
       try {
         actionBtn.disabled = true;
         render("working", "Открываю…", "Завершите привязку в открывшемся окне");
-        await window.openai.openExternal({ href: operationUrl });
+        await window.openai.openExternal({ href: operationUrl, redirectUrl: true });
         render("ready", "Ожидание", "Подтвердите привязку на странице Bridge");
       } catch (error) {
         console.error("openExternal error", error);

@@ -241,7 +241,7 @@ def test_same_target_bind_is_idempotent(test_setup):
 
 
 def test_accept_missing_return_target_fails_and_records_trace(test_setup):
-    _registry, trace_store, service = test_setup
+    registry, trace_store, service = test_setup
 
     prepared = service.prepare_bind("bridge", session_id="session-1")
     op_id = prepared["operation_id"]
@@ -253,6 +253,10 @@ def test_accept_missing_return_target_fails_and_records_trace(test_setup):
     sanitized = trace_store.sanitized(prepared["diagnostic_id"])
     assert sanitized["status"] == "failed"
     assert sanitized["error_code"] == "RETURN_TARGET_MISSING"
+    assert registry.pending_current_bind("bridge") is None
+
+    retried = service.prepare_bind("bridge", session_id="session-1")
+    assert retried["operation_id"] != op_id
 
 
 def test_accept_malformed_return_target_fails_and_records_trace(test_setup):

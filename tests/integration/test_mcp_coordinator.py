@@ -828,6 +828,7 @@ async def test_coordinator_widget_html_contract_and_forbidden_apis(tmp_path):
 
         # Out-of-band openExternal must be present
         assert "window.openai?.openExternal" in html or "window.openai.openExternal" in html
+        assert "window.openai.openExternal({ href: operationUrl, redirectUrl: true })" in html
         assert "actionBtn.onclick" in html
         assert "handleRouteControl" in html
 
