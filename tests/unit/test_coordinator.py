@@ -297,7 +297,7 @@ async def test_web_turn_gate_serializes_channels_and_applies_global_cooldown(mon
 
 
 @pytest.mark.asyncio
-async def test_observed_model_turn_resolves_delivered_continuation():
+async def test_observed_model_turn_waits_for_explicit_model_ack():
     service = CoordinatorService()
     armed = await service.arm_resilient(
         "resume", channel_id="route-g2", retry_delays_seconds=(0, 0)
@@ -309,12 +309,14 @@ async def test_observed_model_turn_resolves_delivered_continuation():
     observed = await service.observe_model_turn("route-g2", armed["continuation_id"])
     assert observed["observed"] is True
     assert observed["delivery_attempts"] == 1
-    assert observed["followup_pending"] is False
+    assert observed["awaiting_model_ack"] is True
+    assert (await service.status("route-g2"))["state"] == "waiting_model_ack"
+    assert (await service.model_ack(armed["continuation_id"]))["acknowledged"] is True
     assert (await service.status("route-g2"))["state"] == "idle"
 
 
 @pytest.mark.asyncio
-async def test_observed_model_turn_promotes_queued_event_to_followup():
+async def test_explicit_model_ack_returns_queued_events_in_same_turn():
     service = CoordinatorService()
     service.MIN_WEB_TURN_INTERVAL_SECONDS = 0
     armed = await service.arm_resilient(
@@ -329,11 +331,12 @@ async def test_observed_model_turn_promotes_queued_event_to_followup():
     observed = await service.observe_model_turn("route-g2", armed["continuation_id"])
     assert observed["observed"] is True
     assert observed["queued_events"] == 1
-    assert observed["followup_pending"] is True
-    assert observed["next_continuation_id"] != armed["continuation_id"]
-    service._pending["route-g2"].available_at = 0
-    followup = await service.claim("route-g2")
-    assert followup["message"] == "B"
+    assert observed["awaiting_model_ack"] is True
+    acknowledged = await service.model_ack(armed["continuation_id"] )
+    assert acknowledged["acknowledged"] is True
+    assert acknowledged["batched_count"] == 1
+    assert acknowledged["batched_messages"] == ["B"]
+    assert (await service.status("route-g2"))["state"] == "idle"
 
 
 @pytest.mark.asyncio
@@ -697,3 +700,27 @@ async def test_cancel_pending_restores_in_memory_wake_if_save_state_fails(tmp_pa
     # In-memory wake must be restored
     assert "route-save-fail" in service._pending
     assert service._pending["route-save-fail"].message == "wake message"
+
+
+@pytest.mark.asyncio
+async def test_model_turn_observation_keeps_continuation_until_explicit_ack():
+    service = CoordinatorService(browser_preflight_required=True)
+    armed = await service.arm_resilient(
+        "resume", channel_id="route-direct-observed", delay_seconds=0
+    )
+    claim = await service.claim("route-direct-observed", delivery_mode="direct")
+    await service.finalize_transport(
+        "route-direct-observed", claim["claim_id"], "review-gpt", "delivered"
+    )
+
+    observed = await service.observe_model_turn(
+        "route-direct-observed", armed["continuation_id"]
+    )
+
+    assert observed["observed"] is True
+    assert observed["awaiting_model_ack"] is True
+    status = await service.status("route-direct-observed", delivery_mode="direct")
+    assert status["state"] == "waiting_model_ack"
+    acknowledged = await service.model_ack(armed["continuation_id"] )
+    assert acknowledged["acknowledged"] is True
+    assert (await service.status("route-direct-observed", delivery_mode="direct"))["state"] == "idle"

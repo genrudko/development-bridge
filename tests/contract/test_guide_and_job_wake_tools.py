@@ -168,14 +168,9 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
         assert wake_result.structured_content is None
         assert container.coordinator.delivery_lease("coordinator")["lease_id"] == mounted_lease
         status = await container.coordinator.status(delivery_lease=mounted_lease)
-        assert status["state"] == "browser_preflight"
-        authorized = await container.coordinator.authorize_browser_preflight(
-            "coordinator", status["continuation_id"]
-        )
-        assert authorized["authorized"] is True
-        # Preflight authorization publishes the wake through a scheduled transition.
-        # Yield once so claim observes the newly authorized continuation deterministically.
-        await asyncio.sleep(0)
+        assert status["state"] == "pending"
+        assert status["ready"] is True
+        assert status["x_listener_active"] is True
         return await container.coordinator.claim(delivery_lease=mounted_lease)
 
     claim = asyncio.run(scenario())

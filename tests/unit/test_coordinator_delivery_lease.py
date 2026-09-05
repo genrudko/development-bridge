@@ -37,3 +37,189 @@ def test_delivery_lease_survives_bridge_restart(tmp_path):
     assert restored is not None
     assert restored["lease_id"] == lease["lease_id"]
     assert restored["generation"] == 2
+
+
+@pytest.mark.asyncio
+async def test_current_explicit_delivery_lease_bypasses_browser_preflight(tmp_path):
+    service = CoordinatorService(tmp_path / "wakes-x.json", browser_preflight_required=True)
+    lease = service.issue_delivery_lease(
+        "route-g3", session_id="session-current", route_id="route", generation=3
+    )
+    await service.arm_resilient("wake", channel_id="route-g3", delay_seconds=0)
+
+    status = await service.status(
+        "route-g3", delivery_lease=lease["lease_id"], delivery_mode="x"
+    )
+    assert status["state"] == "pending"
+    assert status["ready"] is True
+    claim = await service.claim(
+        "route-g3", delivery_lease=lease["lease_id"], delivery_mode="x"
+    )
+    assert claim["claimed"] is True
+
+
+@pytest.mark.asyncio
+async def test_recent_x_listener_blocks_direct_fallback_until_heartbeat_expires(
+    tmp_path, monkeypatch
+):
+    clock = [1000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(tmp_path / "wakes-heartbeat.json", browser_preflight_required=True)
+    service.X_LISTENER_HEARTBEAT_TTL_SECONDS = 10.0
+    lease = service.issue_delivery_lease(
+        "route-g4", session_id="session-current", route_id="route", generation=4
+    )
+    await service.arm_resilient("wake", channel_id="route-g4", delay_seconds=0)
+
+    clock[0] = 1008.0
+    await service.status("route-g4", delivery_lease=lease["lease_id"], delivery_mode="x")
+    clock[0] = 1015.0
+    direct = await service.status("route-g4", delivery_mode="direct")
+    assert direct["state"] == "x_listener_active"
+    assert direct["ready"] is False
+
+    clock[0] = 1019.0
+    direct_after_expiry = await service.status("route-g4", delivery_mode="direct")
+    assert direct_after_expiry["state"] == "pending"
+    assert direct_after_expiry["ready"] is True
+
+@pytest.mark.asyncio
+async def test_restart_grace_blocks_direct_fallback_until_x_listener_can_reconnect(
+    tmp_path, monkeypatch
+):
+    clock = [2000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    path = tmp_path / "wakes-restart-grace.json"
+
+    first = CoordinatorService(path, browser_preflight_required=True)
+    first.X_LISTENER_HEARTBEAT_TTL_SECONDS = 10.0
+    lease = first.issue_delivery_lease(
+        "route-g5", session_id="session-current", route_id="route", generation=5
+    )
+    await first.arm_resilient("wake", channel_id="route-g5", delay_seconds=0)
+
+    # The last persisted lease refresh is deliberately older than the restart.
+    clock[0] = 2020.0
+    restarted = CoordinatorService(path, browser_preflight_required=True)
+    restarted.X_LISTENER_HEARTBEAT_TTL_SECONDS = 10.0
+
+    direct_status = await restarted.status("route-g5", delivery_mode="direct")
+    assert direct_status["state"] == "x_listener_active"
+    assert direct_status["ready"] is False
+    assert (
+        await restarted.claim("route-g5", delivery_mode="direct")
+    )["claimed"] is False
+
+    # Once the mounted X listener reconnects, its current lease refresh extends priority.
+    clock[0] = 2028.0
+    x_status = await restarted.status(
+        "route-g5", delivery_lease=lease["lease_id"], delivery_mode="x"
+    )
+    assert x_status["x_listener_active"] is True
+
+    clock[0] = 2035.0
+    assert (await restarted.status("route-g5", delivery_mode="direct"))["state"] == "x_listener_active"
+
+    clock[0] = 2039.0
+    expired = await restarted.status("route-g5", delivery_mode="direct")
+    assert expired["state"] == "pending"
+    assert expired["ready"] is True
+
+@pytest.mark.asyncio
+async def test_direct_claim_rechecks_x_heartbeat_after_waiting_for_coordinator_lock(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    clock = [3000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(tmp_path / "wakes-race.json", browser_preflight_required=True)
+    service.X_LISTENER_HEARTBEAT_TTL_SECONDS = 10.0
+    lease = service.issue_delivery_lease(
+        "route-g6", session_id="session-current", route_id="route", generation=6
+    )
+    await service.arm_resilient("wake", channel_id="route-g6", delay_seconds=0)
+
+    # Let the original heartbeat expire, then force direct to snapshot liveness and
+    # wait on the coordinator lock before X refreshes the same current lease.
+    clock[0] = 3011.0
+    async with service._lock:
+        direct_task = asyncio.create_task(
+            service.claim("route-g6", delivery_mode="direct")
+        )
+        await asyncio.sleep(0)
+        x_task = asyncio.create_task(
+            service.status(
+                "route-g6", delivery_lease=lease["lease_id"], delivery_mode="x"
+            )
+        )
+        await asyncio.sleep(0)
+
+    direct = await direct_task
+    x_status = await x_task
+
+    assert x_status["x_listener_active"] is True
+    assert direct["claimed"] is False
+    assert (await service.status("route-g6", delivery_mode="direct"))["state"] == "x_listener_active"
+
+@pytest.mark.asyncio
+async def test_x_claim_revalidates_explicit_lease_after_waiting_for_coordinator_lock(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    clock = [4000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(tmp_path / "wakes-rotation.json", browser_preflight_required=True)
+    old = service.issue_delivery_lease(
+        "route-g7", session_id="session-old", route_id="route", generation=7
+    )
+    await service.arm_resilient("wake", channel_id="route-g7", delay_seconds=0)
+
+    async with service._lock:
+        stale_claim_task = asyncio.create_task(
+            service.claim(
+                "route-g7", delivery_lease=old["lease_id"], delivery_mode="x"
+            )
+        )
+        await asyncio.sleep(0)
+        new = service.issue_delivery_lease(
+            "route-g7", session_id="session-new", route_id="route", generation=8
+        )
+        assert new["lease_id"] != old["lease_id"]
+
+    stale = await stale_claim_task
+    assert stale["claimed"] is False
+    assert stale.get("state") == "standby"
+    current = await service.claim(
+        "route-g7", delivery_lease=new["lease_id"], delivery_mode="x"
+    )
+    assert current["claimed"] is True
+
+
+@pytest.mark.asyncio
+async def test_direct_status_uses_lock_time_when_x_heartbeat_expires_while_waiting(
+    tmp_path, monkeypatch
+):
+    import asyncio
+
+    clock = [5000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(tmp_path / "wakes-expiry-race.json", browser_preflight_required=True)
+    service.X_LISTENER_HEARTBEAT_TTL_SECONDS = 10.0
+    service.issue_delivery_lease(
+        "route-g8", session_id="session-current", route_id="route", generation=8
+    )
+    await service.arm_resilient("wake", channel_id="route-g8", delay_seconds=0)
+
+    clock[0] = 5005.0
+    async with service._lock:
+        direct_status_task = asyncio.create_task(
+            service.status("route-g8", delivery_mode="direct")
+        )
+        await asyncio.sleep(0)
+        clock[0] = 5012.0
+
+    direct = await direct_status_task
+    assert direct["state"] == "pending"
+    assert direct["ready"] is True

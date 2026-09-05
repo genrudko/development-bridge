@@ -574,11 +574,11 @@ async def test_ready_legacy_wake_without_continuation_id_causes_zero_probe_and_z
     assert status_after.get("last_transport_disposition") is None
 
 @pytest.mark.asyncio
-async def test_observed_model_turn_completes_direct_continuation_without_waiting_for_model_ack(
+async def test_observed_model_turn_still_requires_explicit_model_ack(
     coordinator: CoordinatorService,
     route_registry: RouteRegistry,
 ):
-    await coordinator.arm_resilient("Job done", channel_id="coordinator")
+    armed = await coordinator.arm_resilient("Job done", channel_id="coordinator")
     transport = MockWakeTransport(
         deliver_results=[WakeDeliveryResult(
             disposition="delivered",
@@ -596,7 +596,12 @@ async def test_observed_model_turn_completes_direct_continuation_without_waiting
     await service.run_once()
 
     status = await coordinator.status("coordinator", delivery_mode="direct")
-    assert status == {"channel_id": "coordinator", "state": "idle", "ready": False}
+    assert status["state"] == "waiting_model_ack"
+    assert status["transport_delivered"] is True
+    assert (await coordinator.model_ack(armed["continuation_id"]))["acknowledged"] is True
+    assert await coordinator.status("coordinator", delivery_mode="direct") == {
+        "channel_id": "coordinator", "state": "idle", "ready": False
+    }
 
 
 @pytest.mark.asyncio
