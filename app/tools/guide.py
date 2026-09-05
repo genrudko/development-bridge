@@ -36,8 +36,9 @@ def guide_tools(registry: ToolRegistry, *, tool_surface: str = "full") -> tuple[
             "coordinator": {
                 "available": coordinator_available,
                 "summary": (
-                    "Registered routes, durable Route Context, event-driven wake, and "
-                    "continuation ACK are available."
+                    "Registered routes, durable Route Context, event-driven wake, and continuation ACK are available. "
+                    "Mount coordinator_x_mount once per chat; later status/wake calls are widgetless and must not remount "
+                    "just to refresh the coordinator card."
                 ),
             },
             "route_binding": {

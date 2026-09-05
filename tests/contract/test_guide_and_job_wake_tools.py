@@ -106,8 +106,8 @@ def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():
     assert "durable" in tool.description
     assert "restored across Bridge restart" in tool.description
     assert "batches concurrent terminal" in tool.description
-    assert "renders/refreshes the coordinator MCP App" in tool.description
-    assert tool.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
+    assert "does not render a new coordinator MCP App" in tool.description
+    assert not (tool.meta or {}).get("openai/outputTemplate")
 
 
 def test_x_wake_payload_never_contains_job_output(tmp_path):
@@ -156,7 +156,7 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
             }),
             SimpleNamespace(request_id="wake-request"),
         )
-        assert wake_result.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
+        assert not (wake_result.meta or {}).get("openai/outputTemplate")
         assert wake_result.structured_content["channel_id"] == "coordinator"
         assert wake_result.structured_content["trigger_url"].endswith("/mcp/x/coordinator/")
         assert isinstance(wake_result.structured_content["delivery_lease"], str)
@@ -201,13 +201,13 @@ def test_coordinator_exec_and_wake_queues_job_and_durable_waiter(tmp_path):
     registry = build_tool_registry(container)
     tool = registry.get("coordinator_exec_and_wake")
     assert tool.definition.input_schema["required"] == ["project_id", "repository_id", "executable"]
-    assert tool.definition.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
+    assert not (tool.definition.meta or {}).get("openai/outputTemplate")
     result = asyncio.run(tool.handler(None, SimpleNamespace(arguments={
         "project_id": "project", "repository_id": "repository",
         "executable": sys.executable, "arguments": ["-c", "print('ok')"],
         "channel_id": "coordinator", "message": "done",
     }), SimpleNamespace(request_id="atomic-request")))
-    assert result.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
+    assert not (result.meta or {}).get("openai/outputTemplate")
     data = json.loads(result.content[0].text)["data"]
     assert data["job_id"].startswith("job_")
     assert data["state"] == "waiting" and data["durable"] is True
@@ -470,3 +470,23 @@ def test_route_binding_guidance_forbids_model_visible_physical_identity_and_lega
     assert "marker/search fallback" in combined
     assert "openExternal" in combined
     assert "native mobile" in combined.lower()
+
+
+def test_only_explicit_mount_and_bind_advertise_coordinator_app():
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    ui_tools = {
+        tool.name
+        for tool in registry.definitions
+        if tool.name.startswith("coordinator_")
+        and (getattr(tool, "meta", None) or {}).get("openai/outputTemplate") == COORDINATOR_UI_URI
+    }
+    assert ui_tools == {"coordinator_x_mount", "coordinator_route_bind_current"}
+
+
+def test_wake_tools_are_widgetless_and_require_no_new_app_instance():
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    for name in ("coordinator_wake_on_jobs", "coordinator_exec_and_wake"):
+        tool = registry.get(name).definition
+        assert not (getattr(tool, "meta", None) or {}).get("openai/outputTemplate")
+        assert "coordinator_x_mount" in tool.description
+        assert "new coordinator MCP App" in tool.description

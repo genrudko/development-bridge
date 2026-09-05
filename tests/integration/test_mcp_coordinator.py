@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import httpx2
 import pytest
@@ -11,6 +12,7 @@ from app.container import build_container
 from app.runtime import create_server
 from app.settings import BridgeSettings, load_settings
 from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
+from app.tools.registry import build_tool_registry
 from app.transport import create_streamable_http_app
 
 
@@ -860,23 +862,16 @@ async def test_coordinator_route_control_status_hidden_tool(tmp_path):
         # Structured content matches safe data
         assert result.structured_content == data
 
-        # Component-only meta contains control authorization
-        rc = result.meta.get("route_control")
-        assert rc is not None
-        assert rc["route_id"] == "bridge"
-        assert "control_token" in rc
-        assert "endpoints" in rc
-        assert rc["endpoints"]["status"] == "https://bridge.example/mcp/x/route-control/status"
-        assert rc["endpoints"]["unbind"] == "https://bridge.example/mcp/x/route-control/unbind"
-        assert rc["endpoints"]["cancel_wakes"] == "https://bridge.example/mcp/x/route-control/cancel-wakes"
-        assert rc["endpoints"]["unbind_and_cancel"] == "https://bridge.example/mcp/x/route-control/unbind-and-cancel"
+        # Hidden status is deliberately widgetless: route-control authorization belongs to
+        # the single persistent coordinator_x_mount App, not every status tool result.
+        assert not (result.meta or {}).get("openai/outputTemplate")
+        assert "route_control" not in (result.meta or {})
 
-        # Model text and structured content must NOT leak physical target or control token
+        # Model text and structured content must NOT leak physical target.
         text = result.content[0].text
         assert "conv-old" not in text
         assert "g-p-infra" not in text
         assert "https://chatgpt.com" not in text
-        assert rc["control_token"] not in text
 
 
 @pytest.mark.asyncio
@@ -1174,3 +1169,27 @@ async def test_mount_rehydrates_same_session_pending_bind_action_without_model_l
         )
         assert "operation_url" not in serialized_model_visible
         assert "/route-control/bind/" not in serialized_model_visible
+
+
+@pytest.mark.asyncio
+async def test_route_control_status_is_widgetless_safe_data(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+    })
+    container = build_container(settings)
+    container.jobs._store.initialize()
+    container.route_registry.bootstrap(
+        "bridge", "https://chatgpt.com/c/00000000-0000-0000-0000-000000000201",
+        "telegram-bridge-g0",
+    )
+    tool = build_tool_registry(container).get("coordinator_route_control_status")
+    result = await tool.handler(
+        None, SimpleNamespace(arguments={"route_id": "bridge"}), SimpleNamespace(request_id="status-widgetless")
+    )
+    data = json.loads(result.content[0].text)["data"]
+    assert data["route_id"] == "bridge"
+    assert result.structured_content == data
+    assert not (result.meta or {}).get("openai/outputTemplate")
+    assert "route_control" not in (result.meta or {})

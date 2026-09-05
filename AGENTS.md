@@ -43,6 +43,8 @@ Treat model/tool round-trips, coordinator chat context, and live ChatGPT Web tra
 
 - Normal workers never call `coordinator_route_takeover` to begin ordinary work.
 - Ordinary setup: discover registered routes via hidden `coordinator_route_list` (via `bridge_search -> bridge_schema -> bridge_call` in compact mode) and mount the existing route with `coordinator_x_mount(route_id=...)`.
+- Mount the Coordinator App **once per physical chat**. Do not call `coordinator_x_mount` again merely to refresh status or arm a wake: the mounted card polls its route, while `coordinator_route_control_status`, `coordinator_wake_on_jobs`, and `coordinator_exec_and_wake` are intentionally widgetless. Repeated UI-bearing tool calls create additional ChatGPT tool-result iframes and bloat the conversation DOM.
+- Do not repeat `coordinator_route_bind_current` while the same bind is still pending. One pending bind means one bind-card; inspect safe status/diagnostics instead of spawning another card.
 - Current route mapping: `development-bridge -> bridge`, `eod -> eod`, AD5X product work -> `ad5xwork`; if uncertain use `coordinator_route_list`.
 - Never ask the owner to copy a ChatGPT conversation URL for ordinary executor setup; URLs are only relevant for initial route bootstrap or exceptional manual takeover.
 - If the mounted logical route is stale or points at another physical chat, invoke `coordinator_route_bind_current` **directly** (never through `bridge_call`), then use the rendered bind-card. Current-chat identity is acquired out of band by the MCP App through `openExternal(..., redirectUrl: true)` and committed by the guarded route-control endpoint. There is no marker/search fallback.

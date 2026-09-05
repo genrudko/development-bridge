@@ -92,6 +92,8 @@ Do not claim completion from intuition, agent self-report, or partial tests. The
 
 - Normal workers must never call `coordinator_route_takeover` to start ordinary work.
 - Ordinary setup: discover registered routes with `coordinator_route_list` (hidden tool) -> mount the appropriate logical route with `coordinator_x_mount(route_id=...)`.
+- Mount the Coordinator App once per physical chat. Do not remount for ordinary status reads or wake registration: the existing card polls status, and route status / wake / exec-and-wake tools are intentionally widgetless so they do not create another ChatGPT iframe.
+- While `coordinator_route_bind_current` is pending, do not call it again just to refresh the bind UI. Keep one bind-card per pending bind and use safe status/diagnostics for inspection.
 - Current route mapping:
   - `development-bridge` -> `bridge`
   - `eod` -> `eod`

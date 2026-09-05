@@ -175,7 +175,7 @@ def _resolve_mount_destination(container: ApplicationContainer, ctx, arguments: 
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
 
-    def attach_coordinator_ui(result, ctx, binding: dict):
+    def attach_coordinator_delivery(result, ctx, binding: dict):
         channel_id = str(binding["channel_id"])
         if binding.get("route_id") is not None and binding.get("route_state") == "active":
             container.route_registry.request(str(binding["route_id"]))
@@ -204,7 +204,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 else {}
             ),
         }
-        result.meta = dict(COORDINATOR_UI_META)
         return result
     async def mount(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -333,7 +332,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             "route_context": bootstrap["context"],
             "bootstrap_message": bootstrap["bootstrap_message"],
         }
-        result.meta = dict(COORDINATOR_UI_META)
         return result
 
     async def rollover_prepare(ctx, params, request_context):
@@ -381,7 +379,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         public_base = container.settings.server.public_base_url
         trigger_url = str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
         result.structured_content = {**safe_data, "trigger_url": trigger_url}
-        result.meta = dict(COORDINATOR_UI_META)
         return result
 
     async def context_get(ctx, params, request_context):
@@ -417,11 +414,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         data = container.route_control.safe_status(route_id)
         result = to_mcp_result(success(request_context.request_id, data))
         result.structured_content = dict(data)
-        descriptor = container.route_control.issue_control_descriptor(route_id)
-        result.meta = {
-            **COORDINATOR_UI_META,
-            "route_control": descriptor,
-        }
         return result
 
     async def route_control_diagnostic(ctx, params, request_context):
@@ -525,7 +517,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             )
             data["channel_id"] = channel_id
         result = to_mcp_result(success(request_context.request_id, data))
-        return attach_coordinator_ui(result, ctx, destination)
+        return attach_coordinator_delivery(result, ctx, destination)
 
     async def exec_and_wake(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -585,7 +577,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 raise
             response = {**job.status_dict(), **waiter, "channel_id": channel_id}
         result = to_mcp_result(success(request_context.request_id, response))
-        return attach_coordinator_ui(result, ctx, destination)
+        return attach_coordinator_delivery(result, ctx, destination)
 
 
 
@@ -594,7 +586,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_x_mount",
-                description="Mount the coordinator X wake listener for an existing registered logical route (e.g. bridge, eod, ad5xwork) or channel; ordinary workers mount existing routes here without asking the owner for URLs; cached clients may pass an exact cont_... ID as channel_id to ACK only that continuation",
+                description="Mount the single persistent coordinator MCP App for this chat and bind its X wake listener to an existing registered logical route (e.g. bridge, eod, ad5xwork) or channel. Mount once per chat; status and wake tools are widgetless and do not require remounting. Cached clients may pass an exact cont_... ID as channel_id to ACK only that continuation",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -644,7 +636,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["route_id", "url"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             takeover,
             "coordinator-x",
@@ -665,14 +656,13 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_route_control_status",
-                description="Read-only safe logical status for a registered coordinator route (generation, binding state, pending wake counts, last operation) without physical chat identity",
+                description="Read-only widgetless logical status for a registered coordinator route (generation, binding state, pending wake counts, last operation) without physical chat identity or rendering another coordinator card",
                 inputSchema={
                     "type": "object",
                     "properties": {"route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"}},
                     "required": ["route_id"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             route_control_status,
             "coordinator-x",
@@ -687,7 +677,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["diagnostic_id"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             route_control_diagnostic,
             "coordinator-x",
@@ -705,7 +694,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["route_id"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             rollover_prepare,
             "coordinator-x",
@@ -798,9 +786,9 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             types.Tool(
                 name="coordinator_wake_on_jobs",
                 description=(
-                    "Event-driven resilient X continuation for durable jobs. With an explicit route/channel, "
-                    "the call renders/refreshes the coordinator MCP App; otherwise coordinator_x_mount supplies "
-                    "the existing destination binding. After jobs become terminal, delivery "
+                    "Event-driven resilient X continuation for durable jobs. Mount coordinator_x_mount once for the chat; "
+                    "this widgetless call uses the existing destination binding and does not render a new coordinator MCP App. "
+                    "After jobs become terminal, delivery "
                     "keeps one active durable continuation_id per channel, batches concurrent terminal "
                     "groups without overwriting them, and deduplicates repeated events. Transport failures "
                     "may retry X up to 3 attempts; after successful ui/message transport ACK the continuation "
@@ -839,7 +827,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["project_id", "repository_id", "job_ids"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             wake_on_jobs,
             "coordinator-x",
@@ -847,7 +834,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_exec_and_wake",
-                description="Queue one durable repository execution, arm its coordinator waiter, and render/refresh the coordinator MCP App in the same request; cancels the new job if waiter registration fails.",
+                description="Queue one durable repository execution and arm its coordinator waiter without rendering a new coordinator MCP App; mount coordinator_x_mount once for the chat first. Cancels the new job if waiter registration fails.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -867,7 +854,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["project_id", "repository_id", "executable"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             exec_and_wake,
             "coordinator-x",
