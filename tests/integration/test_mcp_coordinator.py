@@ -1167,3 +1167,51 @@ async def test_external_trigger_rejects_active_source_channel_during_pending_rol
         response = await client.post("/mcp/x/coordinator/trigger", headers={"Authorization": "Bearer secret"}, json={"channel_id": "telegram-bridge-g0", "message": "must freeze source"})
     assert response.status_code == 409
     assert (await container.coordinator.status("telegram-bridge-g0"))["state"] == "idle"
+
+@pytest.mark.asyncio
+async def test_mount_rehydrates_same_session_pending_bind_action_without_model_leak(tmp_path):
+    settings = BridgeSettings.model_validate(
+        {
+            "server": {"public_base_url": "https://bridge.example"},
+            "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        }
+    )
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "project-route",
+        "https://chatgpt.com/g/g-p-project/c/conv-a",
+        "telegram-project-route-g0",
+        "Project Route",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1"
+        ) as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        prepared = await session.call_tool(
+            "coordinator_route_bind_current",
+            {"route_id": "project-route", "allow_project_change": False},
+        )
+        assert prepared.structured_content["state"] == "bind_pending"
+
+        mounted = await session.call_tool(
+            "coordinator_x_mount", {"route_id": "project-route"}
+        )
+        route_control = mounted.meta["route_control"]
+        assert route_control["action"] == "bind"
+        assert route_control["operation_url"].startswith(
+            "https://bridge.example/mcp/x/route-control/bind/"
+        )
+        serialized_model_visible = json.dumps(
+            {
+                "content": [item.text for item in mounted.content if hasattr(item, "text")],
+                "structured_content": mounted.structured_content,
+            }
+        )
+        assert "operation_url" not in serialized_model_visible
+        assert "/route-control/bind/" not in serialized_model_visible

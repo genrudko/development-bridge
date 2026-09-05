@@ -71,6 +71,20 @@ class RouteControlService:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "stale route control authorization for previous generation")
         return record
 
+    def pending_bind_descriptor(self, route_id: str, *, session_id: str | None) -> dict | None:
+        if session_id is None:
+            return None
+        pending = self.route_registry.pending_current_bind(route_id)
+        if pending is None or pending.get("session_id") != session_id:
+            return None
+        token = str(pending["token"])
+        base = self.public_base_url.rstrip("/") if self.public_base_url else ""
+        return {
+            "action": "bind",
+            "route_id": route_id,
+            "operation_url": f"{base}{self.endpoint_prefix}/bind/{token}",
+        }
+
     def issue_control_descriptor(self, route_id: str) -> dict:
         record = self.issue_control_token(route_id)
         base = self.public_base_url.rstrip("/") if self.public_base_url else ""

@@ -249,9 +249,14 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         }
         result.meta = dict(COORDINATOR_UI_META)
         if container.route_control is not None and binding.get("route_id"):
-            result.meta["route_control"] = container.route_control.issue_control_descriptor(
-                str(binding["route_id"])
+            route_id = str(binding["route_id"])
+            descriptor = container.route_control.issue_control_descriptor(route_id)
+            pending_bind = container.route_control.pending_bind_descriptor(
+                route_id, session_id=_session_id(ctx)
             )
+            if pending_bind is not None:
+                descriptor.update(pending_bind)
+            result.meta["route_control"] = descriptor
         return result
 
     async def bind_current(ctx, params, request_context):
