@@ -295,6 +295,49 @@ def test_accept_malformed_return_target_fails_and_records_trace(test_setup):
     assert sanitized["error_code"] == "TARGET_PARSE_FAILED"
 
 
+def test_project_scoped_same_conversation_accepts_projectless_host_return(test_setup):
+    registry, _trace_store, service = test_setup
+    before = registry.resolve("bridge")
+    assert before["project_id"] == "g-p-infra"
+    assert before["conversation_id"] == "conv-initial"
+
+    prepared = service.prepare_bind(
+        "bridge", session_id="session-project-normalized", allow_project_change=False
+    )
+    service.accept_bind_return(
+        prepared["operation_id"], "https://chatgpt.com/c/conv-initial"
+    )
+    result = service.commit_bind(prepared["operation_id"])
+
+    assert result["state"] == "already_bound"
+    assert result["changed"] is False
+    assert result["generation"] == 0
+    after = registry.resolve("bridge")
+    assert after["project_id"] == "g-p-infra"
+    assert after["conversation_id"] == "conv-initial"
+    assert after["url"] == before["url"]
+
+
+def test_project_scoped_same_conversation_rejects_explicit_other_project(test_setup):
+    registry, trace_store, service = test_setup
+    prepared = service.prepare_bind(
+        "bridge", session_id="session-project-spoof", allow_project_change=False
+    )
+
+    with pytest.raises(BridgeError) as exc_info:
+        service.accept_bind_return(
+            prepared["operation_id"],
+            "https://chatgpt.com/g/g-p-otherproject/c/conv-initial",
+        )
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+    sanitized = trace_store.sanitized(prepared["diagnostic_id"])
+    assert sanitized["status"] == "failed"
+    assert sanitized["error_code"] == "PROJECT_MISMATCH"
+    current = registry.resolve("bridge")
+    assert current["project_id"] == "g-p-infra"
+    assert current["conversation_id"] == "conv-initial"
+
+
 def test_accept_cross_project_mismatch_fails_and_records_trace(test_setup):
     _registry, trace_store, service = test_setup
 

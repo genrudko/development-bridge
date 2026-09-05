@@ -443,6 +443,24 @@ class RouteRegistry:
         self._save(data)
         return {**pending, "route_id": route_id}
 
+    @staticmethod
+    def _current_bind_project_allowed(
+        route: dict,
+        *,
+        candidate_project_id: str | None,
+        candidate_conversation_id: str,
+        allow_project_change: bool,
+    ) -> bool:
+        if allow_project_change:
+            return True
+        if project_identity(candidate_project_id) == project_identity(route.get("project_id")):
+            return True
+        return (
+            candidate_project_id is None
+            and route.get("project_id") is not None
+            and route.get("conversation_id") == candidate_conversation_id
+        )
+
     def record_current_bind_candidate(self, route_id: str, token: str, url: str) -> dict:
         route_id = self.validate_route_id(route_id)
         canonical = canonical_chat_url(url)
@@ -467,11 +485,16 @@ class RouteRegistry:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate already recorded")
         if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
-        if (
-            project_identity(project_id) != project_identity(route.get("project_id"))
-            and not bool(pending.get("allow_project_change", False))
+        if not self._current_bind_project_allowed(
+            route,
+            candidate_project_id=project_id,
+            candidate_conversation_id=conversation_id,
+            allow_project_change=bool(pending.get("allow_project_change", False)),
         ):
-            raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate belongs to a different project")
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "current-chat bind candidate belongs to a different project",
+            )
         pending.update({
             "state": "candidate",
             "candidate_url": canonical,
@@ -506,27 +529,40 @@ class RouteRegistry:
         if url is not None:
             canonical = canonical_chat_url(url)
             project_id, conversation_id = conversation_parts(canonical)
-            if (
-                project_identity(project_id) != project_identity(route.get("project_id"))
-                and not bool(pending.get("allow_project_change", False))
+            if not self._current_bind_project_allowed(
+                route,
+                candidate_project_id=project_id,
+                candidate_conversation_id=conversation_id,
+                allow_project_change=bool(pending.get("allow_project_change", False)),
             ):
-                raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate belongs to a different project")
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "current-chat bind candidate belongs to a different project",
+                )
         else:
             if pending.get("state") != "candidate" or not pending.get("candidate_url"):
                 raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate is not ready")
             canonical = pending["candidate_url"]
             conversation_id = pending["candidate_conversation_id"]
             project_id = pending.get("candidate_project_id")
-            if (
-                project_identity(project_id) != project_identity(route.get("project_id"))
-                and not bool(pending.get("allow_project_change", False))
+            if not self._current_bind_project_allowed(
+                route,
+                candidate_project_id=project_id,
+                candidate_conversation_id=conversation_id,
+                allow_project_change=bool(pending.get("allow_project_change", False)),
             ):
-                raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind candidate belongs to a different project")
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "current-chat bind candidate belongs to a different project",
+                )
 
         is_already_bound = (
             self.is_bound(route)
             and route.get("conversation_id") == conversation_id
-            and project_identity(route.get("project_id")) == project_identity(project_id)
+            and (
+                project_identity(route.get("project_id")) == project_identity(project_id)
+                or (route.get("project_id") is not None and project_id is None)
+            )
         )
 
         if is_already_bound:
