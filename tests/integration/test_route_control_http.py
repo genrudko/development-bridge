@@ -650,6 +650,72 @@ async def test_route_control_status_endpoint_returns_safe_counts_and_no_leakage(
 
 
 @pytest.mark.asyncio
+async def test_route_control_cors_allows_chatgpt_sandbox_control_requests(tmp_path):
+    app, container, _settings = create_test_app_with_jobs(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    origin = "https://web-sandbox.oaiusercontent.com"
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        status_preflight = await client.options(
+            "/mcp/x/route-control/status?route_id=bridge",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert status_preflight.status_code == 200
+        assert status_preflight.headers["access-control-allow-origin"] == origin
+        assert "GET" in status_preflight.headers["access-control-allow-methods"]
+        assert "authorization" in status_preflight.headers["access-control-allow-headers"].lower()
+
+        destructive_preflight = await client.options(
+            "/mcp/x/route-control/unbind-and-cancel",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+        assert destructive_preflight.status_code == 200
+        assert destructive_preflight.headers["access-control-allow-origin"] == origin
+        assert "POST" in destructive_preflight.headers["access-control-allow-methods"]
+        allowed_headers = destructive_preflight.headers["access-control-allow-headers"].lower()
+        assert "authorization" in allowed_headers
+        assert "content-type" in allowed_headers
+
+        status = await client.get(
+            "/mcp/x/route-control/status?route_id=bridge",
+            headers={"Origin": origin, "Authorization": f"Bearer {token}"},
+        )
+        assert status.status_code == 200
+        assert status.headers["access-control-allow-origin"] == origin
+        assert status.json()["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_route_control_non_preflight_options_cannot_execute_destructive_action(tmp_path):
+    app, container, _settings = create_test_app_with_jobs(tmp_path)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.options(
+            "/mcp/x/route-control/unbind-and-cancel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        assert response.status_code == 405
+        route = container.route_registry.resolve("bridge")
+        assert route is not None
+        assert route["binding_state"] == "bound"
+        assert route["generation"] == 0
+
+
+@pytest.mark.asyncio
 async def test_route_control_cancel_wakes_endpoint(tmp_path):
     app, container, _settings = create_test_app_with_jobs(tmp_path)
     await container.coordinator.arm("wake 1", channel_id="telegram-bridge-g0", delay_seconds=10)

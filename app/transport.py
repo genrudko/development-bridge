@@ -22,6 +22,7 @@ from mcp.server.auth.settings import (
 )
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import (
     FileResponse,
@@ -48,6 +49,34 @@ from app.coordinator.route_control_html import (
 )
 from app.ops.routes import create_operator_dashboard_routes
 from app.settings import BridgeSettings
+
+_ROUTE_CONTROL_SANDBOX_ORIGINS = ["https://web-sandbox.oaiusercontent.com"]
+_ROUTE_CONTROL_CORS_HEADERS = ["Authorization", "Content-Type"]
+
+
+class _RouteControlCorsApp:
+    def __init__(self, app, allow_methods: list[str]) -> None:
+        self.app = app
+        self.allow_methods = allow_methods
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") == "http" and scope.get("method") == "OPTIONS":
+            headers = {key.lower(): value for key, value in scope.get("headers", ())}
+            if b"origin" not in headers or b"access-control-request-method" not in headers:
+                response = Response(status_code=405, headers={"Allow": ", ".join(self.allow_methods)})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _route_control_cors(handler, allow_methods: list[str]):
+    cors_app = CORSMiddleware(
+        app=request_response(handler),
+        allow_origins=_ROUTE_CONTROL_SANDBOX_ORIGINS,
+        allow_methods=allow_methods,
+        allow_headers=_ROUTE_CONTROL_CORS_HEADERS,
+    )
+    return _RouteControlCorsApp(cors_app, allow_methods)
 
 
 def create_streamable_http_app(
@@ -1120,32 +1149,32 @@ def create_streamable_http_app(
     custom_routes.append(
         Route(
             route_control_base_path + "/status",
-            route_control_status,
-            methods=["GET"],
+            endpoint=_route_control_cors(route_control_status, ["GET"]),
+            methods=["GET", "OPTIONS"],
             name="route_control_status",
         )
     )
     custom_routes.append(
         Route(
             route_control_base_path + "/unbind",
-            route_control_unbind,
-            methods=["POST"],
+            endpoint=_route_control_cors(route_control_unbind, ["POST"]),
+            methods=["POST", "OPTIONS"],
             name="route_control_unbind",
         )
     )
     custom_routes.append(
         Route(
             route_control_base_path + "/cancel-wakes",
-            route_control_cancel_wakes,
-            methods=["POST"],
+            endpoint=_route_control_cors(route_control_cancel_wakes, ["POST"]),
+            methods=["POST", "OPTIONS"],
             name="route_control_cancel_wakes",
         )
     )
     custom_routes.append(
         Route(
             route_control_base_path + "/unbind-and-cancel",
-            route_control_unbind_and_cancel,
-            methods=["POST"],
+            endpoint=_route_control_cors(route_control_unbind_and_cancel, ["POST"]),
+            methods=["POST", "OPTIONS"],
             name="route_control_unbind_and_cancel",
         )
     )
