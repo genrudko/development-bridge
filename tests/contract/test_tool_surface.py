@@ -146,3 +146,17 @@ def test_legacy_global_workspace_names_are_absent():
         "search_workspace",
         "github_status",
     }.isdisjoint(tool.name for tool in registry.definitions)
+
+
+def test_bind_current_schema_includes_bootstrap_if_missing():
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    tool = registry.get("coordinator_route_bind_current")
+    schema = tool.definition.input_schema
+    assert schema["type"] == "object"
+    assert schema["required"] == ["route_id"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["route_id"]["pattern"] == "^[a-z][a-z0-9-]{0,30}$"
+    assert schema["properties"]["allow_project_change"]["type"] == "boolean"
+    assert schema["properties"]["allow_project_change"]["default"] is False
+    assert schema["properties"]["bootstrap_if_missing"]["type"] == "boolean"
+    assert schema["properties"]["bootstrap_if_missing"]["default"] is False

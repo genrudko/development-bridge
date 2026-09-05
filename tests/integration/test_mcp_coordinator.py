@@ -936,6 +936,90 @@ async def test_bind_current_preserves_existing_route_delivery_lease(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bind_current_missing_route_with_bootstrap_if_missing(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+    ):
+        async with (
+            streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+            ClientSession(*streams) as session,
+        ):
+            await session.initialize()
+
+            # 1. Missing route without bootstrap_if_missing fails with INVALID_ARGUMENT
+            failed = await session.call_tool("coordinator_route_bind_current", {"route_id": "newroute"})
+            assert failed.is_error is True
+            assert "unknown route" in failed.content[0].text
+            assert container.route_registry.resolve("newroute") is None
+
+            # 2. Missing route with bootstrap_if_missing=False also fails
+            failed_false = await session.call_tool(
+                "coordinator_route_bind_current",
+                {"route_id": "newroute", "bootstrap_if_missing": False},
+            )
+            assert failed_false.is_error is True
+            assert "unknown route" in failed_false.content[0].text
+
+            # 3. Missing route with bootstrap_if_missing=True returns safe bind_pending descriptor
+            result = await session.call_tool(
+                "coordinator_route_bind_current",
+                {"route_id": "newroute", "bootstrap_if_missing": True},
+            )
+            assert result.is_error is not True
+            payload = json.loads(result.content[0].text)["data"]
+            assert payload["state"] == "bind_pending"
+            assert payload["route_id"] == "newroute"
+            assert payload["generation"] == 0
+
+            # Pre-commit invariants: Zero route in registry, no session binding
+            assert container.route_registry.resolve("newroute") is None
+            assert container.coordinator._session_bindings == {}
+
+            # Safe structured content
+            assert result.structured_content == {
+                "route_id": "newroute",
+                "state": "bind_pending",
+                "generation": 0,
+            }
+            assert "channel_id" not in result.structured_content
+            assert "delivery_lease" not in result.structured_content
+
+            # Meta contains opaque route control endpoint
+            rc_meta = result.meta.get("route_control")
+            assert rc_meta is not None
+            assert rc_meta["action"] == "bind"
+            assert rc_meta["route_id"] == "newroute"
+            op_id = rc_meta["operation_id"]
+            assert op_id.startswith("bind_")
+            assert rc_meta["operation_url"] == f"https://bridge.example/mcp/x/route-control/bind/{op_id}"
+
+            # 4. Out of band return and commit creates generation 0
+            container.route_control.accept_bind_return(
+                op_id,
+                "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-bootstrapped",
+            )
+            assert container.route_registry.resolve("newroute") is None
+            committed = container.route_control.commit_bind(op_id)
+            assert committed["state"] == "bound"
+            assert committed["generation"] == 0
+            assert committed["changed"] is True
+
+            # Route now exists in registry
+            bound_route = container.route_registry.resolve("newroute")
+            assert bound_route is not None
+            assert bound_route["generation"] == 0
+            assert bound_route["conversation_id"] == "conv-bootstrapped"
+            assert bound_route["channel_id"] == "telegram-newroute-g0"
+
+
+@pytest.mark.asyncio
 async def test_coordinator_widget_html_contract_and_forbidden_apis(tmp_path):
     settings = BridgeSettings.model_validate({
         "server": {"public_base_url": "https://bridge.example"},

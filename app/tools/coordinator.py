@@ -233,9 +233,10 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
 
         arguments = params.arguments or {}
         route_id = container.route_registry.validate_route_id(arguments["route_id"])
+        bootstrap_if_missing = bool(arguments.get("bootstrap_if_missing", False))
         session_id = _session_id(ctx)
         route = container.route_registry.resolve(route_id)
-        if route is None:
+        if route is None and not bootstrap_if_missing:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
         if session_id is not None:
             container.coordinator.unbind_session(session_id)
@@ -244,17 +245,20 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 route_id,
                 session_id=session_id,
                 allow_project_change=bool(arguments.get("allow_project_change", False)),
+                bootstrap_if_missing=bootstrap_if_missing,
             )
         else:
             pending = container.route_registry.prepare_current_bind(
                 route_id,
                 session_id=session_id,
                 allow_project_change=bool(arguments.get("allow_project_change", False)),
+                bootstrap_if_missing=bootstrap_if_missing,
             )
+            generation = int(route.get("generation", 0)) if route else 0
             prepared = {
                 "route_id": route_id,
                 "state": "bind_pending",
-                "generation": int(route.get("generation", 0)),
+                "generation": generation,
                 "operation_id": pending["token"],
                 "diagnostic_id": "bind-fallback",
                 "operation_url": f"/x/route-control/bind/{pending['token']}",
@@ -576,12 +580,13 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_route_bind_current",
-                description="Bind an existing logical route to this exact physical ChatGPT conversation through the OOB bind-card/openExternal flow. Invoke this session-bound tool directly, not through bridge_call; physical ChatGPT URLs, IDs, sessions, and control tokens stay outside model-visible chat. Cross-project changes fail closed unless allow_project_change=true explicitly authorizes this one migration.",
+                description="Bind an existing logical route (or bootstrap a missing one if bootstrap_if_missing=true) to this exact physical ChatGPT conversation through the OOB bind-card/openExternal flow. Invoke this session-bound tool directly, not through bridge_call; physical ChatGPT URLs, IDs, sessions, and control tokens stay outside model-visible chat. Cross-project changes fail closed unless allow_project_change=true explicitly authorizes this one migration.",
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
                         "allow_project_change": {"type": "boolean", "default": False},
+                        "bootstrap_if_missing": {"type": "boolean", "default": False},
                     },
                     "required": ["route_id"],
                     "additionalProperties": False,

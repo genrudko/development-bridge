@@ -646,6 +646,8 @@ def test_bind_current_schema_requires_explicit_boolean_for_project_change(tmp_pa
     schema = registry.get("coordinator_route_bind_current").definition.input_schema
     assert schema["properties"]["allow_project_change"]["type"] == "boolean"
     assert schema["properties"]["allow_project_change"]["default"] is False
+    assert schema["properties"]["bootstrap_if_missing"]["type"] == "boolean"
+    assert schema["properties"]["bootstrap_if_missing"]["default"] is False
 
 
 def test_is_bound_identifies_bound_unbound_and_legacy_records(tmp_path: Path):
