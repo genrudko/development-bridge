@@ -1510,6 +1510,28 @@ def test_bootstrap_control_token_is_invalid_after_commit(test_setup):
     assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
 
 
+def test_bootstrap_control_token_cannot_authorize_replacement_operation(test_setup):
+    registry, _trace_store, service = test_setup
+    first = service.prepare_bind(
+        "newroute", session_id="session-1", bootstrap_if_missing=True
+    )
+    first_token = service.issue_control_descriptor("newroute")["control_token"]
+    assert service.verify_control_token(first_token, "newroute")["generation"] == 0
+
+    assert registry.discard_current_bind("newroute", first["operation_id"]) is True
+    second = service.prepare_bind(
+        "newroute", session_id="session-2", bootstrap_if_missing=True
+    )
+    assert second["operation_id"] != first["operation_id"]
+
+    with pytest.raises(BridgeError) as exc_info:
+        service.verify_control_token(first_token, "newroute")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+    second_token = service.issue_control_descriptor("newroute")["control_token"]
+    assert service.verify_control_token(second_token, "newroute")["generation"] == 0
+
+
 def test_route_control_bootstrap_failed_return_leaves_no_route(test_setup):
     registry, trace_store, service = test_setup
     prepared = service.prepare_bind("badroute", session_id="session-1", bootstrap_if_missing=True)
