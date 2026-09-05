@@ -974,3 +974,102 @@ async def test_route_control_error_schema_does_not_reflect_arbitrary_details(tmp
         # Must not reflect arbitrary route_id, internal state, or URLs in details
         assert "route_id" not in data["details"]
         assert "raw_redirect_url" not in data["details"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["cancel-wakes", "unbind", "unbind-and-cancel"])
+@pytest.mark.parametrize("status_error", ["bridge", "io"])
+async def test_committed_route_control_success_survives_status_read_failure(tmp_path, monkeypatch, action, status_error):
+    app, container, _ = create_test_app_with_jobs(tmp_path)
+    token = container.route_control.issue_control_descriptor("bridge")["control_token"]
+    if action != "unbind":
+        await container.coordinator.arm("cancel me", channel_id="telegram-bridge-g0", delay_seconds=10)
+    reads = []
+    def broken_status(route_id):
+        reads.append(route_id)
+        if status_error == "bridge":
+            raise BridgeError(ErrorCode.INTERNAL_ERROR, "status unavailable")
+        raise OSError("status unavailable")
+    monkeypatch.setattr(container.route_control, "safe_status", broken_status)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app, raise_app_exceptions=False), base_url="https://bridge.example.com") as client:
+        denied = await client.post(f"/mcp/x/route-control/{action}", json={"route_id": "bridge"})
+        assert denied.status_code == 401
+        assert "safe_status" not in denied.json()
+        assert reads == []
+        response = await client.post(f"/mcp/x/route-control/{action}", json={"route_id": "bridge"}, headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert response.json().get("safe_status") is None
+    assert reads == ["bridge"]
+    assert container.route_registry.is_bound(container.route_registry.resolve("bridge")) == (action == "cancel-wakes")
+    assert container.coordinator._pending == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["coordinator_continue", "coordinator_wake_on_jobs", "coordinator_exec_and_wake"])
+@pytest.mark.parametrize("phase", ["pending", "active", "unbind_race"])
+async def test_pending_session_wake_tools_remain_route_fenced(tmp_path, monkeypatch, tool_name, phase):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.tools.registry import build_tool_registry
+
+    _, container, _ = create_test_app_with_jobs(tmp_path)
+    routes = container.route_registry
+    pending = routes.prepare_rollover("bridge")
+    ctx = SimpleNamespace(session=SimpleNamespace(_connection=SimpleNamespace(session_id="successor")))
+    tools = build_tool_registry(container)
+    request = SimpleNamespace(request_id="pending-promotion")
+    await tools.get("coordinator_x_mount").handler(ctx, SimpleNamespace(arguments={"channel_id": pending["channel_id"]}), request)
+    if phase != "pending":
+        routes.record_rollover_candidate("bridge", pending["token"], "https://chatgpt.com/g/g-p-infra/c/new")
+        routes.commit_rollover("bridge", pending["token"])
+    repo = container.projects.repositories.get("project", "repository")
+    arguments = {"project_id": "project", "repository_id": "repository", "message": "done", "delay_seconds": 0, "executable": "/bin/echo", "arguments": ["done"]}
+    if tool_name == "coordinator_wake_on_jobs":
+        job = await container.jobs.start_task(repo, "task", "prepare-job")
+        arguments["job_ids"] = [job.job_id]
+    entered = asyncio.Event()
+    original_start = container.jobs.start_execution
+    async def start(*args, **kwargs):
+        job = await original_start(*args, **kwargs)
+        entered.set()
+        return job
+    monkeypatch.setattr(container.jobs, "start_execution", start)
+    # Observe persisted waiter data at its real storage boundary, including terminal jobs.
+    payloads = []
+    original_save = container.jobs.store.save_terminal_waiter
+    def save(**kwargs):
+        payloads.append(kwargs["payload"])
+        return original_save(**kwargs)
+    monkeypatch.setattr(container.jobs.store, "save_terminal_waiter", save)
+    async def invoke():
+        return await tools.get(tool_name).handler(ctx, SimpleNamespace(arguments=arguments), request)
+    try:
+        if phase == "pending":
+            with pytest.raises(BridgeError):
+                await invoke()
+            assert not entered.is_set()
+        elif phase == "unbind_race":
+            async with routes.route_lock("bridge"):
+                task = asyncio.create_task(invoke())
+                if tool_name == "coordinator_exec_and_wake":
+                    await asyncio.wait_for(entered.wait(), 5)
+                else:
+                    await asyncio.sleep(0)
+                routes.unbind("bridge", expected_generation=1)
+            with pytest.raises(BridgeError, match="unbound"):
+                await task
+        else:
+            await invoke()
+            assert container.coordinator.session_binding("successor")["route_state"] == "active"
+            if tool_name != "coordinator_continue":
+                assert len(payloads) == 1
+                assert payloads[0]["route_id"] == "bridge"
+                assert payloads[0]["generation"] == 1
+                assert payloads[0]["channel_id"] == "telegram-bridge-g1"
+        if phase != "active":
+            assert payloads == []
+            assert container.coordinator._pending == {}
+    finally:
+        await container.jobs.stop()

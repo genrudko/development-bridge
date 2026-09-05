@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import time
+from contextlib import suppress
 from pathlib import PurePosixPath
 
 from mcp.server import Server
@@ -425,7 +426,22 @@ def create_streamable_http_app(
                         route_id, token, body["url"]
                     )
                 elif action == "commit":
+                    if body.get("require_bootstrap_transport") is True and (
+                        container.coordinator_wake_delivery is None
+                        or container.coordinator_wake_delivery.transport is None
+                    ):
+                        raise BridgeError(
+                            ErrorCode.POLICY_VIOLATION,
+                            "Server bootstrap transport is unavailable; active route was not changed",
+                        )
                     result = container.route_registry.commit_rollover(route_id, token)
+                elif action == "bootstrap":
+                    delivery = container.coordinator_wake_delivery
+                    if delivery is None:
+                        container.route_registry.rollover_for_completion(route_id, token)
+                        result = {"state": "bootstrap_waiting", "error": "wake transport unavailable"}
+                    else:
+                        result = await delivery.complete_rollover_bootstrap(route_id, token)
                 elif action == "complete":
                     result = container.route_registry.complete_rollover(route_id, token)
                 elif action == "abort":
@@ -836,7 +852,10 @@ def create_streamable_http_app(
             authorized_route_id = token_rec["route_id"]
             target_route = route_id or token_rec["route_id"]
             res = await service.cancel_wakes(target_route)
-            safe_st = service.safe_status(target_route)
+            safe_st = None
+            # The mutation committed; optional diagnostics cannot undo success.
+            with suppress(Exception):
+                safe_st = service.safe_status(target_route)
             return JSONResponse(
                 {"ok": True, "action": "cancel_wakes", **res, "safe_status": safe_st},
                 status_code=200,
@@ -871,7 +890,10 @@ def create_streamable_http_app(
             authorized_route_id = token_rec["route_id"]
             target_route = route_id or token_rec["route_id"]
             res = await service.unbind(target_route, expected_generation=token_rec["generation"])
-            safe_st = service.safe_status(target_route)
+            safe_st = None
+            # The mutation committed; optional diagnostics cannot undo success.
+            with suppress(Exception):
+                safe_st = service.safe_status(target_route)
             return JSONResponse(
                 {"ok": True, "action": "unbind", **res, "safe_status": safe_st},
                 status_code=200,
@@ -906,7 +928,10 @@ def create_streamable_http_app(
             authorized_route_id = token_rec["route_id"]
             target_route = route_id or token_rec["route_id"]
             res = await service.unbind_and_cancel(target_route, expected_generation=token_rec["generation"])
-            safe_st = service.safe_status(target_route)
+            safe_st = None
+            # The mutation committed; optional diagnostics cannot undo success.
+            with suppress(Exception):
+                safe_st = service.safe_status(target_route)
             return JSONResponse(
                 {"ok": True, "action": "unbind_and_cancel", **res, "safe_status": safe_st},
                 status_code=200,

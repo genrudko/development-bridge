@@ -1004,3 +1004,26 @@ def test_candidate_recording_rejects_malformed_or_cross_origin_targets(tmp_path:
         registry.record_current_bind_candidate("bridge", pending["token"], bad_url)
     assert exc.value.code is ErrorCode.INVALID_ARGUMENT
     assert registry.resolve("bridge")["conversation_id"] == "conv-1"
+
+
+def test_pending_session_promotes_only_exact_active_binding(tmp_path):
+    from app.tools.coordinator import _resolve_destination, _resolve_mount_destination
+
+    container = build_container(BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    }))
+    routes = container.route_registry
+    routes.bootstrap("bridge", "https://chatgpt.com/g/g-p-infra/c/old", "telegram-bridge-g0")
+    pending = routes.prepare_rollover("bridge")
+    ctx = SimpleNamespace(session=SimpleNamespace(_connection=SimpleNamespace(session_id="successor")))
+    _resolve_mount_destination(container, ctx, {"channel_id": pending["channel_id"]})
+    with pytest.raises(BridgeError):
+        _resolve_destination(container, ctx, {})
+    routes.record_rollover_candidate("bridge", pending["token"], "https://chatgpt.com/g/g-p-infra/c/new")
+    routes.commit_rollover("bridge", pending["token"])
+    binding = _resolve_destination(container, ctx, {})
+    assert binding["route_state"] == "active"
+    assert container.coordinator.session_binding("successor")["route_state"] == "active"
+    routes.unbind("bridge", expected_generation=1)
+    with pytest.raises(BridgeError, match="unbound"):
+        _resolve_destination(container, ctx, {})

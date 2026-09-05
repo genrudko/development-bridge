@@ -6,15 +6,15 @@ import base64
 import fcntl
 import json
 import os
-import signal
 import shutil
-from secrets import token_urlsafe
+import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from secrets import token_urlsafe
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -1182,7 +1182,7 @@ class BrowserHost:
         response = requests.post(
             self.cfg.coordinator_local_url + f"rollover/{action}",
             json=body,
-            timeout=5,
+            timeout=300 if action == "bootstrap" else 5,
         )
         response.raise_for_status()
         data = response.json()
@@ -1790,9 +1790,8 @@ class BrowserHost:
 
     def abort_pending_rollover(self, rollover: dict, reason: str) -> dict:
         self.rollover_abort_count += 1
-        try:
-            result = self.rollover_control("abort", rollover, reason=reason[:500])
-        finally:
+        result = self.rollover_control("abort", rollover, reason=reason[:500])
+        if result.get("aborted") is True:
             self.restore_source_after_rollover(rollover["source_url"])
         return result
 
@@ -1922,7 +1921,7 @@ class BrowserHost:
             if not final_validation.get("ok"):
                 raise RuntimeError("successor conversation failed final UI hydration gate")
 
-            committed = self.rollover_control("commit", rollover)
+            committed = self.rollover_control("commit", rollover, require_bootstrap_transport=True)
             self.rollover_count += 1
             return {"state": "committed", "route": committed, "polling_detail": poll_detail}
         except TRANSIENT_CDP_ERRORS as exc:
@@ -1944,26 +1943,11 @@ class BrowserHost:
         record = self.active_rollover_record()
         if record is None or record.get("bootstrap_sent") is True or record.get("state") == "complete":
             return None
-        control = self.wait_for_control_channel(page, self.channel_id, timeout=15)
-        if not control.get("ok") or control.get("channel_id") != self.channel_id:
-            return {"state": "bootstrap_waiting", "error": control.get("error")}
-        message = (
-            f"Automatic physical-chat rollover completed for logical route {self.route_id} "
-            f"generation {self.route_generation}. Before other work, call "
-            f"coordinator_route_context_get with route_id={self.route_id} and use its canonical "
-            "Route Context as the authoritative checkpoint. Then continue NEXT ORDER OF WORK."
-        )
-        bootstrap = self.coordinator_app_control(
-            page,
-            "bootstrap",
-            channel_id=self.channel_id,
-            operation_id=record["token"],
-            message=message,
-        )
-        if not bootstrap.get("ok"):
-            return {"state": "bootstrap_waiting", "error": bootstrap.get("error")}
-        completed = self.rollover_control("complete", record)
-        return {"state": "complete", "rollover": completed, "duplicate": bootstrap.get("duplicate", False)}
+        # Only the server can hold the route mutation lock across physical delivery.
+        try:
+            return self.rollover_control("bootstrap", record)
+        except requests.RequestException:
+            return {"state": "bootstrap_waiting", "error": "server bootstrap unavailable or route changed"}
 
     def refresh_route_target(self) -> bool:
         try:
@@ -1996,7 +1980,7 @@ class BrowserHost:
             data["requested_route"] = requested
             changed_file = True
         route = data["routes"][requested]
-        target = canonical_chat_url(route["url"])
+        target = "about:blank" if route.get("binding_state") == "unbound" else canonical_chat_url(route["url"])
         channel = str(route["channel_id"])
         generation = int(route.get("generation", 0))
         changed = (requested, target, channel, generation) != (self.route_id, self.target_url, self.channel_id, self.route_generation)
@@ -2184,6 +2168,10 @@ class BrowserHost:
                     continue
 
                 route_changed = self.refresh_route_target()
+                if self.target_url == "about:blank":
+                    self.write_state(status="unbound", cdp_ok=True, target_ok=False)
+                    time.sleep(self.cfg.check_interval)
+                    continue
                 if route_changed:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
                     self.last_bridge_turn_id = 0

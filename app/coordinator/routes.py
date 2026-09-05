@@ -624,7 +624,7 @@ class RouteRegistry:
         self._save(data)
         return {**self._normalize_route_record(committed), "route_id": route_id, "default": data.get("default_route") == route_id}
 
-    def complete_rollover(self, route_id: str, token: str) -> dict:
+    def rollover_for_completion(self, route_id: str, token: str) -> dict:
         route_id = self.validate_route_id(route_id)
         data = self._load()
         last = (data.get("last_rollover") or {}).get(route_id)
@@ -634,14 +634,31 @@ class RouteRegistry:
             or last.get("token") != token
             or last.get("state") not in {"committed", "complete"}
             or route is None
+            or not self.is_bound(route)
             or int(route.get("generation", -1)) != int(last.get("target_generation", -2))
+            or route.get("channel_id") != last.get("channel_id")
+            or route.get("url") != last.get("candidate_url")
+            or route.get("conversation_id") != last.get("candidate_conversation_id")
         ):
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "committed rollover token is invalid or stale")
+        return {**last, "route_id": route_id}
+
+    def record_rollover_bootstrap_delivery(self, route_id: str, token: str, state: str) -> None:
+        last = self.rollover_for_completion(route_id, token)
+        data = self._load()
+        last["bootstrap_delivery_state"] = state
+        data.setdefault("last_rollover", {})[route_id] = last
+        self._save(data)
+
+    def complete_rollover(self, route_id: str, token: str) -> dict:
+        last = self.rollover_for_completion(route_id, token)
+        data = self._load()
         last.update({
             "state": "complete",
             "bootstrap_sent": True,
             "bootstrap_sent_at": datetime.now(UTC).isoformat(),
         })
+        data.setdefault("last_rollover", {})[route_id] = last
         self._save(data)
         return {**last, "route_id": route_id}
 

@@ -1060,3 +1060,96 @@ async def test_resolve_destination_rejects_unbound_routes(tmp_path):
         res2 = await session.call_tool("coordinator_continue", {"route_id": "bridge", "message": "hello"})
         assert res2.is_error is True
         assert "unbound" in res2.content[0].text.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unbind_first", [True, False])
+async def test_rollover_bootstrap_delivery_serializes_with_unbind(tmp_path, unbind_first):
+    import asyncio
+    from dataclasses import replace
+
+    from app.coordinator.wake_delivery import CoordinatorWakeDeliveryService
+    from app.coordinator.wake_transport import WakeDeliveryResult, WakeProbeResult
+
+    settings = BridgeSettings.model_validate({"coordinator": {"route_registry_path": tmp_path / "routes.json"}})
+    container = build_container(settings)
+    routes = container.route_registry
+    routes.bootstrap("bridge", "https://chatgpt.com/g/g-p-infra/c/old", "telegram-bridge-g0")
+    pending = routes.prepare_rollover("bridge")
+    routes.record_rollover_candidate("bridge", pending["token"], "https://chatgpt.com/g/g-p-infra/c/new")
+    routes.commit_rollover("bridge", pending["token"])
+    entered, release = asyncio.Event(), asyncio.Event()
+    sent = []
+    class Transport:
+        name = "test"
+        async def probe(self, target):
+            entered.set()
+            await release.wait()
+            return WakeProbeResult(ready=True)
+        async def deliver(self, request):
+            sent.append(request)
+            return WakeDeliveryResult(disposition="delivered")
+    delivery = CoordinatorWakeDeliveryService(container.coordinator, routes, transport=Transport(), enabled=True)
+    container = replace(container, coordinator_wake_delivery=delivery)
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://test") as client:
+        async def bootstrap():
+            return await client.post("/mcp/x/coordinator/rollover/bootstrap", json={"route_id": "bridge", "token": pending["token"]})
+        if unbind_first:
+            async with routes.route_lock("bridge"):
+                task = asyncio.create_task(bootstrap())
+                await asyncio.sleep(0)
+                routes.unbind("bridge", expected_generation=1)
+            response = await task
+            assert response.status_code in {400, 409}
+            assert sent == []
+            assert routes._load()["last_rollover"]["bridge"]["bootstrap_sent"] is False
+        else:
+            task = asyncio.create_task(bootstrap())
+            # A bounded event wait also reports an unsupported endpoint without hanging.
+            probe = asyncio.create_task(entered.wait())
+            done, _ = await asyncio.wait({task, probe}, return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                probe.cancel()
+                response = await task
+                assert response.status_code == 200, response.text
+            async def unbind():
+                async with routes.route_lock("bridge"):
+                    routes.unbind("bridge", expected_generation=1)
+            mutation = asyncio.create_task(unbind())
+            await asyncio.sleep(0)
+            blocked = not mutation.done()
+            release.set()
+            response = await task
+            await mutation
+            await probe
+            assert blocked
+            assert response.status_code == 200
+            assert response.json()["state"] == "complete"
+            assert len(sent) == 1
+            assert "coordinator_route_context_get" in sent[0].prompt
+            assert pending["token"] not in sent[0].prompt
+            assert pending["token"] not in sent[0].continuation_id
+            assert sent[0].target.channel_id == "telegram-bridge-g1"
+            assert routes._load()["last_rollover"]["bridge"]["bootstrap_sent"] is True
+
+
+@pytest.mark.asyncio
+async def test_browser_host_commit_requires_server_bootstrap_transport_before_mutation(tmp_path):
+    settings = BridgeSettings.model_validate({"coordinator": {"route_registry_path": tmp_path / "routes.json"}})
+    container = build_container(settings)
+    routes = container.route_registry
+    routes.bootstrap("bridge", "https://chatgpt.com/g/g-p-infra/c/old", "telegram-bridge-g0")
+    pending = routes.prepare_rollover("bridge")
+    routes.record_rollover_candidate("bridge", pending["token"], "https://chatgpt.com/g/g-p-infra/c/new")
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/mcp/x/coordinator/rollover/commit", json={
+            "route_id": "bridge", "token": pending["token"], "require_bootstrap_transport": True,
+        })
+        assert response.status_code == 409
+        assert routes.resolve("bridge")["generation"] == 0
+        assert routes.resolve("bridge")["conversation_id"] == "old"
+        aborted = await client.post("/mcp/x/coordinator/rollover/abort", json={"route_id": "bridge", "token": pending["token"]})
+        assert aborted.json()["aborted"] is True
+        assert routes.pending_rollover("bridge") is None

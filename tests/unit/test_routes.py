@@ -206,3 +206,25 @@ async def test_route_registry_route_lock_reentrancy_and_exclusion(tmp_path: Path
     await t1
     await t2
     assert acquired_task2
+
+
+@pytest.mark.parametrize("change", ["unbind", "channel", "url", "abort", "generation"])
+def test_rollover_completion_rejects_invalid_successor(tmp_path, change):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap("ad5x", "https://chatgpt.com/g/g-p-ad5x/c/old", "telegram-ad5x-g0")
+    pending = registry.prepare_rollover("ad5x")
+    registry.record_rollover_candidate("ad5x", pending["token"], "https://chatgpt.com/g/g-p-ad5x/c/new")
+    registry.commit_rollover("ad5x", pending["token"])
+    if change == "unbind":
+        registry.unbind("ad5x", expected_generation=1)
+    else:
+        data = registry._load()
+        if change == "abort":
+            data["last_rollover"]["ad5x"]["state"] = "aborted"
+        else:
+            field, value = {"channel": ("channel_id", "wrong"), "url": ("url", "https://chatgpt.com/g/g-p-ad5x/c/wrong"), "generation": ("generation", 2)}[change]
+            data["routes"]["ad5x"][field] = value
+        registry._save(data)
+    with pytest.raises(BridgeError, match="invalid or stale"):
+        registry.complete_rollover("ad5x", pending["token"])
+    assert registry._load()["last_rollover"]["ad5x"]["bootstrap_sent"] is False

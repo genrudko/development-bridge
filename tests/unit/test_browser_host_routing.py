@@ -636,6 +636,7 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
     result = host.process_pending_rollover()
     assert result["state"] == "committed"
     assert [item[0] for item in calls] == ["candidate", "commit"]
+    assert calls[-1][1]["require_bootstrap_transport"] is True
     assert host.rollover_count == 1
 
 
@@ -817,24 +818,14 @@ def test_browser_host_completes_durable_rollover_bootstrap(tmp_path: Path):
         "candidate_url": host.target_url,
     }
     host.active_rollover_record = lambda: dict(record)
-    host.wait_for_control_channel = lambda page, channel_id, timeout=15: {
-        "ok": True, "channel_id": channel_id
-    }
-    sent = []
-    def app_control(page, action, **payload):
-        sent.append((action, payload))
-        return {"ok": True, "channel_id": payload.get("channel_id")}
-    host.coordinator_app_control = app_control
     completed = []
     host.rollover_control = lambda action, current, **payload: completed.append(action) or {
-        **current, "state": "complete", "bootstrap_sent": True
+        "state": "complete", "rollover": {**current, "bootstrap_sent": True}
     }
     result = host.complete_rollover_bootstrap({"id": "candidate"})
     assert result["state"] == "complete"
-    assert sent[0][0] == "bootstrap"
-    assert sent[0][1]["operation_id"] == "roll_durable_token"
-    assert "coordinator_route_context_get" in sent[0][1]["message"]
-    assert completed == ["complete"]
+    assert result["rollover"]["bootstrap_sent"] is True
+    assert completed == ["bootstrap"]
 
 
 def test_browser_host_candidate_validator_requires_stable_hydrated_chat(tmp_path: Path):
@@ -1652,3 +1643,84 @@ def test_browser_host_preflight_fails_closed_when_hidden_app_cannot_be_observer(
     assert result["error"] == "browser_host_observer_binding_failed"
     assert authorized == []
     assert closed == ["page-fresh"]
+
+
+def test_browser_host_refresh_unbound_route_parks_until_rebound(tmp_path):
+    from app.coordinator.routes import RouteRegistry
+
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.refresh_route_target()
+    registry = RouteRegistry(host.cfg.route_registry)
+    registry.unbind("ad5x", expected_generation=0)
+    assert host.refresh_route_target() is True
+    assert host.target_url == "about:blank"
+    assert host.refresh_route_target() is False
+    registry.takeover("ad5x", "https://chatgpt.com/g/g-p-ad5x/c/rebound")
+    assert host.refresh_route_target() is True
+    assert host.target_url == "https://chatgpt.com/g/g-p-ad5x/c/rebound"
+
+
+def test_browser_host_loop_does_no_browser_work_while_unbound(tmp_path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.target_url = "about:blank"
+    host.chrome = host.xvfb = types.SimpleNamespace(poll=lambda: None)
+    for name in ("ensure_debug_port_free", "start_xvfb", "start_chrome", "wait_cdp"):
+        setattr(host, name, lambda: None)
+    host.refresh_route_target = lambda: False
+    host.process_pending_rollover = lambda: pytest.fail("unbound loop attempted rollover")
+    states = []
+    host.write_state = lambda **state: states.append(state)
+    monkeypatch.setattr(module.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(module, "terminate", lambda *args: None)
+    monkeypatch.setattr(module.time, "sleep", lambda _: setattr(host, "stop", True))
+    assert host.run() == 0
+    assert any(state["status"] == "unbound" for state in states)
+
+
+def test_browser_host_bootstrap_uses_server_delivery_instead_of_unfenced_browser_send(tmp_path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    record = {"token": "private-token", "state": "committed", "bootstrap_sent": False}
+    host.active_rollover_record = lambda: record
+    host.wait_for_control_channel = lambda *args, **kwargs: {"ok": True, "channel_id": host.channel_id}
+    sent = []
+    host.coordinator_app_control = lambda *args, **kwargs: sent.append(kwargs) or {"ok": True}
+    actions = []
+    host.rollover_control = lambda action, current, **kwargs: actions.append(action) or {"state": "bootstrap_waiting"}
+    result = host.complete_rollover_bootstrap({})
+    assert sent == [], "bootstrap must be sent inside the server route lock"
+    assert actions == ["bootstrap"]
+    assert result["state"] == "bootstrap_waiting"
+
+
+def test_browser_host_bootstrap_rejection_waits_for_next_route_refresh(tmp_path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.active_rollover_record = lambda: {"token": "private-token", "state": "committed"}
+    def rejected(*args, **kwargs):
+        raise module.requests.RequestException("route changed")
+    host.rollover_control = rejected
+    result = host.complete_rollover_bootstrap({})
+    assert result["state"] == "bootstrap_waiting"
+
+
+@pytest.mark.parametrize("outcome", ["already_committed", "unknown"])
+def test_browser_host_does_not_restore_source_after_unconfirmed_abort(tmp_path, outcome):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    restored = []
+    host.restore_source_after_rollover = restored.append
+    def abort(*args, **kwargs):
+        if outcome == "unknown":
+            raise module.requests.RequestException("lost response")
+        return {"aborted": False}
+    host.rollover_control = abort
+    record = {"token": "private-token", "source_url": host.target_url}
+    if outcome == "unknown":
+        with pytest.raises(module.requests.RequestException):
+            host.abort_pending_rollover(record, "commit response lost")
+    else:
+        assert host.abort_pending_rollover(record, "commit response lost")["aborted"] is False
+    assert restored == []

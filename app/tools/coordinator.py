@@ -7,7 +7,6 @@ from mcp import types
 from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
-
 from app.api.schemas import IDENTIFIER_SCHEMA
 from app.container import ApplicationContainer
 from app.coordinator.context import (
@@ -140,6 +139,10 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
                 "This physical chat channel is stale for the bound logical route",
                 retryable=True,
             )
+        if binding.get("route_state") == "pending":
+            if bound_generation is None:
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, "Pending route session has no generation")
+            return _bind_session(container, ctx, _route_binding(container, route))
     return dict(binding)
 
 
@@ -423,7 +426,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
         destination = _resolve_destination(container, ctx, arguments)
-        route_id = destination.get("route_id") if destination.get("route_state") != "pending" else None
+        route_id = destination.get("route_id")
         if route_id is not None:
             route_id_str = str(route_id)
             async with container.route_registry.route_lock(route_id_str):
@@ -475,7 +478,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         repository = container.projects.repositories.get(
             arguments["project_id"], arguments["repository_id"]
         )
-        route_id = destination.get("route_id") if destination.get("route_state") != "pending" else None
+        route_id = destination.get("route_id")
         if route_id is not None:
             route_id_str = str(route_id)
             async with container.route_registry.route_lock(route_id_str):
@@ -540,7 +543,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             artifacts=arguments.get("artifacts", []), stdin=arguments.get("stdin"),
             idempotency_key=arguments.get("idempotency_key"),
         )
-        route_id = destination.get("route_id") if destination.get("route_state") != "pending" else None
+        route_id = destination.get("route_id")
         if route_id is not None:
             route_id_str = str(route_id)
             async with container.route_registry.route_lock(route_id_str):

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -11,12 +10,10 @@ from app.coordinator.routes import RouteRegistry
 from app.coordinator.service import CoordinatorService
 from app.coordinator.wake_delivery import CoordinatorWakeDeliveryService
 from app.coordinator.wake_transport import (
-    WakeDeliveryDisposition,
     WakeDeliveryRequest,
     WakeDeliveryResult,
     WakeProbeResult,
     WakeTarget,
-    WakeTransport,
 )
 
 
@@ -600,3 +597,72 @@ async def test_observed_model_turn_completes_direct_continuation_without_waiting
 
     status = await coordinator.status("coordinator", delivery_mode="direct")
     assert status == {"channel_id": "coordinator", "state": "idle", "ready": False}
+
+
+@pytest.mark.asyncio
+async def test_direct_delivery_revalidates_snapshot_after_route_lock(coordinator, route_registry):
+    await coordinator.arm_resilient("done", channel_id="coordinator")
+    transport = MockWakeTransport()
+    service = CoordinatorWakeDeliveryService(coordinator, route_registry, transport=transport, enabled=True)
+    async with route_registry.route_lock("main"):
+        task = asyncio.create_task(service.run_once())
+        await asyncio.sleep(0)
+        route_registry.unbind("main", expected_generation=0)
+    await task
+    assert transport.deliver_calls == []
+    assert transport.probe_calls == []
+
+
+@pytest.mark.asyncio
+async def test_direct_delivery_holds_route_lock_through_probe_and_send(coordinator, route_registry):
+    await coordinator.arm_resilient("done", channel_id="coordinator")
+    entered, release = asyncio.Event(), asyncio.Event()
+    transport = MockWakeTransport()
+    original_probe = transport.probe
+    async def probe(target):
+        entered.set()
+        await release.wait()
+        return await original_probe(target)
+    transport.probe = probe
+    service = CoordinatorWakeDeliveryService(coordinator, route_registry, transport=transport, enabled=True)
+    delivery = asyncio.create_task(service.run_once())
+    await entered.wait()
+    async def unbind():
+        async with route_registry.route_lock("main"):
+            route_registry.unbind("main", expected_generation=0)
+    mutation = asyncio.create_task(unbind())
+    await asyncio.sleep(0)
+    blocked = not mutation.done()
+    release.set()
+    await asyncio.gather(delivery, mutation)
+    assert blocked, "unbind committed while direct delivery was probing"
+    assert len(transport.deliver_calls) == 1
+    assert not route_registry.is_bound(route_registry.resolve("main"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["not_submitted", "uncertain", "owner_input_required", "exception"])
+async def test_rollover_bootstrap_retries_only_proven_not_submitted(coordinator, route_registry, disposition):
+    pending = route_registry.prepare_rollover("main")
+    route_registry.record_rollover_candidate("main", pending["token"], "https://chatgpt.com/g/g-p-test-proj/c/successor")
+    route_registry.commit_rollover("main", pending["token"])
+    transport = MockWakeTransport()
+    if disposition == "exception":
+        transport.deliver_exception = RuntimeError("lost response")
+    else:
+        transport.deliver_results = [WakeDeliveryResult(disposition=disposition)]
+    service = CoordinatorWakeDeliveryService(coordinator, route_registry, transport=transport, enabled=True)
+    result = await service.complete_rollover_bootstrap("main", pending["token"])
+    assert result["state"] == "bootstrap_waiting"
+    assert route_registry.snapshot()["last_rollover"]["main"]["bootstrap_sent"] is False
+    transport.deliver_exception = None
+    result = await service.complete_rollover_bootstrap("main", pending["token"])
+    if disposition == "not_submitted":
+        assert result["state"] == "complete"
+        assert len(transport.deliver_calls) == 2
+        duplicate = await service.complete_rollover_bootstrap("main", pending["token"])
+        assert duplicate["duplicate"] is True
+        assert len(transport.deliver_calls) == 2
+    else:
+        assert result["state"] == "bootstrap_waiting"
+        assert len(transport.deliver_calls) == 1
