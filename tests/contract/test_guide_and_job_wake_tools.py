@@ -146,8 +146,14 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
         assert container.jobs._store.start(job.job_id)
         await container.jobs._finish_job(job.job_id, JobStatus.SUCCEEDED)
         registry = build_tool_registry(container)
+        mounted = await registry.get("coordinator_x_mount").handler(
+            _mcp_ctx("mount-session"),
+            SimpleNamespace(arguments={"channel_id": "coordinator"}),
+            SimpleNamespace(request_id="mount-request"),
+        )
+        mounted_lease = mounted.structured_content["delivery_lease"]
         wake_result = await registry.get("coordinator_wake_on_jobs").handler(
-            None,
+            _mcp_ctx("wake-session"),
             SimpleNamespace(arguments={
                 "project_id": "project",
                 "repository_id": "repository",
@@ -157,11 +163,9 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
             SimpleNamespace(request_id="wake-request"),
         )
         assert not (wake_result.meta or {}).get("openai/outputTemplate")
-        assert wake_result.structured_content["channel_id"] == "coordinator"
-        assert wake_result.structured_content["trigger_url"].endswith("/mcp/x/coordinator/")
-        assert isinstance(wake_result.structured_content["delivery_lease"], str)
-        assert len(wake_result.structured_content["delivery_lease"]) >= 10
-        status = await container.coordinator.status()
+        assert wake_result.structured_content is None
+        assert container.coordinator.delivery_lease("coordinator")["lease_id"] == mounted_lease
+        status = await container.coordinator.status(delivery_lease=mounted_lease)
         assert status["state"] == "browser_preflight"
         authorized = await container.coordinator.authorize_browser_preflight(
             "coordinator", status["continuation_id"]
@@ -170,7 +174,7 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
         # Preflight authorization publishes the wake through a scheduled transition.
         # Yield once so claim observes the newly authorized continuation deterministically.
         await asyncio.sleep(0)
-        return await container.coordinator.claim()
+        return await container.coordinator.claim(delivery_lease=mounted_lease)
 
     claim = asyncio.run(scenario())
     assert claim["claimed"] is True
@@ -208,6 +212,8 @@ def test_coordinator_exec_and_wake_queues_job_and_durable_waiter(tmp_path):
         "channel_id": "coordinator", "message": "done",
     }), SimpleNamespace(request_id="atomic-request")))
     assert not (result.meta or {}).get("openai/outputTemplate")
+    assert result.structured_content is None
+    assert container.coordinator.delivery_lease("coordinator") is None
     data = json.loads(result.content[0].text)["data"]
     assert data["job_id"].startswith("job_")
     assert data["state"] == "waiting" and data["durable"] is True
@@ -222,7 +228,7 @@ def _mcp_ctx(session_id: str):
     )
 
 
-def test_exec_and_wake_self_mount_requests_active_route_and_owns_lease(tmp_path):
+def test_exec_and_wake_preserves_persistent_mount_lease_across_tool_sessions(tmp_path):
     repository_path = create_git_repository(tmp_path, "repository")
     settings = BridgeSettings.model_validate({
         "server": {"public_base_url": "https://bridge.example"},
@@ -238,12 +244,15 @@ def test_exec_and_wake_self_mount_requests_active_route_and_owns_lease(tmp_path)
         "ad5x", "https://chatgpt.com/c/00000000-0000-0000-0000-000000000101",
         "telegram-ad5x-g0", "AD5X",
     )
-    container.route_registry.bootstrap(
-        "bridge-dev", "https://chatgpt.com/c/00000000-0000-0000-0000-000000000102",
-        "telegram-bridge-g0", "Bridge Dev",
-    )
-    container.route_registry.request("bridge-dev")
-    tool = build_tool_registry(container).get("coordinator_exec_and_wake")
+    registry = build_tool_registry(container)
+    mounted = asyncio.run(registry.get("coordinator_x_mount").handler(
+        _mcp_ctx("mount-session"),
+        SimpleNamespace(arguments={"route_id": "ad5x"}),
+        SimpleNamespace(request_id="req-mount"),
+    ))
+    mounted_lease = mounted.structured_content["delivery_lease"]
+    before = dict(container.coordinator.delivery_lease("telegram-ad5x-g0"))
+    tool = registry.get("coordinator_exec_and_wake")
 
     def call(session_id: str, marker: str):
         return asyncio.run(tool.handler(
@@ -256,20 +265,13 @@ def test_exec_and_wake_self_mount_requests_active_route_and_owns_lease(tmp_path)
             SimpleNamespace(request_id=f"req-{marker}"),
         ))
 
-    first = call("session-a", "one")
-    first_sc = first.structured_content
-    assert first_sc["channel_id"] == "telegram-ad5x-g0"
-    assert first_sc["trigger_url"] == "https://bridge.example/mcp/x/coordinator/"
-    assert isinstance(first_sc["delivery_lease"], str) and len(first_sc["delivery_lease"]) >= 10
-    assert first_sc["route_id"] == "ad5x"
-    assert first_sc["generation"] == 0
-    assert first_sc["route_state"] == "active"
-    assert container.route_registry.snapshot()["requested_route"] == "ad5x"
+    for session_id, marker in (("session-a", "one"), ("session-b", "two")):
+        result = call(session_id, marker)
+        assert result.structured_content is None
+        assert container.coordinator.delivery_lease("telegram-ad5x-g0") == before
+        assert container.coordinator.delivery_lease("telegram-ad5x-g0")["lease_id"] == mounted_lease
 
-    same_session = call("session-a", "two")
-    assert same_session.structured_content["delivery_lease"] == first_sc["delivery_lease"]
-    other_session = call("session-b", "three")
-    assert other_session.structured_content["delivery_lease"] != first_sc["delivery_lease"]
+    assert container.route_registry.snapshot()["requested_route"] == "ad5x"
 
 
 def test_exec_and_wake_rejects_pending_rollover_channel(tmp_path):

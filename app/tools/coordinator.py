@@ -175,36 +175,6 @@ def _resolve_mount_destination(container: ApplicationContainer, ctx, arguments: 
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
 
-    def attach_coordinator_delivery(result, ctx, binding: dict):
-        channel_id = str(binding["channel_id"])
-        if binding.get("route_id") is not None and binding.get("route_state") == "active":
-            container.route_registry.request(str(binding["route_id"]))
-        delivery = container.coordinator.issue_delivery_lease(
-            channel_id,
-            session_id=_session_id(ctx),
-            route_id=(str(binding["route_id"]) if binding.get("route_id") is not None else None),
-            generation=(int(binding["generation"]) if binding.get("generation") is not None else None),
-        )
-        trigger_path = container.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
-        public_base = container.settings.server.public_base_url
-        trigger_url = (
-            str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
-        )
-        result.structured_content = {
-            "channel_id": channel_id,
-            "trigger_url": trigger_url,
-            "delivery_lease": delivery["lease_id"],
-            **(
-                {
-                    "route_id": binding["route_id"],
-                    "generation": binding.get("generation"),
-                    "route_state": binding.get("route_state"),
-                }
-                if binding.get("route_id") is not None
-                else {}
-            ),
-        }
-        return result
     async def mount(ctx, params, request_context):
         arguments = params.arguments or {}
         requested_channel = arguments.get("channel_id")
@@ -517,7 +487,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             )
             data["channel_id"] = channel_id
         result = to_mcp_result(success(request_context.request_id, data))
-        return attach_coordinator_delivery(result, ctx, destination)
+        return result
 
     async def exec_and_wake(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -577,7 +547,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 raise
             response = {**job.status_dict(), **waiter, "channel_id": channel_id}
         result = to_mcp_result(success(request_context.request_id, response))
-        return attach_coordinator_delivery(result, ctx, destination)
+        return result
 
 
 
