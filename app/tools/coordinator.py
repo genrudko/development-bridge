@@ -184,19 +184,15 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             return to_mcp_result(success(request_context.request_id, data))
         destination = _resolve_mount_destination(container, ctx, arguments, bind=False)
         channel_id = str(destination["channel_id"])
+        delivery = container.coordinator.issue_delivery_lease(
+            channel_id,
+            session_id=_session_id(ctx),
+            route_id=(str(destination["route_id"]) if destination.get("route_id") is not None else None),
+            generation=(int(destination["generation"]) if destination.get("generation") is not None else None),
+        )
+        binding = _bind_session(container, ctx, destination)
         if destination.get("route_id") is not None and destination.get("route_state") == "active":
             container.route_registry.request(str(destination["route_id"]))
-        try:
-            delivery = container.coordinator.issue_delivery_lease(
-                channel_id,
-                session_id=_session_id(ctx),
-                route_id=(str(destination["route_id"]) if destination.get("route_id") is not None else None),
-                generation=(int(destination["generation"]) if destination.get("generation") is not None else None),
-            )
-        except Exception:
-            container.coordinator.unbind_session(_session_id(ctx))
-            raise
-        binding = _bind_session(container, ctx, destination)
         result = to_mcp_result(
             success(
                 request_context.request_id,

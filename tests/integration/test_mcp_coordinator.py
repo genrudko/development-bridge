@@ -720,6 +720,80 @@ async def test_exclusive_route_endpoint_ownership_rejects_second_session_and_pre
 
 
 @pytest.mark.asyncio
+async def test_competing_mount_failure_preserves_caller_binding_and_requested_route(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "server": {"tool_surface": "compact"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "ad5x",
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000061",
+        "telegram-ad5x-g0",
+        "AD5X",
+    )
+    container.route_registry.bootstrap(
+        "eod",
+        "https://chatgpt.com/c/00000000-0000-0000-0000-000000000062",
+        "telegram-eod-g0",
+        "EOD",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams_a,
+        ClientSession(*streams_a) as session_a,
+    ):
+        await session_a.initialize()
+        mount_a = await session_a.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
+        assert mount_a.is_error is False
+        lease_a = mount_a.structured_content["delivery_lease"]
+        assert lease_a is not None
+
+        # 2. Session B mounts route eod successfully (establishes valid eod binding)
+        async with (
+            streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams_b,
+            ClientSession(*streams_b) as session_b,
+        ):
+            await session_b.initialize()
+            mount_b = await session_b.call_tool("coordinator_x_mount", {"route_id": "eod"})
+            assert mount_b.is_error is False
+            lease_b = mount_b.structured_content["delivery_lease"]
+            assert lease_b is not None
+
+            requested_before = container.route_registry.snapshot()["requested_route"]
+            assert requested_before == "eod"
+
+            # 3. Session B attempts to mount busy ad5x and gets POLICY_VIOLATION
+            competing_mount = await session_b.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
+            assert competing_mount.is_error is True
+            error_payload = json.loads(competing_mount.content[0].text)
+            assert error_payload["error"]["code"] == "POLICY_VIOLATION"
+
+            # Invariant: requested route must remain unchanged
+            assert container.route_registry.snapshot()["requested_route"] == requested_before
+
+            # Invariant: existing lease owner remains unchanged
+            lease_record = container.coordinator.delivery_lease("telegram-ad5x-g0")
+            assert lease_record is not None
+            assert lease_record["lease_id"] == lease_a
+
+            # Invariant: session B's no-destination coordinator_continue must still resolve to eod
+            continue_result = await session_b.call_tool(
+                "bridge_call",
+                {
+                    "tool_name": "coordinator_continue",
+                    "arguments": {"message": "session b continuation"},
+                },
+            )
+            assert continue_result.is_error is False
+            continue_payload = json.loads(continue_result.content[0].text)
+            assert continue_payload["ok"] is True
+            assert continue_payload["data"]["channel_id"] == "telegram-eod-g0"
+
+
+@pytest.mark.asyncio
 async def test_legacy_current_chat_discovery_endpoint_is_removed(tmp_path):
     settings = BridgeSettings.model_validate({
         "coordinator": {"route_registry_path": tmp_path / "routes.json"},
