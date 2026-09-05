@@ -529,3 +529,300 @@ def test_falsify_attribute_owner_empty_id_or_whitespace_fails_closed():
         })
     assert exc_ws.value.code == ErrorCode.INVALID_ARGUMENT
     assert "lacks stable owner_id" in exc_ws.value.message
+
+    # Face and edge empty owner_id
+    for owner_t in ("face", "edge", "sketch_curve", "sketch_point"):
+        with pytest.raises(FusionCadError) as exc_owner:
+            compute_model_fingerprint({
+                "document_ref": "doc_1",
+                "attributes": [{"owner_type": owner_t, "owner_id": " ", "group": "bridge.cad/v1", "name": "tag", "value": "v"}],
+            })
+        assert exc_owner.value.code == ErrorCode.INVALID_ARGUMENT
+
+
+def test_falsify_attribute_relocation_across_all_eleven_mutation_sensitive_owners():
+    """Proves relocating identical attributes across all 11 owners produces distinct fingerprints."""
+    owners = [
+        ("document", "doc_1"),
+        ("component", "comp_root"),
+        ("occurrence", "root:occ_1"),
+        ("body", "comp_root:Body1"),
+        ("face", "comp_root:Body1:face_0"),
+        ("edge", "comp_root:Body1:edge_0"),
+        ("sketch", "comp_root:Sketch1"),
+        ("sketch_curve", "comp_root:Sketch1:curve_0"),
+        ("sketch_point", "comp_root:Sketch1:point_0"),
+        ("timeline", "feat_extrude_1"),
+        ("feature", "feat_extrude_1"),
+    ]
+    fingerprints = set()
+
+    for owner_type, owner_id in owners:
+        payload = {
+            "document_ref": "doc_1",
+            "attributes": [
+                {
+                    "owner_type": owner_type,
+                    "owner_id": owner_id,
+                    "group": "bridge.cad/v1",
+                    "name": "status",
+                    "value": "locked",
+                }
+            ],
+        }
+        fp = compute_model_fingerprint(payload)
+        fingerprints.add(fp)
+
+    assert len(fingerprints) == len(owners), f"Expected 11 distinct fingerprints for 11 owner types, got {len(fingerprints)}"
+
+
+def test_falsify_face_and_edge_internal_geometry_changes_preserve_coarse_aggregates():
+    """Proves altering face centroids, surface types, or edge lengths/curves alters fingerprint even when counts/volume/area/bbox are unchanged."""
+    base_body = {
+        "document_ref": "doc_1",
+        "bodies": [
+            {
+                "name": "Body1",
+                "component": "Root",
+                "is_solid": True,
+                "is_visible": True,
+                "volume": 1000.0,
+                "area": 600.0,
+                "faces_count": 2,
+                "edges_count": 2,
+                "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+                "faces": [
+                    {"centroid": [5.0, 5.0, 0.0], "area": 300.0, "surface_type": "PlaneSurface"},
+                    {"centroid": [5.0, 5.0, 10.0], "area": 300.0, "surface_type": "PlaneSurface"},
+                ],
+                "edges": [
+                    {"length": 10.0, "curve_type": "Line3D"},
+                    {"length": 10.0, "curve_type": "Line3D"},
+                ],
+            }
+        ],
+    }
+    fp_base = compute_model_fingerprint(base_body)
+
+    # 1. Face centroid shift while volume, area, bbox, counts remain identical
+    shifted_faces = {
+        "document_ref": "doc_1",
+        "bodies": [
+            {
+                "name": "Body1",
+                "component": "Root",
+                "is_solid": True,
+                "is_visible": True,
+                "volume": 1000.0,
+                "area": 600.0,
+                "faces_count": 2,
+                "edges_count": 2,
+                "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+                "faces": [
+                    {"centroid": [4.0, 5.0, 0.0], "area": 300.0, "surface_type": "PlaneSurface"},
+                    {"centroid": [6.0, 5.0, 10.0], "area": 300.0, "surface_type": "PlaneSurface"},
+                ],
+                "edges": [
+                    {"length": 10.0, "curve_type": "Line3D"},
+                    {"length": 10.0, "curve_type": "Line3D"},
+                ],
+            }
+        ],
+    }
+    assert compute_model_fingerprint(shifted_faces) != fp_base
+
+    # 2. Surface type change while volume, area, bbox, counts remain identical
+    surface_type_change = {
+        "document_ref": "doc_1",
+        "bodies": [
+            {
+                "name": "Body1",
+                "component": "Root",
+                "is_solid": True,
+                "is_visible": True,
+                "volume": 1000.0,
+                "area": 600.0,
+                "faces_count": 2,
+                "edges_count": 2,
+                "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+                "faces": [
+                    {"centroid": [5.0, 5.0, 0.0], "area": 300.0, "surface_type": "CylinderSurface"},
+                    {"centroid": [5.0, 5.0, 10.0], "area": 300.0, "surface_type": "PlaneSurface"},
+                ],
+                "edges": [
+                    {"length": 10.0, "curve_type": "Line3D"},
+                    {"length": 10.0, "curve_type": "Line3D"},
+                ],
+            }
+        ],
+    }
+    assert compute_model_fingerprint(surface_type_change) != fp_base
+
+    # 3. Edge curve type change while volume, area, bbox, counts remain identical
+    edge_type_change = {
+        "document_ref": "doc_1",
+        "bodies": [
+            {
+                "name": "Body1",
+                "component": "Root",
+                "is_solid": True,
+                "is_visible": True,
+                "volume": 1000.0,
+                "area": 600.0,
+                "faces_count": 2,
+                "edges_count": 2,
+                "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+                "faces": [
+                    {"centroid": [5.0, 5.0, 0.0], "area": 300.0, "surface_type": "PlaneSurface"},
+                    {"centroid": [5.0, 5.0, 10.0], "area": 300.0, "surface_type": "PlaneSurface"},
+                ],
+                "edges": [
+                    {"length": 10.0, "curve_type": "Circle3D"},
+                    {"length": 10.0, "curve_type": "Line3D"},
+                ],
+            }
+        ],
+    }
+    assert compute_model_fingerprint(edge_type_change) != fp_base
+
+
+def test_falsify_mock_model_state_rejected_by_rendered_production_script():
+    """Proves common.py.txt does not recognize mock_model_state and fails closed without active Fusion context."""
+    from app.fusion_cad.scripts import FusionCadScriptBundle
+    bundle = FusionCadScriptBundle()
+    script = bundle.build("read", {
+        "operation": "model_snapshot",
+        "mock_model_state": {
+            "document": {"document_ref": "doc_forged"},
+            "bodies": [],
+        },
+    })
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<rendered-test-script>", "exec"), scope)  # noqa: S102
+    out = scope["_output"]
+    # Because mock_model_state is removed from common.py.txt, it MUST NOT return synthetic doc_forged!
+    # Instead it attempts real Application.get() and fails with NO_ACTIVE_DESIGN or FUSION_API_ERROR
+    assert out["status"] == "failed"
+    assert out["error"]["code"] in ("NO_ACTIVE_DESIGN", "FUSION_API_ERROR")
+    assert out.get("data", {}).get("document_ref") != "doc_forged"
+
+
+def test_falsify_face_edge_and_sketch_topology_and_parameter_signatures():
+    """Proves that face/edge/sketch curve topology and parameters distinguish states preserving coarse aggregates."""
+    import json
+
+    base_state = {
+        "document_ref": "doc_1",
+        "bodies": [
+            {
+                "name": "Body1",
+                "component": "Root",
+                "is_solid": True,
+                "is_visible": True,
+                "volume": 1000.0,
+                "area": 600.0,
+                "faces_count": 1,
+                "edges_count": 1,
+                "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+                "faces": [
+                    {
+                        "centroid": [5.0, 5.0, 0.0],
+                        "area": 300.0,
+                        "surface_type": "PlaneSurface",
+                        "normal": [0.0, 0.0, 1.0],
+                        "loops_count": 1,
+                        "loops": [{"is_outer": True, "edges_count": 4}],
+                        "edges_count": 4,
+                        "vertices_count": 4,
+                        "is_param_reversed": False,
+                        "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 0.0]},
+                    }
+                ],
+                "edges": [
+                    {
+                        "length": 10.0,
+                        "curve_type": "Line3D",
+                        "faces_count": 2,
+                        "start_vertex": [0.0, 0.0, 0.0],
+                        "end_vertex": [10.0, 0.0, 0.0],
+                        "is_degenerate": False,
+                        "is_param_reversed": False,
+                        "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 0.0, 0.0]},
+                    }
+                ],
+            }
+        ],
+        "sketches": [
+            {
+                "name": "Sketch1",
+                "component": "Root",
+                "is_visible": True,
+                "curves_count": 1,
+                "curves": [
+                    {
+                        "type": "SketchLine",
+                        "length": 10.0,
+                        "start_point": [0.0, 0.0, 0.0],
+                        "end_point": [10.0, 0.0, 0.0],
+                        "start_sketch_point": [0.0, 0.0, 0.0],
+                        "end_sketch_point": [10.0, 0.0, 0.0],
+                        "is_construction": False,
+                        "is_fixed": False,
+                        "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 0.0, 0.0]},
+                    }
+                ],
+            }
+        ],
+    }
+    fp_base = compute_model_fingerprint(base_state)
+
+    # 1. Inverted face normal
+    inverted_normal = json.loads(json.dumps(base_state))
+    inverted_normal["bodies"][0]["faces"][0]["normal"] = [0.0, 0.0, -1.0]
+    assert compute_model_fingerprint(inverted_normal) != fp_base
+
+    # 2. Face loop topology (e.g. inner hole added)
+    hole_loop = json.loads(json.dumps(base_state))
+    hole_loop["bodies"][0]["faces"][0]["loops_count"] = 2
+    hole_loop["bodies"][0]["faces"][0]["loops"].append({"is_outer": False, "edges_count": 4})
+    assert compute_model_fingerprint(hole_loop) != fp_base
+
+    # 3. Face is_param_reversed toggle
+    param_reversed = json.loads(json.dumps(base_state))
+    param_reversed["bodies"][0]["faces"][0]["is_param_reversed"] = True
+    assert compute_model_fingerprint(param_reversed) != fp_base
+
+    # 4. Face bounding box change
+    face_bbox_change = json.loads(json.dumps(base_state))
+    face_bbox_change["bodies"][0]["faces"][0]["bounding_box"]["max"] = [10.0, 10.0, 1.0]
+    assert compute_model_fingerprint(face_bbox_change) != fp_base
+
+    # 5. Edge vertex connectivity change
+    edge_vert_change = json.loads(json.dumps(base_state))
+    edge_vert_change["bodies"][0]["edges"][0]["start_vertex"] = [0.0, 1.0, 0.0]
+    assert compute_model_fingerprint(edge_vert_change) != fp_base
+
+    # 6. Edge faces_count change (e.g. boundary edge vs manifold edge)
+    edge_faces_change = json.loads(json.dumps(base_state))
+    edge_faces_change["bodies"][0]["edges"][0]["faces_count"] = 1
+    assert compute_model_fingerprint(edge_faces_change) != fp_base
+
+    # 7. Edge bounding box change
+    edge_bbox_change = json.loads(json.dumps(base_state))
+    edge_bbox_change["bodies"][0]["edges"][0]["bounding_box"]["max"] = [10.0, 1.0, 0.0]
+    assert compute_model_fingerprint(edge_bbox_change) != fp_base
+
+    # 8. Sketch curve sketch point connectivity change
+    sketch_pt_change = json.loads(json.dumps(base_state))
+    sketch_pt_change["sketches"][0]["curves"][0]["start_sketch_point"] = [0.0, 2.0, 0.0]
+    assert compute_model_fingerprint(sketch_pt_change) != fp_base
+
+    # 9. Sketch curve is_construction toggle
+    sketch_construction = json.loads(json.dumps(base_state))
+    sketch_construction["sketches"][0]["curves"][0]["is_construction"] = True
+    assert compute_model_fingerprint(sketch_construction) != fp_base
+
+    # 10. Sketch curve is_fixed toggle
+    sketch_fixed = json.loads(json.dumps(base_state))
+    sketch_fixed["sketches"][0]["curves"][0]["is_fixed"] = True
+    assert compute_model_fingerprint(sketch_fixed) != fp_base

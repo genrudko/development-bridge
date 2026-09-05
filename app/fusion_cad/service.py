@@ -174,7 +174,12 @@ class FusionCadService:
                 exp_rev = target
 
         if doc_ref is None:
-            doc_ref = self._revision_tracker.active_document_ref or "doc_1"
+            doc_ref = self._revision_tracker.active_document_ref
+        if not doc_ref:
+            raise FusionCadError(
+                ErrorCode.NO_ACTIVE_DESIGN,
+                "No active design or document_ref provided for mutation freshness check",
+            )
 
         return self._revision_tracker.assert_expected(doc_ref, exp_rev)
 
@@ -431,6 +436,70 @@ class FusionCadService:
         node_id: str | None = None,
     ) -> CadResult | dict[str, Any]:
         cad_result = result if isinstance(result, CadResult) else self.decode_domain_result(result)
+
+        # 0. Pre-validate transaction commit / abort / rollback before observing or mutating tracker state
+        if effective_bundle_group == "transaction" and op in ("commit", "abort", "rollback"):
+            tx_id = payload.get("transaction_id")
+            if isinstance(cad_result.data, (dict, Mapping)) and not tx_id:
+                tx_id = cad_result.data.get("transaction_id")
+            if tx_id:
+                stored_baseline = self._revision_tracker.get_transaction_baseline(tx_id)
+                if stored_baseline is not None:
+                    if cad_result.status != "succeeded":
+                        raise FusionCadError(
+                            ErrorCode.FUSION_API_ERROR,
+                            f"Transaction '{tx_id}' {op} failed or incomplete (status='{cad_result.status}'); preserving stored baseline",
+                            details={"transaction_id": tx_id, "operation": op, "status": cad_result.status},
+                        )
+                    if op in ("abort", "rollback"):
+                        res_doc = (
+                            (cad_result.document.document_ref if cad_result.document else None)
+                            or (cad_result.data.get("document_ref") if isinstance(cad_result.data, (dict, Mapping)) else None)
+                        )
+                        if not res_doc or not isinstance(res_doc, str) or not res_doc.strip():
+                            raise FusionCadError(
+                                ErrorCode.NO_ACTIVE_DESIGN,
+                                f"Transaction '{tx_id}' {op} result lacks stable runtime document identity; preserving stored baseline",
+                                details={"transaction_id": tx_id, "operation": op},
+                            )
+                        if res_doc != stored_baseline["document_ref"]:
+                            raise FusionCadError(
+                                ErrorCode.WRONG_DOCUMENT,
+                                f"Transaction '{tx_id}' {op} result document '{res_doc}' does not match bound document '{stored_baseline['document_ref']}'; preserving stored baseline",
+                                details={
+                                    "transaction_id": tx_id,
+                                    "bound_document": stored_baseline["document_ref"],
+                                    "result_document": res_doc,
+                                    "operation": op,
+                                },
+                            )
+                        res_fp = (
+                            cad_result.data.get("fingerprint")
+                            if isinstance(cad_result.data, (dict, Mapping))
+                            else None
+                        )
+                        if not res_fp or not isinstance(res_fp, str) or not res_fp.strip():
+                            raise FusionCadError(
+                                ErrorCode.FUSION_API_ERROR,
+                                f"Transaction '{tx_id}' {op} completed without a real authoritative fingerprint; preserving stored baseline",
+                                details={"transaction_id": tx_id, "operation": op, "document_ref": res_doc},
+                            )
+                        cur_rec = self._revision_tracker.current(res_doc)
+                        valid_fps = {stored_baseline["baseline_fingerprint"]}
+                        if cur_rec:
+                            valid_fps.add(cur_rec.fingerprint)
+                        if res_fp not in valid_fps:
+                            raise FusionCadError(
+                                ErrorCode.REVISION_CONFLICT,
+                                f"Transaction '{tx_id}' {op} result fingerprint '{res_fp}' diverged from stored baseline and observed document state; preserving stored baseline",
+                                details={
+                                    "transaction_id": tx_id,
+                                    "operation": op,
+                                    "document_ref": res_doc,
+                                    "result_fingerprint": res_fp,
+                                    "baseline_fingerprint": stored_baseline["baseline_fingerprint"],
+                                },
+                            )
 
         # 1. Observe document revision state if returned
         fp = None
@@ -890,8 +959,12 @@ class FusionCadService:
                     )
                 self.assert_fresh_for_mutation(payload, document_ref=doc_ref)
                 known_fp = self._revision_tracker.get_fingerprint(doc_ref, exp_rev)
-                if known_fp is not None and "expected_fingerprint" not in payload:
+                if known_fp is not None:
                     payload["expected_fingerprint"] = known_fp
+                else:
+                    payload.pop("expected_fingerprint", None)
+            elif "expected_fingerprint" in payload:
+                payload.pop("expected_fingerprint", None)
 
         # Transaction begin: persist baseline after execution succeeds (below)
         if is_transaction_begin:
@@ -905,8 +978,15 @@ class FusionCadService:
             if exp_rev is not None and _begin_doc_ref:
                 self.assert_fresh_for_mutation(payload, document_ref=_begin_doc_ref)
                 known_fp = self._revision_tracker.get_fingerprint(_begin_doc_ref, exp_rev)
-                if known_fp is not None and "expected_fingerprint" not in payload:
+                if known_fp is not None:
                     payload["expected_fingerprint"] = known_fp
+                else:
+                    payload.pop("expected_fingerprint", None)
+            elif "expected_fingerprint" in payload:
+                payload.pop("expected_fingerprint", None)
+
+        # Remove caller-supplied synthetic authority
+        payload.pop("mock_model_state", None)
 
         script = self._script_bundle.build(effective_bundle_group, payload)
         journal = {

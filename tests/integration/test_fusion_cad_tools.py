@@ -1158,7 +1158,7 @@ async def test_async_transaction_mutations_lifecycle_operation_result_and_uncert
         "data": {
             "transaction_id": "tx_1234",
             "operation": operation,
-            "fingerprint": "valid_real_fp_123",
+            "fingerprint": "hash-desk1-seed" if operation == "abort" else "valid_real_fp_123",
             "document_ref": "doc_1",
         },
     }
