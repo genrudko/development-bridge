@@ -48,6 +48,8 @@ def test_bridge_guide_is_short_structured_runtime_summary():
     assert coordinator["available"] is True
     assert "route" in coordinator["summary"].lower()
     assert "ack" in coordinator["summary"].lower()
+    assert "bridge_call" in coordinator["summary"]
+    assert "widgetless" in coordinator["summary"].lower()
 
     route_binding = data["route_binding"]["summary"]
     assert "coordinator_route_bind_current" in route_binding

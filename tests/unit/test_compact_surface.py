@@ -320,3 +320,10 @@ async def test_bridge_call_rejects_session_bound_bind_tool_delegation():
             request_context,
         )
     assert "invoke coordinator_route_bind_current directly" in str(exc.value)
+
+
+def test_wake_tools_are_hidden_from_compact_surface():
+    assert "coordinator_x_mount" in COMPACT_VISIBLE_TOOLS
+    assert "coordinator_route_bind_current" in COMPACT_VISIBLE_TOOLS
+    assert "coordinator_exec_and_wake" not in COMPACT_VISIBLE_TOOLS
+    assert "coordinator_wake_on_jobs" not in COMPACT_VISIBLE_TOOLS

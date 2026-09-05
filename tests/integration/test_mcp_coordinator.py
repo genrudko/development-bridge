@@ -356,8 +356,10 @@ async def test_compact_dashboard_live_state_resource(tmp_path):
 
                     listed = await session.list_tools()
                     names = {tool.name for tool in listed.tools}
-                    assert len(names) == 15
+                    assert len(names) == 13
                     assert "work_progress_update" not in names
+                    assert "coordinator_exec_and_wake" not in names
+                    assert "coordinator_wake_on_jobs" not in names
 
                     mounted = await session.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
                     assert mounted.structured_content["route_id"] == "ad5x"

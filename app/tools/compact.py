@@ -40,8 +40,6 @@ COMPACT_VISIBLE_TOOLS = (
     "coordinator_x_mount",
     "coordinator_route_bind_current",
     "coordinator_ack",
-    "coordinator_exec_and_wake",
-    "coordinator_wake_on_jobs",
 )
 
 _COMPACT_META_TOOLS = {"bridge_dashboard", "bridge_search", "bridge_schema", "bridge_call"}
