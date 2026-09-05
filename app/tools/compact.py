@@ -45,6 +45,7 @@ COMPACT_VISIBLE_TOOLS = (
 )
 
 _COMPACT_META_TOOLS = {"bridge_dashboard", "bridge_search", "bridge_schema", "bridge_call"}
+_DIRECT_ONLY_TOOLS = {"coordinator_route_bind_current"}
 
 
 def _category(name: str) -> str:
@@ -244,6 +245,11 @@ def compact_tools(container: ApplicationContainer, registry: ToolRegistry) -> tu
         name = str(arguments.get("tool_name") or "")
         if name in _COMPACT_META_TOOLS:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "compact meta-tools cannot delegate to themselves")
+        if name in _DIRECT_ONLY_TOOLS:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"invoke {name} directly; session-bound tools cannot be delegated through bridge_call",
+            )
         registered = registry.get(name)
         if registered is None:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown delegated tool: {name}")

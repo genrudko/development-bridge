@@ -295,3 +295,28 @@ async def test_route_control_tools_are_hidden_and_discoverable():
         None, SimpleNamespace(arguments={"tool_name": "coordinator_route_control_status"}), request_context
     )
     assert "route_id" in schema_res.content[0].text
+
+@pytest.mark.asyncio
+async def test_bridge_call_rejects_session_bound_bind_tool_delegation():
+    registry = _registry()
+    container = SimpleNamespace(
+        settings=SimpleNamespace(server=SimpleNamespace(name="development-bridge")),
+        projects=SimpleNamespace(list=lambda: ()),
+        route_registry=SimpleNamespace(resolve=lambda: None),
+    )
+    tools = {tool.definition.name: tool for tool in compact_tools(container, registry)}
+    registry.register_many(tools.values())
+    request_context = SimpleNamespace(request_id="req_direct_bind_only")
+
+    with pytest.raises(BridgeError) as exc:
+        await tools["bridge_call"].handler(
+            None,
+            SimpleNamespace(
+                arguments={
+                    "tool_name": "coordinator_route_bind_current",
+                    "arguments": {"value": "ignored"},
+                }
+            ),
+            request_context,
+        )
+    assert "invoke coordinator_route_bind_current directly" in str(exc.value)
