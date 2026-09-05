@@ -347,22 +347,29 @@ class RouteRegistry:
         self._save(data)
         return True
 
-    def route_id_for_current_bind_token(self, token: str) -> str | None:
+    def current_bind_token_state(self, token: str) -> dict | None:
         data = self._load()
         for route_id, pending in list((data.get("current_binds") or {}).items()):
             if not isinstance(pending, dict) or pending.get("token") != token:
                 continue
-            if self._current_bind_is_stale(pending, data["routes"].get(route_id)):
+            stale_reason = self._current_bind_stale_reason(
+                pending, data["routes"].get(route_id)
+            )
+            if stale_reason is not None:
                 data.get("current_binds", {}).pop(route_id, None)
                 self._save(data)
-                return None
-            return route_id
+                return {"route_id": route_id, "state": stale_reason}
+            return {"route_id": route_id, "state": "valid"}
         return None
 
+    def route_id_for_current_bind_token(self, token: str) -> str | None:
+        state = self.current_bind_token_state(token)
+        if state is None or state["state"] != "valid":
+            return None
+        return str(state["route_id"])
+
     @staticmethod
-    def _current_bind_is_stale(pending: dict, route: dict | None) -> bool:
-        if not isinstance(route, dict):
-            return True
+    def _current_bind_stale_reason(pending: dict, route: dict | None) -> str | None:
         try:
             created_at = datetime.fromisoformat(str(pending.get("created_at") or ""))
             if created_at.tzinfo is None:
@@ -373,13 +380,19 @@ class RouteRegistry:
         except (TypeError, ValueError):
             expired = True
         if expired:
-            return True
+            return "expired"
+        if not isinstance(route, dict):
+            return "generation_changed"
         try:
-            return int(pending.get("source_generation", -1)) != int(
-                route.get("generation", 0)
-            )
+            if int(pending.get("source_generation", -1)) != int(route.get("generation", 0)):
+                return "generation_changed"
         except (TypeError, ValueError):
-            return True
+            return "generation_changed"
+        return None
+
+    @classmethod
+    def _current_bind_is_stale(cls, pending: dict, route: dict | None) -> bool:
+        return cls._current_bind_stale_reason(pending, route) is not None
 
     def prepare_current_bind(self, route_id: str, *, session_id: str | None, allow_project_change: bool = False) -> dict:
         route_id = self.validate_route_id(route_id)

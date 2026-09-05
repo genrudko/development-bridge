@@ -98,6 +98,27 @@ def test_accept_bind_return_unknown_operation_does_not_allocate_trace(test_setup
     assert not trace_store.state_dir.exists()
 
 
+def test_accept_bind_return_expired_operation_finishes_existing_trace(test_setup):
+    registry, trace_store, service = test_setup
+    prepared = service.prepare_bind("bridge", session_id="session-1")
+    data = registry._load()
+    data["current_binds"]["bridge"]["created_at"] = "2020-01-01T00:00:00+00:00"
+    registry._save(data)
+
+    with pytest.raises(BridgeError, match="invalid or stale"):
+        service.accept_bind_return(
+            prepared["operation_id"],
+            "https://chatgpt.com/g/g-p-infra/c/conv-expired",
+        )
+
+    sanitized = trace_store.sanitized(prepared["diagnostic_id"])
+    assert sanitized["status"] == "failed"
+    assert sanitized["error_code"] == "TOKEN_EXPIRED"
+    assert sanitized["stages"][-1]["name"] == "token_check"
+    assert sanitized["stages"][-1]["error_code"] == "TOKEN_EXPIRED"
+    assert registry.pending_current_bind("bridge") is None
+
+
 def test_accept_bind_return_expired_operation_does_not_reallocate_trace(test_setup):
     registry, trace_store, service = test_setup
     prepared = service.prepare_bind("bridge", session_id="session-1")

@@ -140,20 +140,40 @@ class RouteControlService:
         }
 
     def accept_bind_return(self, operation_id: str, redirect_url: str | None) -> dict:
-        route_id = self._find_route_id_for_token(operation_id)
-        if route_id is None:
+        diag_id = self.trace_store.find_by_operation_id(operation_id)
+        existing_trace = self.trace_store.sanitized(diag_id) if diag_id is not None else None
+        if existing_trace and existing_trace.get("status") in ("ok", "failed"):
+            route_id = str(existing_trace.get("route_id") or "")
+            if existing_trace.get("status") == "ok":
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind operation already completed")
+            err = existing_trace.get("error_code") or "OPERATION_FAILED"
+            if route_id:
+                self._discard_bind_best_effort(route_id, operation_id)
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"current-chat bind operation already failed: {err}")
+
+        token_state = self.route_registry.current_bind_token_state(operation_id)
+        if token_state is None:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
 
-        diag_id = self.trace_store.find_by_operation_id(operation_id)
-        if diag_id is not None:
-            existing_trace = self.trace_store.sanitized(diag_id)
-            if existing_trace and existing_trace.get("status") in ("ok", "failed"):
-                if existing_trace.get("status") == "ok":
-                    raise BridgeError(ErrorCode.POLICY_VIOLATION, "current-chat bind operation already completed")
-                err = existing_trace.get("error_code") or "OPERATION_FAILED"
-                self._discard_bind_best_effort(route_id, operation_id)
-                raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"current-chat bind operation already failed: {err}")
-        else:
+        route_id = str(token_state["route_id"])
+        token_status = str(token_state["state"])
+        if token_status != "valid":
+            if diag_id is not None:
+                if token_status == "expired":
+                    error_code = "TOKEN_EXPIRED"
+                    stage_name = "token_check"
+                else:
+                    error_code = "GENERATION_CHANGED"
+                    stage_name = "generation_guard"
+                self._stage_best_effort(
+                    diag_id, stage_name, "failed", error_code=error_code
+                )
+                self._finish_best_effort(
+                    diag_id, status="failed", error_code=error_code
+                )
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+
+        if diag_id is None:
             diag_id = self.trace_store.start(
                 "bind", route_id=route_id, operation_id=operation_id
             )

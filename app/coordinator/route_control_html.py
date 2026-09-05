@@ -7,7 +7,7 @@ TEMPLATE_PATH = Path(__file__).parent / "route_control_result.html"
 _TEMPLATE = TEMPLATE_PATH.read_text(encoding="utf-8")
 
 ERROR_CODE_STAGE_MAP = {
-    "RETURN_TARGET_MISSING": "Conversation identification",
+    "RETURN_TARGET_MISSING": "ChatGPT client did not provide a conversation return target",
     "TARGET_PARSE_FAILED": "Target validation",
     "TOKEN_INVALID": "Security token verification",
     "TOKEN_EXPIRED": "Security token verification",

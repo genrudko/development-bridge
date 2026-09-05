@@ -205,7 +205,8 @@ async def test_get_bind_missing_redirect_url_yields_failure_page(tmp_path):
         html = resp.text
         assert "❌" in html
         assert "Chat could not be linked" in html
-        assert "Conversation identification" in html
+        assert "ChatGPT client did not provide a conversation return target" in html
+        assert "Conversation identification" not in html
         assert "Existing binding was not changed" in html
         assert diag_id in html
 
