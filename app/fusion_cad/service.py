@@ -419,6 +419,151 @@ class FusionCadService:
             details={"raw_result": raw_result},
         )
 
+    def _finalize_completed_execution(
+        self,
+        result: CadResult | dict[str, Any],
+        *,
+        effective_bundle_group: str,
+        op: str,
+        payload: dict[str, Any],
+        begin_tx_id: str | None = None,
+        begin_doc_ref: str | None = None,
+        node_id: str | None = None,
+    ) -> CadResult | dict[str, Any]:
+        cad_result = result if isinstance(result, CadResult) else self.decode_domain_result(result)
+
+        # 1. Observe document revision state if returned
+        fp = None
+        if isinstance(cad_result.data, (dict, Mapping)):
+            fp = cad_result.data.get("fingerprint")
+        doc_state = cad_result.document
+        observed_rec = None
+        if doc_state and doc_state.document_ref:
+            if fp:
+                observed_rec = self._revision_tracker.observe(doc_state.document_ref, fp)
+            elif doc_state.model_revision:
+                observed_rec = self._revision_tracker.observe(doc_state.document_ref, doc_state.model_revision)
+        elif fp:
+            fallback_doc = self._revision_tracker.active_document_ref or "doc_1"
+            observed_rec = self._revision_tracker.observe(fallback_doc, fp)
+
+        # 2. Transaction begin: persist authoritative baseline ONLY after proven successful terminal execution
+        if effective_bundle_group == "transaction" and op == "begin":
+            tx_id = begin_tx_id or payload.get("transaction_id")
+            if isinstance(cad_result.data, (dict, Mapping)) and not tx_id:
+                tx_id = cad_result.data.get("transaction_id")
+            if not tx_id:
+                raise FusionCadError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "transaction:begin completed without a transaction_id; cannot establish authoritative baseline",
+                )
+
+            target_doc = (
+                (cad_result.document.document_ref if cad_result.document else None)
+                or begin_doc_ref
+                or self._revision_tracker.active_document_ref
+            )
+            if not target_doc:
+                raise FusionCadError(
+                    ErrorCode.NO_ACTIVE_DESIGN,
+                    "transaction:begin completed without an active document reference",
+                    details={"transaction_id": tx_id},
+                )
+
+            proven_fp = (
+                cad_result.data.get("fingerprint")
+                if isinstance(cad_result.data, (dict, Mapping))
+                else None
+            )
+            if tx_id and target_doc and proven_fp and isinstance(proven_fp, str) and proven_fp.strip():
+                rec = observed_rec or self._revision_tracker.current(target_doc)
+                if rec is None or rec.fingerprint != proven_fp.strip():
+                    rec = self._revision_tracker.observe(target_doc, proven_fp.strip())
+                self._revision_tracker.begin_transaction(
+                    tx_id,
+                    document_ref=target_doc,
+                    baseline_revision=rec.revision,
+                    baseline_fingerprint=proven_fp.strip(),
+                )
+            if isinstance(cad_result.data, dict) and tx_id:
+                cad_result.data["transaction_id"] = tx_id
+
+        # 3. Transaction commit / abort / rollback: clear stored baseline ONLY after proven terminal execution
+        if effective_bundle_group == "transaction" and op in ("commit", "abort", "rollback"):
+            tx_id = payload.get("transaction_id")
+            if isinstance(cad_result.data, (dict, Mapping)) and not tx_id:
+                tx_id = cad_result.data.get("transaction_id")
+            if tx_id:
+                self._revision_tracker.clear_transaction(tx_id)
+
+        domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
+        if node_id and has_binary_data(domain_payload):
+            try:
+                return self._desktop_nodes.store_external_result(node_id, domain_payload)
+            except Exception as exc:
+                raise BridgeError(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"Failed to externalize binary result payload: {exc}",
+                ) from exc
+
+        if isinstance(result, dict) and not isinstance(result, CadResult):
+            return cad_result.model_dump(mode="python", exclude_none=True)
+        return cad_result
+
+    def finalize_terminal_operation(
+        self,
+        op_status: dict[str, Any],
+        full_result: Any,
+    ) -> CadResult:
+        """Finalize a terminal desktop operation from the durable operation lifecycle.
+
+        Persists authoritative baseline for transaction:begin or clears baseline
+        for commit/abort/rollback ONLY after proven successful terminal execution.
+        Failed, uncertain, or queued operations fail closed and do not manufacture
+        or discard authoritative transaction state.
+        """
+        status = op_status.get("status")
+        if status not in ("succeeded", "late_succeeded"):
+            if self._is_error_payload(full_result):
+                err_code, err_msg, err_details = self._extract_error_info(full_result)
+                raise FusionCadError(err_code, err_msg, retryable=False, details=err_details)
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                f"Cannot finalize incomplete or non-succeeded operation (status='{status}')",
+                details={"status": status, "operation_id": op_status.get("operation_id")},
+            )
+
+        if self._is_error_payload(full_result):
+            err_code, err_msg, err_details = self._extract_error_info(full_result)
+            raise FusionCadError(err_code, err_msg, retryable=False, details=err_details)
+
+        cad_result = self.decode_domain_result(full_result)
+        checkpoint = op_status.get("checkpoint") or {}
+        summary = str(op_status.get("summary") or "")
+
+        group = checkpoint.get("group")
+        op = checkpoint.get("operation")
+        if (not group or not op) and ":" in summary:
+            parts = summary.split(":", 1)
+            group = group or parts[0]
+            op = op or parts[1]
+
+        effective_bundle_group = "mutate" if group in ("metadata", "style") else (group or "")
+        tx_id = checkpoint.get("transaction_id") or (
+            cad_result.data.get("transaction_id") if isinstance(cad_result.data, (dict, Mapping)) else None
+        )
+        doc_ref = checkpoint.get("document_ref")
+
+        self._finalize_completed_execution(
+            cad_result,
+            effective_bundle_group=effective_bundle_group,
+            op=op or "",
+            payload=checkpoint,
+            begin_tx_id=tx_id if (effective_bundle_group == "transaction" and op == "begin") else None,
+            begin_doc_ref=doc_ref,
+        )
+        return cad_result
+
     def _resolve_group(self, request: Any) -> str:
         if isinstance(request, FusionReadRequest.__args__):  # type: ignore[attr-defined]
             return "read"
@@ -664,7 +809,6 @@ class FusionCadService:
         is_transaction_begin = (effective_bundle_group == "transaction") and (op == "begin")
         is_transaction_preview_commit = (effective_bundle_group == "transaction") and (op in ("preview", "commit"))
         is_transaction_stage = (effective_bundle_group == "transaction") and (op == "stage")
-        is_transaction_terminal = (effective_bundle_group == "transaction") and (op in ("commit", "abort", "rollback"))
         if is_transaction_stage or is_transaction_preview_commit:
             tx_id = payload.get("transaction_id")
             if not tx_id:
@@ -679,10 +823,32 @@ class FusionCadService:
                     f"No stored baseline for transaction '{tx_id}'; call transaction:begin first",
                     details={"transaction_id": tx_id, "operation": op},
                 )
+            if payload.get("document_ref") and payload["document_ref"] != stored_baseline["document_ref"]:
+                raise FusionCadError(
+                    ErrorCode.WRONG_DOCUMENT,
+                    f"Transaction '{tx_id}' is bound to document '{stored_baseline['document_ref']}', but request specified '{payload['document_ref']}'; transaction operations cannot switch documents",
+                    details={"transaction_id": tx_id, "bound_document": stored_baseline["document_ref"], "requested_document": payload["document_ref"]},
+                )
             # Override expected_revision/fingerprint with stored baseline
             payload["expected_revision"] = stored_baseline["baseline_revision"]
             payload["expected_fingerprint"] = stored_baseline["baseline_fingerprint"]
-            if not payload.get("document_ref"):
+            payload["document_ref"] = stored_baseline["document_ref"]
+
+        if op in ("abort", "rollback") and effective_bundle_group == "transaction":
+            tx_id = payload.get("transaction_id")
+            if not tx_id:
+                raise FusionCadError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"transaction_id is required for transaction {op}",
+                )
+            stored_baseline = self._revision_tracker.get_transaction_baseline(tx_id)
+            if stored_baseline is not None:
+                if payload.get("document_ref") and payload["document_ref"] != stored_baseline["document_ref"]:
+                    raise FusionCadError(
+                        ErrorCode.WRONG_DOCUMENT,
+                        f"Transaction '{tx_id}' is bound to document '{stored_baseline['document_ref']}', but request specified '{payload['document_ref']}'",
+                        details={"transaction_id": tx_id, "bound_document": stored_baseline["document_ref"], "requested_document": payload["document_ref"]},
+                    )
                 payload["document_ref"] = stored_baseline["document_ref"]
 
         # Bridge revision freshness precheck (fail-fast optimization)
@@ -716,7 +882,16 @@ class FusionCadService:
                     payload["expected_fingerprint"] = known_fp
 
         script = self._script_bundle.build(effective_bundle_group, payload)
-        journal = {"mutation": is_mutation, "summary": summary}
+        journal = {
+            "mutation": is_mutation,
+            "summary": summary,
+            "checkpoint": {
+                "operation": op,
+                "group": effective_bundle_group,
+                "transaction_id": payload.get("transaction_id"),
+                "document_ref": payload.get("document_ref"),
+            },
+        }
 
         # Authoritative DesktopNodeService session_generation captured before dispatching read:capabilities
         probe_generation: int | None = None
@@ -734,52 +909,6 @@ class FusionCadService:
                     {"script": script},
                     journal=journal,
                 )
-                if isinstance(sub_result, dict):
-                    if self._is_error_payload(sub_result):
-                        err_code, err_msg, err_details = self._extract_error_info(sub_result)
-                        if err_code == ErrorCode.REVISION_CONFLICT:
-                            cur_fp = err_details.get("current_fingerprint") if isinstance(err_details, (dict, Mapping)) else None
-                            doc_ref = err_details.get("document_ref") if isinstance(err_details, (dict, Mapping)) else None
-                            doc_ref = doc_ref or self._revision_tracker.active_document_ref
-                            if cur_fp and doc_ref:
-                                self._revision_tracker.observe(doc_ref, cur_fp)
-                        raise FusionCadError(err_code, err_msg, retryable=False, details=err_details)
-
-                    if "document" in sub_result and isinstance(sub_result["document"], dict):
-                        doc_d = sub_result["document"]
-                        doc_r = doc_d.get("document_ref")
-                        if doc_r:
-                            fp = sub_result.get("data", {}).get("fingerprint") if isinstance(sub_result.get("data"), dict) else None
-                            self._revision_tracker.observe(doc_r, fp or doc_d.get("model_revision", "rev_1"))
-
-                    # Persist transaction baseline after successful transaction:begin in async path
-                    if is_transaction_begin and _begin_tx_id:
-                        begin_doc = (
-                            (sub_result.get("document", {}).get("document_ref") if isinstance(sub_result.get("document"), dict) else None)
-                            or _begin_doc_ref
-                            or self._revision_tracker.active_document_ref
-                        )
-                        if begin_doc:
-                            rec = self._revision_tracker.current(begin_doc)
-                            fp_data = sub_result.get("data", {}).get("fingerprint") if isinstance(sub_result.get("data"), dict) else None
-                            try:
-                                self._revision_tracker.begin_transaction(
-                                    _begin_tx_id,
-                                    document_ref=begin_doc,
-                                    baseline_revision=rec.revision if rec else "rev_1",
-                                    baseline_fingerprint=fp_data or (rec.fingerprint if rec else ""),
-                                )
-                            except FusionCadError:
-                                pass
-                        if isinstance(sub_result.get("data"), dict) and "transaction_id" not in sub_result["data"]:
-                            sub_result["data"]["transaction_id"] = _begin_tx_id
-
-                    # Clear transaction baseline after successful commit/abort/rollback in async path
-                    if is_transaction_terminal:
-                        _terminal_tx_id = payload.get("transaction_id")
-                        if _terminal_tx_id:
-                            self._revision_tracker.clear_transaction(_terminal_tx_id)
-                return sub_result
             except FusionCadError as exc:
                 if exc.code == ErrorCode.REVISION_CONFLICT:
                     cur_fp = exc.details.get("current_fingerprint") if isinstance(exc.details, (dict, Mapping)) else None
@@ -788,6 +917,36 @@ class FusionCadService:
                     if cur_fp and doc_ref:
                         self._revision_tracker.observe(doc_ref, cur_fp)
                 raise
+
+            if isinstance(sub_result, dict):
+                if self._is_error_payload(sub_result):
+                    err_code, err_msg, err_details = self._extract_error_info(sub_result)
+                    if err_code == ErrorCode.REVISION_CONFLICT:
+                        cur_fp = err_details.get("current_fingerprint") if isinstance(err_details, (dict, Mapping)) else None
+                        doc_ref = err_details.get("document_ref") if isinstance(err_details, (dict, Mapping)) else None
+                        doc_ref = doc_ref or self._revision_tracker.active_document_ref
+                        if cur_fp and doc_ref:
+                            self._revision_tracker.observe(doc_ref, cur_fp)
+                    raise FusionCadError(err_code, err_msg, retryable=False, details=err_details)
+
+                # If sub_result is queued/running/claimed:
+                # Represent pending truthfully; NEVER manufacture or discard authoritative transaction state!
+                if sub_result.get("status") in ("queued", "running", "claimed"):
+                    return sub_result
+
+                # If sub_result was already a completed terminal execution (e.g. from a test mock):
+                if sub_result.get("status") in ("succeeded", "late_succeeded") or sub_result.get("api_version") == "fusion.cad/v1":
+                    return self._finalize_completed_execution(
+                        sub_result,
+                        effective_bundle_group=effective_bundle_group,
+                        op=op,
+                        payload=payload,
+                        begin_tx_id=_begin_tx_id if is_transaction_begin else None,
+                        begin_doc_ref=_begin_doc_ref if is_transaction_begin else None,
+                        node_id=node_id,
+                    )
+
+            return sub_result
 
         try:
             raw_result = await self._desktop_nodes.call(
@@ -815,7 +974,16 @@ class FusionCadService:
         # Handle external_result reference already returned by desktop node
         if "external_result" in raw_result:
             full, _ = self._desktop_nodes.external_result(raw_result["external_result"])
-            self.decode_domain_result(full)
+            cad_result = self.decode_domain_result(full)
+            self._finalize_completed_execution(
+                cad_result,
+                effective_bundle_group=effective_bundle_group,
+                op=op,
+                payload=payload,
+                begin_tx_id=_begin_tx_id if is_transaction_begin else None,
+                begin_doc_ref=_begin_doc_ref if is_transaction_begin else None,
+                node_id=node_id,
+            )
             return raw_result
 
         try:
@@ -828,20 +996,6 @@ class FusionCadService:
                 if cur_fp and doc_ref:
                     self._revision_tracker.observe(doc_ref, cur_fp)
             raise
-
-        # Observe document revision state if returned
-        if cad_result.document:
-            doc_state = cad_result.document
-            fp = None
-            if isinstance(cad_result.data, (dict, Mapping)):
-                fp = cad_result.data.get("fingerprint")
-            if fp:
-                self._revision_tracker.observe(doc_state.document_ref, fp)
-            elif doc_state.model_revision:
-                self._revision_tracker.observe(doc_state.document_ref, doc_state.model_revision)
-        elif isinstance(cad_result.data, (dict, Mapping)) and "fingerprint" in cad_result.data:
-            doc_ref = self._revision_tracker.active_document_ref or "doc_1"
-            self._revision_tracker.observe(doc_ref, cad_result.data["fingerprint"])
 
         # If operation was capabilities read, persist the probed capability matrix
         # only if the authoritative session_generation is still current.
@@ -876,43 +1030,12 @@ class FusionCadService:
             else:
                 self._node_capabilities.pop(node_id, None)
 
-        # Persist transaction baseline after successful transaction:begin
-        if is_transaction_begin and _begin_tx_id:
-            begin_doc = (
-                (cad_result.document.document_ref if cad_result.document else None)
-                or _begin_doc_ref
-                or self._revision_tracker.active_document_ref
-            )
-            if begin_doc:
-                rec = self._revision_tracker.current(begin_doc)
-                fp_data = cad_result.data.get("fingerprint") if isinstance(cad_result.data, (dict, Mapping)) else None
-                try:
-                    self._revision_tracker.begin_transaction(
-                        _begin_tx_id,
-                        document_ref=begin_doc,
-                        baseline_revision=rec.revision if rec else "rev_1",
-                        baseline_fingerprint=fp_data or (rec.fingerprint if rec else ""),
-                    )
-                except FusionCadError:
-                    pass
-            if isinstance(cad_result.data, dict) and "transaction_id" not in cad_result.data:
-                cad_result.data["transaction_id"] = _begin_tx_id
-
-        # Clear transaction baseline after successful commit/abort/rollback
-        is_transaction_terminal = (effective_bundle_group == "transaction") and (op in ("commit", "abort", "rollback"))
-        if is_transaction_terminal:
-            _terminal_tx_id = payload.get("transaction_id")
-            if _terminal_tx_id:
-                self._revision_tracker.clear_transaction(_terminal_tx_id)
-
-        domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
-        if has_binary_data(domain_payload):
-            try:
-                return self._desktop_nodes.store_external_result(node_id, domain_payload)
-            except Exception as exc:
-                raise BridgeError(
-                    ErrorCode.INTERNAL_ERROR,
-                    f"Failed to externalize binary result payload: {exc}",
-                ) from exc
-
-        return cad_result
+        return self._finalize_completed_execution(
+            cad_result,
+            effective_bundle_group=effective_bundle_group,
+            op=op,
+            payload=payload,
+            begin_tx_id=_begin_tx_id if is_transaction_begin else None,
+            begin_doc_ref=_begin_doc_ref if is_transaction_begin else None,
+            node_id=node_id,
+        )

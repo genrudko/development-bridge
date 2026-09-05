@@ -96,4 +96,17 @@ def run():
                 validation={"status": "passed", "errors": []},
             )
 
+    if op in ("abort", "rollback"):
+        abort_primitive = globals().get(f"_transaction_{op}_primitive")
+        if callable(abort_primitive):
+            abort_primitive(PAYLOAD)
+        return make_result(
+            data={
+                "operation": op,
+                "applied": True,
+                "transaction_id": PAYLOAD.get("transaction_id"),
+            },
+            summary=f"Executed transaction:{op}",
+        )
+
     return make_result(data={"operation": op}, summary=f"Executed transaction:{op}")

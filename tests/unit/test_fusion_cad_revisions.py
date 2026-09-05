@@ -329,3 +329,71 @@ def test_sketch_constraints_and_dimensions_change_fingerprint():
     assert fp_plain != fp_cons
     assert fp_plain != fp_dim
     assert fp_cons != fp_dim
+
+
+def test_falsify_attribute_owner_relocation_changes_fingerprint():
+    """Proves that relocating Bridge attributes between different mutation-sensitive owners changes fingerprint."""
+    owners = [
+        ("document", "doc_1"),
+        ("component", "comp_root"),
+        ("occurrence", "root:occ_1"),
+        ("body", "comp_root:Body1"),
+        ("body", "comp_root:Body2"),
+        ("sketch", "comp_root:Sketch1"),
+        ("timeline", "feat_extrude_1"),
+        ("feature", "feat_extrude_1"),
+    ]
+    fingerprints = set()
+
+    for owner_type, owner_id in owners:
+        payload = {
+            "document_ref": "doc_1",
+            "attributes": [
+                {
+                    "owner_type": owner_type,
+                    "owner_id": owner_id,
+                    "group": "bridge.cad/v1",
+                    "name": "tag",
+                    "value": "v1",
+                }
+            ],
+        }
+        fp = compute_model_fingerprint(payload)
+        fingerprints.add(fp)
+
+    # Every owner location must produce a distinct fingerprint
+    assert len(fingerprints) == len(owners)
+
+
+def test_falsify_begin_transaction_fails_closed_on_empty_fingerprint_or_unobserved_doc():
+    """Proves begin_transaction fails closed on empty fingerprint, empty string, or unobserved document."""
+    tracker = RevisionTracker()
+
+    # Case A: unobserved document and no revision provided fails closed (no rev_1 fallback)
+    with pytest.raises(FusionCadError) as exc_unobs:
+        tracker.begin_transaction("tx_1", "doc_unobserved", baseline_fingerprint="some-fp")
+    assert exc_unobs.value.code == ErrorCode.NO_ACTIVE_DESIGN
+
+    # Case B: observed document but empty string fingerprint fails closed (no empty fingerprint)
+    tracker.observe("doc_1", "valid-seed-fp")
+    with pytest.raises(FusionCadError) as exc_empty_fp:
+        tracker.begin_transaction("tx_1", "doc_1", baseline_revision="rev_1", baseline_fingerprint="")
+    assert exc_empty_fp.value.code == ErrorCode.INVALID_ARGUMENT
+    assert "cannot be empty" in exc_empty_fp.value.message
+
+    # Case C: whitespace-only fingerprint fails closed
+    with pytest.raises(FusionCadError) as exc_ws:
+        tracker.begin_transaction("tx_1", "doc_1", baseline_revision="rev_1", baseline_fingerprint="   ")
+    assert exc_ws.value.code == ErrorCode.INVALID_ARGUMENT
+
+    # Case D: None fingerprint when document has no current fingerprint fails closed
+    tracker_empty = RevisionTracker()
+    with pytest.raises(FusionCadError) as exc_no_fp:
+        tracker_empty.begin_transaction("tx_1", "doc_empty", baseline_revision="rev_1", baseline_fingerprint=None)
+    assert exc_no_fp.value.code == ErrorCode.INVALID_ARGUMENT
+
+    # Case E: Valid observed document and non-empty fingerprint succeeds
+    bl = tracker.begin_transaction("tx_valid", "doc_1")
+    assert bl["transaction_id"] == "tx_valid"
+    assert bl["baseline_revision"] == "rev_1"
+    assert bl["baseline_fingerprint"] == "valid-seed-fp"

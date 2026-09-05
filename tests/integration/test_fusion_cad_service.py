@@ -674,15 +674,20 @@ class AdskFakeContext:
                 pass
 
         class FakeAttributes:
-            def __init__(self, ctx):
-                self._ctx = ctx
+            def __init__(self, ctx_or_items=None):
+                if hasattr(ctx_or_items, "attributes"):
+                    self._items = ctx_or_items.attributes
+                elif isinstance(ctx_or_items, list):
+                    self._items = ctx_or_items
+                else:
+                    self._items = []
 
             @property
             def count(self):
-                return len(self._ctx.attributes)
+                return len(self._items)
 
             def item(self, idx):
-                return self._ctx.attributes[idx]
+                return self._items[idx]
 
             def add(self, group_name, name, value):
                 class Attr:
@@ -690,7 +695,25 @@ class AdskFakeContext:
                         self.groupName = g
                         self.name = n
                         self.value = v
-                self._ctx.attributes.append(Attr(group_name, name, value))
+                attr = Attr(group_name, name, value)
+                self._items.append(attr)
+                return attr
+
+        class FakeTransform:
+            def __init__(self, matrix=None):
+                self._matrix = list(matrix or [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+
+            def asArray(self):
+                return list(self._matrix)
+
+        class FakeOccurrence:
+            def __init__(self, name="Occ1"):
+                self.name = name
+                self.fullPathName = f"Root+{name}"
+                self.isVisible = True
+                self.isLightBulbOn = True
+                self.transform = FakeTransform()
+                self.attributes = FakeAttributes()
 
         class FakeBody:
             def __init__(self, ctx):
@@ -703,6 +726,7 @@ class AdskFakeContext:
                 self.faces = FakeCollection([object() for _ in range(6)])
                 self.edges = FakeCollection([object() for _ in range(12)])
                 self.boundingBox = FakeBoundingBox(FakePoint(0, 0, 0), FakePoint(10, 10, 10))
+                self.attributes = FakeAttributes()
 
             @property
             def volume(self):
@@ -733,6 +757,7 @@ class AdskFakeContext:
                 self.sketchCurves = FakeCollection([object(), object(), object(), object()])
                 self.geometricConstraints = FakeCollection([FakeConstraint()])
                 self.sketchDimensions = FakeCollection([FakeDimension()])
+                self.attributes = FakeAttributes()
 
         class FakeComponent:
             def __init__(self, ctx):
@@ -742,6 +767,13 @@ class AdskFakeContext:
                 self.bRepBodies = FakeCollection([FakeBody(ctx)])
                 self.sketches = FakeCollection([FakeSketch()])
                 self.allOccurrences = FakeCollection([])
+                self.attributes = FakeAttributes()
+
+        class FakeFeature:
+            def __init__(self, token="feat_extrude_1", name="Extrude1"):
+                self.entityToken = token
+                self.name = name
+                self.attributes = FakeAttributes()
 
         class FakeTimelineItem:
             def __init__(self):
@@ -752,6 +784,8 @@ class AdskFakeContext:
                 self.isValid = True
                 self.isRolledBack = False
                 self.healthStatus = "ok"
+                self.attributes = FakeAttributes()
+                self.entity = FakeFeature()
 
         class FakeParameter:
             def __init__(self):
@@ -1491,7 +1525,7 @@ async def test_falsify_missing_required_fingerprint_groups_fail_closed(
     # Test each mandatory group being missing/corrupted in Fusion runtime
     for missing_group in ("timeline", "parameters", "components", "occurrences", "bodies", "sketches", "attributes"):
         primitive_reached = False
-        with AdskFakeContext("doc_1", initial_volume=100.0) as fake_adsk:
+        with AdskFakeContext("doc_1", initial_volume=100.0):
             import adsk.core
             app = adsk.core.Application.get()
             doc = app.activeDocument
@@ -1623,3 +1657,402 @@ async def test_falsify_wrong_or_absent_document_identity_fails_closed(
         assert exc_no_id.value.code == ErrorCode.NO_ACTIVE_DESIGN
         assert "Document lacks stable runtime identity" in exc_no_id.value.message
         assert primitive_reached is False
+
+
+@pytest.mark.asyncio
+async def test_falsify_async_transaction_lifecycle_queued_failed_and_succeeded(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves async transaction authority is never changed on queued or failed/uncertain states, only proven terminal success."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # 1. Async transaction:begin queued acknowledgment returns status: queued truthfully
+    # and MUST NOT manufacture authoritative baseline in RevisionTracker
+    mock_desktop_service.submit = AsyncMock(return_value={"operation_id": "op_async_begin", "status": "queued"})
+    sub_res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "begin",
+            "transaction_id": "tx_async_1",
+            "document_ref": "doc_1",
+        },
+        group="transaction",
+    )
+    assert sub_res == {"operation_id": "op_async_begin", "status": "queued"}
+    # Tracker must NOT have any baseline for tx_async_1
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is None
+
+    # 2. Terminal failed or uncertain begin does NOT manufacture transaction state
+    op_status_fail = {
+        "operation_id": "op_async_begin",
+        "node_id": "desk-1",
+        "status": "failed",
+        "summary": "transaction:begin",
+        "checkpoint": {"operation": "begin", "group": "transaction", "transaction_id": "tx_async_1", "document_ref": "doc_1"},
+    }
+    with pytest.raises(FusionCadError) as exc_fail:
+        cad_service.finalize_terminal_operation(
+            op_status_fail,
+            {"status": "failed", "error": {"code": "FUSION_API_ERROR", "message": "Fusion script failed"}},
+        )
+    assert exc_fail.value.code == ErrorCode.FUSION_API_ERROR
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is None
+
+    # Uncertain state
+    op_status_unc = {
+        "operation_id": "op_async_begin",
+        "node_id": "desk-1",
+        "status": "uncertain",
+        "summary": "transaction:begin",
+        "checkpoint": {"operation": "begin", "group": "transaction", "transaction_id": "tx_async_1", "document_ref": "doc_1"},
+    }
+    with pytest.raises(FusionCadError):
+        cad_service.finalize_terminal_operation(op_status_unc, {"status": "uncertain"})
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is None
+
+    # 3. Terminal succeeded begin with empty fingerprint does NOT establish baseline
+    op_status_succ = {
+        "operation_id": "op_async_begin",
+        "node_id": "desk-1",
+        "status": "succeeded",
+        "summary": "transaction:begin",
+        "checkpoint": {"operation": "begin", "group": "transaction", "transaction_id": "tx_async_1", "document_ref": "doc_1"},
+    }
+    cad_service.finalize_terminal_operation(
+        op_status_succ,
+        {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Transaction begin completed",
+            "data": {"operation": "begin", "applied": True, "fingerprint": "", "transaction_id": "tx_async_1"},
+            "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+        },
+    )
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is None
+
+    # 4. Proven terminal succeeded begin with valid fingerprint persists authoritative baseline
+    cad_service.finalize_terminal_operation(
+        op_status_succ,
+        {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Transaction begin completed",
+            "data": {"operation": "begin", "applied": True, "fingerprint": "proven_fp_123", "transaction_id": "tx_async_1"},
+            "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+        },
+    )
+    stored = cad_service.revision_tracker.get_transaction_baseline("tx_async_1")
+    assert stored is not None
+    assert stored["baseline_revision"] == "rev_2"
+    assert stored["baseline_fingerprint"] == "proven_fp_123"
+
+    # 5. Async commit queued acknowledgment MUST NOT clear stored baseline
+    mock_desktop_service.submit = AsyncMock(return_value={"operation_id": "op_async_commit", "status": "queued"})
+    comm_sub_res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "commit",
+            "transaction_id": "tx_async_1",
+        },
+        group="transaction",
+    )
+    assert comm_sub_res == {"operation_id": "op_async_commit", "status": "queued"}
+    # Stored baseline must STILL exist
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
+
+    # 6. Failed or uncertain commit MUST NOT clear stored baseline
+    op_status_comm_fail = {
+        "operation_id": "op_async_commit",
+        "node_id": "desk-1",
+        "status": "failed",
+        "summary": "transaction:commit",
+        "checkpoint": {"operation": "commit", "group": "transaction", "transaction_id": "tx_async_1"},
+    }
+    with pytest.raises(FusionCadError):
+        cad_service.finalize_terminal_operation(
+            op_status_comm_fail,
+            {"status": "failed", "error": {"code": "FUSION_API_ERROR"}},
+        )
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
+
+    # 7. Proven terminal succeeded commit clears stored baseline
+    op_status_comm_succ = {
+        "operation_id": "op_async_commit",
+        "node_id": "desk-1",
+        "status": "succeeded",
+        "summary": "Transaction commit completed",
+        "checkpoint": {"operation": "commit", "group": "transaction", "transaction_id": "tx_async_1"},
+    }
+    cad_service.finalize_terminal_operation(
+        op_status_comm_succ,
+        {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Transaction commit completed",
+            "data": {"operation": "commit", "applied": True, "transaction_id": "tx_async_1"},
+        },
+    )
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is None
+
+
+@pytest.mark.asyncio
+async def test_falsify_transaction_preview_and_commit_bound_to_begin_baseline_and_wrong_doc_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves preview and commit stay bound to stored begin baseline, ignoring caller freshness values, and wrong document fails closed."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    cad_service.revision_tracker.observe("doc_1", "seed_fp_1")
+    cad_service.revision_tracker.begin_transaction("tx_bound", "doc_1", "rev_1", "seed_fp_1")
+
+    captured_payload = None
+
+    async def capture_submit(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        nonlocal captured_payload
+        import json
+        script = arguments["script"]
+        # extract PAYLOAD_RAW
+        for line in script.splitlines():
+            if line.startswith("PAYLOAD_RAW = "):
+                raw_json = line[len("PAYLOAD_RAW = "):]
+                captured_payload = json.loads(json.loads(raw_json) if raw_json.startswith('"') else raw_json)
+                break
+        return {"operation_id": "op_bound", "status": "queued"}
+
+    mock_desktop_service.submit = capture_submit  # type: ignore[assignment]
+
+    # 1. Caller attempts to pass forged expected_revision="rev_999"
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "preview",
+            "transaction_id": "tx_bound",
+            "expected_revision": "rev_999",
+        },
+        group="transaction",
+    )
+    assert captured_payload is not None
+    # Script payload MUST be bound to stored begin baseline, NOT caller-selected values
+    assert captured_payload["expected_revision"] == "rev_1"
+    assert captured_payload["expected_fingerprint"] == "seed_fp_1"
+    assert captured_payload["document_ref"] == "doc_1"
+
+    # 2. Caller attempts to target a different document with tx_bound: fails closed with WRONG_DOCUMENT
+    with pytest.raises(FusionCadError) as exc_wrong_doc:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "commit",
+                "transaction_id": "tx_bound",
+                "document_ref": "doc_other",
+            },
+            group="transaction",
+        )
+    assert exc_wrong_doc.value.code == ErrorCode.WRONG_DOCUMENT
+    assert "Transaction 'tx_bound' is bound to document 'doc_1', but request specified 'doc_other'" in exc_wrong_doc.value.message
+
+
+@pytest.mark.asyncio
+async def test_falsify_rendered_script_attribute_owner_relocation_changes_fingerprint(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves executing rendered production scripts detects attribute relocation between document, components, occurrences, bodies, sketches, and timeline."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    fingerprints = {}
+
+    async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+    mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+
+    owner_locations = ["document", "body", "sketch", "component", "occurrence", "timeline", "feature"]
+
+    for loc in owner_locations:
+        with AdskFakeContext("doc_1", initial_volume=100.0):
+            import adsk.core
+            app = adsk.core.Application.get()
+            doc = app.activeDocument
+            design = doc.products.itemByClass("adsk::fusion::Design")
+            root = design.rootComponent
+
+            # Add an occurrence to rootComponent for testing occurrence owner
+            if hasattr(root, "allOccurrences"):
+                class FakeOcc:
+                    def __init__(self):
+                        self.name = "Occ1"
+                        self.fullPathName = "Root+Occ1"
+                        self.isVisible = True
+                        self.isLightBulbOn = True
+                        class FT:
+                            def asArray(self):
+                                return [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                        self.transform = FT()
+                        class FA:
+                            def __init__(self):
+                                self._items = []
+                            @property
+                            def count(self):
+                                return len(self._items)
+                            def item(self, idx):
+                                return self._items[idx]
+                            def add(self, g, n, v):
+                                class Attr:
+                                    def __init__(self, g, n, v):
+                                        self.groupName = g
+                                        self.name = n
+                                        self.value = v
+                                self._items.append(Attr(g, n, v))
+                        self.attributes = FA()
+                occ = FakeOcc()
+                root.allOccurrences = type("FakeColl", (), {"count": 1, "item": lambda self, idx, o=occ: o})()
+
+            # Place attribute ("bridge.cad/v1", "marker", "val1") at the specified location
+            if loc == "document":
+                doc.attributes.add("bridge.cad/v1", "marker", "val1")
+            elif loc == "body":
+                root.bRepBodies.item(0).attributes.add("bridge.cad/v1", "marker", "val1")
+            elif loc == "sketch":
+                root.sketches.item(0).attributes.add("bridge.cad/v1", "marker", "val1")
+            elif loc == "component":
+                root.attributes.add("bridge.cad/v1", "marker", "val1")
+            elif loc == "occurrence":
+                occ.attributes.add("bridge.cad/v1", "marker", "val1")
+            elif loc == "timeline":
+                design.timeline.item(0).attributes.add("bridge.cad/v1", "marker", "val1")
+            elif loc == "feature":
+                design.timeline.item(0).entity.attributes.add("bridge.cad/v1", "marker", "val1")
+
+            res = await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
+            assert isinstance(res, CadResult)
+            fp = res.data["fingerprint"]
+            fingerprints[loc] = fp
+
+    # Every location must produce a distinct fingerprint
+    distinct_fps = set(fingerprints.values())
+    assert len(distinct_fps) == len(owner_locations), f"Fingerprints did not differentiate owner locations: {fingerprints}"
+
+
+@pytest.mark.asyncio
+async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves rendered production script fails closed before write when mandatory transform, visibility, geometry, or attributes are unreadable."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    primitive_reached = False
+
+    async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        nonlocal primitive_reached
+        script = arguments["script"]
+        scope = {
+            "__name__": "__main__",
+            "_mutation_primitive": lambda payload: globals().update(primitive_reached=True),
+        }
+        exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+    mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+
+    cad_service.revision_tracker.observe("doc_1", "seed-fp")
+
+    unreadable_cases = [
+        "corrupt_transform",
+        "missing_transform_asArray",
+        "missing_body_volume",
+        "missing_body_area",
+        "missing_body_isSolid",
+        "missing_body_visibility",
+        "missing_body_bbox",
+        "missing_sketch_visibility",
+        "missing_sketch_profiles",
+        "missing_sketch_geometricConstraints",
+        "unreadable_doc_attributes",
+    ]
+
+    for case in unreadable_cases:
+        primitive_reached = False
+        with AdskFakeContext("doc_1", initial_volume=100.0):
+            import adsk.core
+            app = adsk.core.Application.get()
+            doc = app.activeDocument
+            design = doc.products.itemByClass("adsk::fusion::Design")
+            root = design.rootComponent
+
+            if case == "corrupt_transform":
+                # Add an occurrence with transform=None
+                class BadOcc:
+                    name = "Occ1"
+                    fullPathName = "Root+Occ1"
+                    transform = None
+                root.allOccurrences = type("FakeColl", (), {"count": 1, "item": lambda s, idx: BadOcc()})()
+            elif case == "missing_transform_asArray":
+                class BadOcc2:
+                    name = "Occ1"
+                    fullPathName = "Root+Occ1"
+                    transform = object()  # lacks asArray
+                root.allOccurrences = type("FakeColl", (), {"count": 1, "item": lambda s, idx: BadOcc2()})()
+            elif case == "missing_body_volume":
+                root.bRepBodies.item(0)._ctx.volume = None
+            elif case == "missing_body_area":
+                root.bRepBodies.item(0).area = None
+            elif case == "missing_body_isSolid":
+                root.bRepBodies.item(0).isSolid = None
+            elif case == "missing_body_visibility":
+                root.bRepBodies.item(0).isVisible = None
+                root.bRepBodies.item(0).isLightBulbOn = None
+            elif case == "missing_body_bbox":
+                root.bRepBodies.item(0).boundingBox = None
+            elif case == "missing_sketch_visibility":
+                root.sketches.item(0).isVisible = None
+                root.sketches.item(0).isLightBulbOn = None
+            elif case == "missing_sketch_profiles":
+                root.sketches.item(0).profiles = None
+            elif case == "missing_sketch_geometricConstraints":
+                root.sketches.item(0).geometricConstraints = None
+            elif case == "unreadable_doc_attributes":
+                doc.attributes = None
+
+            with pytest.raises(FusionCadError) as exc_case:
+                await cad_service.execute(
+                    {
+                        "node_id": "desk-1",
+                        "operation": "set",
+                        "target": "ent_1",
+                        "name": "tag",
+                        "value": "v1",
+                        "expected_revision": "rev_1",
+                    },
+                    group="metadata",
+                )
+            assert exc_case.value.code in (ErrorCode.CAPABILITY_UNAVAILABLE, ErrorCode.FUSION_API_ERROR), f"Unexpected code for case {case}: {exc_case.value.code}"
+            assert primitive_reached is False, f"Primitive was reached for unreadable case {case}!"

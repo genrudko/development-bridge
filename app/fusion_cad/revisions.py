@@ -190,9 +190,12 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
     if "attributes" in payload:
         raw_attrs = payload["attributes"]
         attr_items: list[dict[str, Any]] = []
+        doc_id_for_attr = canonical.get("document", {}).get("document_ref", "")
         if isinstance(raw_attrs, Mapping):
             for k, v in raw_attrs.items():
                 attr_items.append({
+                    "owner_type": "document",
+                    "owner_id": doc_id_for_attr,
                     "group": "bridge.cad/v1",
                     "name": str(k),
                     "value": str(v),
@@ -201,11 +204,13 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
             for a in raw_attrs:
                 if isinstance(a, Mapping):
                     attr_items.append({
+                        "owner_type": str(a.get("owner_type", "document")),
+                        "owner_id": str(a.get("owner_id", doc_id_for_attr if str(a.get("owner_type", "document")) == "document" else "")),
                         "group": str(a.get("group", "bridge.cad/v1")),
                         "name": str(a.get("name", "")),
                         "value": str(a.get("value", "")),
                     })
-        attr_items.sort(key=lambda x: (x["group"], x["name"]))
+        attr_items.sort(key=lambda x: (x["owner_type"], x["owner_id"], x["group"], x["name"], x.get("value", "")))
         canonical["attributes"] = attr_items
 
     # 8. Effective visibility inputs
@@ -455,15 +460,30 @@ class RevisionTracker:
             )
 
         rec = self._documents.get(doc_ref)
-        if rec is None and (baseline_revision is None or baseline_fingerprint is None):
+        if baseline_fingerprint is not None:
+            b_fp = baseline_fingerprint
+        else:
+            b_fp = rec.fingerprint if rec else None
+
+        if baseline_revision is not None:
+            b_rev = baseline_revision
+        else:
+            b_rev = rec.revision if rec else None
+
+        if not b_fp or not isinstance(b_fp, str) or not b_fp.strip():
             raise FusionCadError(
-                ErrorCode.NO_ACTIVE_DESIGN,
-                f"No observed revision for document '{doc_ref}' at transaction begin",
-                details={"document_ref": doc_ref, "transaction_id": transaction_id},
+                ErrorCode.INVALID_ARGUMENT,
+                f"Authoritative baseline_fingerprint is required and cannot be empty for transaction '{transaction_id}' on document '{doc_ref}'",
+                details={"transaction_id": transaction_id, "document_ref": doc_ref},
             )
 
-        b_rev = baseline_revision or (rec.revision if rec else "rev_1")
-        b_fp = baseline_fingerprint or (rec.fingerprint if rec else "")
+        if not b_rev or not isinstance(b_rev, str) or not b_rev.strip():
+            raise FusionCadError(
+                ErrorCode.NO_ACTIVE_DESIGN,
+                f"No observed revision for document '{doc_ref}' at transaction begin; cannot establish authoritative baseline",
+                details={"transaction_id": transaction_id, "document_ref": doc_ref},
+            )
+
         baseline = {
             "transaction_id": transaction_id,
             "document_ref": doc_ref,

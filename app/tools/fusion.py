@@ -108,7 +108,7 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         full, metadata = container.desktop_nodes.operation_result(args["node_id"], args["operation_id"])
         summary = op_status.get("summary")
         if isinstance(summary, str) and getattr(container, "fusion_cad", None) and container.fusion_cad.is_domain_summary(summary):
-            container.fusion_cad.decode_domain_result(full)
+            container.fusion_cad.finalize_terminal_operation(op_status, full)
         elif FusionCadService._is_error_payload(full) or op_status.get("status") in ("failed", "late_failed"):
             err_code, err_msg, err_details = FusionCadService._extract_error_info(full)
             raise BridgeError(err_code, err_msg, details=err_details)

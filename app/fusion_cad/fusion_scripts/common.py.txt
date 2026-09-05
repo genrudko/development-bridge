@@ -227,19 +227,39 @@ def collect_model_fingerprint(payload=None):
         for i in range(all_occs.count):
             try:
                 occ = all_occs.item(i)
-                t_mat = None
+                occ_name = str(getattr(occ, "name", ""))
                 transform = getattr(occ, "transform", None)
-                if transform and hasattr(transform, "asArray"):
-                    t_mat = [round(float(v), 6) for v in transform.asArray()]
-                is_local_vis = bool(getattr(occ, "isLightBulbOn", getattr(occ, "isVisible", True)))
-                is_eff_vis = bool(getattr(occ, "isVisible", True))
+                if transform is None or not hasattr(transform, "asArray"):
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        f"Occurrence '{occ_name}' has unreadable or missing transform",
+                    )
+                t_arr = transform.asArray()
+                if t_arr is None:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        f"Occurrence '{occ_name}' transform.asArray returned None",
+                    )
+                t_mat = [round(float(v), 6) for v in t_arr]
+
+                raw_local = getattr(occ, "isLightBulbOn", None)
+                raw_eff = getattr(occ, "isVisible", None)
+                if raw_local is None and raw_eff is None:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        f"Occurrence '{occ_name}' has unreadable visibility (isLightBulbOn/isVisible missing)",
+                    )
+                is_local_vis = bool(raw_local if raw_local is not None else raw_eff)
+                is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                 occ_items.append({
-                    "name": str(getattr(occ, "name", "")),
-                    "full_path_name": str(getattr(occ, "fullPathName", getattr(occ, "name", ""))),
+                    "name": occ_name,
+                    "full_path_name": str(getattr(occ, "fullPathName", occ_name)),
                     "is_visible": is_local_vis,
                     "effective_visibility": is_eff_vis,
                     "transform": t_mat,
                 })
+            except FusionScriptError:
+                raise
             except Exception as exc:
                 raise FusionScriptError("FUSION_API_ERROR", f"Failed to read occurrence {i}: {exc}") from exc
         occ_items.sort(key=lambda x: x["full_path_name"])
@@ -259,32 +279,62 @@ def collect_model_fingerprint(payload=None):
             for b_idx in range(bodies.count):
                 try:
                     b = bodies.item(b_idx)
-                    bbox = None
+                    b_name = str(getattr(b, "name", ""))
+
+                    raw_solid = getattr(b, "isSolid", None)
+                    if raw_solid is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable or missing isSolid")
+
+                    raw_vol = getattr(b, "volume", None)
+                    if raw_vol is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable or missing volume")
+
+                    raw_area = getattr(b, "area", None)
+                    if raw_area is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable or missing area")
+
+                    raw_local = getattr(b, "isLightBulbOn", None)
+                    raw_eff = getattr(b, "isVisible", None)
+                    if raw_local is None and raw_eff is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable visibility")
+
                     bb = getattr(b, "boundingBox", None)
-                    if bb:
-                        min_pt = getattr(bb, "minPoint", None)
-                        max_pt = getattr(bb, "maxPoint", None)
-                        if min_pt and max_pt:
-                            bbox = {
-                                "min": [round(float(min_pt.x), 6), round(float(min_pt.y), 6), round(float(min_pt.z), 6)],
-                                "max": [round(float(max_pt.x), 6), round(float(max_pt.y), 6), round(float(max_pt.z), 6)],
-                            }
+                    if bb is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable or missing boundingBox")
+                    min_pt = getattr(bb, "minPoint", None)
+                    max_pt = getattr(bb, "maxPoint", None)
+                    if min_pt is None or max_pt is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' boundingBox minPoint or maxPoint is unreadable")
+
+                    bbox = {
+                        "min": [round(float(min_pt.x), 6), round(float(min_pt.y), 6), round(float(min_pt.z), 6)],
+                        "max": [round(float(max_pt.x), 6), round(float(max_pt.y), 6), round(float(max_pt.z), 6)],
+                    }
+
                     faces = getattr(b, "faces", None)
+                    if faces is None or not hasattr(faces, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' faces collection is unreadable")
+
                     edges = getattr(b, "edges", None)
-                    is_local_vis = bool(getattr(b, "isLightBulbOn", getattr(b, "isVisible", True)))
-                    is_eff_vis = bool(getattr(b, "isVisible", True))
+                    if edges is None or not hasattr(edges, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edges collection is unreadable")
+
+                    is_local_vis = bool(raw_local if raw_local is not None else raw_eff)
+                    is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                     b_items.append({
-                        "name": str(getattr(b, "name", "")),
+                        "name": b_name,
                         "component": c_name,
-                        "is_solid": bool(getattr(b, "isSolid", True)),
+                        "is_solid": bool(raw_solid),
                         "is_visible": is_local_vis,
                         "effective_visibility": is_eff_vis,
-                        "volume": canonicalize_value(float(getattr(b, "volume", 0.0))),
-                        "area": canonicalize_value(float(getattr(b, "area", 0.0))),
-                        "faces_count": getattr(faces, "count", 0) if faces else 0,
-                        "edges_count": getattr(edges, "count", 0) if edges else 0,
+                        "volume": canonicalize_value(float(raw_vol)),
+                        "area": canonicalize_value(float(raw_area)),
+                        "faces_count": faces.count,
+                        "edges_count": edges.count,
                         "bounding_box": bbox,
                     })
+                except FusionScriptError:
+                    raise
                 except Exception as exc:
                     raise FusionScriptError("FUSION_API_ERROR", f"Failed to read body {b_idx} in component '{c_name}': {exc}") from exc
         b_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
@@ -304,53 +354,71 @@ def collect_model_fingerprint(payload=None):
             for s_idx in range(sketches.count):
                 try:
                     s = sketches.item(s_idx)
+                    s_name = str(getattr(s, "name", ""))
+
+                    raw_local = getattr(s, "isLightBulbOn", None)
+                    raw_eff = getattr(s, "isVisible", None)
+                    if raw_local is None and raw_eff is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' has unreadable visibility")
+
                     prof = getattr(s, "profiles", None)
+                    if prof is None or not hasattr(prof, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' has unreadable profiles collection")
+
                     curves = getattr(s, "sketchCurves", None)
+                    if curves is None or not hasattr(curves, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' has unreadable sketchCurves collection")
+
                     geom_cons = getattr(s, "geometricConstraints", None)
+                    if geom_cons is None or not hasattr(geom_cons, "count"):
+                        raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Sketch '{s_name}' lacks geometricConstraints collection")
+
                     sketch_dims = getattr(s, "sketchDimensions", None)
+                    if sketch_dims is None or not hasattr(sketch_dims, "count"):
+                        raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Sketch '{s_name}' lacks sketchDimensions collection")
 
                     cons_items = []
-                    if geom_cons and hasattr(geom_cons, "count"):
-                        for ci in range(geom_cons.count):
-                            try:
-                                con = geom_cons.item(ci)
-                                cons_items.append({
-                                    "type": str(getattr(con, "objectType", None) or type(con).__name__),
-                                    "is_deletable": bool(getattr(con, "isDeletable", True)),
-                                })
-                            except Exception as exc:
-                                raise FusionScriptError("FUSION_API_ERROR", f"Failed to read constraint {ci} on sketch '{getattr(s, 'name', '')}': {exc}") from exc
+                    for ci in range(geom_cons.count):
+                        try:
+                            con = geom_cons.item(ci)
+                            cons_items.append({
+                                "type": str(getattr(con, "objectType", None) or type(con).__name__),
+                                "is_deletable": bool(getattr(con, "isDeletable", True)),
+                            })
+                        except Exception as exc:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Failed to read constraint {ci} on sketch '{s_name}': {exc}") from exc
                     cons_items.sort(key=lambda x: x["type"])
 
                     dim_items = []
-                    if sketch_dims and hasattr(sketch_dims, "count"):
-                        for di in range(sketch_dims.count):
-                            try:
-                                dim = sketch_dims.item(di)
-                                param = getattr(dim, "parameter", None)
-                                dim_items.append({
-                                    "name": str(getattr(param, "name", "") if param else getattr(dim, "name", "")),
-                                    "value": canonicalize_value(float(getattr(param, "value", getattr(dim, "value", 0.0)))) if (param or hasattr(dim, "value")) else None,
-                                    "expression": str(getattr(param, "expression", "")) if param else None,
-                                })
-                            except Exception as exc:
-                                raise FusionScriptError("FUSION_API_ERROR", f"Failed to read dimension {di} on sketch '{getattr(s, 'name', '')}': {exc}") from exc
+                    for di in range(sketch_dims.count):
+                        try:
+                            dim = sketch_dims.item(di)
+                            param = getattr(dim, "parameter", None)
+                            dim_items.append({
+                                "name": str(getattr(param, "name", "") if param else getattr(dim, "name", "")),
+                                "value": canonicalize_value(float(getattr(param, "value", getattr(dim, "value", 0.0)))) if (param or hasattr(dim, "value")) else None,
+                                "expression": str(getattr(param, "expression", "")) if param else None,
+                            })
+                        except Exception as exc:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Failed to read dimension {di} on sketch '{s_name}': {exc}") from exc
                     dim_items.sort(key=lambda x: (x["name"], str(x.get("value"))))
 
-                    is_local_vis = bool(getattr(s, "isLightBulbOn", getattr(s, "isVisible", True)))
-                    is_eff_vis = bool(getattr(s, "isVisible", True))
+                    is_local_vis = bool(raw_local if raw_local is not None else raw_eff)
+                    is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                     s_items.append({
-                        "name": str(getattr(s, "name", "")),
+                        "name": s_name,
                         "component": c_name,
                         "is_visible": is_local_vis,
                         "effective_visibility": is_eff_vis,
-                        "profiles_count": getattr(prof, "count", 0) if prof else 0,
-                        "curves_count": getattr(curves, "count", 0) if curves else 0,
+                        "profiles_count": prof.count,
+                        "curves_count": curves.count,
                         "constraints_count": len(cons_items),
                         "constraints": cons_items,
                         "dimensions_count": len(dim_items),
                         "dimensions": dim_items,
                     })
+                except FusionScriptError:
+                    raise
                 except Exception as exc:
                     raise FusionScriptError("FUSION_API_ERROR", f"Failed to read sketch {s_idx} in component '{c_name}': {exc}") from exc
         s_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
@@ -382,43 +450,49 @@ def collect_model_fingerprint(payload=None):
 
     # 7. Bridge attributes across relevant document/components/occurrences/entities (mandatory)
     attrs = getattr(doc, "attributes", None) if doc else None
-    if doc and (not attrs or not hasattr(attrs, "count")):
+    if doc and (attrs is None or not hasattr(attrs, "count")):
         raise FusionScriptError(
             "CAPABILITY_UNAVAILABLE",
             "Active document lacks attributes collection; "
             "mandatory fingerprint group 'attributes' cannot be omitted",
         )
     attr_items = []
-    if attrs and hasattr(attrs, "count"):
-        for i in range(attrs.count):
+
+    def _read_owner_attributes(owner, owner_type, owner_id):
+        o_attrs = getattr(owner, "attributes", None)
+        if o_attrs is None:
+            return
+        if not hasattr(o_attrs, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"{owner_type} '{owner_id}' has invalid attributes collection",
+            )
+        for idx in range(o_attrs.count):
             try:
-                a = attrs.item(i)
+                a = o_attrs.item(idx)
                 grp = getattr(a, "groupName", "")
                 if grp == "bridge.cad/v1":
                     attr_items.append({
+                        "owner_type": owner_type,
+                        "owner_id": owner_id,
                         "group": grp,
                         "name": str(getattr(a, "name", "")),
                         "value": str(getattr(a, "value", "")),
                     })
             except Exception as exc:
-                raise FusionScriptError("FUSION_API_ERROR", f"Failed to read attribute {i}: {exc}") from exc
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    f"Failed to read attribute {idx} on {owner_type} '{owner_id}': {exc}",
+                ) from exc
+
+    # Document attributes
+    if doc:
+        _read_owner_attributes(doc, "document", safe_doc_ref)
 
     # Component attributes
     for c in comps_list:
-        c_attrs = getattr(c, "attributes", None)
-        if c_attrs and hasattr(c_attrs, "count"):
-            for i in range(c_attrs.count):
-                try:
-                    a = c_attrs.item(i)
-                    grp = getattr(a, "groupName", "")
-                    if grp == "bridge.cad/v1":
-                        attr_items.append({
-                            "group": grp,
-                            "name": str(getattr(a, "name", "")),
-                            "value": str(getattr(a, "value", "")),
-                        })
-                except Exception as exc:
-                    raise FusionScriptError("FUSION_API_ERROR", f"Failed to read component attribute {i}: {exc}") from exc
+        c_id = str(getattr(c, "id", "") or getattr(c, "entityToken", "") or getattr(c, "name", ""))
+        _read_owner_attributes(c, "component", c_id)
 
     # Occurrence attributes
     if design and root:
@@ -426,43 +500,41 @@ def collect_model_fingerprint(payload=None):
         if all_occs and hasattr(all_occs, "count"):
             for i in range(all_occs.count):
                 occ = all_occs.item(i)
-                occ_attrs = getattr(occ, "attributes", None)
-                if occ_attrs and hasattr(occ_attrs, "count"):
-                    for j in range(occ_attrs.count):
-                        try:
-                            a = occ_attrs.item(j)
-                            grp = getattr(a, "groupName", "")
-                            if grp == "bridge.cad/v1":
-                                attr_items.append({
-                                    "group": grp,
-                                    "name": str(getattr(a, "name", "")),
-                                    "value": str(getattr(a, "value", "")),
-                                })
-                        except Exception as exc:
-                            raise FusionScriptError("FUSION_API_ERROR", f"Failed to read occurrence attribute {j}: {exc}") from exc
+                occ_id = str(getattr(occ, "fullPathName", getattr(occ, "name", "")))
+                _read_owner_attributes(occ, "occurrence", occ_id)
 
     # Body attributes
     for c in comps_list:
+        c_name = str(getattr(c, "name", ""))
         bodies = getattr(c, "bRepBodies", None)
         if bodies and hasattr(bodies, "count"):
-            for i in range(bodies.count):
-                b = bodies.item(i)
-                b_attrs = getattr(b, "attributes", None)
-                if b_attrs and hasattr(b_attrs, "count"):
-                    for j in range(b_attrs.count):
-                        try:
-                            a = b_attrs.item(j)
-                            grp = getattr(a, "groupName", "")
-                            if grp == "bridge.cad/v1":
-                                attr_items.append({
-                                    "group": grp,
-                                    "name": str(getattr(a, "name", "")),
-                                    "value": str(getattr(a, "value", "")),
-                                })
-                        except Exception as exc:
-                            raise FusionScriptError("FUSION_API_ERROR", f"Failed to read body attribute {j}: {exc}") from exc
+            for b_idx in range(bodies.count):
+                b = bodies.item(b_idx)
+                b_id = f"{c_name}:{str(getattr(b, 'entityToken', '') or getattr(b, 'name', ''))}"
+                _read_owner_attributes(b, "body", b_id)
 
-    attr_items.sort(key=lambda x: (x["group"], x["name"], x.get("value", "")))
+    # Sketch attributes
+    for c in comps_list:
+        c_name = str(getattr(c, "name", ""))
+        sketches = getattr(c, "sketches", None)
+        if sketches and hasattr(sketches, "count"):
+            for s_idx in range(sketches.count):
+                s = sketches.item(s_idx)
+                s_id = f"{c_name}:{str(getattr(s, 'entityToken', '') or getattr(s, 'name', ''))}"
+                _read_owner_attributes(s, "sketch", s_id)
+
+    # Timeline / Feature entity attributes
+    if design and timeline and hasattr(timeline, "count"):
+        for t_idx in range(timeline.count):
+            t = timeline.item(t_idx)
+            t_id = str(getattr(t, "entityToken", None) or getattr(t, "id", None) or getattr(t, "name", "") or t_idx)
+            _read_owner_attributes(t, "timeline", t_id)
+            feat = getattr(t, "entity", None)
+            if feat:
+                f_id = str(getattr(feat, "entityToken", None) or getattr(feat, "id", None) or getattr(feat, "name", "") or t_id)
+                _read_owner_attributes(feat, "feature", f_id)
+
+    attr_items.sort(key=lambda x: (x["owner_type"], x["owner_id"], x["group"], x["name"], x.get("value", "")))
     canonical["attributes"] = attr_items
 
     # Mandatory group validation: when design is active, all groups must be present
