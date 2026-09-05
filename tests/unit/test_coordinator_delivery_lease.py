@@ -2,30 +2,153 @@ from __future__ import annotations
 
 import pytest
 
+from app.api.errors import BridgeError, ErrorCode
 from app.coordinator.service import CoordinatorService
 
 
 @pytest.mark.asyncio
-async def test_delivery_lease_rejects_explicit_stale_owner_but_allows_legacy_widget(tmp_path):
+async def test_delivery_lease_exclusive_endpoint_fails_closed_for_different_session(tmp_path):
     service = CoordinatorService(tmp_path / "wakes.json")
-    service.MIN_WEB_TURN_INTERVAL_SECONDS = 0
+    first = service.issue_delivery_lease("route-g1", session_id="session-a", route_id="route", generation=1)
+
+    # Different second session while current heartbeat is active fails closed with POLICY_VIOLATION
+    with pytest.raises(BridgeError) as exc_info:
+        service.issue_delivery_lease("route-g1", session_id="session-b", route_id="route", generation=1)
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+    # Preserves old lease
+    preserved = service.delivery_lease("route-g1")
+    assert preserved is not None
+    assert preserved["lease_id"] == first["lease_id"]
+    assert preserved["session_id"] == "session-a"
+
+    # Missing session_id also fails closed
+    with pytest.raises(BridgeError) as exc_info_anon:
+        service.issue_delivery_lease("route-g1", session_id=None, route_id="route", generation=1)
+    assert exc_info_anon.value.code == ErrorCode.POLICY_VIOLATION
+
+
+@pytest.mark.asyncio
+async def test_delivery_lease_same_session_remount_reuses_and_refreshes_lease(tmp_path):
+    service = CoordinatorService(tmp_path / "wakes.json")
     first = service.issue_delivery_lease("route-g1", session_id="session-a", route_id="route", generation=1)
     same = service.issue_delivery_lease("route-g1", session_id="session-a", route_id="route", generation=1)
     assert same["lease_id"] == first["lease_id"]
+    assert same["session_id"] == "session-a"
 
-    await service.arm("wake-one", channel_id="route-g1", delay_seconds=0)
-    visible = await service.status("route-g1")
-    assert visible["state"] == "pending"
-    claim = await service.claim("route-g1")
-    assert claim["claimed"] is True
-    assert (await service.ack("route-g1", claim["claim_id"], delivery_lease="wrong"))["acknowledged"] is False
-    assert (await service.ack("route-g1", claim["claim_id"]))["acknowledged"] is True
 
+@pytest.mark.asyncio
+async def test_delivery_lease_takeover_allowed_after_heartbeat_ttl_expires(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(tmp_path / "wakes.json")
+    service.X_LISTENER_HEARTBEAT_TTL_SECONDS = 10.0
+    first = service.issue_delivery_lease("route-g1", session_id="session-a", route_id="route", generation=1)
+
+    clock[0] = 1005.0
+    with pytest.raises(BridgeError) as exc_info:
+        service.issue_delivery_lease("route-g1", session_id="session-b", route_id="route", generation=1)
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+    # After TTL expiry, different session acquires new lease
+    clock[0] = 1011.0
     second = service.issue_delivery_lease("route-g1", session_id="session-b", route_id="route", generation=1)
     assert second["lease_id"] != first["lease_id"]
-    await service.arm("wake-two", channel_id="route-g1", delay_seconds=0)
-    assert (await service.claim("route-g1", delivery_lease=first["lease_id"]))["claimed"] is False
-    assert (await service.claim("route-g1", delivery_lease=second["lease_id"]))["claimed"] is True
+    assert second["session_id"] == "session-b"
+
+
+@pytest.mark.asyncio
+async def test_delivery_lease_generation_turnover_allows_new_session(tmp_path):
+    service = CoordinatorService(tmp_path / "wakes.json")
+    first = service.issue_delivery_lease("route-g1", session_id="session-a", route_id="route", generation=1)
+
+    # Generation turnover to generation 2 succeeds even with active heartbeat on gen 1
+    second = service.issue_delivery_lease("route-g1", session_id="session-b", route_id="route", generation=2)
+    assert second["lease_id"] != first["lease_id"]
+    assert second["session_id"] == "session-b"
+    assert second["generation"] == 2
+
+
+@pytest.mark.asyncio
+async def test_x_endpoints_reject_missing_or_stale_lease_when_lease_exists(tmp_path):
+    service = CoordinatorService(tmp_path / "wakes.json")
+    service.MIN_WEB_TURN_INTERVAL_SECONDS = 0
+    lease = service.issue_delivery_lease("route-g1", session_id="session-a", route_id="route", generation=1)
+
+    await service.arm("wake-one", channel_id="route-g1", delay_seconds=0)
+
+    # Status with missing lease
+    missing_status = await service.status("route-g1", delivery_lease=None, delivery_mode="x")
+    assert missing_status["state"] == "standby"
+    assert missing_status["ready"] is False
+    assert missing_status.get("delivery_lease_required") is True
+
+    # Status with stale lease
+    stale_status = await service.status("route-g1", delivery_lease="stale-lease", delivery_mode="x")
+    assert stale_status["state"] == "standby"
+    assert stale_status["ready"] is False
+    assert stale_status.get("delivery_lease_required") is True
+
+    # Claim with missing lease
+    missing_claim = await service.claim("route-g1", delivery_lease=None, delivery_mode="x")
+    assert missing_claim["claimed"] is False
+    assert missing_claim["state"] == "standby"
+    assert missing_claim.get("delivery_lease_required") is True
+
+    # Claim with stale lease
+    stale_claim = await service.claim("route-g1", delivery_lease="stale-lease", delivery_mode="x")
+    assert stale_claim["claimed"] is False
+    assert stale_claim["state"] == "standby"
+    assert stale_claim.get("delivery_lease_required") is True
+
+    # Claim with valid lease succeeds
+    valid_claim = await service.claim("route-g1", delivery_lease=lease["lease_id"], delivery_mode="x")
+    assert valid_claim["claimed"] is True
+
+    # Ack with missing lease
+    missing_ack = await service.ack("route-g1", valid_claim["claim_id"], delivery_lease=None)
+    assert missing_ack["acknowledged"] is False
+    assert missing_ack["state"] == "standby"
+    assert missing_ack.get("delivery_lease_required") is True
+
+    # Ack with stale lease
+    stale_ack = await service.ack("route-g1", valid_claim["claim_id"], delivery_lease="stale-lease")
+    assert stale_ack["acknowledged"] is False
+    assert stale_ack["state"] == "standby"
+    assert stale_ack.get("delivery_lease_required") is True
+
+    # Ack with valid lease succeeds
+    valid_ack = await service.ack("route-g1", valid_claim["claim_id"], delivery_lease=lease["lease_id"])
+    assert valid_ack["acknowledged"] is True
+
+
+@pytest.mark.asyncio
+async def test_direct_delivery_fallback_works_after_x_heartbeat_expires_when_lease_exists(
+    tmp_path, monkeypatch
+):
+    clock = [1000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    service = CoordinatorService(tmp_path / "wakes.json")
+    service.X_LISTENER_HEARTBEAT_TTL_SECONDS = 10.0
+    service.issue_delivery_lease("route-g1", session_id="session-a", route_id="route", generation=1)
+
+    await service.arm("wake-direct", channel_id="route-g1", delay_seconds=0)
+
+    # Active heartbeat blocks direct fallback
+    clock[0] = 1005.0
+    direct_status = await service.status("route-g1", delivery_mode="direct")
+    assert direct_status["state"] == "x_listener_active"
+    assert direct_status["ready"] is False
+    direct_claim = await service.claim("route-g1", delivery_mode="direct")
+    assert direct_claim["claimed"] is False
+
+    # After TTL expiry, direct fallback works without delivery lease
+    clock[0] = 1012.0
+    expired_status = await service.status("route-g1", delivery_mode="direct")
+    assert expired_status["state"] == "pending"
+    assert expired_status["ready"] is True
+    expired_claim = await service.claim("route-g1", delivery_mode="direct")
+    assert expired_claim["claimed"] is True
 
 
 def test_delivery_lease_survives_bridge_restart(tmp_path):

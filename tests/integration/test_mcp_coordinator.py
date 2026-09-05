@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import httpx2
@@ -579,7 +580,7 @@ async def test_stale_physical_session_cannot_implicitly_wake_successor(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_new_mount_invalidates_old_physical_chat_delivery_lease(tmp_path):
+async def test_exclusive_route_endpoint_ownership_rejects_second_session_and_preserves_binding(tmp_path):
     settings = BridgeSettings.model_validate({
         "server": {"tool_surface": "compact"},
         "coordinator": {"route_registry_path": tmp_path / "routes.json"},
@@ -592,41 +593,130 @@ async def test_new_mount_invalidates_old_physical_chat_delivery_lease(tmp_path):
         "AD5X",
     )
     app = create_streamable_http_app(create_server(container), settings, container)
-    async with app.router.lifespan_context(app):
-        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
-            async def mount_once():
-                async with streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams:
-                    async with ClientSession(*streams) as session:
-                        await session.initialize()
-                        result = await session.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
-                        return result.structured_content["delivery_lease"]
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+    ):
+        # 1. Session 1 mounts route ad5x
+        async with (
+            streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams1,
+            ClientSession(*streams1) as session1,
+        ):
+            await session1.initialize()
+            mount1 = await session1.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
+            assert mount1.is_error is False
+            lease_1 = mount1.structured_content["delivery_lease"]
+            assert lease_1 is not None
 
-            old_lease = await mount_once()
-            new_lease = await mount_once()
-            assert old_lease != new_lease
+            bindings_after_mount1 = dict(container.coordinator._session_bindings)
+            assert len(bindings_after_mount1) == 1
 
-            await container.coordinator.arm("wake-current-chat", channel_id="telegram-ad5x-g0", delay_seconds=0)
-            old = await client.post(
-                f"/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease={old_lease}"
-            )
-            assert old.json()["claimed"] is False
-            assert old.json()["state"] == "standby"
-            legacy = await client.post(
-                "/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0"
-            )
-            assert legacy.json()["claimed"] is True
-            assert (await container.coordinator.ack(
-                "telegram-ad5x-g0", legacy.json()["claim_id"]
-            ))["acknowledged"] is True
+            # 2. Session 2 attempts to mount route ad5x while Session 1 heartbeat is active
+            async with (
+                streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams2,
+                ClientSession(*streams2) as session2,
+            ):
+                await session2.initialize()
+                mount2 = await session2.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
+                # Must fail closed with safe POLICY_VIOLATION
+                assert mount2.is_error is True
+                error_payload = json.loads(mount2.content[0].text)
+                assert error_payload["error"]["code"] == "POLICY_VIOLATION"
+
+                # Preserves old lease
+                current_lease = container.coordinator.delivery_lease("telegram-ad5x-g0")
+                assert current_lease is not None
+                assert current_lease["lease_id"] == lease_1
+
+                # Session 2 must NOT be left bound
+                bindings_after_mount2 = dict(container.coordinator._session_bindings)
+                assert bindings_after_mount2 == bindings_after_mount1
+
+                # Session 2 calling tool without bound session must fail
+                unbound_call = await session2.call_tool(
+                    "bridge_call",
+                    {"tool_name": "coordinator_continue", "arguments": {"message": "steal"}},
+                )
+                assert unbound_call.is_error is True
+
+            # 3. Same-session remount reuses and refreshes lease
+            remount1 = await session1.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
+            assert remount1.is_error is False
+            assert remount1.structured_content["delivery_lease"] == lease_1
+
+        # 4. HTTP endpoints reject missing or stale lease, but accept current lease
+        await container.coordinator.arm("wake-endpoint", channel_id="telegram-ad5x-g0", delay_seconds=0)
+
+        # Missing lease rejected
+        missing_status = await client.get("/mcp/x/coordinator/status?channel_id=telegram-ad5x-g0")
+        assert missing_status.json()["state"] == "standby"
+        assert missing_status.json().get("delivery_lease_required") is True
+
+        missing_claim = await client.post("/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0")
+        assert missing_claim.json()["claimed"] is False
+        assert missing_claim.json().get("delivery_lease_required") is True
+
+        # Stale lease rejected
+        stale_claim = await client.post(
+            "/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease=stale-lease"
+        )
+        assert stale_claim.json()["claimed"] is False
+        assert stale_claim.json().get("delivery_lease_required") is True
+
+        # Valid lease claims wake
+        valid_claim = await client.post(
+            f"/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease={lease_1}"
+        )
+        assert valid_claim.json()["claimed"] is True
+        claim_id = valid_claim.json()["claim_id"]
+
+        # Missing lease rejected on ack
+        missing_ack = await client.post(
+            f"/mcp/x/coordinator/ack?channel_id=telegram-ad5x-g0&claim_id={claim_id}"
+        )
+        assert missing_ack.json()["acknowledged"] is False
+        assert missing_ack.json().get("delivery_lease_required") is True
+
+        # Valid lease acknowledges wake
+        valid_ack = await client.post(
+            f"/mcp/x/coordinator/ack?channel_id=telegram-ad5x-g0&claim_id={claim_id}&delivery_lease={lease_1}"
+        )
+        assert valid_ack.json()["acknowledged"] is True
+
+        # 5. After heartbeat TTL expiry, session 2 can acquire lease
+        expired_time = (
+            time.time() - container.coordinator.X_LISTENER_HEARTBEAT_TTL_SECONDS - 5.0
+        )
+        container.coordinator._delivery_leases["telegram-ad5x-g0"]["refreshed_at"] = expired_time
+        container.coordinator._started_at = expired_time
+        async with (
+            streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams2,
+            ClientSession(*streams2) as session2,
+        ):
+            await session2.initialize()
+            takeover = await session2.call_tool("coordinator_x_mount", {"route_id": "ad5x"})
+            assert takeover.is_error is False
+            lease_2 = takeover.structured_content["delivery_lease"]
+            assert lease_2 != lease_1
+            new_lease_record = container.coordinator.delivery_lease("telegram-ad5x-g0")
+            assert new_lease_record["lease_id"] == lease_2
+            assert new_lease_record["session_id"] != current_lease["session_id"]
+
+            # Old lease 1 can no longer claim
             container.coordinator._global_cooldown_until = 0
             container.coordinator._cooldown_until["telegram-ad5x-g0"] = 0
-            await container.coordinator.arm(
-                "wake-current-chat-again", channel_id="telegram-ad5x-g0", delay_seconds=0
+            await container.coordinator.arm("wake-takeover", channel_id="telegram-ad5x-g0", delay_seconds=0)
+            old_claim = await client.post(
+                f"/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease={lease_1}"
             )
-            current = await client.post(
-                f"/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease={new_lease}"
+            assert old_claim.json()["claimed"] is False
+            assert old_claim.json().get("delivery_lease_required") is True
+
+            # New lease 2 claims wake
+            new_claim = await client.post(
+                f"/mcp/x/coordinator/claim?channel_id=telegram-ad5x-g0&delivery_lease={lease_2}"
             )
-            assert current.json()["claimed"] is True
+            assert new_claim.json()["claimed"] is True
 
 
 @pytest.mark.asyncio

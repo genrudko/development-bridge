@@ -229,18 +229,47 @@ class CoordinatorService:
     ) -> dict[str, object]:
         channel = self.validate_channel(channel_id)
         session = self.validate_session_id(session_id) if session_id is not None else None
+        now = time.time()
         current = self._delivery_leases.get(channel)
-        if current is not None and session is not None and current.get("session_id") == session:
-            item = dict(current)
+        if current is not None:
+            current_gen = current.get("generation")
+            is_turnover = (
+                generation is not None
+                and current_gen is not None
+                and int(generation) != int(current_gen)
+            ) or (
+                route_id is not None
+                and current.get("route_id") is not None
+                and str(route_id) != str(current.get("route_id"))
+            )
+            if not is_turnover:
+                if session is not None and current.get("session_id") == session:
+                    item = dict(current)
+                elif self._x_listener_active(channel, now):
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "Route endpoint already has an active physical chat owner",
+                        retryable=True,
+                        details={
+                            "channel_id": channel,
+                            "route_id": str(route_id or current.get("route_id") or ""),
+                            "generation": int(generation if generation is not None else (current_gen or 0)),
+                            "error_code": "EXCLUSIVE_ENDPOINT_ACTIVE",
+                        },
+                    )
+                else:
+                    item = {"lease_id": token_urlsafe(24), "issued_at": now}
+            else:
+                item = {"lease_id": token_urlsafe(24), "issued_at": now}
         else:
-            item = {"lease_id": token_urlsafe(24), "issued_at": time.time()}
+            item = {"lease_id": token_urlsafe(24), "issued_at": now}
         if session is not None:
             item["session_id"] = session
         if route_id is not None:
             item["route_id"] = str(route_id)
         if generation is not None:
             item["generation"] = int(generation)
-        item["refreshed_at"] = time.time()
+        item["refreshed_at"] = now
         self._delivery_leases[channel] = item
         self._save_state()
         return {"channel_id": channel, **item}
@@ -280,13 +309,14 @@ class CoordinatorService:
         last_seen_at = max(refreshed_at, self._started_at)
         return last_seen_at + self.X_LISTENER_HEARTBEAT_TTL_SECONDS >= now
 
-    def _delivery_lease_matches(self, channel_id: str, delivery_lease: str | None) -> bool:
-        item = self._delivery_leases.get(channel_id)
-        if item is None or delivery_lease is None:
-            # Cached/legacy coordinator widgets may miss the tool-result event that carries
-            # the current lease. The physical channel already identifies the exact chat, so
-            # allow an omitted lease while still rejecting any explicitly stale lease.
+    def _delivery_lease_matches(
+        self, channel_id: str, delivery_lease: str | None, *, delivery_mode: str = "x"
+    ) -> bool:
+        if delivery_mode == "direct":
             return True
+        item = self._delivery_leases.get(channel_id)
+        if item is None:
+            return delivery_lease is None
         return self._delivery_lease_is_current(channel_id, delivery_lease)
 
     @staticmethod
@@ -617,7 +647,9 @@ class CoordinatorService:
             explicit_current_lease = self._delivery_lease_is_current(
                 channel_id, delivery_lease
             )
-            if not self._delivery_lease_matches(channel_id, delivery_lease):
+            if not self._delivery_lease_matches(
+                channel_id, delivery_lease, delivery_mode=delivery_mode
+            ):
                 return {
                     "channel_id": channel_id,
                     "state": "standby",
@@ -854,7 +886,9 @@ class CoordinatorService:
             explicit_current_lease = self._delivery_lease_is_current(
                 channel_id, delivery_lease
             )
-            if not self._delivery_lease_matches(channel_id, delivery_lease):
+            if not self._delivery_lease_matches(
+                channel_id, delivery_lease, delivery_mode=delivery_mode
+            ):
                 return {
                     "channel_id": channel_id,
                     "claimed": False,
@@ -1022,7 +1056,7 @@ class CoordinatorService:
     ) -> dict:
         "Acknowledge one iframe transport delivery attempt."
         channel_id = self.validate_channel(channel_id)
-        if not self._delivery_lease_matches(channel_id, delivery_lease):
+        if not self._delivery_lease_matches(channel_id, delivery_lease, delivery_mode="x"):
             return {
                 "channel_id": channel_id,
                 "acknowledged": False,

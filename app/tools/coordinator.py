@@ -61,7 +61,7 @@ def _bind_session(container: ApplicationContainer, ctx, binding: dict) -> dict:
     return binding
 
 
-def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) -> dict:
+def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict, *, bind: bool = True) -> dict:
     from app.api.errors import BridgeError, ErrorCode
 
     route_id = arguments.get("route_id")
@@ -79,13 +79,15 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
             )
         if channel_id is not None and channel_id != route["channel_id"]:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "route_id and channel_id refer to different destinations")
-        return _bind_session(container, ctx, _route_binding(container, route))
+        binding = _route_binding(container, route)
+        return _bind_session(container, ctx, binding) if bind else binding
 
     if channel_id is not None:
         channel = container.coordinator.validate_channel(channel_id)
         route = container.route_registry.wake_route_for_channel(channel)
         if route is None:
-            return _bind_session(container, ctx, {"channel_id": channel, "route_state": "explicit"})
+            binding = {"channel_id": channel, "route_state": "explicit"}
+            return _bind_session(container, ctx, binding) if bind else binding
         resolved_logical = container.route_registry.resolve(route["route_id"])
         if resolved_logical is not None and not container.route_registry.is_bound(resolved_logical):
             raise BridgeError(
@@ -100,7 +102,7 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
                 details={"route_id": route["route_id"], "error_code": "ROUTE_UNBOUND"},
             )
         binding = _route_binding(container, route, route_state=str(route.get("route_state", "active")))
-        return _bind_session(container, ctx, binding)
+        return _bind_session(container, ctx, binding) if bind else binding
 
     binding = container.coordinator.session_binding(_session_id(ctx))
     if binding is None:
@@ -142,34 +144,31 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
         if binding.get("route_state") == "pending":
             if bound_generation is None:
                 raise BridgeError(ErrorCode.POLICY_VIOLATION, "Pending route session has no generation")
-            return _bind_session(container, ctx, _route_binding(container, route))
+            new_binding = _route_binding(container, route)
+            return _bind_session(container, ctx, new_binding) if bind else new_binding
     return dict(binding)
 
 
-def _resolve_mount_destination(container: ApplicationContainer, ctx, arguments: dict) -> dict:
+def _resolve_mount_destination(container: ApplicationContainer, ctx, arguments: dict, *, bind: bool = True) -> dict:
     """Resolve the mount-only pending-generation exception without weakening wakes."""
     route_id = arguments.get("route_id")
     channel_id = arguments.get("channel_id")
     if route_id is not None or channel_id is None:
-        return _resolve_destination(container, ctx, arguments)
+        return _resolve_destination(container, ctx, arguments, bind=bind)
 
     channel = container.coordinator.validate_channel(channel_id)
     route = container.route_registry.mount_route_for_channel(channel)
     if route is None:
-        return _bind_session(
-            container, ctx, {"channel_id": channel, "route_state": "explicit"}
-        )
+        binding = {"channel_id": channel, "route_state": "explicit"}
+        return _bind_session(container, ctx, binding) if bind else binding
     if route.get("route_state") == "active" and not container.route_registry.is_bound(route):
         raise BridgeError(
             ErrorCode.POLICY_VIOLATION,
             f"Route '{route['route_id']}' is unbound; bind a destination before mounting",
             details={"route_id": route["route_id"], "error_code": "ROUTE_UNBOUND"},
         )
-    return _bind_session(
-        container,
-        ctx,
-        _route_binding(container, route, route_state=str(route["route_state"])),
-    )
+    binding = _route_binding(container, route, route_state=str(route["route_state"]))
+    return _bind_session(container, ctx, binding) if bind else binding
 
 
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
@@ -183,16 +182,21 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             data = dict(ack)
             data["state"] = "acknowledged" if ack.get("acknowledged") else "not_found"
             return to_mcp_result(success(request_context.request_id, data))
-        binding = _resolve_mount_destination(container, ctx, arguments)
-        channel_id = str(binding["channel_id"])
-        if binding.get("route_id") is not None and binding.get("route_state") == "active":
-            container.route_registry.request(str(binding["route_id"]))
-        delivery = container.coordinator.issue_delivery_lease(
-            channel_id,
-            session_id=_session_id(ctx),
-            route_id=(str(binding["route_id"]) if binding.get("route_id") is not None else None),
-            generation=(int(binding["generation"]) if binding.get("generation") is not None else None),
-        )
+        destination = _resolve_mount_destination(container, ctx, arguments, bind=False)
+        channel_id = str(destination["channel_id"])
+        if destination.get("route_id") is not None and destination.get("route_state") == "active":
+            container.route_registry.request(str(destination["route_id"]))
+        try:
+            delivery = container.coordinator.issue_delivery_lease(
+                channel_id,
+                session_id=_session_id(ctx),
+                route_id=(str(destination["route_id"]) if destination.get("route_id") is not None else None),
+                generation=(int(destination["generation"]) if destination.get("generation") is not None else None),
+            )
+        except Exception:
+            container.coordinator.unbind_session(_session_id(ctx))
+            raise
+        binding = _bind_session(container, ctx, destination)
         result = to_mcp_result(
             success(
                 request_context.request_id,
