@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app.api.errors import BridgeError
+from app.api.errors import BridgeError, ErrorCode
 from app.coordinator import CoordinatorService
 
 
@@ -297,7 +297,7 @@ async def test_web_turn_gate_serializes_channels_and_applies_global_cooldown(mon
 
 
 @pytest.mark.asyncio
-async def test_observed_model_turn_resolves_delivered_continuation():
+async def test_observed_model_turn_waits_for_explicit_model_ack():
     service = CoordinatorService()
     armed = await service.arm_resilient(
         "resume", channel_id="route-g2", retry_delays_seconds=(0, 0)
@@ -309,12 +309,14 @@ async def test_observed_model_turn_resolves_delivered_continuation():
     observed = await service.observe_model_turn("route-g2", armed["continuation_id"])
     assert observed["observed"] is True
     assert observed["delivery_attempts"] == 1
-    assert observed["followup_pending"] is False
+    assert observed["awaiting_model_ack"] is True
+    assert (await service.status("route-g2"))["state"] == "waiting_model_ack"
+    assert (await service.model_ack(armed["continuation_id"]))["acknowledged"] is True
     assert (await service.status("route-g2"))["state"] == "idle"
 
 
 @pytest.mark.asyncio
-async def test_observed_model_turn_promotes_queued_event_to_followup():
+async def test_explicit_model_ack_returns_queued_events_in_same_turn():
     service = CoordinatorService()
     service.MIN_WEB_TURN_INTERVAL_SECONDS = 0
     armed = await service.arm_resilient(
@@ -329,11 +331,12 @@ async def test_observed_model_turn_promotes_queued_event_to_followup():
     observed = await service.observe_model_turn("route-g2", armed["continuation_id"])
     assert observed["observed"] is True
     assert observed["queued_events"] == 1
-    assert observed["followup_pending"] is True
-    assert observed["next_continuation_id"] != armed["continuation_id"]
-    service._pending["route-g2"].available_at = 0
-    followup = await service.claim("route-g2")
-    assert followup["message"] == "B"
+    assert observed["awaiting_model_ack"] is True
+    acknowledged = await service.model_ack(armed["continuation_id"] )
+    assert acknowledged["acknowledged"] is True
+    assert acknowledged["batched_count"] == 1
+    assert acknowledged["batched_messages"] == ["B"]
+    assert (await service.status("route-g2"))["state"] == "idle"
 
 
 @pytest.mark.asyncio
@@ -614,3 +617,110 @@ async def test_authorize_browser_preflight_refuses_blocked_wakes(disposition):
         "route-blocked", armed["continuation_id"]
     )
     assert authorized["authorized"] is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_clears_pending_wake_and_persists(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    service1 = CoordinatorService(path)
+    await service1.arm("wake message", channel_id="route-cancel", delay_seconds=10)
+    assert (await service1.status("route-cancel"))["state"] == "pending"
+
+    res = await service1.cancel_pending("route-cancel")
+    assert res["channel_id"] == "route-cancel"
+    assert res["cancelled"] is True
+    assert (await service1.status("route-cancel"))["state"] == "idle"
+
+    service2 = CoordinatorService(path)
+    assert (await service2.status("route-cancel"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_is_idempotent_on_idle_channel():
+    service = CoordinatorService()
+    res = await service.cancel_pending("route-idle")
+    assert res["channel_id"] == "route-idle"
+    assert res["cancelled"] is False
+    assert (await service.status("route-idle"))["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_fails_closed_when_claimed():
+    service = CoordinatorService()
+    await service.arm("wake message", channel_id="route-claimed", delay_seconds=0)
+    claim = await service.claim("route-claimed")
+    assert claim["claimed"] is True
+    with pytest.raises(BridgeError) as exc_info:
+        await service.cancel_pending("route-claimed")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["delivered", "uncertain", "owner_input_required"])
+async def test_cancel_pending_fails_closed_when_in_flight_or_uncertain(disposition):
+    service = CoordinatorService()
+    await service.arm_resilient("wake", channel_id="route-flight", delay_seconds=0)
+    claim = await service.claim("route-flight")
+    if disposition == "delivered":
+        await service.ack("route-flight", claim["claim_id"])
+    else:
+        await service.finalize_transport("route-flight", claim["claim_id"], "review-gpt", disposition)
+    with pytest.raises(BridgeError) as exc_info:
+        await service.cancel_pending("route-flight")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_fails_closed_on_expired_claim():
+    service = CoordinatorService()
+    await service.arm("wake message", channel_id="route-expired-claim", delay_seconds=0)
+    claim = await service.claim("route-expired-claim")
+    assert claim["claimed"] is True
+    # Simulate expired lease with non-null claim_id
+    service._pending["route-expired-claim"].lease_expires_at = 1.0
+    with pytest.raises(BridgeError) as exc_info:
+        await service.cancel_pending("route-expired-claim")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_restores_in_memory_wake_if_save_state_fails(tmp_path):
+    path = tmp_path / "coordinator-wakes.json"
+    service = CoordinatorService(path)
+    await service.arm("wake message", channel_id="route-save-fail", delay_seconds=10)
+    assert "route-save-fail" in service._pending
+
+    def failing_save():
+        raise OSError("Disk full")
+
+    service._save_state = failing_save
+    with pytest.raises(OSError, match="Disk full"):
+        await service.cancel_pending("route-save-fail")
+
+    # In-memory wake must be restored
+    assert "route-save-fail" in service._pending
+    assert service._pending["route-save-fail"].message == "wake message"
+
+
+@pytest.mark.asyncio
+async def test_model_turn_observation_keeps_continuation_until_explicit_ack():
+    service = CoordinatorService(browser_preflight_required=True)
+    armed = await service.arm_resilient(
+        "resume", channel_id="route-direct-observed", delay_seconds=0
+    )
+    claim = await service.claim("route-direct-observed", delivery_mode="direct")
+    await service.finalize_transport(
+        "route-direct-observed", claim["claim_id"], "review-gpt", "delivered"
+    )
+
+    observed = await service.observe_model_turn(
+        "route-direct-observed", armed["continuation_id"]
+    )
+
+    assert observed["observed"] is True
+    assert observed["awaiting_model_ack"] is True
+    status = await service.status("route-direct-observed", delivery_mode="direct")
+    assert status["state"] == "waiting_model_ack"
+    acknowledged = await service.model_ack(armed["continuation_id"] )
+    assert acknowledged["acknowledged"] is True
+    assert (await service.status("route-direct-observed", delivery_mode="direct"))["state"] == "idle"

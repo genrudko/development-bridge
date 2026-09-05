@@ -165,6 +165,12 @@ class TelegramSupervisorService:
             "coordinator": await self.coordinator.status((self.route_registry.resolve() or {}).get("channel_id", self.channel_id)),
         }
 
+    async def model_status(self) -> dict:
+        """Return supervisor state with only safe logical route metadata."""
+        data = await self.status()
+        data["routes"] = self.route_registry.list_safe_routes()
+        return data
+
     @staticmethod
     def _message_topic_id(message) -> int | None:
         reply_to = getattr(message, "reply_to", None)
@@ -209,13 +215,39 @@ class TelegramSupervisorService:
             route_id = None; body = text
             if text.startswith("@") and " " in text:
                 candidate, body = text[1:].split(" ", 1); route_id = candidate.strip(); body = body.strip()
-            route = self.route_registry.resolve(route_id); target_channel = route["channel_id"] if route else self.channel_id; route_label = route["route_id"] if route else "legacy"
-            if route:
-                self.route_registry.request(route["route_id"])
-            await self.coordinator.arm(
-                f"[Telegram supervisor | route={route_label} | message_id={message_id}]\n{body}",
-                channel_id=target_channel, delay_seconds=0, conflict="reject",
+            route = self.route_registry.resolve(route_id)
+            route_label = route["route_id"] if route else "legacy"
+            wake_message = (
+                f"[Telegram supervisor | route={route_label} | message_id={message_id}]\n{body}"
             )
+            if route is None:
+                fallback_route = self.route_registry.wake_route_for_channel(self.channel_id)
+                if fallback_route is not None:
+                    route = fallback_route
+            if route is None:
+                await self.coordinator.arm(
+                    wake_message,
+                    channel_id=self.channel_id,
+                    delay_seconds=0,
+                    conflict="reject",
+                )
+            else:
+                selected_route_id = str(route["route_id"])
+                expected_generation = int(route.get("generation", 0))
+                expected_channel = str(route["channel_id"])
+                async with self.route_registry.route_lock(selected_route_id):
+                    current = self.route_registry.require_wakeable_route(
+                        selected_route_id,
+                        expected_generation=expected_generation,
+                        expected_channel=expected_channel,
+                    )
+                    self.route_registry.request(selected_route_id)
+                    await self.coordinator.arm(
+                        wake_message,
+                        channel_id=str(current["channel_id"]),
+                        delay_seconds=0,
+                        conflict="reject",
+                    )
         except BridgeError as error:
             self._last_error = error.message
             await self._notice(

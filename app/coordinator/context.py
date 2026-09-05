@@ -71,16 +71,27 @@ class RouteContextStore:
 
     def bootstrap(self, route: dict) -> dict:
         context = self.get(route["route_id"])
+        safe_route = {
+            "route_id": route["route_id"],
+            "title": route.get("title") or route["route_id"],
+            "state": (
+                "bound"
+                if route.get("binding_state") in (None, "bound")
+                else str(route["binding_state"])
+            ),
+            "generation": int(route.get("generation", 0)),
+            "channel_id": route.get("channel_id"),
+        }
         if context is None:
             return {
-                "route": route,
+                "route": safe_route,
                 "context": None,
                 "bootstrap_message": (
                     f"No canonical Route Context is stored for route {route['route_id']}."
                 ),
             }
         return {
-            "route": route,
+            "route": safe_route,
             "context": context,
             "bootstrap_message": (
                 f"Canonical Route Context loaded for route {route['route_id']}. "

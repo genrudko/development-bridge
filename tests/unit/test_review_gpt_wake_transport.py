@@ -1245,46 +1245,12 @@ async def test_existing_committed_receipt_is_observed_without_resending(tmp_path
     assert state["browser"] is False
 
 @pytest.mark.asyncio
-async def test_discover_current_chat_reads_unique_verified_result(tmp_path: Path):
-    marker = "DBRIDGE_ROUTE_BIND_abcdefghijklmnopqrstuvwxyz123456"
-    target = WakeTarget(route_id="bridge", channel_id="telegram-bridge-g4", conversation_id="conv-old", route_url="https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old")
-    def write_discovery(argv: Sequence[str], timeout: float):
-        assert "review_gpt_discovery.mjs" in Path(argv[1]).name
-        assert argv[argv.index("--marker") + 1] == marker
-        assert argv[argv.index("--route-url") + 1] == target.route_url
-        out = Path(argv[argv.index("--output") + 1])
-        out.write_text(json.dumps({"found": True, "route_url": "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-new", "conversation_id": "conv-new", "marker_verified": True, "match_count": 1}), encoding="utf-8")
-    transport = ReviewGptWakeTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=tmp_path / "receipts", process_runner=FakeProcessRunner(on_run=write_discovery))
-    result = await transport.discover_current_chat(marker, target)
-    assert result.found is True
-    assert result.conversation_id == "conv-new"
-    assert result.route_url.endswith("/c/conv-new")
-
-
-@pytest.mark.asyncio
-async def test_discover_current_chat_rejects_unverified_or_cross_project_result(tmp_path: Path):
-    marker = "DBRIDGE_ROUTE_BIND_abcdefghijklmnopqrstuvwxyz123456"
-    target = WakeTarget(route_id="bridge", channel_id="telegram-bridge-g4", conversation_id="conv-old", route_url="https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old")
-    payloads = [
-        {"found": True, "route_url": "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-new", "conversation_id": "conv-new", "marker_verified": False, "match_count": 1},
-        {"found": True, "route_url": "https://chatgpt.com/g/g-p-22222222222222222222222222222222/c/conv-new", "conversation_id": "conv-new", "marker_verified": True, "match_count": 1},
-    ]
-    for payload in payloads:
-        def write_discovery(argv: Sequence[str], timeout: float, payload=payload):
-            Path(argv[argv.index("--output") + 1]).write_text(json.dumps(payload), encoding="utf-8")
-        transport = ReviewGptWakeTransport(node_path="/usr/bin/node", cli_path="/opt/review-gpt/cli.js", config_path=tmp_path / "config.json", browser_endpoint="http://127.0.0.1:9222", receipt_dir=tmp_path / "receipts", process_runner=FakeProcessRunner(on_run=write_discovery))
-        result = await transport.discover_current_chat(marker, target)
-        assert result.found is False
-
-
-@pytest.mark.asyncio
 async def test_on_demand_browser_operations_are_serialized(tmp_path: Path):
     state = {"active": False, "ready": False, "overlap": False}
     target = WakeTarget(
         route_id="bridge", channel_id="telegram-bridge-g4", conversation_id="conv-old",
         route_url="https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old",
     )
-    marker = "DBRIDGE_ROUTE_BIND_abcdefghijklmnopqrstuvwxyz123456"
 
     class Runner:
         async def __call__(self, argv, timeout):
@@ -1300,15 +1266,6 @@ async def test_on_demand_browser_operations_are_serialized(tmp_path: Path):
                 await asyncio.sleep(0.01)
                 state["ready"] = False
                 state["active"] = False
-                return ProcessResult(0)
-            if len(argv) > 1 and Path(argv[1]).name == "review_gpt_discovery.mjs":
-                out = Path(argv[argv.index("--output") + 1])
-                out.write_text(json.dumps({
-                    "found": True, "route_url": target.route_url,
-                    "conversation_id": target.conversation_id,
-                    "marker_verified": True, "match_count": 1,
-                }), encoding="utf-8")
-                await asyncio.sleep(0.02)
                 return ProcessResult(0)
             if "thread" in argv and "export" in argv:
                 out = Path(argv[argv.index("--output") + 1])
@@ -1331,9 +1288,7 @@ async def test_on_demand_browser_operations_are_serialized(tmp_path: Path):
         browser_stop_command=("browserctl", "stop"),
         browser_endpoint_probe=endpoint_probe,
     )
-    discovered, probed = await asyncio.gather(
-        transport.discover_current_chat(marker, target), transport.probe(target)
-    )
-    assert discovered.found is True
-    assert probed.ready is True
+    first, second = await asyncio.gather(transport.probe(target), transport.probe(target))
+    assert first.ready is True
+    assert second.ready is True
     assert state["overlap"] is False

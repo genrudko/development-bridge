@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,6 +92,115 @@ async def test_supervisor_arms_only_configured_topic(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_supervisor_rejects_unbound_default_route(tmp_path):
+    supervisor = make_supervisor(tmp_path)
+    supervisor.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    supervisor.route_registry.unbind("bridge", expected_generation=0)
+    notices = []
+
+    async def notice(text):
+        notices.append(text)
+        return True
+
+    supervisor._notice = notice
+    await supervisor._on_message(forum_event("must not wake", 103, 56))
+
+    assert supervisor.coordinator.armed == []
+    assert notices == ["предыдущая команда ещё не забрана ChatGPT; это сообщение не передано."]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_rejects_registered_pending_route_channel(tmp_path):
+    supervisor = make_supervisor(tmp_path)
+    supervisor.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    pending = supervisor.route_registry.prepare_rollover("bridge")
+    raw = supervisor.route_registry.snapshot()
+    raw["default_route"] = None
+    supervisor.route_registry._save(raw)
+    supervisor.channel_id = pending["channel_id"]
+    notices = []
+
+    async def notice(text):
+        notices.append(text)
+        return True
+
+    supervisor._notice = notice
+    await supervisor._on_message(forum_event("must not wake pending", 106, 56))
+
+    assert supervisor.coordinator.armed == []
+    assert notices == ["предыдущая команда ещё не забрана ChatGPT; это сообщение не передано."]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_arms_bound_route_under_route_lock(tmp_path):
+    supervisor = make_supervisor(tmp_path)
+    supervisor.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    route_lock = supervisor.route_registry.route_lock("bridge")
+    lock_observations = []
+
+    async def observe_lock(_message, **_kwargs):
+        lock_observations.append(route_lock.locked())
+
+    async def notice(_text):
+        return True
+
+    supervisor.coordinator.arm = observe_lock
+    supervisor._notice = notice
+    await supervisor._on_message(forum_event("current wake", 104, 56))
+
+    assert lock_observations == [True]
+
+
+@pytest.mark.asyncio
+async def test_supervisor_rejects_route_generation_change_before_arm(tmp_path):
+    supervisor = make_supervisor(tmp_path)
+    supervisor.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    route_lock = supervisor.route_registry.route_lock("bridge")
+    first_resolve = asyncio.Event()
+    original_resolve = supervisor.route_registry.resolve
+
+    def observe_resolve(route_id=None):
+        route = original_resolve(route_id)
+        if route is not None and route["route_id"] == "bridge":
+            first_resolve.set()
+        return route
+
+    supervisor.route_registry.resolve = observe_resolve
+
+    async def notice(_text):
+        return True
+
+    supervisor._notice = notice
+    async with route_lock:
+        wake_task = asyncio.create_task(
+            supervisor._on_message(forum_event("stale wake", 105, 56))
+        )
+        await first_resolve.wait()
+        supervisor.route_registry.takeover(
+            "bridge", "https://chatgpt.com/g/g-p-infra/c/conv-successor"
+        )
+
+    await wake_task
+    assert supervisor.coordinator.armed == []
+
+
+@pytest.mark.asyncio
 async def test_supervisor_replies_to_configured_topic(tmp_path):
     supervisor = make_supervisor(tmp_path)
     client = FakeClient()
@@ -112,3 +222,16 @@ def test_supervisor_session_isolated_copy(tmp_path):
     assert isolated.name == "telegram.supervisor.session"
     assert isolated.read_bytes() == source.read_bytes()
     assert isolated.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_supervisor_rejects_active_source_route_while_rollover_pending(tmp_path):
+    supervisor = make_supervisor(tmp_path)
+    supervisor.route_registry.bootstrap("bridge", "https://chatgpt.com/g/g-p-infra/c/conv-current", "telegram-bridge-g0")
+    supervisor.route_registry.prepare_rollover("bridge")
+    notices = []
+    async def notice(text): notices.append(text); return True
+    supervisor._notice = notice
+    await supervisor._on_message(forum_event("must freeze source", 107, 56))
+    assert supervisor.coordinator.armed == []
+    assert notices == ["предыдущая команда ещё не забрана ChatGPT; это сообщение не передано."]

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+from contextlib import suppress
+
 from mcp import types
 
+from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
-from app.coordinator.context import MAX_CONTEXT_CHARS, RouteContextStore, default_route_context_path
 from app.container import ApplicationContainer
+from app.coordinator.context import (
+    MAX_CONTEXT_CHARS,
+    RouteContextStore,
+    default_route_context_path,
+)
 from app.settings import ArtifactSettings
 from app.tools.jobs import JOB_ID_SCHEMA
 
 COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v5.html"
+
 COORDINATOR_UI_ALIASES = (
     "ui://development-bridge/coordinator-x-v4.html",
     "ui://development-bridge/coordinator-x-v3.html",
@@ -63,15 +71,34 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
         route = container.route_registry.resolve(route_id)
         if route is None:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        if not container.route_registry.is_bound(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route_id}' is unbound; bind a destination before mounting or waking",
+                details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
+            )
         if channel_id is not None and channel_id != route["channel_id"]:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "route_id and channel_id refer to different destinations")
         return _bind_session(container, ctx, _route_binding(container, route))
 
     if channel_id is not None:
         channel = container.coordinator.validate_channel(channel_id)
-        route = container.route_registry.route_for_channel(channel)
+        route = container.route_registry.wake_route_for_channel(channel)
         if route is None:
             return _bind_session(container, ctx, {"channel_id": channel, "route_state": "explicit"})
+        resolved_logical = container.route_registry.resolve(route["route_id"])
+        if resolved_logical is not None and not container.route_registry.is_bound(resolved_logical):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route['route_id']}' is unbound; bind a destination before mounting or waking",
+                details={"route_id": route["route_id"], "error_code": "ROUTE_UNBOUND"},
+            )
+        if route.get("route_state") != "pending" and not container.route_registry.is_bound(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route['route_id']}' is unbound; bind a destination before mounting or waking",
+                details={"route_id": route["route_id"], "error_code": "ROUTE_UNBOUND"},
+            )
         binding = _route_binding(container, route, route_state=str(route.get("route_state", "active")))
         return _bind_session(container, ctx, binding)
 
@@ -86,6 +113,12 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
         route = container.route_registry.resolve(str(bound_route))
         if route is None:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "Bound logical route no longer exists")
+        if not container.route_registry.is_bound(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{bound_route}' is unbound; bind a destination before mounting or waking",
+                details={"route_id": str(bound_route), "error_code": "ROUTE_UNBOUND"},
+            )
         bound_generation = binding.get("generation")
         current_generation = int(route.get("generation", 0))
         if bound_generation is not None and int(bound_generation) != current_generation:
@@ -106,43 +139,42 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict) 
                 "This physical chat channel is stale for the bound logical route",
                 retryable=True,
             )
+        if binding.get("route_state") == "pending":
+            if bound_generation is None:
+                raise BridgeError(ErrorCode.POLICY_VIOLATION, "Pending route session has no generation")
+            return _bind_session(container, ctx, _route_binding(container, route))
     return dict(binding)
+
+
+def _resolve_mount_destination(container: ApplicationContainer, ctx, arguments: dict) -> dict:
+    """Resolve the mount-only pending-generation exception without weakening wakes."""
+    route_id = arguments.get("route_id")
+    channel_id = arguments.get("channel_id")
+    if route_id is not None or channel_id is None:
+        return _resolve_destination(container, ctx, arguments)
+
+    channel = container.coordinator.validate_channel(channel_id)
+    route = container.route_registry.mount_route_for_channel(channel)
+    if route is None:
+        return _bind_session(
+            container, ctx, {"channel_id": channel, "route_state": "explicit"}
+        )
+    if route.get("route_state") == "active" and not container.route_registry.is_bound(route):
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            f"Route '{route['route_id']}' is unbound; bind a destination before mounting",
+            details={"route_id": route["route_id"], "error_code": "ROUTE_UNBOUND"},
+        )
+    return _bind_session(
+        container,
+        ctx,
+        _route_binding(container, route, route_state=str(route["route_state"])),
+    )
 
 
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
 
-    def attach_coordinator_ui(result, ctx, binding: dict):
-        channel_id = str(binding["channel_id"])
-        if binding.get("route_id") is not None and binding.get("route_state") == "active":
-            container.route_registry.request(str(binding["route_id"]))
-        delivery = container.coordinator.issue_delivery_lease(
-            channel_id,
-            session_id=_session_id(ctx),
-            route_id=(str(binding["route_id"]) if binding.get("route_id") is not None else None),
-            generation=(int(binding["generation"]) if binding.get("generation") is not None else None),
-        )
-        trigger_path = container.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
-        public_base = container.settings.server.public_base_url
-        trigger_url = (
-            str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
-        )
-        result.structured_content = {
-            "channel_id": channel_id,
-            "trigger_url": trigger_url,
-            "delivery_lease": delivery["lease_id"],
-            **(
-                {
-                    "route_id": binding["route_id"],
-                    "generation": binding.get("generation"),
-                    "route_state": binding.get("route_state"),
-                }
-                if binding.get("route_id") is not None
-                else {}
-            ),
-        }
-        result.meta = dict(COORDINATOR_UI_META)
-        return result
     async def mount(ctx, params, request_context):
         arguments = params.arguments or {}
         requested_channel = arguments.get("channel_id")
@@ -151,7 +183,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             data = dict(ack)
             data["state"] = "acknowledged" if ack.get("acknowledged") else "not_found"
             return to_mcp_result(success(request_context.request_id, data))
-        binding = _resolve_destination(container, ctx, arguments)
+        binding = _resolve_mount_destination(container, ctx, arguments)
         channel_id = str(binding["channel_id"])
         if binding.get("route_id") is not None and binding.get("route_state") == "active":
             container.route_registry.request(str(binding["route_id"]))
@@ -185,6 +217,15 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             **({"route_id": binding["route_id"], "generation": binding.get("generation"), "route_state": binding.get("route_state")} if binding.get("route_id") is not None else {}),
         }
         result.meta = dict(COORDINATOR_UI_META)
+        if container.route_control is not None and binding.get("route_id"):
+            route_id = str(binding["route_id"])
+            descriptor = container.route_control.issue_control_descriptor(route_id)
+            pending_bind = container.route_control.pending_bind_descriptor(
+                route_id, session_id=_session_id(ctx)
+            )
+            if pending_bind is not None:
+                descriptor.update(pending_bind)
+            result.meta["route_control"] = descriptor
         return result
 
     async def bind_current(ctx, params, request_context):
@@ -198,23 +239,51 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
         if session_id is not None:
             container.coordinator.unbind_session(session_id)
-        binding = _route_binding(container, route, route_state="discovery")
-        pending = container.route_registry.prepare_current_bind(
-            route_id,
-            session_id=session_id,
-            allow_project_change=bool(arguments.get("allow_project_change", False)),
-        )
-        result = to_mcp_result(success(request_context.request_id, {
-            "route_id": route_id,
-            "state": "discovery_prepared",
-        }))
-        result = attach_coordinator_ui(result, ctx, binding)
-        result.structured_content["route_discovery"] = {
-            "route_id": route_id,
-            "token": pending["token"],
-            "marker": pending["marker"],
+        if container.route_control is not None:
+            prepared = container.route_control.prepare_bind(
+                route_id,
+                session_id=session_id,
+                allow_project_change=bool(arguments.get("allow_project_change", False)),
+            )
+        else:
+            pending = container.route_registry.prepare_current_bind(
+                route_id,
+                session_id=session_id,
+                allow_project_change=bool(arguments.get("allow_project_change", False)),
+            )
+            prepared = {
+                "route_id": route_id,
+                "state": "bind_pending",
+                "generation": int(route.get("generation", 0)),
+                "operation_id": pending["token"],
+                "diagnostic_id": "bind-fallback",
+                "operation_url": f"/x/route-control/bind/{pending['token']}",
+            }
+        safe_data = {
+            "route_id": prepared["route_id"],
+            "state": prepared["state"],
+            "generation": prepared["generation"],
+        }
+        result = to_mcp_result(success(request_context.request_id, safe_data))
+        result.structured_content = safe_data
+        rc_meta = {
+            "action": "bind",
+            "route_id": prepared["route_id"],
+            "operation_url": prepared["operation_url"],
+            "operation_id": prepared["operation_id"],
+            "diagnostic_id": prepared["diagnostic_id"],
+            "nonce": prepared["operation_id"],
+        }
+        if container.route_control is not None:
+            descriptor = container.route_control.issue_control_descriptor(prepared["route_id"])
+            rc_meta["control_token"] = descriptor["control_token"]
+            rc_meta["endpoints"] = descriptor["endpoints"]
+        result.meta = {
+            **COORDINATOR_UI_META,
+            "route_control": rc_meta,
         }
         return result
+
 
     async def takeover(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -233,31 +302,53 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             "route_context": bootstrap["context"],
             "bootstrap_message": bootstrap["bootstrap_message"],
         }
-        result.meta = dict(COORDINATOR_UI_META)
         return result
 
     async def rollover_prepare(ctx, params, request_context):
         arguments = params.arguments or {}
         route_id = container.route_registry.validate_route_id(arguments["route_id"])
-        route = container.route_registry.resolve(route_id)
-        if route is None:
-            from app.api.errors import BridgeError, ErrorCode
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
-        coordinator_status = await container.coordinator.status(route["channel_id"])
-        if coordinator_status.get("state") != "idle":
-            from app.api.errors import BridgeError, ErrorCode
-            raise BridgeError(
-                ErrorCode.POLICY_VIOLATION,
-                f"route coordinator is not idle: {coordinator_status.get('state')}",
-                retryable=True,
-            )
-        pending = container.route_registry.prepare_rollover(route_id)
-        result = to_mcp_result(success(request_context.request_id, {"route": route, "rollover": pending, "state": "prepared"}))
+        async with container.route_registry.route_lock(route_id):
+            route = container.route_registry.resolve(route_id)
+            if route is None:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+            if not container.route_registry.is_bound(route):
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    f"Route '{route_id}' is unbound; rollover cannot be prepared",
+                    details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
+                )
+            generation = int(route.get("generation", 0))
+            coordinator_status = await container.coordinator.status(route["channel_id"])
+            if coordinator_status.get("state") != "idle":
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    f"route coordinator is not idle: {coordinator_status.get('state')}",
+                    retryable=True,
+                )
+            jobs = getattr(container, "jobs", None)
+            if jobs is not None and await jobs.has_durable_waiters(
+                handler_name="coordinator",
+                payload_match={"route_id": route_id, "generation": generation},
+            ):
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "route has an active durable waiter; rollover cannot be prepared",
+                    retryable=True,
+                    details={"route_id": route_id, "error_code": "PENDING_WAITER"},
+                )
+            pending = container.route_registry.prepare_rollover(route_id)
+        safe_data = {
+            "route_id": route_id,
+            "state": "prepared",
+            "generation": int(route.get("generation", 0)),
+            "target_generation": int(pending["target_generation"]),
+            "channel_id": route["channel_id"],
+        }
+        result = to_mcp_result(success(request_context.request_id, safe_data))
         trigger_path = container.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
         public_base = container.settings.server.public_base_url
         trigger_url = str(public_base).rstrip("/") + trigger_path if public_base is not None else trigger_path
-        result.structured_content = {"channel_id": route["channel_id"], "trigger_url": trigger_url, "rollover": pending}
-        result.meta = dict(COORDINATOR_UI_META)
+        result.structured_content = {**safe_data, "trigger_url": trigger_url}
         return result
 
     async def context_get(ctx, params, request_context):
@@ -281,28 +372,64 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         return to_mcp_result(success(request_context.request_id, data))
 
     async def route_list(ctx, params, request_context):
-        routes = [
-            {
-                "route_id": item["route_id"],
-                "title": item.get("title") or item["route_id"],
-                "project_id": item.get("project_id"),
-                "channel_id": item.get("channel_id"),
-                "generation": int(item.get("generation", 0)),
-                "default": bool(item.get("default", False)),
-            }
-            for item in container.route_registry.list_routes()
-        ]
+        routes = container.route_registry.list_safe_routes()
         return to_mcp_result(success(request_context.request_id, {"routes": routes}))
+
+    async def route_control_status(ctx, params, request_context):
+        arguments = params.arguments or {}
+        route_id = container.route_registry.validate_route_id(arguments["route_id"])
+        if container.route_control is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INTERNAL_ERROR, "Route control is not configured")
+        data = container.route_control.safe_status(route_id)
+        result = to_mcp_result(success(request_context.request_id, data))
+        result.structured_content = dict(data)
+        return result
+
+    async def route_control_diagnostic(ctx, params, request_context):
+        arguments = params.arguments or {}
+        diag_id = str(arguments.get("diagnostic_id") or "").strip()
+        if not diag_id:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "diagnostic_id is required")
+        if container.route_control is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INTERNAL_ERROR, "Route control is not configured")
+        trace = container.route_control.trace_store.sanitized(diag_id)
+        if trace is None:
+            from app.api.errors import BridgeError, ErrorCode
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"diagnostic trace not found: {diag_id}")
+        result = to_mcp_result(success(request_context.request_id, trace))
+        result.structured_content = dict(trace)
+        return result
 
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
         destination = _resolve_destination(container, ctx, arguments)
-        data = await container.coordinator.arm(
-            arguments["message"],
-            channel_id=str(destination["channel_id"]),
-            delay_seconds=arguments.get("delay_seconds", 12),
-            conflict=arguments.get("conflict", "coalesce"),
-        )
+        route_id = destination.get("route_id")
+        if route_id is not None:
+            route_id_str = str(route_id)
+            async with container.route_registry.route_lock(route_id_str):
+                route = container.route_registry.require_wakeable_route(
+                    route_id_str,
+                    expected_generation=int(destination.get("generation", 0)),
+                    expected_channel=str(destination.get("channel_id")),
+                )
+                channel_id = str(route["channel_id"])
+                data = await container.coordinator.arm(
+                    arguments["message"],
+                    channel_id=channel_id,
+                    delay_seconds=arguments.get("delay_seconds", 12),
+                    conflict=arguments.get("conflict", "coalesce"),
+                )
+        else:
+            channel_id = str(destination["channel_id"])
+            data = await container.coordinator.arm(
+                arguments["message"],
+                channel_id=channel_id,
+                delay_seconds=arguments.get("delay_seconds", 12),
+                conflict=arguments.get("conflict", "coalesce"),
+            )
         return to_mcp_result(success(request_context.request_id, data))
 
     async def ack_continuation(ctx, params, request_context):
@@ -320,21 +447,47 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         repository = container.projects.repositories.get(
             arguments["project_id"], arguments["repository_id"]
         )
-        payload = ({"route_id": str(destination["route_id"])} if destination.get("route_id") is not None else {"channel_id": channel_id})
-        if message is not None:
-            payload["message"] = message
-        data = await container.jobs.wake_on_jobs_durable(
-            repository,
-            tuple(arguments["job_ids"]),
-            arguments.get("policy", "all_terminal"),
-            "coordinator",
-            payload,
-        )
-        data["channel_id"] = channel_id
-        if destination.get("route_id") is not None:
-            data["route_id"] = destination["route_id"]
+        route_id = destination.get("route_id")
+        if route_id is not None:
+            route_id_str = str(route_id)
+            async with container.route_registry.route_lock(route_id_str):
+                route = container.route_registry.require_wakeable_route(
+                    route_id_str,
+                    expected_generation=int(destination.get("generation", 0)),
+                    expected_channel=str(destination.get("channel_id")),
+                )
+                gen = int(route["generation"])
+                chan = str(route["channel_id"])
+                payload = {
+                    "route_id": route_id_str,
+                    "generation": gen,
+                    "channel_id": chan,
+                }
+                if message is not None:
+                    payload["message"] = message
+                data = await container.jobs.wake_on_jobs_durable(
+                    repository,
+                    tuple(arguments["job_ids"]),
+                    arguments.get("policy", "all_terminal"),
+                    "coordinator",
+                    payload,
+                )
+                data["channel_id"] = chan
+                data["route_id"] = route_id_str
+        else:
+            payload = {"channel_id": channel_id}
+            if message is not None:
+                payload["message"] = message
+            data = await container.jobs.wake_on_jobs_durable(
+                repository,
+                tuple(arguments["job_ids"]),
+                arguments.get("policy", "all_terminal"),
+                "coordinator",
+                payload,
+            )
+            data["channel_id"] = channel_id
         result = to_mcp_result(success(request_context.request_id, data))
-        return attach_coordinator_ui(result, ctx, destination)
+        return result
 
     async def exec_and_wake(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -348,31 +501,62 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             artifacts=arguments.get("artifacts", []), stdin=arguments.get("stdin"),
             idempotency_key=arguments.get("idempotency_key"),
         )
-        payload = ({"route_id": str(destination["route_id"])} if destination.get("route_id") is not None else {"channel_id": channel_id})
-        if arguments.get("message") is not None:
-            payload["message"] = arguments["message"]
-        try:
-            waiter = await container.jobs.wake_on_jobs_durable(
-                repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
-            )
-        except Exception:
+        route_id = destination.get("route_id")
+        if route_id is not None:
+            route_id_str = str(route_id)
+            async with container.route_registry.route_lock(route_id_str):
+                try:
+                    route = container.route_registry.require_wakeable_route(
+                        route_id_str,
+                        expected_generation=int(destination.get("generation", 0)),
+                        expected_channel=str(destination.get("channel_id")),
+                    )
+                except BridgeError:
+                    with suppress(Exception):
+                        await container.jobs.cancel(repository, job.job_id)
+                    raise
+                gen = int(route["generation"])
+                chan = str(route["channel_id"])
+                payload = {
+                    "route_id": route_id_str,
+                    "generation": gen,
+                    "channel_id": chan,
+                }
+                if arguments.get("message") is not None:
+                    payload["message"] = arguments["message"]
+                try:
+                    waiter = await container.jobs.wake_on_jobs_durable(
+                        repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
+                    )
+                except Exception:
+                    with suppress(Exception):
+                        await container.jobs.cancel(repository, job.job_id)
+                    raise
+                response = {**job.status_dict(), **waiter, "channel_id": chan, "route_id": route_id_str}
+        else:
+            payload = {"channel_id": channel_id}
+            if arguments.get("message") is not None:
+                payload["message"] = arguments["message"]
             try:
-                await container.jobs.cancel(repository, job.job_id)
+                waiter = await container.jobs.wake_on_jobs_durable(
+                    repository, (job.job_id,), arguments.get("policy", "all_terminal"), "coordinator", payload
+                )
             except Exception:
-                pass
-            raise
-        response = {**job.status_dict(), **waiter, "channel_id": channel_id}
-        if destination.get("route_id") is not None:
-            response["route_id"] = destination["route_id"]
+                with suppress(Exception):
+                    await container.jobs.cancel(repository, job.job_id)
+                raise
+            response = {**job.status_dict(), **waiter, "channel_id": channel_id}
         result = to_mcp_result(success(request_context.request_id, response))
-        return attach_coordinator_ui(result, ctx, destination)
+        return result
+
+
 
     common_meta = COORDINATOR_UI_META
     return (
         RegisteredTool(
             types.Tool(
                 name="coordinator_x_mount",
-                description="Mount the coordinator X wake listener for an existing registered logical route (e.g. bridge, eod, ad5xwork) or channel; ordinary workers mount existing routes here without asking the owner for URLs; cached clients may pass an exact cont_... ID as channel_id to ACK only that continuation",
+                description="Mount the single persistent coordinator MCP App for this chat and bind its X wake listener to an existing registered logical route (e.g. bridge, eod, ad5xwork) or channel. Mount once per chat; status and wake tools are widgetless and do not require remounting. Cached clients may pass an exact cont_... ID as channel_id to ACK only that continuation",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -392,7 +576,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_route_bind_current",
-                description="Bind an existing logical route to this exact physical ChatGPT conversation without asking the owner for a URL; by default it fails closed across projects, while explicit allow_project_change=true authorizes this one marker-verified route migration",
+                description="Bind an existing logical route to this exact physical ChatGPT conversation through the OOB bind-card/openExternal flow. Invoke this session-bound tool directly, not through bridge_call; physical ChatGPT URLs, IDs, sessions, and control tokens stay outside model-visible chat. Cross-project changes fail closed unless allow_project_change=true explicitly authorizes this one migration.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -422,7 +606,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["route_id", "url"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             takeover,
             "coordinator-x",
@@ -442,6 +625,34 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         ),
         RegisteredTool(
             types.Tool(
+                name="coordinator_route_control_status",
+                description="Read-only widgetless logical status for a registered coordinator route (generation, binding state, pending wake counts, last operation) without physical chat identity or rendering another coordinator card",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"}},
+                    "required": ["route_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            route_control_status,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_control_diagnostic",
+                description="Read-only sanitized diagnostic trace for a route-control operation; never returns raw chat identity, tokens, or URLs",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"diagnostic_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"}},
+                    "required": ["diagnostic_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            route_control_diagnostic,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
                 name="coordinator_route_rollover_prepare",
                 description=(
                     "Prepare fail-safe automatic physical-chat rollover without changing the active route; "
@@ -453,7 +664,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["route_id"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             rollover_prepare,
             "coordinator-x",
@@ -546,9 +756,9 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             types.Tool(
                 name="coordinator_wake_on_jobs",
                 description=(
-                    "Event-driven resilient X continuation for durable jobs. With an explicit route/channel, "
-                    "the call renders/refreshes the coordinator MCP App; otherwise coordinator_x_mount supplies "
-                    "the existing destination binding. After jobs become terminal, delivery "
+                    "Event-driven resilient X continuation for durable jobs. Mount coordinator_x_mount once for the chat; "
+                    "this widgetless call uses the existing destination binding and does not render a new coordinator MCP App. "
+                    "After jobs become terminal, delivery "
                     "keeps one active durable continuation_id per channel, batches concurrent terminal "
                     "groups without overwriting them, and deduplicates repeated events. Transport failures "
                     "may retry X up to 3 attempts; after successful ui/message transport ACK the continuation "
@@ -587,7 +797,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["project_id", "repository_id", "job_ids"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             wake_on_jobs,
             "coordinator-x",
@@ -595,7 +804,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_exec_and_wake",
-                description="Queue one durable repository execution, arm its coordinator waiter, and render/refresh the coordinator MCP App in the same request; cancels the new job if waiter registration fails.",
+                description="Queue one durable repository execution and arm its coordinator waiter without rendering a new coordinator MCP App; mount coordinator_x_mount once for the chat first. Cancels the new job if waiter registration fails.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -615,7 +824,6 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["project_id", "repository_id", "executable"],
                     "additionalProperties": False,
                 },
-                _meta=common_meta,
             ),
             exec_and_wake,
             "coordinator-x",

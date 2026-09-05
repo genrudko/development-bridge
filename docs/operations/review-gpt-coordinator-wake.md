@@ -15,17 +15,20 @@ Every direct wake must use both:
 
 Do not replace the Project URL with a guessed canonical `/c/<conversation-id>` route. Preflight must navigate the authoritative route and verify the exact conversation identity. ReviewGPT accepts both plain and Project conversation URL forms for same-thread identity, but Bridge production targeting remains authoritative-Project-URL first.
 
-### Current-chat autodiscovery
+### Current-chat binding is out of band
 
-When an existing logical route must be rebound to the exact physical ChatGPT conversation that invoked Bridge, use `coordinator_route_bind_current`; do not ask the owner to copy the browser URL. The flow is deliberately fail-closed:
+ReviewGPT is a wake delivery/probe transport only. It does not identify the currently invoking ChatGPT conversation and it must not use Global Search or marker turns for route binding.
 
-1. Bridge prepares a durable one-time `DBRIDGE_ROUTE_BIND_*` marker bound to the route generation and, when the transport provides one, the MCP session. Modern sessionless MCP requests remain safe because the marker itself is committed by the mounted app in the invoking physical conversation and is then verified through authenticated ChatGPT history search.
-2. The mounted MCP App commits that marker once in the current physical conversation.
-3. ReviewGPT opens its authenticated ChatGPT profile and uses Global Search for the exact marker.
-4. Discovery requires exactly one result, reopens it through the expected Project route shape, and verifies the marker in that conversation.
-5. Bridge verifies same-project identity and atomically updates the route/session binding. A same-chat result is a no-op; ambiguity, cross-project results, missing indexing, or authentication problems do not change the route.
+When an existing logical route must be rebound to the exact physical ChatGPT conversation that invoked Bridge:
 
-Marker emission and discovery completion are idempotent in the MCP App so retries do not create duplicate marker turns. ReviewGPT browser operations are serialized to prevent current-chat discovery from racing a normal wake probe or delivery.
+1. invoke `coordinator_route_bind_current` directly, never through delegated `bridge_call`;
+2. render/use the MCP bind-card;
+3. the App calls `openExternal(..., redirectUrl: true)` and the guarded route-control endpoint validates the returned target, project policy, token, and generation before commit;
+4. a same-conversation result is idempotent; cross-project, replay, expired-token, missing-return-target, or generation-race cases fail closed.
+
+**Model-visible identity boundary:** Never ask the owner to paste or copy a physical ChatGPT conversation URL. Physical conversation URLs, `conversation_id`, `project_id`, MCP/session identity, bind/rollover/control token, nonce, `redirectUrl`/return target, and equivalent physical binding material stay outside model-visible chat and prompts. Logical `route_id` and safe diagnostic IDs are the supported model-visible handles. There is no marker/search fallback.
+
+Native mobile new-bind is currently a ChatGPT host/WebView limitation: the client can open the Bridge page but does not supply the return target. Existing bound routes can still be controlled from mobile; establish a new physical binding from desktop/Web instead of adding a marker/search fallback.
 
 ## On-demand browser lifecycle
 

@@ -118,7 +118,37 @@ class JobStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM job_terminal_waiters WHERE waiter_id = ?", (waiter_id,))
 
+    def delete_matching_terminal_waiters(
+        self,
+        *,
+        handler_name: str,
+        payload_match: dict[str, object],
+    ) -> tuple[str, ...]:
+        deleted_ids: list[str] = []
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT waiter_id, payload_json FROM job_terminal_waiters WHERE handler_name = ?",
+                (handler_name,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if all(payload.get(k) == v for k, v in payload_match.items()):
+                    deleted_ids.append(str(row["waiter_id"]))
+            if deleted_ids:
+                placeholders = ",".join("?" for _ in deleted_ids)
+                connection.execute(
+                    f"DELETE FROM job_terminal_waiters WHERE waiter_id IN ({placeholders})",
+                    deleted_ids,
+                )
+        return tuple(deleted_ids)
+
     def terminal_waiters(self) -> tuple[dict[str, object], ...]:
+
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM job_terminal_waiters ORDER BY created_at, waiter_id").fetchall()
         return tuple({"waiter_id": row["waiter_id"], "project_id": row["project_id"], "repository_id": row["repository_id"], "job_ids": tuple(json.loads(row["job_ids_json"])), "policy": row["policy"], "handler_name": row["handler_name"], "payload": json.loads(row["payload_json"])} for row in rows)

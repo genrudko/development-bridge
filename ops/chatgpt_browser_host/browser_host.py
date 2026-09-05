@@ -6,15 +6,15 @@ import base64
 import fcntl
 import json
 import os
-import signal
 import shutil
-from secrets import token_urlsafe
+import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from secrets import token_urlsafe
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -1182,7 +1182,7 @@ class BrowserHost:
         response = requests.post(
             self.cfg.coordinator_local_url + f"rollover/{action}",
             json=body,
-            timeout=5,
+            timeout=300 if action == "bootstrap" else 5,
         )
         response.raise_for_status()
         data = response.json()
@@ -1352,7 +1352,7 @@ class BrowserHost:
             ws.close()
 
     def create_project_successor(
-        self, source_url: str, target_channel: str, token: str, *, timeout: float = 120
+        self, source_url: str, target_channel: str, *, timeout: float = 120
     ) -> tuple[dict, str]:
         source = canonical_chat_url(source_url)
         project_prefix = source.rsplit("/c/", 1)[0]
@@ -1382,7 +1382,7 @@ class BrowserHost:
             preflight_message = (
                 "Development Bridge fresh-chat rollover preflight. Do not continue project work. "
                 f"Call coordinator_x_mount with channel_id={target_channel}. After that tool succeeds, "
-                f"reply exactly: ROLLOVER_READY {token}. Do not do other work."
+                "stop without doing other work."
             )
             self.submit_native_prompt(page, preflight_message)
 
@@ -1419,7 +1419,9 @@ class BrowserHost:
             if not validation.get("ok"):
                 current = validation.get("current_url") or "unknown"
                 raise RuntimeError(f"fresh successor failed UI hydration: {current}")
-            preflight = self.wait_for_rollover_preflight(page, token, timeout=max(5, min(75, timeout)))
+            preflight = self.wait_for_rollover_preflight(
+                page, target_channel, timeout=max(5, min(75, timeout))
+            )
             if not preflight.get("ready"):
                 raise RuntimeError("fresh successor did not complete native rollover preflight")
             return page, candidate_url
@@ -1596,7 +1598,15 @@ class BrowserHost:
             and (page_id is None or str(item.get("parentId") or "") == page_id)
         ]
 
-    def coordinator_app_control(self, page: dict, action: str, **payload) -> dict:
+    def coordinator_app_control(
+        self,
+        page: dict,
+        action: str,
+        *,
+        expected_channel_id: str | None = None,
+        expected_observer_only: bool | None = None,
+        **payload,
+    ) -> dict:
         nonce = token_urlsafe(12)
         message = {
             "type": "development-bridge/control-v1",
@@ -1675,6 +1685,16 @@ class BrowserHost:
                                 and value.get("observer_only") is not True
                             ):
                                 break
+                            if (
+                                expected_channel_id is not None
+                                and value.get("channel_id") != expected_channel_id
+                            ):
+                                break
+                            if (
+                                expected_observer_only is not None
+                                and value.get("observer_only") is not expected_observer_only
+                            ):
+                                break
                             return value
                         break
             finally:
@@ -1714,36 +1734,32 @@ class BrowserHost:
             time.sleep(1)
         return False, detail
 
-    def wait_for_rollover_preflight(self, page: dict, token: str, timeout: float = 75) -> dict:
-        marker = f"ROLLOVER_READY {token}"
-        encoded_marker = json.dumps(marker, ensure_ascii=False)
-        expression = f'''(()=>{{
-          const marker={encoded_marker};
-          const generating=[...document.querySelectorAll('button')].some(b=>{{
-            const text=((b.getAttribute('aria-label')||'')+' '+(b.innerText||'')).toLowerCase();
-            return text.includes('stop generating')||text.includes('stop streaming')||text.includes('остановить');
-          }});
-          let matched=false, iframeCount=0;
-          for(const turn of document.querySelectorAll('[data-testid^="conversation-turn-"]')){{
-            const text=(turn.innerText||turn.textContent||'');
-            if(!text.includes(marker))continue;
-            const assistant=(turn.querySelector('[data-message-author-role="assistant"]')?.innerText||'').trim();
-            const frames=[...turn.querySelectorAll('iframe')].filter(f=>
-              f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html')
-            );
-            iframeCount=Math.max(iframeCount,frames.length);
-            if(assistant&&frames.length)matched=true;
-          }}
-          return {{ready:matched&&!generating,generating,iframe_count:iframeCount}};
-        }})()'''
+    def wait_for_rollover_preflight(
+        self, page: dict, target_channel: str, timeout: float = 75
+    ) -> dict:
         deadline = time.monotonic() + timeout
-        last = {"ready": False, "iframe_count": 0}
+        last = {"ready": False, "error": "native_mount_timeout"}
         while time.monotonic() < deadline:
-            value = self.runtime_evaluate(page, expression)
+            try:
+                value = self.coordinator_app_control(
+                    page,
+                    "ping",
+                    expected_channel_id=target_channel,
+                    expected_observer_only=False,
+                )
+            except TRANSIENT_CDP_ERRORS as exc:
+                value = {"ok": False, "error": str(exc)}
             if isinstance(value, dict):
-                last = value
-                if value.get("ready") is True:
-                    return value
+                last = {
+                    **value,
+                    "ready": bool(
+                        value.get("ok")
+                        and value.get("channel_id") == target_channel
+                        and value.get("observer_only") is False
+                    ),
+                }
+                if last["ready"]:
+                    return last
             time.sleep(1)
         return last
 
@@ -1774,9 +1790,8 @@ class BrowserHost:
 
     def abort_pending_rollover(self, rollover: dict, reason: str) -> dict:
         self.rollover_abort_count += 1
-        try:
-            result = self.rollover_control("abort", rollover, reason=reason[:500])
-        finally:
+        result = self.rollover_control("abort", rollover, reason=reason[:500])
+        if result.get("aborted") is True:
             self.restore_source_after_rollover(rollover["source_url"])
         return result
 
@@ -1820,7 +1835,7 @@ class BrowserHost:
                 # This is intentional: rollover must still work when the old long chat
                 # can no longer hydrate its historical coordinator card.
                 candidate_page, candidate_url = self.create_project_successor(
-                    source_url, target_channel, rollover["token"]
+                    source_url, target_channel
                 )
                 rollover = self.rollover_control("candidate", rollover, url=candidate_url)
                 state = "candidate"
@@ -1869,14 +1884,14 @@ class BrowserHost:
                 raise RuntimeError(f"successor X polling was not observed: {poll_detail}")
 
             preflight = self.wait_for_rollover_preflight(
-                candidate_page, rollover["token"], timeout=2
+                candidate_page, target_channel, timeout=2
             )
             if not preflight.get("ready"):
-                preflight_operation = f"{rollover['token']}-preflight"
+                preflight_operation = f"rollover-preflight-{target_channel}"
                 preflight_message = (
-                    f"Development Bridge automatic rollover preflight. Do not continue project work. "
+                    "Development Bridge automatic rollover preflight. Do not continue project work. "
                     f"Call coordinator_x_mount with channel_id={target_channel}. After that tool succeeds, "
-                    f"reply exactly: ROLLOVER_READY {rollover['token']}"
+                    "stop without doing other work."
                 )
                 preflight_send = self.coordinator_app_control(
                     candidate_page,
@@ -1890,7 +1905,7 @@ class BrowserHost:
                         f"successor preflight delivery failed: {preflight_send.get('error', 'unknown')}"
                     )
                 preflight = self.wait_for_rollover_preflight(
-                    candidate_page, rollover["token"], timeout=75
+                    candidate_page, target_channel, timeout=75
                 )
             if not preflight.get("ready"):
                 raise RuntimeError(
@@ -1906,7 +1921,7 @@ class BrowserHost:
             if not final_validation.get("ok"):
                 raise RuntimeError("successor conversation failed final UI hydration gate")
 
-            committed = self.rollover_control("commit", rollover)
+            committed = self.rollover_control("commit", rollover, require_bootstrap_transport=True)
             self.rollover_count += 1
             return {"state": "committed", "route": committed, "polling_detail": poll_detail}
         except TRANSIENT_CDP_ERRORS as exc:
@@ -1928,26 +1943,11 @@ class BrowserHost:
         record = self.active_rollover_record()
         if record is None or record.get("bootstrap_sent") is True or record.get("state") == "complete":
             return None
-        control = self.wait_for_control_channel(page, self.channel_id, timeout=15)
-        if not control.get("ok") or control.get("channel_id") != self.channel_id:
-            return {"state": "bootstrap_waiting", "error": control.get("error")}
-        message = (
-            f"Automatic physical-chat rollover completed for logical route {self.route_id} "
-            f"generation {self.route_generation}. Before other work, call "
-            f"coordinator_route_context_get with route_id={self.route_id} and use its canonical "
-            "Route Context as the authoritative checkpoint. Then continue NEXT ORDER OF WORK."
-        )
-        bootstrap = self.coordinator_app_control(
-            page,
-            "bootstrap",
-            channel_id=self.channel_id,
-            operation_id=record["token"],
-            message=message,
-        )
-        if not bootstrap.get("ok"):
-            return {"state": "bootstrap_waiting", "error": bootstrap.get("error")}
-        completed = self.rollover_control("complete", record)
-        return {"state": "complete", "rollover": completed, "duplicate": bootstrap.get("duplicate", False)}
+        # Only the server can hold the route mutation lock across physical delivery.
+        try:
+            return self.rollover_control("bootstrap", record)
+        except requests.RequestException:
+            return {"state": "bootstrap_waiting", "error": "server bootstrap unavailable or route changed"}
 
     def refresh_route_target(self) -> bool:
         try:
@@ -1980,7 +1980,7 @@ class BrowserHost:
             data["requested_route"] = requested
             changed_file = True
         route = data["routes"][requested]
-        target = canonical_chat_url(route["url"])
+        target = "about:blank" if route.get("binding_state") == "unbound" else canonical_chat_url(route["url"])
         channel = str(route["channel_id"])
         generation = int(route.get("generation", 0))
         changed = (requested, target, channel, generation) != (self.route_id, self.target_url, self.channel_id, self.route_generation)
@@ -2168,6 +2168,10 @@ class BrowserHost:
                     continue
 
                 route_changed = self.refresh_route_target()
+                if self.target_url == "about:blank":
+                    self.write_state(status="unbound", cdp_ok=True, target_ok=False)
+                    time.sleep(self.cfg.check_interval)
+                    continue
                 if route_changed:
                     poll_deadline = time.monotonic() + self.cfg.poll_grace
                     self.last_bridge_turn_id = 0

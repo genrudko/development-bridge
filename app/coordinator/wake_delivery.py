@@ -3,16 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from typing import Any
 
 from app.api.errors import BridgeError, ErrorCode
 from app.coordinator.routes import RouteRegistry
 from app.coordinator.service import CoordinatorService
 from app.coordinator.wake_transport import (
     WakeDeliveryRequest,
-    WakeDeliveryResult,
-    WakeDiscoveryResult,
-    WakeProbeResult,
     WakeTarget,
     WakeTransport,
 )
@@ -97,34 +93,47 @@ class CoordinatorWakeDeliveryService:
                 logger.warning("Error during coordinator wake delivery cycle: %s", exc)
             await asyncio.sleep(self._poll_interval_seconds)
 
-    async def discover_and_bind_current_route(self, route_id: str, token: str) -> dict:
-        if self._transport is None:
-            raise BridgeError(ErrorCode.POLICY_VIOLATION, "Current-chat discovery requires a configured wake transport")
-        route = self._route_registry.resolve(route_id)
-        pending = self._route_registry.pending_current_bind(route_id)
-        if route is None or pending is None or pending.get("token") != token:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
-        target = WakeTarget(
-            route_id=route_id,
-            channel_id=str(route["channel_id"]),
-            conversation_id=str(route["conversation_id"]),
-            route_url=str(route["url"]),
-            allow_project_change=bool(pending.get("allow_project_change", False)),
-        )
-        discovery: WakeDiscoveryResult = await self._transport.discover_current_chat(str(pending["marker"]), target)
-        if not discovery.found or not discovery.route_url or not discovery.conversation_id:
-            raise BridgeError(ErrorCode.POLICY_VIOLATION, discovery.detail or "Current ChatGPT conversation could not be discovered unambiguously")
-        bound = self._route_registry.complete_current_bind(route_id, token, discovery.route_url)
-        session_id = bound.pop("session_id", None)
-        if session_id:
-            self._coordinator.bind_session(
-                str(session_id),
-                str(bound["channel_id"]),
+    async def complete_rollover_bootstrap(self, route_id: str, token: str) -> dict:
+        """Validate, deliver and complete under the same fence as route mutations."""
+        async with self._route_registry.route_lock(route_id):
+            record = self._route_registry.rollover_for_completion(route_id, token)
+            if record.get("bootstrap_sent") is True:
+                return {"state": "complete", "rollover": record, "duplicate": True}
+            if record.get("bootstrap_delivery_state") in {"sending", "uncertain", "owner_input_required"}:
+                return {"state": "bootstrap_waiting", "error": "previous bootstrap requires reconciliation"}
+            if self._transport is None:
+                return {"state": "bootstrap_waiting", "error": "wake transport unavailable"}
+            route = self._route_registry.resolve(route_id)
+            target = WakeTarget(
                 route_id=route_id,
-                generation=int(bound.get("generation", 0)),
-                route_state="active",
+                channel_id=str(route["channel_id"]),
+                conversation_id=str(route["conversation_id"]),
+                route_url=str(route["url"]),
             )
-        return bound
+            probe = await self._transport.probe(target)
+            if not probe.ready or probe.owner_input_required:
+                return {"state": "bootstrap_waiting", "error": probe.detail}
+            operation_id = f"rollover-bootstrap-{route_id}-g{route['generation']}"
+            message = (
+                f"Automatic physical-chat rollover completed for logical route {route_id} "
+                f"generation {route['generation']}. Before other work, call "
+                f"coordinator_route_context_get with route_id={route_id} and use its canonical "
+                "Route Context as the authoritative checkpoint. Then continue NEXT ORDER OF WORK."
+            )
+            # Persist before sending: a lost response or process exit must not cause a resend.
+            self._route_registry.record_rollover_bootstrap_delivery(route_id, token, "sending")
+            try:
+                delivered = await self._transport.deliver(WakeDeliveryRequest(
+                    target=target, continuation_id=operation_id,
+                    prompt=message, delivery_key=operation_id,
+                ))
+            except Exception:  # noqa: BLE001 - a lost transport response is an uncertain delivery
+                return {"state": "bootstrap_waiting", "error": "bootstrap delivery requires reconciliation"}
+            if delivered.disposition != "delivered":
+                self._route_registry.record_rollover_bootstrap_delivery(route_id, token, delivered.disposition)
+                return {"state": "bootstrap_waiting", "error": delivered.detail}
+            completed = self._route_registry.complete_rollover(route_id, token)
+            return {"state": "complete", "rollover": completed, "duplicate": False}
 
     async def run_once(self) -> None:
         if not self._enabled or self._transport is None:
@@ -149,116 +158,125 @@ class CoordinatorWakeDeliveryService:
             ):
                 continue
 
-            channel_id = channel_id.strip()
-            status = await self._coordinator.status(channel_id, delivery_mode="direct")
-            continuation_id = status.get("continuation_id")
-            if (
-                not status.get("ready")
-                or not isinstance(continuation_id, str)
-                or not continuation_id.strip()
-            ):
-                continue
+            async with self._route_registry.route_lock(route_id):
+                current = self._route_registry.resolve(route_id)
+                if (
+                    current is None
+                    or not self._route_registry.is_bound(current)
+                    or int(current.get("generation", -1)) != int(route.get("generation", 0))
+                    or current.get("channel_id") != channel_id
+                ):
+                    continue
+                channel_id = channel_id.strip()
+                status = await self._coordinator.status(channel_id, delivery_mode="direct")
+                continuation_id = status.get("continuation_id")
+                if (
+                    not status.get("ready")
+                    or not isinstance(continuation_id, str)
+                    or not continuation_id.strip()
+                ):
+                    continue
 
-            target = WakeTarget(
-                route_id=route_id.strip(),
-                channel_id=channel_id,
-                conversation_id=conversation_id.strip(),
-                route_url=route_url.strip(),
-            )
-
-            try:
-                probe_result = await self._transport.probe(target)
-            except Exception as exc:
-                logger.warning("Probe exception for route %s: %s", route_id, exc)
-                continue
-
-            if not probe_result.ready and not probe_result.owner_input_required:
-                continue
-
-            if probe_result.owner_input_required:
-                logger.warning(
-                    "Coordinator direct wake probe blocked route=%s channel=%s continuation=%s transport=%s detail=%s",
-                    target.route_id,
-                    channel_id,
-                    continuation_id.strip(),
-                    self._transport.name,
-                    probe_result.detail,
+                target = WakeTarget(
+                    route_id=route_id.strip(),
+                    channel_id=channel_id,
+                    conversation_id=conversation_id.strip(),
+                    route_url=route_url.strip(),
                 )
+
+                try:
+                    probe_result = await self._transport.probe(target)
+                except Exception as exc:
+                    logger.warning("Probe exception for route %s: %s", route_id, exc)
+                    continue
+
+                if not probe_result.ready and not probe_result.owner_input_required:
+                    continue
+
+                if probe_result.owner_input_required:
+                    logger.warning(
+                        "Coordinator direct wake probe blocked route=%s channel=%s continuation=%s transport=%s detail=%s",
+                        target.route_id,
+                        channel_id,
+                        continuation_id.strip(),
+                        self._transport.name,
+                        probe_result.detail,
+                    )
+                    claim_result = await self._coordinator.claim(channel_id, delivery_mode="direct")
+                    if claim_result.get("claimed"):
+                        claim_id = str(claim_result["claim_id"])
+                        await self._coordinator.finalize_transport(
+                            channel_id,
+                            claim_id,
+                            self._transport.name,
+                            "owner_input_required",
+                            detail=probe_result.detail,
+                        )
+                        return
+                    continue
+
                 claim_result = await self._coordinator.claim(channel_id, delivery_mode="direct")
-                if claim_result.get("claimed"):
-                    claim_id = str(claim_result["claim_id"])
+                if not claim_result.get("claimed"):
+                    continue
+
+                claim_id = str(claim_result["claim_id"])
+                continuation_id = str(claim_result.get("continuation_id") or "")
+                raw_message = str(claim_result.get("message") or "")
+                prompt = self.build_continuation_prompt(continuation_id, raw_message)
+
+                request = WakeDeliveryRequest(
+                    target=target,
+                    continuation_id=continuation_id,
+                    prompt=prompt,
+                    delivery_key=continuation_id,
+                )
+
+                try:
+                    delivery_result = await self._transport.deliver(request)
+                    logger.warning(
+                        "Coordinator direct wake delivery result route=%s channel=%s continuation=%s transport=%s disposition=%s model_turn_observed=%s detail=%s receipt=%s",
+                        target.route_id,
+                        channel_id,
+                        continuation_id,
+                        self._transport.name,
+                        delivery_result.disposition,
+                        delivery_result.model_turn_observed,
+                        delivery_result.detail,
+                        delivery_result.receipt_path,
+                    )
                     await self._coordinator.finalize_transport(
                         channel_id,
                         claim_id,
                         self._transport.name,
-                        "owner_input_required",
-                        detail=probe_result.detail,
+                        delivery_result.disposition,
+                        detail=delivery_result.detail,
                     )
-                    return
-                continue
-
-            claim_result = await self._coordinator.claim(channel_id, delivery_mode="direct")
-            if not claim_result.get("claimed"):
-                continue
-
-            claim_id = str(claim_result["claim_id"])
-            continuation_id = str(claim_result.get("continuation_id") or "")
-            raw_message = str(claim_result.get("message") or "")
-            prompt = self.build_continuation_prompt(continuation_id, raw_message)
-
-            request = WakeDeliveryRequest(
-                target=target,
-                continuation_id=continuation_id,
-                prompt=prompt,
-                delivery_key=continuation_id,
-            )
-
-            try:
-                delivery_result = await self._transport.deliver(request)
-                logger.warning(
-                    "Coordinator direct wake delivery result route=%s channel=%s continuation=%s transport=%s disposition=%s model_turn_observed=%s detail=%s receipt=%s",
-                    target.route_id,
-                    channel_id,
-                    continuation_id,
-                    self._transport.name,
-                    delivery_result.disposition,
-                    delivery_result.model_turn_observed,
-                    delivery_result.detail,
-                    delivery_result.receipt_path,
-                )
-                await self._coordinator.finalize_transport(
-                    channel_id,
-                    claim_id,
-                    self._transport.name,
-                    delivery_result.disposition,
-                    detail=delivery_result.detail,
-                )
-                if (
-                    delivery_result.disposition == "delivered"
-                    and delivery_result.model_turn_observed
-                ):
-                    observation = await self._coordinator.observe_model_turn(
-                        channel_id, continuation_id
-                    )
-                    logger.warning(
-                        "Coordinator direct wake model observation channel=%s continuation=%s observed=%s",
-                        channel_id,
+                    if (
+                        delivery_result.disposition == "delivered"
+                        and delivery_result.model_turn_observed
+                    ):
+                        observation = await self._coordinator.observe_model_turn(
+                            channel_id, continuation_id
+                        )
+                        logger.warning(
+                            "Coordinator direct wake model observation channel=%s continuation=%s observed=%s",
+                            channel_id,
+                            continuation_id,
+                            observation.get("observed", False),
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "Unexpected exception during wake delivery for continuation %s: %s",
                         continuation_id,
-                        observation.get("observed", False),
+                        exc,
                     )
-            except Exception as exc:
-                logger.error(
-                    "Unexpected exception during wake delivery for continuation %s: %s",
-                    continuation_id,
-                    exc,
-                )
-                await self._coordinator.finalize_transport(
-                    channel_id,
-                    claim_id,
-                    self._transport.name,
-                    "uncertain",
-                    detail=f"Delivery exception: {str(exc)[:500]}",
-                )
+                    await self._coordinator.finalize_transport(
+                        channel_id,
+                        claim_id,
+                        self._transport.name,
+                        "uncertain",
+                        detail=f"Delivery exception: {str(exc)[:500]}",
+                    )
 
-            # Single lane: after any successful claim/finalization, stop scanning routes for this cycle.
-            return
+                # Single lane: after any successful claim/finalization, stop scanning routes for this cycle.
+                return

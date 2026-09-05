@@ -6,14 +6,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from mcp import types
-from mcp.server import Server
+from mcp.server import NotificationOptions, Server
 
 from app.api.context import new_request_context
 from app.api.errors import BridgeError, ErrorCode
 from app.api.results import failure, to_mcp_result
 from app.audit import AuditEvent, AuditOutcome
 from app.container import ApplicationContainer, build_container
-from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
 from app.tools.compact import (
     BRIDGE_DASHBOARD_STATE_URI,
     BRIDGE_DASHBOARD_UI_LEGACY_URI,
@@ -21,7 +20,22 @@ from app.tools.compact import (
     dashboard_snapshot,
     exposed_tool_definitions,
 )
+from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
 from app.tools.registry import build_tool_registry
+
+
+class DevelopmentBridgeServer(Server):
+    def create_initialization_options(
+        self,
+        notification_options=None,
+        experimental_capabilities=None,
+        extensions=None,
+    ):
+        if notification_options is None:
+            notification_options = NotificationOptions(tools_changed=True)
+        return super().create_initialization_options(
+            notification_options, experimental_capabilities, extensions
+        )
 
 
 def create_server(container: ApplicationContainer | None = None) -> Server:
@@ -44,15 +58,18 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
                 await application.telegram_supervisor.stop()
             await application.jobs.stop()
 
-    bridge_server = Server(application.settings.server.name, lifespan=lifespan)
+    bridge_server = DevelopmentBridgeServer(application.settings.server.name, lifespan=lifespan)
     bridge_server.extensions["io.modelcontextprotocol/ui"] = {
         "mimeTypes": ["text/html;profile=mcp-app"]
     }
 
     connect_domains = []
+    redirect_domains = []
     if application.settings.server.public_base_url is not None:
-        connect_domains.append(str(application.settings.server.public_base_url).rstrip("/"))
-    widget_meta = {
+        base_url_str = str(application.settings.server.public_base_url).rstrip("/")
+        connect_domains.append(base_url_str)
+        redirect_domains.append(base_url_str)
+    dashboard_meta = {
         "ui": {
             "csp": {
                 "connectDomains": connect_domains,
@@ -64,10 +81,27 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
             "resource_domains": ["https://unpkg.com"],
         },
     }
+    coordinator_meta = {
+        "ui": {
+            "csp": {
+                "connectDomains": connect_domains,
+                "resourceDomains": ["https://unpkg.com"],
+                "redirectDomains": redirect_domains,
+            }
+        },
+        "openai/widgetCSP": {
+            "connect_domains": connect_domains,
+            "resource_domains": ["https://unpkg.com"],
+            "redirect_domains": redirect_domains,
+        },
+    }
+
     if application.settings.server.public_base_url is not None:
         domain = str(application.settings.server.public_base_url).rstrip("/")
-        widget_meta["ui"]["domain"] = domain
-        widget_meta["openai/widgetDomain"] = domain
+        dashboard_meta["ui"]["domain"] = domain
+        dashboard_meta["openai/widgetDomain"] = domain
+        coordinator_meta["ui"]["domain"] = domain
+        coordinator_meta["openai/widgetDomain"] = domain
     ui_html = (Path(__file__).parent / "coordinator" / "x_ui.html").read_text(
         encoding="utf-8"
     )
@@ -99,7 +133,7 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
                 uri=uri,
                 description="Mounted MCP App for delayed coordinator wake messages",
                 mimeType="text/html;profile=mcp-app",
-                _meta=widget_meta,
+                _meta=coordinator_meta,
             )
             for uri in COORDINATOR_UI_URIS
         ]
@@ -110,7 +144,7 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
                     uri=BRIDGE_DASHBOARD_UI_URI,
                     description="Compact user-facing Bridge health and work-progress dashboard",
                     mimeType="text/html;profile=mcp-app",
-                    _meta=widget_meta,
+                    _meta=dashboard_meta,
                 ),
                 types.Resource(
                     name="Development Bridge Dashboard State",
@@ -126,7 +160,7 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
         if requested_uri in {BRIDGE_DASHBOARD_UI_URI, BRIDGE_DASHBOARD_UI_LEGACY_URI} and application.settings.server.tool_surface == "compact":
             text = dashboard_html
             mime_type = "text/html;profile=mcp-app"
-            meta = widget_meta
+            meta = dashboard_meta
         elif requested_uri == BRIDGE_DASHBOARD_STATE_URI and application.settings.server.tool_surface == "compact":
             session = getattr(ctx, "session", None)
             connection = getattr(session, "_connection", None)
@@ -140,7 +174,7 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
         elif requested_uri in COORDINATOR_UI_URIS:
             text = ui_html
             mime_type = "text/html;profile=mcp-app"
-            meta = widget_meta
+            meta = coordinator_meta
         else:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Unknown resource")
         return types.ReadResourceResult(

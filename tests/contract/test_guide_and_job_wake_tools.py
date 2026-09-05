@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from app.api.errors import BridgeError
 from app.container import build_container
 from app.jobs import JobStatus
 from app.settings import BridgeSettings
@@ -45,6 +48,14 @@ def test_bridge_guide_is_short_structured_runtime_summary():
     assert coordinator["available"] is True
     assert "route" in coordinator["summary"].lower()
     assert "ack" in coordinator["summary"].lower()
+    assert "bridge_call" in coordinator["summary"]
+    assert "widgetless" in coordinator["summary"].lower()
+
+    route_binding = data["route_binding"]["summary"]
+    assert "coordinator_route_bind_current" in route_binding
+    assert "openExternal" in route_binding
+    assert "model-visible" in route_binding
+    assert "marker/search fallback" in route_binding
 
     economy = data["economy_mode"]
     assert economy["enabled"] is True
@@ -97,8 +108,8 @@ def test_coordinator_job_wake_schema_is_bounded_and_mount_explicit():
     assert "durable" in tool.description
     assert "restored across Bridge restart" in tool.description
     assert "batches concurrent terminal" in tool.description
-    assert "renders/refreshes the coordinator MCP App" in tool.description
-    assert tool.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
+    assert "does not render a new coordinator MCP App" in tool.description
+    assert not (tool.meta or {}).get("openai/outputTemplate")
 
 
 def test_x_wake_payload_never_contains_job_output(tmp_path):
@@ -137,8 +148,14 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
         assert container.jobs._store.start(job.job_id)
         await container.jobs._finish_job(job.job_id, JobStatus.SUCCEEDED)
         registry = build_tool_registry(container)
+        mounted = await registry.get("coordinator_x_mount").handler(
+            _mcp_ctx("mount-session"),
+            SimpleNamespace(arguments={"channel_id": "coordinator"}),
+            SimpleNamespace(request_id="mount-request"),
+        )
+        mounted_lease = mounted.structured_content["delivery_lease"]
         wake_result = await registry.get("coordinator_wake_on_jobs").handler(
-            None,
+            _mcp_ctx("wake-session"),
             SimpleNamespace(arguments={
                 "project_id": "project",
                 "repository_id": "repository",
@@ -147,21 +164,14 @@ def test_x_wake_payload_never_contains_job_output(tmp_path):
             }),
             SimpleNamespace(request_id="wake-request"),
         )
-        assert wake_result.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
-        assert wake_result.structured_content["channel_id"] == "coordinator"
-        assert wake_result.structured_content["trigger_url"].endswith("/mcp/x/coordinator/")
-        assert isinstance(wake_result.structured_content["delivery_lease"], str)
-        assert len(wake_result.structured_content["delivery_lease"]) >= 10
-        status = await container.coordinator.status()
-        assert status["state"] == "browser_preflight"
-        authorized = await container.coordinator.authorize_browser_preflight(
-            "coordinator", status["continuation_id"]
-        )
-        assert authorized["authorized"] is True
-        # Preflight authorization publishes the wake through a scheduled transition.
-        # Yield once so claim observes the newly authorized continuation deterministically.
-        await asyncio.sleep(0)
-        return await container.coordinator.claim()
+        assert not (wake_result.meta or {}).get("openai/outputTemplate")
+        assert wake_result.structured_content is None
+        assert container.coordinator.delivery_lease("coordinator")["lease_id"] == mounted_lease
+        status = await container.coordinator.status(delivery_lease=mounted_lease)
+        assert status["state"] == "pending"
+        assert status["ready"] is True
+        assert status["x_listener_active"] is True
+        return await container.coordinator.claim(delivery_lease=mounted_lease)
 
     claim = asyncio.run(scenario())
     assert claim["claimed"] is True
@@ -192,13 +202,15 @@ def test_coordinator_exec_and_wake_queues_job_and_durable_waiter(tmp_path):
     registry = build_tool_registry(container)
     tool = registry.get("coordinator_exec_and_wake")
     assert tool.definition.input_schema["required"] == ["project_id", "repository_id", "executable"]
-    assert tool.definition.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
+    assert not (tool.definition.meta or {}).get("openai/outputTemplate")
     result = asyncio.run(tool.handler(None, SimpleNamespace(arguments={
         "project_id": "project", "repository_id": "repository",
         "executable": sys.executable, "arguments": ["-c", "print('ok')"],
         "channel_id": "coordinator", "message": "done",
     }), SimpleNamespace(request_id="atomic-request")))
-    assert result.meta["openai/outputTemplate"] == COORDINATOR_UI_URI
+    assert not (result.meta or {}).get("openai/outputTemplate")
+    assert result.structured_content is None
+    assert container.coordinator.delivery_lease("coordinator") is None
     data = json.loads(result.content[0].text)["data"]
     assert data["job_id"].startswith("job_")
     assert data["state"] == "waiting" and data["durable"] is True
@@ -213,7 +225,7 @@ def _mcp_ctx(session_id: str):
     )
 
 
-def test_exec_and_wake_self_mount_requests_active_route_and_owns_lease(tmp_path):
+def test_exec_and_wake_preserves_persistent_mount_lease_across_tool_sessions(tmp_path):
     repository_path = create_git_repository(tmp_path, "repository")
     settings = BridgeSettings.model_validate({
         "server": {"public_base_url": "https://bridge.example"},
@@ -229,12 +241,15 @@ def test_exec_and_wake_self_mount_requests_active_route_and_owns_lease(tmp_path)
         "ad5x", "https://chatgpt.com/c/00000000-0000-0000-0000-000000000101",
         "telegram-ad5x-g0", "AD5X",
     )
-    container.route_registry.bootstrap(
-        "bridge-dev", "https://chatgpt.com/c/00000000-0000-0000-0000-000000000102",
-        "telegram-bridge-g0", "Bridge Dev",
-    )
-    container.route_registry.request("bridge-dev")
-    tool = build_tool_registry(container).get("coordinator_exec_and_wake")
+    registry = build_tool_registry(container)
+    mounted = asyncio.run(registry.get("coordinator_x_mount").handler(
+        _mcp_ctx("mount-session"),
+        SimpleNamespace(arguments={"route_id": "ad5x"}),
+        SimpleNamespace(request_id="req-mount"),
+    ))
+    mounted_lease = mounted.structured_content["delivery_lease"]
+    before = dict(container.coordinator.delivery_lease("telegram-ad5x-g0"))
+    tool = registry.get("coordinator_exec_and_wake")
 
     def call(session_id: str, marker: str):
         return asyncio.run(tool.handler(
@@ -247,23 +262,16 @@ def test_exec_and_wake_self_mount_requests_active_route_and_owns_lease(tmp_path)
             SimpleNamespace(request_id=f"req-{marker}"),
         ))
 
-    first = call("session-a", "one")
-    first_sc = first.structured_content
-    assert first_sc["channel_id"] == "telegram-ad5x-g0"
-    assert first_sc["trigger_url"] == "https://bridge.example/mcp/x/coordinator/"
-    assert isinstance(first_sc["delivery_lease"], str) and len(first_sc["delivery_lease"]) >= 10
-    assert first_sc["route_id"] == "ad5x"
-    assert first_sc["generation"] == 0
-    assert first_sc["route_state"] == "active"
+    for session_id, marker in (("session-a", "one"), ("session-b", "two")):
+        result = call(session_id, marker)
+        assert result.structured_content is None
+        assert container.coordinator.delivery_lease("telegram-ad5x-g0") == before
+        assert container.coordinator.delivery_lease("telegram-ad5x-g0")["lease_id"] == mounted_lease
+
     assert container.route_registry.snapshot()["requested_route"] == "ad5x"
 
-    same_session = call("session-a", "two")
-    assert same_session.structured_content["delivery_lease"] == first_sc["delivery_lease"]
-    other_session = call("session-b", "three")
-    assert other_session.structured_content["delivery_lease"] != first_sc["delivery_lease"]
 
-
-def test_exec_and_wake_self_mount_does_not_request_pending_rollover(tmp_path):
+def test_exec_and_wake_rejects_pending_rollover_channel(tmp_path):
     repository_path = create_git_repository(tmp_path, "repository")
     settings = BridgeSettings.model_validate({
         "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
@@ -285,19 +293,95 @@ def test_exec_and_wake_self_mount_does_not_request_pending_rollover(tmp_path):
     container.route_registry.request("bridge-dev")
     pending = container.route_registry.prepare_rollover("ad5x")
     tool = build_tool_registry(container).get("coordinator_exec_and_wake")
-    result = asyncio.run(tool.handler(
-        _mcp_ctx("pending-session"),
-        SimpleNamespace(arguments={
-            "project_id": "project", "repository_id": "repository",
-            "executable": sys.executable, "arguments": ["-c", "print('pending')"],
-            "channel_id": pending["channel_id"], "message": "pending",
-        }),
-        SimpleNamespace(request_id="req-pending"),
-    ))
-    assert result.structured_content["channel_id"] == pending["channel_id"]
-    assert result.structured_content["route_id"] == "ad5x"
-    assert result.structured_content["route_state"] == "pending"
+    with pytest.raises(BridgeError, match="route-generation"):
+        asyncio.run(tool.handler(
+            _mcp_ctx("pending-session"),
+            SimpleNamespace(arguments={
+                "project_id": "project", "repository_id": "repository",
+                "executable": sys.executable, "arguments": ["-c", "print('pending')"],
+                "channel_id": pending["channel_id"], "message": "pending",
+            }),
+            SimpleNamespace(request_id="req-pending"),
+        ))
     assert container.route_registry.snapshot()["requested_route"] == "bridge-dev"
+
+
+def test_coordinator_wake_on_jobs_rejects_unregistered_future_route_channel(tmp_path):
+    repository_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate({
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "projects": [{"id": "project", "name": "Project", "repositories": [{
+            "id": "repository", "path": repository_path, "capabilities": {"execute": True}
+        }]}],
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    registrations = []
+
+    async def register(*args, **kwargs):
+        registrations.append((args, kwargs))
+        return {"state": "waiting", "durable": True}
+
+    container.jobs.wake_on_jobs_durable = register
+    tool = build_tool_registry(container).get("coordinator_wake_on_jobs")
+
+    with pytest.raises(BridgeError, match="route-generation"):
+        asyncio.run(tool.handler(
+            None,
+            SimpleNamespace(arguments={
+                "project_id": "project",
+                "repository_id": "repository",
+                "job_ids": ["job_00000000000000000000000000000001"],
+                "channel_id": "telegram-bridge-g1",
+            }),
+            SimpleNamespace(request_id="req-future-waiter"),
+        ))
+    assert registrations == []
+
+
+def test_coordinator_wake_on_jobs_rejects_registered_pending_route_channel(tmp_path):
+    repository_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate({
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "projects": [{"id": "project", "name": "Project", "repositories": [{
+            "id": "repository", "path": repository_path,
+            "capabilities": {"execute": True},
+        }]}],
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    pending = container.route_registry.prepare_rollover("bridge")
+    registrations = []
+
+    async def register(*args, **kwargs):
+        registrations.append((args, kwargs))
+        return {"state": "waiting", "durable": True}
+
+    container.jobs.wake_on_jobs_durable = register
+    tool = build_tool_registry(container).get("coordinator_wake_on_jobs")
+
+    with pytest.raises(BridgeError, match="pending route-generation"):
+        asyncio.run(tool.handler(
+            None,
+            SimpleNamespace(arguments={
+                "project_id": "project",
+                "repository_id": "repository",
+                "job_ids": ["job_00000000000000000000000000000001"],
+                "channel_id": pending["channel_id"],
+            }),
+            SimpleNamespace(request_id="req-pending-waiter"),
+        ))
+    assert registrations == []
 
 def test_coordinator_exec_and_wake_cancels_job_if_waiter_registration_fails(tmp_path):
     repository_path = create_git_repository(tmp_path, "repository")
@@ -333,3 +417,75 @@ def test_coordinator_exec_and_wake_cancels_job_if_waiter_registration_fails(tmp_
     assert len(cancelled) == 1
     job = container.jobs._store.get_by_id(cancelled[0])
     assert job is not None and job.status == JobStatus.CANCELLED
+
+
+def test_coordinator_wake_on_jobs_pins_route_id_generation_and_channel(tmp_path):
+    repository_path = create_git_repository(tmp_path, "repository")
+    settings = BridgeSettings.model_validate({
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "projects": [{"id": "project", "name": "Project", "repositories": [{
+            "id": "repository", "path": repository_path, "capabilities": {"execute": True}
+        }]}],
+    })
+    container = build_container(settings)
+    container.jobs._store.initialize()
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    repo = container.projects.repositories.get("project", "repository")
+    job = asyncio.run(container.jobs.start_task(repo, "task", "req-pin")) if hasattr(container.tasks, "get") and container.tasks.list("project", "repository") else asyncio.run(container.jobs.start_execution(repo, sys.executable, ["-c", "print(1)"], "req-pin"))
+
+    tool = build_tool_registry(container).get("coordinator_wake_on_jobs")
+    asyncio.run(tool.handler(None, SimpleNamespace(arguments={
+        "project_id": "project",
+        "repository_id": "repository",
+        "job_ids": [job.job_id],
+        "route_id": "bridge",
+    }), SimpleNamespace(request_id="req-wake-pin")))
+
+    waiters = container.jobs._store.terminal_waiters()
+    assert len(waiters) == 1
+    payload = waiters[0]["payload"]
+    assert payload["route_id"] == "bridge"
+    assert payload["generation"] == 0
+    assert payload["channel_id"] == "telegram-bridge-g0"
+
+
+def test_route_binding_guidance_forbids_model_visible_physical_identity_and_legacy_discovery():
+    root = Path(__file__).parents[2]
+    agent_rules = (root / "AGENTS.md").read_text(encoding="utf-8")
+    contract = (root / "docs/operations/executor-operating-contract.md").read_text(encoding="utf-8")
+    wake_runbook = (root / "docs/operations/review-gpt-coordinator-wake.md").read_text(encoding="utf-8")
+    combined = f"{agent_rules}\n{contract}\n{wake_runbook}"
+
+    assert "Never ask the owner to paste or copy a physical ChatGPT conversation URL" in combined
+    assert "conversation_id" in combined
+    assert "project_id" in combined
+    assert "bind/rollover/control token" in combined
+    assert "model-visible" in combined
+    assert "marker/search fallback" in combined
+    assert "openExternal" in combined
+    assert "native mobile" in combined.lower()
+
+
+def test_only_explicit_mount_and_bind_advertise_coordinator_app():
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    ui_tools = {
+        tool.name
+        for tool in registry.definitions
+        if tool.name.startswith("coordinator_")
+        and (getattr(tool, "meta", None) or {}).get("openai/outputTemplate") == COORDINATOR_UI_URI
+    }
+    assert ui_tools == {"coordinator_x_mount", "coordinator_route_bind_current"}
+
+
+def test_wake_tools_are_widgetless_and_require_no_new_app_instance():
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    for name in ("coordinator_wake_on_jobs", "coordinator_exec_and_wake"):
+        tool = registry.get(name).definition
+        assert not (getattr(tool, "meta", None) or {}).get("openai/outputTemplate")
+        assert "coordinator_x_mount" in tool.description
+        assert "new coordinator MCP App" in tool.description

@@ -19,12 +19,19 @@ from app.coordinator import (
     CoordinatorService,
     CoordinatorWakeDeliveryService,
     ReviewGptWakeTransport,
+    RouteControlService,
+    RouteControlTraceStore,
     RouteRegistry,
     WakeTransport,
 )
 from app.desktop_nodes import DesktopNodeService
+from app.executors import (
+    AntigravityExecutor,
+    AsyncioProcessRunner,
+    ExecutorSelector,
+    ExecutorService,
+)
 from app.files import FileService
-from app.executors import AntigravityExecutor, AsyncioProcessRunner, ExecutorSelector, ExecutorService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
     GitHubActionsArtifactExportService,
@@ -94,6 +101,8 @@ class ApplicationContainer:
     bridge_restart: BridgeRestartService
     desktop_nodes: DesktopNodeService
     coordinator_wake_delivery: CoordinatorWakeDeliveryService | None = None
+    route_control: RouteControlService | None = None
+    route_control_trace_store: RouteControlTraceStore | None = None
 
 
 def build_container(
@@ -330,26 +339,74 @@ def build_container(
         route_registry.path.parent / "coordinator-wakes.json",
         browser_preflight_required=True,
     )
+    route_control_trace_store = RouteControlTraceStore(
+        route_registry.path.parent / "traces"
+    )
+    route_control = RouteControlService(
+        route_registry,
+        route_control_trace_store,
+        coordinator=coordinator,
+        jobs=jobs,
+        public_base_url=(
+            str(configured.server.public_base_url)
+            if configured.server.public_base_url is not None
+            else None
+        ),
+        endpoint_prefix=configured.server.endpoint.rstrip("/") + "/x/route-control",
+    )
 
     async def resume_coordinator_waiter(payload, records, reason):
         route_id = payload.get("route_id")
         if route_id is not None:
-            route = route_registry.resolve(str(route_id))
-            if route is None:
-                raise BridgeError(
-                    ErrorCode.POLICY_VIOLATION,
-                    f"durable coordinator waiter route no longer exists: {route_id}",
-                    retryable=True,
+            expected_generation = payload.get("generation")
+            expected_channel = payload.get("channel_id")
+            if expected_generation is None or expected_channel is None:
+                return
+            route_id_str = str(route_id)
+            async with route_registry.route_lock(route_id_str):
+                try:
+                    route = route_registry.require_wakeable_route(
+                        route_id_str,
+                        expected_generation=int(expected_generation),
+                        expected_channel=str(expected_channel),
+                    )
+                except BridgeError as error:
+                    if isinstance(error.details, dict) and error.details.get("error_code") == "ROLLOVER_PENDING":
+                        raise
+                    return
+                channel_id = str(route["channel_id"])
+                await coordinator.arm_job_continuation(
+                    records,
+                    reason,
+                    channel_id=channel_id,
+                    message=(
+                        str(payload["message"])
+                        if payload.get("message") is not None
+                        else None
+                    ),
                 )
-            channel_id = str(route["channel_id"])
         else:
             channel_id = str(payload["channel_id"])
-        await coordinator.arm_job_continuation(
-            records, reason, channel_id=channel_id,
-            message=(str(payload["message"]) if payload.get("message") is not None else None),
-        )
+            try:
+                route = route_registry.wake_route_for_channel(channel_id)
+            except BridgeError:
+                return
+            if route is not None:
+                return
+            await coordinator.arm_job_continuation(
+                records,
+                reason,
+                channel_id=channel_id,
+                message=(
+                    str(payload["message"])
+                    if payload.get("message") is not None
+                    else None
+                ),
+            )
+
 
     jobs.register_durable_terminal_handler("coordinator", resume_coordinator_waiter)
+
     supervisor_settings = configured.telegram_supervisor
     telegram_supervisor = None
     if supervisor_settings.enabled:
@@ -429,6 +486,7 @@ def build_container(
         ),
         coordinator=coordinator,
         route_registry=route_registry,
+        route_control=route_control,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
         desktop_nodes=DesktopNodeService(
@@ -437,4 +495,5 @@ def build_container(
             configured.server.endpoint,
         ),
         coordinator_wake_delivery=coordinator_wake_delivery,
+        route_control_trace_store=route_control_trace_store,
     )

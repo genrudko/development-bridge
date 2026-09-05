@@ -94,10 +94,14 @@ Do not claim completion from intuition, agent self-report, or partial tests. The
 
 - Normal workers must never call `coordinator_route_takeover` to start ordinary work.
 - Ordinary setup: discover registered routes with `coordinator_route_list` (hidden tool) -> mount the appropriate logical route with `coordinator_x_mount(route_id=...)`.
+- Mount the Coordinator App once per physical chat. Do not remount for ordinary status reads or wake registration: the existing card polls status, and route status / wake / exec-and-wake tools are intentionally widgetless so they do not create another ChatGPT iframe.
+- While `coordinator_route_bind_current` is pending, do not call it again just to refresh the bind UI. Keep one bind-card per pending bind and use safe status/diagnostics for inspection.
 - Current route mapping:
   - `development-bridge` -> `bridge`
   - `eod` -> `eod`
   - AD5X product work -> `ad5xwork`
   - If uncertain, call `coordinator_route_list` to inspect registered routes.
-- The owner must never be asked to copy a ChatGPT conversation URL for ordinary executor setup; URLs are only relevant during initial route bootstrap or exceptional manual takeover.
+- Current-chat rebinding uses direct `coordinator_route_bind_current` followed by its MCP bind-card; the App obtains identity out of band with `openExternal(..., redirectUrl: true)`. Do not delegate this session-bound tool through `bridge_call`, and do not use marker/Global-Search discovery.
+- **Model-visible identity boundary:** Never ask the owner to paste or copy a physical ChatGPT conversation URL. Do not request or transfer a physical conversation URL, `conversation_id`, `project_id`, MCP/session identity, bind/rollover/control token, nonce, `redirectUrl`/return target, or equivalent physical binding data through model-visible chat or prompts. Logical `route_id` and safe diagnostic IDs are the intended model-visible handles.
+- Native mobile cannot currently establish a new binding because the host/WebView omits the return target. Existing bound routes remain controllable on mobile; perform new binding from desktop/Web and never add a marker/search fallback.
 - Automatic rollover remains the normal physical-chat successor path; manual takeover across different ChatGPT projects is rejected with `POLICY_VIOLATION`.

@@ -5,6 +5,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 def _module():
     path = Path(__file__).parents[2] / "ops/chatgpt_browser_host/browser_host.py"
@@ -604,7 +606,7 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
     host.coordinator_app_control = lambda page, action, **payload: {
         "ok": True, "channel_id": "telegram-ad5x-g5"
     }
-    host.create_project_successor = lambda url, channel, token: (candidate_page, candidate_url)
+    host.create_project_successor = lambda url, channel: (candidate_page, candidate_url)
     host.validate_candidate_conversation = lambda page, url, timeout=30: {"ok": True, "current_url": url, "composer_visible": True}
     host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
         "ok": True, "channel_id": channel_id
@@ -634,6 +636,7 @@ def test_browser_host_rollover_commits_only_after_successor_verification(tmp_pat
     result = host.process_pending_rollover()
     assert result["state"] == "committed"
     assert [item[0] for item in calls] == ["candidate", "commit"]
+    assert calls[-1][1]["require_bootstrap_transport"] is True
     assert host.rollover_count == 1
 
 
@@ -659,8 +662,8 @@ def test_browser_host_rollover_creates_fresh_successor_without_source_control(tm
         {"ok": True, "channel_id": payload.get("channel_id", "telegram-ad5x-g6")}
     )
     created = []
-    host.create_project_successor = lambda url, channel, token: (
-        created.append((url, channel, token)) or (candidate_page, candidate_url)
+    host.create_project_successor = lambda url, channel: (
+        created.append((url, channel)) or (candidate_page, candidate_url)
     )
     host.validate_candidate_conversation = lambda page, url, timeout=30: {
         "ok": True, "current_url": url, "composer_visible": True
@@ -681,7 +684,7 @@ def test_browser_host_rollover_creates_fresh_successor_without_source_control(tm
     host.rollover_control=control
     result=host.process_pending_rollover()
     assert result["state"]=="committed"
-    assert created == [(source_url, "telegram-ad5x-g6", "roll_fresh_token")]
+    assert created == [(source_url, "telegram-ad5x-g6")]
     assert all(page_id != "source" for page_id, _ in source_control_calls)
     assert calls == ["candidate", "commit"]
 
@@ -745,6 +748,63 @@ def test_browser_host_rollover_aborts_before_commit_on_successor_failure(tmp_pat
     assert host.rollover_abort_count == 1
 
 
+def test_browser_host_generated_rollover_preflight_hides_private_nonce(tmp_path: Path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.route_generation = 5
+    token = "roll_private_nonce_must_not_reach_model"
+    candidate_url = "https://chatgpt.com/g/g-p-ad5x/c/conv-b"
+    rollover = {
+        "token": token,
+        "state": "candidate",
+        "source_generation": 5,
+        "target_generation": 6,
+        "source_url": host.target_url,
+        "candidate_url": candidate_url,
+        "channel_id": "telegram-ad5x-g6",
+    }
+    candidate_page = {"id": "candidate", "url": candidate_url}
+    host.pending_rollover = lambda: dict(rollover)
+    host.pages = lambda: [candidate_page]
+    host.validate_candidate_conversation = lambda page, url, timeout=30: {
+        "ok": True,
+        "current_url": url,
+        "composer_visible": True,
+    }
+    host.wait_for_control_channel = lambda page, channel_id, timeout=30: {
+        "ok": True,
+        "channel_id": channel_id,
+        "observer_only": True,
+    }
+    host.wait_for_polling = lambda channel_id, timeout=35: (True, "matches=3")
+    preflights = iter(({"ready": False}, {"ready": True}))
+    host.wait_for_rollover_preflight = lambda page, channel_id, timeout=75: next(
+        preflights
+    )
+    bootstrap_payloads = []
+
+    def app_control(page, action, **payload):
+        assert action == "bootstrap"
+        bootstrap_payloads.append(payload)
+        return {"ok": True, "channel_id": payload["channel_id"]}
+
+    host.coordinator_app_control = app_control
+    host.rollover_control = lambda action, current, **payload: {
+        "route_id": "ad5x",
+        "generation": 6,
+        "channel_id": "telegram-ad5x-g6",
+    }
+
+    result = host.process_pending_rollover()
+
+    assert result["state"] == "committed"
+    assert len(bootstrap_payloads) == 1
+    assert token not in bootstrap_payloads[0]["message"]
+    assert token not in bootstrap_payloads[0]["operation_id"]
+    assert "telegram-ad5x-g6" in bootstrap_payloads[0]["message"]
+    assert "ROLLOVER_READY" not in bootstrap_payloads[0]["message"]
+
+
 def test_browser_host_completes_durable_rollover_bootstrap(tmp_path: Path):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
@@ -758,24 +818,14 @@ def test_browser_host_completes_durable_rollover_bootstrap(tmp_path: Path):
         "candidate_url": host.target_url,
     }
     host.active_rollover_record = lambda: dict(record)
-    host.wait_for_control_channel = lambda page, channel_id, timeout=15: {
-        "ok": True, "channel_id": channel_id
-    }
-    sent = []
-    def app_control(page, action, **payload):
-        sent.append((action, payload))
-        return {"ok": True, "channel_id": payload.get("channel_id")}
-    host.coordinator_app_control = app_control
     completed = []
     host.rollover_control = lambda action, current, **payload: completed.append(action) or {
-        **current, "state": "complete", "bootstrap_sent": True
+        "state": "complete", "rollover": {**current, "bootstrap_sent": True}
     }
     result = host.complete_rollover_bootstrap({"id": "candidate"})
     assert result["state"] == "complete"
-    assert sent[0][0] == "bootstrap"
-    assert sent[0][1]["operation_id"] == "roll_durable_token"
-    assert "coordinator_route_context_get" in sent[0][1]["message"]
-    assert completed == ["complete"]
+    assert result["rollover"]["bootstrap_sent"] is True
+    assert completed == ["bootstrap"]
 
 
 def test_browser_host_candidate_validator_requires_stable_hydrated_chat(tmp_path: Path):
@@ -835,16 +885,16 @@ def test_browser_host_creates_successor_from_project_home(tmp_path: Path, monkey
     host.validate_candidate_conversation = lambda selected, url, timeout=30: {
         "ok": True, "current_url": url, "composer_visible": True
     }
-    host.wait_for_rollover_preflight = lambda selected, token, timeout=75: {
+    host.wait_for_rollover_preflight = lambda selected, channel_id, timeout=75: {
         "ready": True, "iframe_count": 1
     }
     selected, url = host.create_project_successor(
-        host.target_url, "telegram-ad5x-g6", "roll_fresh", timeout=5
+        host.target_url, "telegram-ad5x-g6", timeout=5
     )
     assert navigated == ["https://chatgpt.com/g/g-p-ad5x/project"]
     assert "coordinator_x_mount" in submitted[0]
     assert "telegram-ad5x-g6" in submitted[0]
-    assert "ROLLOVER_READY roll_fresh" in submitted[0]
+    assert "ROLLOVER_READY" not in submitted[0]
     assert url == candidate_url
     assert selected["url"] == candidate_url
 
@@ -944,19 +994,67 @@ def test_browser_host_materializes_branch_response_to_stable_project_url(tmp_pat
 
 
 
-def test_browser_host_preflight_requires_native_iframe_in_ready_turn(tmp_path: Path, monkeypatch):
+def test_browser_host_preflight_requires_exact_native_non_observer_mount(
+    tmp_path: Path, monkeypatch
+):
     module = _module()
     host = module.BrowserHost(_config(module, tmp_path))
-    expressions = []
-    host.runtime_evaluate = lambda page, expression, **kwargs: expressions.append(expression) or {
-        "ready": True, "generating": False, "iframe_count": 1
+    calls = []
+    host.runtime_evaluate = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("assistant transcript must not be used as preflight evidence")
+    )
+    host.coordinator_app_control = lambda page, action, **kwargs: calls.append(
+        (action, kwargs)
+    ) or {
+        "ok": True,
+        "channel_id": "telegram-ad5x-g6",
+        "observer_only": False,
     }
     monkeypatch.setattr(module.time, "sleep", lambda _: None)
-    result = host.wait_for_rollover_preflight({}, "roll_test", timeout=1)
+    result = host.wait_for_rollover_preflight({}, "telegram-ad5x-g6", timeout=1)
     assert result["ready"] is True
-    assert "ROLLOVER_READY roll_test" in expressions[0]
-    assert "coordinator-x-v" in expressions[0]
-    assert "data-message-author-role" in expressions[0]
+    assert result["channel_id"] == "telegram-ad5x-g6"
+    assert result["observer_only"] is False
+    assert calls == [
+        (
+            "ping",
+            {
+                "expected_channel_id": "telegram-ad5x-g6",
+                "expected_observer_only": False,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "observer_only"),
+    (("telegram-ad5x-g6", True), ("telegram-ad5x-g5", False)),
+)
+def test_browser_host_assistant_text_and_non_native_binding_cannot_satisfy_preflight(
+    tmp_path: Path, monkeypatch, channel_id: str, observer_only: bool
+):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.runtime_evaluate = lambda *args, **kwargs: {
+        "ready": True,
+        "generating": False,
+        "iframe_count": 1,
+        "assistant": "ROLLOVER_READY roll_private",
+    }
+    host.coordinator_app_control = lambda *args, **kwargs: {
+        "ok": True,
+        "channel_id": channel_id,
+        "observer_only": observer_only,
+    }
+    clock = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    result = host.wait_for_rollover_preflight(
+        {}, "telegram-ad5x-g6", timeout=1
+    )
+
+    assert result["ready"] is False
 
 
 
@@ -1016,6 +1114,75 @@ def test_browser_host_controls_inner_mcp_app_execution_context(tmp_path: Path, m
     call = next(item for item in sent if "window.__developmentBridgeControlV1(" in item.get("params", {}).get("expression", ""))
     assert call["params"]["contextId"] == 3
     assert call["params"]["awaitPromise"] is True
+
+
+def test_browser_host_native_preflight_skips_observer_control_app(
+    tmp_path: Path, monkeypatch
+):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.coordinator_app_targets = lambda page=None: [
+        {"webSocketDebuggerUrl": "ws://observer"},
+        {"webSocketDebuggerUrl": "ws://native"},
+    ]
+
+    class FakeWS:
+        def __init__(self, observer_only):
+            self.observer_only = observer_only
+            self.queue = []
+
+        def send(self, raw):
+            request = __import__("json").loads(raw)
+            request_id = request["id"]
+            method = request["method"]
+            if method == "Runtime.enable":
+                self.queue.extend([
+                    {
+                        "method": "Runtime.executionContextCreated",
+                        "params": {"context": {"id": 1}},
+                    },
+                    {"id": request_id, "result": {}},
+                ])
+            elif "__developmentBridgeControlV1==='function'" in request["params"]["expression"]:
+                self.queue.append({
+                    "id": request_id,
+                    "result": {"result": {"value": True}},
+                })
+            elif "window.__developmentBridgeControlV1(" in request["params"]["expression"]:
+                self.queue.append({
+                    "id": request_id,
+                    "result": {"result": {"value": {
+                        "ok": True,
+                        "channel_id": "telegram-ad5x-g6",
+                        "observer_only": self.observer_only,
+                    }}},
+                })
+            else:
+                raise AssertionError(request)
+
+        def recv(self):
+            return __import__("json").dumps(self.queue.pop(0))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        module.websocket,
+        "create_connection",
+        lambda url, **kwargs: FakeWS(url.endswith("observer")),
+        raising=False,
+    )
+
+    result = host.coordinator_app_control(
+        {},
+        "ping",
+        expected_channel_id="telegram-ad5x-g6",
+        expected_observer_only=False,
+    )
+
+    assert result["ok"] is True
+    assert result["channel_id"] == "telegram-ad5x-g6"
+    assert result["observer_only"] is False
 
 
 def test_browser_host_rollover_retries_transient_cdp_failure(tmp_path: Path):
@@ -1476,3 +1643,84 @@ def test_browser_host_preflight_fails_closed_when_hidden_app_cannot_be_observer(
     assert result["error"] == "browser_host_observer_binding_failed"
     assert authorized == []
     assert closed == ["page-fresh"]
+
+
+def test_browser_host_refresh_unbound_route_parks_until_rebound(tmp_path):
+    from app.coordinator.routes import RouteRegistry
+
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.refresh_route_target()
+    registry = RouteRegistry(host.cfg.route_registry)
+    registry.unbind("ad5x", expected_generation=0)
+    assert host.refresh_route_target() is True
+    assert host.target_url == "about:blank"
+    assert host.refresh_route_target() is False
+    registry.takeover("ad5x", "https://chatgpt.com/g/g-p-ad5x/c/rebound")
+    assert host.refresh_route_target() is True
+    assert host.target_url == "https://chatgpt.com/g/g-p-ad5x/c/rebound"
+
+
+def test_browser_host_loop_does_no_browser_work_while_unbound(tmp_path, monkeypatch):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.target_url = "about:blank"
+    host.chrome = host.xvfb = types.SimpleNamespace(poll=lambda: None)
+    for name in ("ensure_debug_port_free", "start_xvfb", "start_chrome", "wait_cdp"):
+        setattr(host, name, lambda: None)
+    host.refresh_route_target = lambda: False
+    host.process_pending_rollover = lambda: pytest.fail("unbound loop attempted rollover")
+    states = []
+    host.write_state = lambda **state: states.append(state)
+    monkeypatch.setattr(module.signal, "signal", lambda *args: None)
+    monkeypatch.setattr(module, "terminate", lambda *args: None)
+    monkeypatch.setattr(module.time, "sleep", lambda _: setattr(host, "stop", True))
+    assert host.run() == 0
+    assert any(state["status"] == "unbound" for state in states)
+
+
+def test_browser_host_bootstrap_uses_server_delivery_instead_of_unfenced_browser_send(tmp_path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    record = {"token": "private-token", "state": "committed", "bootstrap_sent": False}
+    host.active_rollover_record = lambda: record
+    host.wait_for_control_channel = lambda *args, **kwargs: {"ok": True, "channel_id": host.channel_id}
+    sent = []
+    host.coordinator_app_control = lambda *args, **kwargs: sent.append(kwargs) or {"ok": True}
+    actions = []
+    host.rollover_control = lambda action, current, **kwargs: actions.append(action) or {"state": "bootstrap_waiting"}
+    result = host.complete_rollover_bootstrap({})
+    assert sent == [], "bootstrap must be sent inside the server route lock"
+    assert actions == ["bootstrap"]
+    assert result["state"] == "bootstrap_waiting"
+
+
+def test_browser_host_bootstrap_rejection_waits_for_next_route_refresh(tmp_path):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    host.active_rollover_record = lambda: {"token": "private-token", "state": "committed"}
+    def rejected(*args, **kwargs):
+        raise module.requests.RequestException("route changed")
+    host.rollover_control = rejected
+    result = host.complete_rollover_bootstrap({})
+    assert result["state"] == "bootstrap_waiting"
+
+
+@pytest.mark.parametrize("outcome", ["already_committed", "unknown"])
+def test_browser_host_does_not_restore_source_after_unconfirmed_abort(tmp_path, outcome):
+    module = _module()
+    host = module.BrowserHost(_config(module, tmp_path))
+    restored = []
+    host.restore_source_after_rollover = restored.append
+    def abort(*args, **kwargs):
+        if outcome == "unknown":
+            raise module.requests.RequestException("lost response")
+        return {"aborted": False}
+    host.rollover_control = abort
+    record = {"token": "private-token", "source_url": host.target_url}
+    if outcome == "unknown":
+        with pytest.raises(module.requests.RequestException):
+            host.abort_pending_rollover(record, "commit response lost")
+    else:
+        assert host.abort_pending_rollover(record, "commit response lost")["aborted"] is False
+    assert restored == []

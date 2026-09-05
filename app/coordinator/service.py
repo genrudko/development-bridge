@@ -65,6 +65,7 @@ class CoordinatorService:
     MAX_DELAY_SECONDS = 300.0
     LEASE_SECONDS = 20.0
     BROWSER_PREFLIGHT_TTL_SECONDS = 15.0
+    X_LISTENER_HEARTBEAT_TTL_SECONDS = 15.0
     MAX_UNDELIVERED_AGE_SECONDS = 1800.0
     SESSION_BINDING_TTL_SECONDS = 86_400.0
     MAX_SESSION_BINDINGS = 256
@@ -82,6 +83,7 @@ class CoordinatorService:
         self._global_cooldown_until = 0.0
         self._session_bindings: dict[str, dict[str, object]] = {}
         self._delivery_leases: dict[str, dict[str, object]] = {}
+        self._started_at = time.time()
         self._lock = asyncio.Lock()
         self._load_state()
 
@@ -248,6 +250,36 @@ class CoordinatorService:
         item = self._delivery_leases.get(channel)
         return {"channel_id": channel, **item} if item is not None else None
 
+    def _delivery_lease_is_current(self, channel_id: str, delivery_lease: str | None) -> bool:
+        item = self._delivery_leases.get(channel_id)
+        return (
+            item is not None
+            and isinstance(delivery_lease, str)
+            and delivery_lease == item.get("lease_id")
+        )
+
+    def _touch_delivery_lease(
+        self, channel_id: str, delivery_lease: str | None, now: float
+    ) -> bool:
+        if not self._delivery_lease_is_current(channel_id, delivery_lease):
+            return False
+        self._delivery_leases[channel_id]["refreshed_at"] = now
+        return True
+
+    def _x_listener_active(self, channel_id: str, now: float) -> bool:
+        item = self._delivery_leases.get(channel_id)
+        if item is None:
+            return False
+        try:
+            refreshed_at = float(item.get("refreshed_at", item.get("issued_at", 0.0)))
+        except (TypeError, ValueError):
+            return False
+        # A persisted mount may have been actively polling immediately before a Bridge
+        # restart, while its latest in-memory heartbeat was never written to disk. Give
+        # that existing lease one normal heartbeat TTL to reconnect before direct fallback.
+        last_seen_at = max(refreshed_at, self._started_at)
+        return last_seen_at + self.X_LISTENER_HEARTBEAT_TTL_SECONDS >= now
+
     def _delivery_lease_matches(self, channel_id: str, delivery_lease: str | None) -> bool:
         item = self._delivery_leases.get(channel_id)
         if item is None or delivery_lease is None:
@@ -255,7 +287,7 @@ class CoordinatorService:
             # the current lease. The physical channel already identifies the exact chat, so
             # allow an omitted lease while still rejecting any explicitly stale lease.
             return True
-        return isinstance(delivery_lease, str) and delivery_lease == item.get("lease_id")
+        return self._delivery_lease_is_current(channel_id, delivery_lease)
 
     @staticmethod
     def validate_channel(channel_id: str) -> str:
@@ -266,6 +298,11 @@ class CoordinatorService:
         ):
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "channel_id is invalid")
         return channel_id
+
+    def pending_wake_count(self, channel_id: str) -> int:
+        channel_id = self.validate_channel(channel_id)
+        wake = self._pending.get(channel_id)
+        return 1 if wake is not None else 0
 
     @classmethod
     def validate_message(cls, message: str) -> str:
@@ -569,15 +606,27 @@ class CoordinatorService:
     ) -> dict:
         channel_id = self.validate_channel(channel_id)
         delivery_mode = self._validate_delivery_mode(delivery_mode)
-        if not self._delivery_lease_matches(channel_id, delivery_lease):
-            return {
-                "channel_id": channel_id,
-                "state": "standby",
-                "ready": False,
-                "delivery_lease_required": True,
-            }
-        now = time.time()
+        prelock_current_lease = (
+            delivery_mode == "x"
+            and self._delivery_lease_is_current(channel_id, delivery_lease)
+        )
+        if prelock_current_lease:
+            self._touch_delivery_lease(channel_id, delivery_lease, time.time())
         async with self._lock:
+            now = time.time()
+            explicit_current_lease = self._delivery_lease_is_current(
+                channel_id, delivery_lease
+            )
+            if not self._delivery_lease_matches(channel_id, delivery_lease):
+                return {
+                    "channel_id": channel_id,
+                    "state": "standby",
+                    "ready": False,
+                    "delivery_lease_required": True,
+                }
+            if delivery_mode == "x" and explicit_current_lease:
+                self._touch_delivery_lease(channel_id, delivery_lease, now)
+            x_listener_active = self._x_listener_active(channel_id, now)
             wake = self._pending.get(channel_id)
             if wake is None:
                 return {"channel_id": channel_id, "state": "idle", "ready": False}
@@ -595,7 +644,11 @@ class CoordinatorService:
             other_claim_until = self._other_claim_until(channel_id, now)
             web_blocked = not wake.transport_delivered and web_backoff_until > now
             cooldown_blocked = not wake.transport_delivered and max(web_cooldown_until, other_claim_until) > now
-            browser_preflight_authorized = self._browser_preflight_authorized(wake, now)
+            browser_preflight_authorized = (
+                self._browser_preflight_authorized(wake, now)
+                or (delivery_mode == "x" and explicit_current_lease)
+            )
+            direct_listener_blocked = delivery_mode == "direct" and x_listener_active
             browser_preflight_blocked = (
                 delivery_mode == "x"
                 and not wake.transport_delivered
@@ -615,6 +668,7 @@ class CoordinatorService:
                 and not wake.transport_delivered
                 and not web_blocked
                 and not cooldown_blocked
+                and not direct_listener_blocked
                 and not browser_preflight_blocked
                 and now >= wake.available_at
             )
@@ -638,6 +692,8 @@ class CoordinatorService:
                 state = "web_backoff"
             elif cooldown_blocked:
                 state = "web_cooldown"
+            elif direct_listener_blocked:
+                state = "x_listener_active"
             elif browser_preflight_blocked:
                 state = "browser_preflight"
             elif wake.model_ack_required and wake.delivery_attempts > 0 and not ready:
@@ -669,6 +725,7 @@ class CoordinatorService:
                         "browser_preflight_required": self._browser_preflight_required,
                         "browser_preflight_authorized": browser_preflight_authorized,
                         "browser_preflight_ttl_seconds": self.BROWSER_PREFLIGHT_TTL_SECONDS,
+                        "x_listener_active": x_listener_active,
                     }
                 )
             if wake.last_transport_name is not None:
@@ -786,15 +843,27 @@ class CoordinatorService:
     ) -> dict:
         channel_id = self.validate_channel(channel_id)
         delivery_mode = self._validate_delivery_mode(delivery_mode)
-        if not self._delivery_lease_matches(channel_id, delivery_lease):
-            return {
-                "channel_id": channel_id,
-                "claimed": False,
-                "state": "standby",
-                "delivery_lease_required": True,
-            }
-        now = time.time()
+        prelock_current_lease = (
+            delivery_mode == "x"
+            and self._delivery_lease_is_current(channel_id, delivery_lease)
+        )
+        if prelock_current_lease:
+            self._touch_delivery_lease(channel_id, delivery_lease, time.time())
         async with self._lock:
+            now = time.time()
+            explicit_current_lease = self._delivery_lease_is_current(
+                channel_id, delivery_lease
+            )
+            if not self._delivery_lease_matches(channel_id, delivery_lease):
+                return {
+                    "channel_id": channel_id,
+                    "claimed": False,
+                    "state": "standby",
+                    "delivery_lease_required": True,
+                }
+            if delivery_mode == "x" and explicit_current_lease:
+                self._touch_delivery_lease(channel_id, delivery_lease, now)
+            x_listener_active = self._x_listener_active(channel_id, now)
             wake = self._pending.get(channel_id)
             if (
                 wake is None
@@ -802,6 +871,7 @@ class CoordinatorService:
                 or self._web_backoff_until(now) > now
                 or self._web_turn_cooldown_until(channel_id) > now
                 or self._other_claim_until(channel_id, now) > now
+                or (delivery_mode == "direct" and x_listener_active)
                 or self._lease_active(wake, now)
                 or wake.transport_delivered
                 or wake.model_acknowledged
@@ -809,6 +879,7 @@ class CoordinatorService:
                 or self._undelivered_expired(wake, now)
                 or (
                     delivery_mode == "x"
+                    and not explicit_current_lease
                     and not self._browser_preflight_authorized(wake, now)
                 )
                 or (wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts)
@@ -1008,7 +1079,7 @@ class CoordinatorService:
             }
 
     async def observe_model_turn(self, channel_id: str, continuation_id: str) -> dict:
-        """Resolve a delivered continuation after Browser Host observes its model turn."""
+        """Record model activity without treating it as the continuation ACK."""
         channel_id = self.validate_channel(channel_id)
         continuation_id = self.validate_continuation_id(continuation_id)
         now = time.time()
@@ -1032,7 +1103,6 @@ class CoordinatorService:
             self._cooldown_until[channel_id] = max(
                 self._cooldown_until.get(channel_id, 0.0), cooldown_until
             )
-            next_continuation_id = self._promote_queued_locked(channel_id, wake, now)
             self._save_state()
             return {
                 "channel_id": channel_id,
@@ -1040,8 +1110,9 @@ class CoordinatorService:
                 "observed": True,
                 "delivery_attempts": attempts,
                 "queued_events": queued_events,
-                "followup_pending": next_continuation_id is not None,
-                "next_continuation_id": next_continuation_id,
+                "awaiting_model_ack": True,
+                "followup_pending": False,
+                "next_continuation_id": None,
             }
 
     async def model_ack(self, continuation_id: str) -> dict:
@@ -1150,6 +1221,43 @@ class CoordinatorService:
                     "resolved": True,
                 }
             return {"continuation_id": continuation_id, "resolved": False}
+
+    async def cancel_pending(self, channel_id: str = DEFAULT_CHANNEL) -> dict:
+        """Cancel a pending coordinator wake for channel_id. Idempotent on idle; fails closed if claimed/in-flight/uncertain."""
+        channel_id = self.validate_channel(channel_id)
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if wake is None:
+                return {
+                    "channel_id": channel_id,
+                    "cancelled": False,
+                    "state": "idle",
+                    "pending_wakes": 0,
+                }
+            if (
+                wake.claim_id is not None
+                or wake.transport_delivered
+                or self._automatic_delivery_blocked(wake)
+            ):
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Wake is actively claimed, in-flight, or in an uncertain transport state",
+                    retryable=False,
+                    details={"channel_id": channel_id},
+                )
+            del self._pending[channel_id]
+            try:
+                self._save_state()
+            except Exception:
+                self._pending[channel_id] = wake
+                raise
+            return {
+                "channel_id": channel_id,
+                "cancelled": True,
+                "state": "cancelled",
+                "pending_wakes": 0,
+            }
+
 
     @staticmethod
     def _lease_active(wake: PendingWake, now: float) -> bool:

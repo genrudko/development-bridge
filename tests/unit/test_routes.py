@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,33 @@ def test_route_registry_rollover_rejects_wrong_project_and_can_abort(tmp_path: P
     assert registry.pending_rollover("ad5x") is None
 
 
+def test_unbind_invalidates_pending_rollover_and_consumes_reserved_generation(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    active = registry.bootstrap(
+        "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-a",
+        "telegram-ad5x-g0",
+    )
+    prepared = registry.prepare_rollover("ad5x")
+    registry.record_rollover_candidate(
+        "ad5x", prepared["token"],
+        "https://chatgpt.com/g/g-p-project/c/conv-b",
+    )
+
+    unbound = registry.unbind("ad5x", expected_generation=active["generation"])
+
+    assert registry.pending_rollover("ad5x") is None
+    assert unbound["generation"] == prepared["target_generation"]
+    assert unbound["channel_id"] == prepared["channel_id"]
+    with pytest.raises(BridgeError, match="invalid or stale"):
+        registry.commit_rollover("ad5x", prepared["token"])
+
+    rebound = registry.takeover(
+        "ad5x", "https://chatgpt.com/g/g-p-project/c/conv-c"
+    )
+    assert rebound["generation"] == prepared["target_generation"] + 1
+    assert rebound["channel_id"] == "telegram-ad5x-g2"
+
+
 def test_manual_takeover_is_rejected_while_rollover_pending(tmp_path: Path):
     registry = RouteRegistry(tmp_path / "routes.json")
     registry.bootstrap(
@@ -134,3 +162,69 @@ def test_takeover_rejects_different_project_and_preserves_old_route(tmp_path: Pa
     assert taken_over["generation"] == 1
     assert taken_over["conversation_id"] == "conv-b"
     assert registry.resolve("ad5x")["conversation_id"] == "conv-b"
+
+
+@pytest.mark.asyncio
+async def test_route_registry_route_lock_reentrancy_and_exclusion(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    lock = registry.route_lock("test-route")
+
+    # Reentrancy within the same task
+    async with lock:
+        assert lock.locked()
+        async with lock:
+            assert lock.locked()
+
+    assert not lock.locked()
+
+    # Release without acquire
+    with pytest.raises(RuntimeError):
+        lock.release()
+
+    # Mutual exclusion across tasks
+    acquired_task2 = False
+    task1_hold = asyncio.Event()
+    task1_can_release = asyncio.Event()
+
+    async def task1():
+        async with registry.route_lock("test-route"):
+            task1_hold.set()
+            await task1_can_release.wait()
+
+    async def task2():
+        nonlocal acquired_task2
+        async with registry.route_lock("test-route"):
+            acquired_task2 = True
+
+    t1 = asyncio.create_task(task1())
+    await task1_hold.wait()
+    t2 = asyncio.create_task(task2())
+    await asyncio.sleep(0.01)
+    assert not acquired_task2
+
+    task1_can_release.set()
+    await t1
+    await t2
+    assert acquired_task2
+
+
+@pytest.mark.parametrize("change", ["unbind", "channel", "url", "abort", "generation"])
+def test_rollover_completion_rejects_invalid_successor(tmp_path, change):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap("ad5x", "https://chatgpt.com/g/g-p-ad5x/c/old", "telegram-ad5x-g0")
+    pending = registry.prepare_rollover("ad5x")
+    registry.record_rollover_candidate("ad5x", pending["token"], "https://chatgpt.com/g/g-p-ad5x/c/new")
+    registry.commit_rollover("ad5x", pending["token"])
+    if change == "unbind":
+        registry.unbind("ad5x", expected_generation=1)
+    else:
+        data = registry._load()
+        if change == "abort":
+            data["last_rollover"]["ad5x"]["state"] = "aborted"
+        else:
+            field, value = {"channel": ("channel_id", "wrong"), "url": ("url", "https://chatgpt.com/g/g-p-ad5x/c/wrong"), "generation": ("generation", 2)}[change]
+            data["routes"]["ad5x"][field] = value
+        registry._save(data)
+    with pytest.raises(BridgeError, match="invalid or stale"):
+        registry.complete_rollover("ad5x", pending["token"])
+    assert registry._load()["last_rollover"]["ad5x"]["bootstrap_sent"] is False
