@@ -1003,10 +1003,23 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
         await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
         assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
 
+        # 1b. Begin transaction records baseline_revision="rev_1"
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "begin",
+                "transaction_id": "tx_1234",
+            },
+            group="transaction",
+        )
+        stored_bl = cad_service.revision_tracker.get_transaction_baseline("tx_1234")
+        assert stored_bl is not None
+        assert stored_bl["baseline_revision"] == "rev_1"
+
         # 2. External change occurs in Fusion
         fake_adsk.volume = 300.0
 
-        # 3. Transaction commit with stale rev_1: rendered script freshness guard rejects before apply
+        # 3. Transaction commit with stale tx_1234: rendered script freshness guard rejects before apply
         with pytest.raises(BridgeError) as exc_commit:
             await cad_service.execute(
                 {
@@ -1026,7 +1039,7 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
         # 4. Another external change occurs
         fake_adsk.volume = 400.0
 
-        # 5. Transaction preview with stale rev_2: rendered script freshness guard rejects before preview
+        # 5. Transaction preview with stale tx_1234: Bridge precheck rejects before preview
         with pytest.raises(BridgeError) as exc_preview:
             await cad_service.execute(
                 {
@@ -1040,15 +1053,56 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
         assert exc_preview.value.code == ErrorCode.REVISION_CONFLICT
         assert exc_preview.value.details.get("applied") is False
         assert fake_adsk.tx_previewed is False
+        # Bridge precheck failed fast without dispatching to Fusion, so tracker remains at rev_2
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+        # 5b. Caller attempting to bypass baseline by passing expected_revision="rev_2" on tx_1234 STILL FAILS
+        # because preview/commit always binds to stored baseline ("rev_1"), never caller-selected revision
+        with pytest.raises(BridgeError) as exc_bypass:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "commit",
+                    "transaction_id": "tx_1234",
+                    "expected_revision": "rev_2",
+                },
+                group="transaction",
+            )
+        assert exc_bypass.value.code == ErrorCode.REVISION_CONFLICT
+
+        # 6. Read syncs the external change (volume 400.0) into Bridge tracker -> rev_3
+        await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
         assert cad_service.revision_tracker.current("doc_1").revision == "rev_3"
 
-        # 6. Transaction preview with fresh rev_3 succeeds
+        # 7. Abort stale transaction and begin fresh one at rev_3
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "abort",
+                "transaction_id": "tx_1234",
+            },
+            group="transaction",
+        )
+        assert cad_service.revision_tracker.get_transaction_baseline("tx_1234") is None
+
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "begin",
+                "transaction_id": "tx_fresh",
+            },
+            group="transaction",
+        )
+        fresh_bl = cad_service.revision_tracker.get_transaction_baseline("tx_fresh")
+        assert fresh_bl is not None
+        assert fresh_bl["baseline_revision"] == "rev_3"
+
+        # 8. Transaction preview on fresh transaction succeeds
         res_preview = await cad_service.execute(
             {
                 "node_id": "desk-1",
                 "operation": "preview",
-                "transaction_id": "tx_1234",
-                "expected_revision": "rev_3",
+                "transaction_id": "tx_fresh",
             },
             group="transaction",
         )
@@ -1056,19 +1110,19 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
         assert data.get("preview") is True
         assert fake_adsk.tx_previewed is True
 
-        # 7. Transaction commit with fresh rev_3 succeeds
+        # 9. Transaction commit on fresh transaction succeeds
         res_commit = await cad_service.execute(
             {
                 "node_id": "desk-1",
                 "operation": "commit",
-                "transaction_id": "tx_1234",
-                "expected_revision": "rev_3",
+                "transaction_id": "tx_fresh",
             },
             group="transaction",
         )
         commit_data = res_commit.data if isinstance(res_commit, CadResult) else res_commit.get("data", {})
         assert commit_data.get("applied") is True
         assert fake_adsk.tx_committed is True
+        assert cad_service.revision_tracker.get_transaction_baseline("tx_fresh") is None
 
 
 @pytest.mark.asyncio
@@ -1160,6 +1214,7 @@ async def test_falsify_degraded_or_unavailable_revision_capability_blocks_mutati
     assert exc_unavail.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
 
     # Transaction staging does NOT require revision.external_change_detection
+    cad_service.revision_tracker.begin_transaction("tx_1", "doc_1")
     mock_desktop_service.submit = AsyncMock(return_value={"status": "queued", "operation_id": "op_stage"})
     stage_res = await cad_service.execute(
         {
@@ -1304,3 +1359,267 @@ async def test_falsify_service_document_switch_and_multi_document_isolation(
     assert cad_service.assert_fresh_for_mutation(document_ref="doc_2", expected_revision="rev_1").revision == "rev_1"
     with pytest.raises(FusionCadError):
         cad_service.assert_fresh_for_mutation(document_ref="doc_2", expected_revision="rev_2")
+
+
+@pytest.mark.asyncio
+async def test_falsify_transaction_baseline_bypass_and_staging_bounds(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves transaction begin persists baseline, and commit/preview/staging cannot bypass that baseline."""
+    with AdskFakeContext("doc_1", initial_volume=100.0) as fake_adsk:
+        cad_service = FusionCadService(mock_desktop_service)
+        matrix = CapabilityMatrix.from_records([
+            CapabilityRecord(name="transaction.preview_replay", state="supported"),
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(name="revision.external_change_detection", state="supported"),
+        ])
+        cad_service.set_node_capabilities("desk-1", matrix)
+
+        async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+            script = arguments["script"]
+            scope = {
+                "__name__": "__main__",
+                "_transaction_commit_primitive": lambda payload: setattr(fake_adsk, "tx_committed", True),
+                "_transaction_preview_primitive": lambda payload: setattr(fake_adsk, "tx_previewed", True),
+            }
+            exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+            return scope["_output"]
+
+        mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+        mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+
+        # 1. Staging without transaction begin fails closed with INVALID_ARGUMENT
+        with pytest.raises(FusionCadError) as exc_stage_unbegun:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "stage",
+                    "transaction_id": "tx_unbegun",
+                    "action": {
+                        "action_type": "text_create",
+                        "text": "Hello",
+                        "height_mm": 5.0,
+                        "position": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}},
+                    },
+                },
+                group="transaction",
+            )
+        assert exc_stage_unbegun.value.code == ErrorCode.INVALID_ARGUMENT
+        assert "call transaction:begin first" in exc_stage_unbegun.value.message
+
+        # 2. Begin transaction records baseline
+        begin_res = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "begin",
+                "transaction_id": "tx_bypass_test",
+            },
+            group="transaction",
+        )
+        data = begin_res.data if isinstance(begin_res, CadResult) else begin_res.get("data", {})
+        assert data.get("operation") == "begin"
+        stored_bl = cad_service.revision_tracker.get_transaction_baseline("tx_bypass_test")
+        assert stored_bl is not None
+        assert stored_bl["baseline_revision"] == "rev_1"
+
+        # 3. External change occurs in Fusion (volume 100.0 -> 250.0)
+        fake_adsk.volume = 250.0
+
+        # 4. Caller attempts commit on tx_bypass_test passing a newer expected_revision="rev_2"
+        # Service overrides caller's expected_revision with stored baseline ("rev_1")
+        # Authoritative Fusion-side guard detects divergence from stored baseline and rejects
+        with pytest.raises(BridgeError) as exc_commit:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "commit",
+                    "transaction_id": "tx_bypass_test",
+                    "expected_revision": "rev_2",
+                },
+                group="transaction",
+            )
+        assert exc_commit.value.code == ErrorCode.REVISION_CONFLICT
+        assert fake_adsk.tx_committed is False
+
+        # 5. Caller attempts preview on tx_bypass_test passing expected_revision="rev_99"
+        # Must still fail with REVISION_CONFLICT and not reach primitive
+        with pytest.raises(BridgeError) as exc_prev:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "preview",
+                    "transaction_id": "tx_bypass_test",
+                    "expected_revision": "rev_99",
+                },
+                group="transaction",
+            )
+        assert exc_prev.value.code == ErrorCode.REVISION_CONFLICT
+        assert fake_adsk.tx_previewed is False
+
+
+@pytest.mark.asyncio
+async def test_falsify_missing_required_fingerprint_groups_fail_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves that missing required mutation-sensitive semantic groups fail closed rather than silently omitting."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    primitive_reached = False
+
+    async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        nonlocal primitive_reached
+        script = arguments["script"]
+        scope = {
+            "__name__": "__main__",
+            "_mutation_primitive": lambda payload: globals().update(primitive_reached=True),
+        }
+        exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+    mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+
+    # Seed tracker at rev_1
+    cad_service.revision_tracker.observe("doc_1", "seed-fp")
+
+    # Test each mandatory group being missing/corrupted in Fusion runtime
+    for missing_group in ("timeline", "parameters", "components", "occurrences", "bodies", "sketches", "attributes"):
+        primitive_reached = False
+        with AdskFakeContext("doc_1", initial_volume=100.0) as fake_adsk:
+            import adsk.core
+            app = adsk.core.Application.get()
+            doc = app.activeDocument
+            design = doc.products.itemByClass("adsk::fusion::Design")
+
+            if missing_group == "timeline":
+                design.timeline = None
+            elif missing_group == "parameters":
+                design.allParameters = None
+            elif missing_group == "components":
+                design.allComponents = None
+            elif missing_group == "occurrences":
+                design.rootComponent.allOccurrences = None
+            elif missing_group == "bodies":
+                design.rootComponent.bRepBodies = None
+            elif missing_group == "sketches":
+                design.rootComponent.sketches = None
+            elif missing_group == "attributes":
+                doc.attributes = None
+
+            with pytest.raises(FusionCadError) as exc_group:
+                await cad_service.execute(
+                    {
+                        "node_id": "desk-1",
+                        "operation": "set",
+                        "target": "ent_1",
+                        "name": "tag",
+                        "value": "v1",
+                        "expected_revision": "rev_1",
+                    },
+                    group="metadata",
+                )
+            assert exc_group.value.code in (ErrorCode.CAPABILITY_UNAVAILABLE, ErrorCode.FUSION_API_ERROR)
+            assert primitive_reached is False
+
+
+@pytest.mark.asyncio
+async def test_falsify_wrong_or_absent_document_identity_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves that requested document_ref mismatch and missing active document/design fail closed."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="metadata.attributes", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    primitive_reached = False
+
+    async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+        nonlocal primitive_reached
+        script = arguments["script"]
+        scope = {
+            "__name__": "__main__",
+            "_mutation_primitive": lambda payload: globals().update(primitive_reached=True),
+        }
+        exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+    mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+
+    cad_service.revision_tracker.observe("doc_1", "seed-fp")
+    cad_service.revision_tracker.observe("doc_wrong", "seed-fp")
+
+    # Case A: Requested document_ref="doc_wrong" does not match runtime document "doc_1"
+    with AdskFakeContext("doc_1", initial_volume=100.0):
+        with pytest.raises(FusionCadError) as exc_mismatch:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": "ent_1",
+                    "name": "tag",
+                    "value": "v1",
+                    "expected_revision": "rev_1",
+                    "document_ref": "doc_wrong",
+                },
+                group="metadata",
+            )
+        assert exc_mismatch.value.code == ErrorCode.WRONG_DOCUMENT
+        assert "does not match active document runtime identity" in exc_mismatch.value.message
+        assert primitive_reached is False
+
+    # Case B: No active document in Fusion runtime context; never synthesize identity from payload.document_ref
+    with AdskFakeContext("doc_1", initial_volume=100.0):
+        import adsk.core
+        app = adsk.core.Application.get()
+        app._doc = None  # No active document
+
+        with pytest.raises(FusionCadError) as exc_no_doc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": "ent_1",
+                    "name": "tag",
+                    "value": "v1",
+                    "expected_revision": "rev_1",
+                    "document_ref": "doc_1",
+                },
+                group="metadata",
+            )
+        assert exc_no_doc.value.code == ErrorCode.NO_ACTIVE_DESIGN
+        assert "Active document and design required" in exc_no_doc.value.message
+        assert primitive_reached is False
+
+    # Case C: Document lacks stable runtime identity (mutable name cannot be used)
+    with AdskFakeContext("doc_1", initial_volume=100.0):
+        import adsk.core
+        app = adsk.core.Application.get()
+        app.activeDocument.dataId = None  # Strip stable dataId/creationId/dataFile.id
+
+        with pytest.raises(FusionCadError) as exc_no_id:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": "ent_1",
+                    "name": "tag",
+                    "value": "v1",
+                    "expected_revision": "rev_1",
+                    "document_ref": "doc_1",
+                },
+                group="metadata",
+            )
+        assert exc_no_id.value.code == ErrorCode.NO_ACTIVE_DESIGN
+        assert "Document lacks stable runtime identity" in exc_no_id.value.message
+        assert primitive_reached is False

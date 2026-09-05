@@ -1,6 +1,40 @@
 def run():
     op = PAYLOAD.get("operation", "")
 
+    if op == "begin":
+        expected_fp = PAYLOAD.get("expected_fingerprint")
+        current_fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
+
+        if expected_fp is not None and expected_fp != current_fp:
+            return make_error(
+                "REVISION_CONFLICT",
+                f"Authoritative Fusion-side guard: model fingerprint diverged from baseline during transaction {op}",
+                details={
+                    "document_ref": doc_ref,
+                    "expected_revision": PAYLOAD.get("expected_revision"),
+                    "expected_fingerprint": expected_fp,
+                    "current_fingerprint": current_fp,
+                    "applied": False,
+                },
+            )
+
+        doc_state = {
+            "document_ref": doc_ref,
+            "model_revision": PAYLOAD.get("expected_revision") or "rev_1",
+            "name": canonical_data.get("document", {}).get("name") or "active",
+            "units": "mm",
+        }
+        return make_result(
+            data={
+                "operation": op,
+                "applied": True,
+                "fingerprint": current_fp,
+                "transaction_id": PAYLOAD.get("transaction_id"),
+            },
+            summary=f"Executed transaction:{op}",
+            document=doc_state,
+        )
+
     if op in ("preview", "commit"):
         expected_fp = PAYLOAD.get("expected_fingerprint")
         current_fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)

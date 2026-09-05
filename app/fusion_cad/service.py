@@ -658,6 +658,33 @@ class FusionCadService:
                     },
                 )
 
+        # Finding 1: Transaction preview/commit must bind to stored baseline,
+        # not caller-selected expected_revision, to prevent freshness bypass.
+        # Staging also remains bound to stored transaction baseline.
+        is_transaction_begin = (effective_bundle_group == "transaction") and (op == "begin")
+        is_transaction_preview_commit = (effective_bundle_group == "transaction") and (op in ("preview", "commit"))
+        is_transaction_stage = (effective_bundle_group == "transaction") and (op == "stage")
+        is_transaction_terminal = (effective_bundle_group == "transaction") and (op in ("commit", "abort", "rollback"))
+        if is_transaction_stage or is_transaction_preview_commit:
+            tx_id = payload.get("transaction_id")
+            if not tx_id:
+                raise FusionCadError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"transaction_id is required for transaction {op}",
+                )
+            stored_baseline = self._revision_tracker.get_transaction_baseline(tx_id)
+            if stored_baseline is None:
+                raise FusionCadError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"No stored baseline for transaction '{tx_id}'; call transaction:begin first",
+                    details={"transaction_id": tx_id, "operation": op},
+                )
+            # Override expected_revision/fingerprint with stored baseline
+            payload["expected_revision"] = stored_baseline["baseline_revision"]
+            payload["expected_fingerprint"] = stored_baseline["baseline_fingerprint"]
+            if not payload.get("document_ref"):
+                payload["document_ref"] = stored_baseline["document_ref"]
+
         # Bridge revision freshness precheck (fail-fast optimization)
         if is_standalone_mutation or is_transaction_preview_commit:
             exp_rev = payload.get("expected_revision")
@@ -670,6 +697,21 @@ class FusionCadService:
                     )
                 self.assert_fresh_for_mutation(payload, document_ref=doc_ref)
                 known_fp = self._revision_tracker.get_fingerprint(doc_ref, exp_rev)
+                if known_fp is not None and "expected_fingerprint" not in payload:
+                    payload["expected_fingerprint"] = known_fp
+
+        # Transaction begin: persist baseline after execution succeeds (below)
+        if is_transaction_begin:
+            _begin_tx_id = payload.get("transaction_id")
+            if not _begin_tx_id:
+                import uuid
+                _begin_tx_id = f"tx_{uuid.uuid4().hex[:12]}"
+                payload["transaction_id"] = _begin_tx_id
+            _begin_doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+            exp_rev = payload.get("expected_revision")
+            if exp_rev is not None and _begin_doc_ref:
+                self.assert_fresh_for_mutation(payload, document_ref=_begin_doc_ref)
+                known_fp = self._revision_tracker.get_fingerprint(_begin_doc_ref, exp_rev)
                 if known_fp is not None and "expected_fingerprint" not in payload:
                     payload["expected_fingerprint"] = known_fp
 
@@ -709,6 +751,34 @@ class FusionCadService:
                         if doc_r:
                             fp = sub_result.get("data", {}).get("fingerprint") if isinstance(sub_result.get("data"), dict) else None
                             self._revision_tracker.observe(doc_r, fp or doc_d.get("model_revision", "rev_1"))
+
+                    # Persist transaction baseline after successful transaction:begin in async path
+                    if is_transaction_begin and _begin_tx_id:
+                        begin_doc = (
+                            (sub_result.get("document", {}).get("document_ref") if isinstance(sub_result.get("document"), dict) else None)
+                            or _begin_doc_ref
+                            or self._revision_tracker.active_document_ref
+                        )
+                        if begin_doc:
+                            rec = self._revision_tracker.current(begin_doc)
+                            fp_data = sub_result.get("data", {}).get("fingerprint") if isinstance(sub_result.get("data"), dict) else None
+                            try:
+                                self._revision_tracker.begin_transaction(
+                                    _begin_tx_id,
+                                    document_ref=begin_doc,
+                                    baseline_revision=rec.revision if rec else "rev_1",
+                                    baseline_fingerprint=fp_data or (rec.fingerprint if rec else ""),
+                                )
+                            except FusionCadError:
+                                pass
+                        if isinstance(sub_result.get("data"), dict) and "transaction_id" not in sub_result["data"]:
+                            sub_result["data"]["transaction_id"] = _begin_tx_id
+
+                    # Clear transaction baseline after successful commit/abort/rollback in async path
+                    if is_transaction_terminal:
+                        _terminal_tx_id = payload.get("transaction_id")
+                        if _terminal_tx_id:
+                            self._revision_tracker.clear_transaction(_terminal_tx_id)
                 return sub_result
             except FusionCadError as exc:
                 if exc.code == ErrorCode.REVISION_CONFLICT:
@@ -805,6 +875,35 @@ class FusionCadService:
                     self._node_capabilities.pop(node_id, None)
             else:
                 self._node_capabilities.pop(node_id, None)
+
+        # Persist transaction baseline after successful transaction:begin
+        if is_transaction_begin and _begin_tx_id:
+            begin_doc = (
+                (cad_result.document.document_ref if cad_result.document else None)
+                or _begin_doc_ref
+                or self._revision_tracker.active_document_ref
+            )
+            if begin_doc:
+                rec = self._revision_tracker.current(begin_doc)
+                fp_data = cad_result.data.get("fingerprint") if isinstance(cad_result.data, (dict, Mapping)) else None
+                try:
+                    self._revision_tracker.begin_transaction(
+                        _begin_tx_id,
+                        document_ref=begin_doc,
+                        baseline_revision=rec.revision if rec else "rev_1",
+                        baseline_fingerprint=fp_data or (rec.fingerprint if rec else ""),
+                    )
+                except FusionCadError:
+                    pass
+            if isinstance(cad_result.data, dict) and "transaction_id" not in cad_result.data:
+                cad_result.data["transaction_id"] = _begin_tx_id
+
+        # Clear transaction baseline after successful commit/abort/rollback
+        is_transaction_terminal = (effective_bundle_group == "transaction") and (op in ("commit", "abort", "rollback"))
+        if is_transaction_terminal:
+            _terminal_tx_id = payload.get("transaction_id")
+            if _terminal_tx_id:
+                self._revision_tracker.clear_transaction(_terminal_tx_id)
 
         domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
         if has_binary_data(domain_payload):

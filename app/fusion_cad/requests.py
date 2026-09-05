@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.fusion_cad.models import (
+    DOCUMENT_REF_PATTERN,
     ENTITY_REF_PATTERN,
     MODEL_REVISION_PATTERN,
     TEXT_REF_PATTERN,
@@ -23,6 +24,7 @@ TargetRef = Annotated[str, Field(pattern=ENTITY_REF_PATTERN)] | EntitySelector
 class _StrictCadBase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     node_id: str = Field(..., min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    document_ref: str | None = Field(default=None, pattern=DOCUMENT_REF_PATTERN)
 
 
 # ==========================================
@@ -679,6 +681,7 @@ TransactionStageAction = Annotated[
 class TransactionBeginRequest(_StrictCadBase):
     operation: Literal["begin"]
     expected_revision: str | None = Field(default=None, pattern=MODEL_REVISION_PATTERN)
+    transaction_id: str | None = Field(default=None, pattern=TRANSACTION_ID_PATTERN)
 
 
 class TransactionStageRequest(_StrictCadBase):

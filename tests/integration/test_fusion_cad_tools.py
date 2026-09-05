@@ -49,6 +49,8 @@ def setup_desk1_capabilities(container: ApplicationContainer) -> None:
     ]
     container.fusion_cad.set_node_capabilities("desk-1", CapabilityMatrix.from_records(all_supported), generation=1)
     container.fusion_cad.revision_tracker.observe("doc_1", "hash-desk1-seed")
+    container.fusion_cad.revision_tracker.begin_transaction("tx_1", "doc_1")
+    container.fusion_cad.revision_tracker.begin_transaction("tx_1234", "doc_1")
 
 
 @pytest.fixture

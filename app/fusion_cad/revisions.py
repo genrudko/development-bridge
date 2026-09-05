@@ -267,6 +267,7 @@ class RevisionTracker:
         self._documents: dict[str, RevisionRecord] = {}
         self._history: dict[str, list[RevisionRecord]] = {}
         self._active_document_ref: str | None = None
+        self._transactions: dict[str, dict[str, str]] = {}
 
     @property
     def active_document_ref(self) -> str | None:
@@ -343,7 +344,7 @@ class RevisionTracker:
                 raise FusionCadError(
                     ErrorCode.REVISION_CONFLICT,
                     f"expected_revision is required for freshness check on document '{document_ref}'",
-                    details={"document_ref": document_ref, "expected_revision": None},
+                    details={"document_ref": document_ref, "expected_revision": None, "applied": False},
                 )
             rec = self._documents.get(document_ref)
             if rec is None:
@@ -363,6 +364,7 @@ class RevisionTracker:
                     "document_ref": document_ref,
                     "expected_revision": expected_revision,
                     "current_revision": None,
+                    "applied": False,
                 },
             )
 
@@ -375,6 +377,7 @@ class RevisionTracker:
                     "expected_revision": expected_revision,
                     "current_revision": rec.revision,
                     "current_sequence": rec.sequence,
+                    "applied": False,
                 },
             )
 
@@ -408,7 +411,78 @@ class RevisionTracker:
             self._history.pop(document_ref, None)
             if self._active_document_ref == document_ref:
                 self._active_document_ref = None
+            # Clear any transactions bound to this document
+            to_remove = [
+                tid for tid, tb in self._transactions.items()
+                if tb["document_ref"] == document_ref
+            ]
+            for tid in to_remove:
+                self._transactions.pop(tid, None)
         else:
             self._documents.clear()
             self._history.clear()
             self._active_document_ref = None
+            self._transactions.clear()
+
+    # ------------------------------------------------------------------
+    # Transaction baseline persistence (Task 4 foundation)
+    # ------------------------------------------------------------------
+
+    def begin_transaction(
+        self,
+        transaction_id: str,
+        document_ref: str | None = None,
+        baseline_revision: str | None = None,
+        baseline_fingerprint: str | None = None,
+    ) -> dict[str, str]:
+        """Record baseline revision and fingerprint at transaction begin.
+
+        Returns a dict with baseline_revision and baseline_fingerprint.
+        preview/commit must bind to these stored values, not caller-selected
+        expected_revision, to prevent freshness bypass.
+        """
+        if not transaction_id or not isinstance(transaction_id, str):
+            raise FusionCadError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"transaction_id must be a non-empty string, got {transaction_id!r}",
+            )
+
+        doc_ref = document_ref or self._active_document_ref
+        if not doc_ref:
+            raise FusionCadError(
+                ErrorCode.NO_ACTIVE_DESIGN,
+                "No active document for transaction begin",
+            )
+
+        rec = self._documents.get(doc_ref)
+        if rec is None and (baseline_revision is None or baseline_fingerprint is None):
+            raise FusionCadError(
+                ErrorCode.NO_ACTIVE_DESIGN,
+                f"No observed revision for document '{doc_ref}' at transaction begin",
+                details={"document_ref": doc_ref, "transaction_id": transaction_id},
+            )
+
+        b_rev = baseline_revision or (rec.revision if rec else "rev_1")
+        b_fp = baseline_fingerprint or (rec.fingerprint if rec else "")
+        baseline = {
+            "transaction_id": transaction_id,
+            "document_ref": doc_ref,
+            "baseline_revision": b_rev,
+            "baseline_fingerprint": b_fp,
+        }
+        self._transactions[transaction_id] = baseline
+        return baseline
+
+    def get_transaction_baseline(
+        self,
+        transaction_id: str,
+    ) -> dict[str, str] | None:
+        """Look up stored baseline for a transaction.
+
+        Returns None if no baseline is stored (transaction not begun).
+        """
+        return self._transactions.get(transaction_id)
+
+    def clear_transaction(self, transaction_id: str) -> None:
+        """Remove stored transaction baseline (after commit, abort, or rollback)."""
+        self._transactions.pop(transaction_id, None)
