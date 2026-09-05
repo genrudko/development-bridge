@@ -1073,3 +1073,29 @@ async def test_pending_session_wake_tools_remain_route_fenced(tmp_path, monkeypa
             assert container.coordinator._pending == {}
     finally:
         await container.jobs.stop()
+
+@pytest.mark.asyncio
+async def test_rollover_prepare_rejects_existing_route_durable_waiter(tmp_path):
+    from types import SimpleNamespace
+
+    from app.tools.registry import build_tool_registry
+
+    _app, container, _settings = create_test_app_with_jobs(tmp_path)
+    repo = container.projects.repositories.get("project", "repository")
+    job = await container.jobs.start_task(repo, "task", "req-rollover-waiter")
+    await container.jobs.wake_on_jobs_durable(
+        repo,
+        (job.job_id,),
+        "all_terminal",
+        "coordinator",
+        {"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+    )
+    tool = build_tool_registry(container).get("coordinator_route_rollover_prepare")
+    with pytest.raises(BridgeError, match="waiter"):
+        await tool.handler(
+            None,
+            SimpleNamespace(arguments={"route_id": "bridge"}),
+            SimpleNamespace(request_id="req-rollover-waiter-prepare"),
+        )
+    assert container.route_registry.pending_rollover("bridge") is None
+    await container.jobs.stop()

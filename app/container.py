@@ -364,13 +364,15 @@ def build_container(
                 return
             route_id_str = str(route_id)
             async with route_registry.route_lock(route_id_str):
-                route = route_registry.resolve(route_id_str)
-                if route is None or not route_registry.is_bound(route):
-                    return
-                if (
-                    int(route.get("generation", -1)) != int(expected_generation)
-                    or str(route.get("channel_id")) != str(expected_channel)
-                ):
+                try:
+                    route = route_registry.require_wakeable_route(
+                        route_id_str,
+                        expected_generation=int(expected_generation),
+                        expected_channel=str(expected_channel),
+                    )
+                except BridgeError as error:
+                    if isinstance(error.details, dict) and error.details.get("error_code") == "ROLLOVER_PENDING":
+                        raise
                     return
                 channel_id = str(route["channel_id"])
                 await coordinator.arm_job_continuation(

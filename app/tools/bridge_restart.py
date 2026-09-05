@@ -91,21 +91,11 @@ def bridge_restart_tools(container: ApplicationContainer) -> tuple[RegisteredToo
             route_id = str(route["route_id"])
             expected_generation = int(route.get("generation", 0))
             async with container.route_registry.route_lock(route_id):
-                current = container.route_registry.resolve(route_id)
-                if current is None or not container.route_registry.is_bound(current):
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        f"Route '{route_id}' is unbound; restart continuation suppressed",
-                    )
-                if (
-                    int(current.get("generation", -1)) != expected_generation
-                    or str(current.get("channel_id")) != channel_id
-                ):
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "Route generation or channel changed before restart continuation",
-                        retryable=True,
-                    )
+                container.route_registry.require_wakeable_route(
+                    route_id,
+                    expected_generation=expected_generation,
+                    expected_channel=channel_id,
+                )
                 continuation = await container.coordinator.arm(
                     RESTART_CONTINUATION_MESSAGE,
                     channel_id=channel_id,

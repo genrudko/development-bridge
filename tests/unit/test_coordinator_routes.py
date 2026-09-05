@@ -1027,3 +1027,29 @@ def test_pending_session_promotes_only_exact_active_binding(tmp_path):
     routes.unbind("bridge", expected_generation=1)
     with pytest.raises(BridgeError, match="unbound"):
         _resolve_destination(container, ctx, {})
+
+
+@pytest.mark.asyncio
+async def test_rollover_prepare_freezes_source_generation_against_concurrent_continue(tmp_path: Path):
+    settings = BridgeSettings.model_validate({"coordinator": {"route_registry_path": tmp_path / "routes.json"}})
+    container = build_container(settings)
+    container.route_registry.bootstrap("bridge", "https://chatgpt.com/g/g-p-infra/c/old", "telegram-bridge-g0")
+    tools = build_tool_registry(container)
+    rollover = tools.get("coordinator_route_rollover_prepare")
+    continue_tool = tools.get("coordinator_continue")
+    observed = asyncio.Event(); release = asyncio.Event()
+    original_status = container.coordinator.status
+
+    async def paused_status(channel_id="coordinator", *args, **kwargs):
+        snapshot = await original_status(channel_id, *args, **kwargs)
+        observed.set(); await release.wait(); return snapshot
+
+    container.coordinator.status = paused_status
+    prepare_task = asyncio.create_task(rollover.handler(None, SimpleNamespace(arguments={"route_id": "bridge"}), SimpleNamespace(request_id="req-rollover-race")))
+    await observed.wait()
+    wake_task = asyncio.create_task(continue_tool.handler(None, SimpleNamespace(arguments={"route_id": "bridge", "message": "must not arm during rollover", "delay_seconds": 0}), SimpleNamespace(request_id="req-rollover-race-wake")))
+    await asyncio.sleep(0); release.set(); await prepare_task
+    with pytest.raises(BridgeError, match="rollover"):
+        await wake_task
+    assert container.route_registry.pending_rollover("bridge") is not None
+    assert (await original_status("telegram-bridge-g0"))["state"] == "idle"

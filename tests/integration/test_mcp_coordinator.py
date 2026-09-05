@@ -1153,3 +1153,16 @@ async def test_browser_host_commit_requires_server_bootstrap_transport_before_mu
         aborted = await client.post("/mcp/x/coordinator/rollover/abort", json={"route_id": "bridge", "token": pending["token"]})
         assert aborted.json()["aborted"] is True
         assert routes.pending_rollover("bridge") is None
+
+
+@pytest.mark.asyncio
+async def test_external_trigger_rejects_active_source_channel_during_pending_rollover(tmp_path):
+    settings = load_settings(environ={"DEVELOPMENT_BRIDGE_X_TRIGGER_TOKEN": "secret", "DEVELOPMENT_BRIDGE_ROUTE_REGISTRY_PATH": str(tmp_path / "routes-rollover-freeze.json")})
+    container = build_container(settings)
+    container.route_registry.bootstrap("bridge", "https://chatgpt.com/g/g-p-infra/c/conv-current", "telegram-bridge-g0")
+    container.route_registry.prepare_rollover("bridge")
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        response = await client.post("/mcp/x/coordinator/trigger", headers={"Authorization": "Bearer secret"}, json={"channel_id": "telegram-bridge-g0", "message": "must freeze source"})
+    assert response.status_code == 409
+    assert (await container.coordinator.status("telegram-bridge-g0"))["state"] == "idle"

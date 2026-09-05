@@ -222,3 +222,16 @@ def test_supervisor_session_isolated_copy(tmp_path):
     assert isolated.name == "telegram.supervisor.session"
     assert isolated.read_bytes() == source.read_bytes()
     assert isolated.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_supervisor_rejects_active_source_route_while_rollover_pending(tmp_path):
+    supervisor = make_supervisor(tmp_path)
+    supervisor.route_registry.bootstrap("bridge", "https://chatgpt.com/g/g-p-infra/c/conv-current", "telegram-bridge-g0")
+    supervisor.route_registry.prepare_rollover("bridge")
+    notices = []
+    async def notice(text): notices.append(text); return True
+    supervisor._notice = notice
+    await supervisor._on_message(forum_event("must freeze source", 107, 56))
+    assert supervisor.coordinator.armed == []
+    assert notices == ["предыдущая команда ещё не забрана ChatGPT; это сообщение не передано."]

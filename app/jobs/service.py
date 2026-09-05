@@ -341,6 +341,41 @@ class JobService:
             ready = self._collect_terminal_callbacks(store)
         await self._invoke_terminal_callbacks(ready)
 
+    async def has_durable_waiters(
+        self,
+        *,
+        handler_name: str,
+        payload_match: dict[str, object],
+    ) -> bool:
+        if not isinstance(handler_name, str) or not handler_name:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "handler_name is invalid")
+        if not isinstance(payload_match, dict):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "payload_match is invalid")
+
+        def matches(waiter: TerminalWaiter) -> bool:
+            return (
+                waiter.durable
+                and waiter.handler_name == handler_name
+                and isinstance(waiter.payload, dict)
+                and all(waiter.payload.get(k) == v for k, v in payload_match.items())
+            )
+
+        async with self._terminal_lock:
+            if any(matches(waiter) for waiter in self._terminal_waiters.values()):
+                return True
+            if any(matches(waiter) for waiter in self._firing_terminal_waiters.values()):
+                return True
+            if self._store is not None:
+                for item in self._store.terminal_waiters():
+                    payload = item.get("payload")
+                    if (
+                        item.get("handler_name") == handler_name
+                        and isinstance(payload, dict)
+                        and all(payload.get(k) == v for k, v in payload_match.items())
+                    ):
+                        return True
+        return False
+
     async def cancel_durable_waiters(
         self,
         *,

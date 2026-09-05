@@ -232,6 +232,52 @@ class RouteRegistry:
             )
         return None
 
+    def require_wakeable_route(
+        self,
+        route_id: str,
+        *,
+        expected_generation: int | None = None,
+        expected_channel: str | None = None,
+    ) -> dict:
+        """Return the active bound route only when its source generation is not frozen by rollover."""
+        route_id = self.validate_route_id(route_id)
+        data = self._load()
+        route = data["routes"].get(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        normalized = self._normalize_route_record(route)
+        if not self.is_bound(normalized):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route_id}' is unbound; wake is suppressed",
+                details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
+            )
+        generation = int(normalized.get("generation", 0))
+        channel_id = str(normalized.get("channel_id") or f"telegram-{route_id}-g{generation}")
+        if (
+            expected_generation is not None
+            and int(expected_generation) != generation
+        ) or (expected_channel is not None and str(expected_channel) != channel_id):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "Route generation or channel changed before wake",
+                retryable=True,
+                details={"route_id": route_id, "error_code": "ROUTE_STALE"},
+            )
+        pending = (data.get("rollovers") or {}).get(route_id)
+        if (
+            isinstance(pending, dict)
+            and int(pending.get("source_generation", -1)) == generation
+            and pending.get("state") in {"prepared", "candidate"}
+        ):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route_id}' rollover is pending; new wakes are suppressed",
+                retryable=True,
+                details={"route_id": route_id, "error_code": "ROLLOVER_PENDING"},
+            )
+        return {**normalized, "route_id": route_id}
+
     def request(self, route_id: str) -> dict:
         route_id = self.validate_route_id(route_id)
         data = self._load()

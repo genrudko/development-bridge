@@ -192,3 +192,17 @@ async def test_restart_arms_bound_route_under_route_lock(tmp_path):
 
     assert json.loads(result.content[0].text)["data"]["restart_scheduled"] is True
     assert lock_observations == [True]
+
+
+@pytest.mark.asyncio
+async def test_restart_rejects_active_source_route_while_rollover_pending(tmp_path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap("ad5x", "https://chatgpt.com/g/g-p-infra/c/conv-current", "telegram-ad5x-g0")
+    registry.prepare_rollover("ad5x")
+    coordinator = FakeCoordinator()
+    container = SimpleNamespace(route_registry=registry, coordinator=coordinator, bridge_restart=FakeRestart())
+    tool = bridge_restart_tools(container)[0]
+    with pytest.raises(BridgeError, match="rollover"):
+        await tool.handler(None, SimpleNamespace(arguments={"route_id": "ad5x"}), SimpleNamespace(request_id="request-rollover-freeze"))
+    assert coordinator.armed == []
+    assert container.bridge_restart.calls == 1

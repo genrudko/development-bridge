@@ -236,21 +236,11 @@ class TelegramSupervisorService:
                 expected_generation = int(route.get("generation", 0))
                 expected_channel = str(route["channel_id"])
                 async with self.route_registry.route_lock(selected_route_id):
-                    current = self.route_registry.resolve(selected_route_id)
-                    if current is None or not self.route_registry.is_bound(current):
-                        raise BridgeError(
-                            ErrorCode.POLICY_VIOLATION,
-                            f"Route '{selected_route_id}' is unbound; cannot arm Telegram wake",
-                        )
-                    if (
-                        int(current.get("generation", -1)) != expected_generation
-                        or str(current.get("channel_id")) != expected_channel
-                    ):
-                        raise BridgeError(
-                            ErrorCode.POLICY_VIOLATION,
-                            "Route generation or channel changed before Telegram wake",
-                            retryable=True,
-                        )
+                    current = self.route_registry.require_wakeable_route(
+                        selected_route_id,
+                        expected_generation=expected_generation,
+                        expected_channel=expected_channel,
+                    )
                     self.route_registry.request(selected_route_id)
                     await self.coordinator.arm(
                         wake_message,

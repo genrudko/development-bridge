@@ -1309,3 +1309,57 @@ async def test_pre_task_5_waiter_without_generation_handled_safely_for_status_an
     # unbind_and_cancel must handle legacy waiter safely without error
     unbind_cancel_res = await container.route_control.unbind_and_cancel("bridge")
     assert unbind_cancel_res["state"] == "unbound"
+
+
+@pytest.mark.asyncio
+async def test_terminal_callback_rejects_source_generation_while_rollover_pending(tmp_path: Path):
+    from app.container import build_container
+    from app.jobs.models import JobRecord, JobStatus
+    from app.settings import BridgeSettings
+    container = build_container(BridgeSettings.model_validate({"coordinator": {"route_registry_path": tmp_path / "routes.json"}}))
+    container.route_registry.bootstrap("bridge", "https://chatgpt.com/g/g-p-infra/c/conv-current", "telegram-bridge-g0")
+    container.route_registry.prepare_rollover("bridge")
+    handler = container.jobs._durable_terminal_handlers["coordinator"]
+    job = JobRecord(job_id="job_00000000000000000000000000000099", project_id="development-bridge", repository_id="development-bridge", task_id="test", request_id="req-rollover-terminal", status=JobStatus.SUCCEEDED, created_at="2026-09-05T00:00:00+00:00")
+    with pytest.raises(BridgeError, match="rollover"):
+        await handler({"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"}, (job,), "all_terminal")
+    assert (await container.coordinator.status("telegram-bridge-g0"))["state"] == "idle"
+
+@pytest.mark.asyncio
+async def test_rollover_prepare_rejects_in_flight_route_durable_waiter(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from app.container import build_container
+    from app.jobs.service import TerminalWaiter
+    from app.settings import BridgeSettings
+    from app.tools.registry import build_tool_registry
+
+    container = build_container(BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    }))
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+
+    async def callback(_jobs, _reason):
+        return None
+
+    container.jobs._firing_terminal_waiters["waiter-rollover-in-flight"] = TerminalWaiter(
+        waiter_id="waiter-rollover-in-flight",
+        job_ids=("job_00000000000000000000000000000098",),
+        policy="all_terminal",
+        callback=callback,
+        durable=True,
+        handler_name="coordinator",
+        payload={"route_id": "bridge", "generation": 0, "channel_id": "telegram-bridge-g0"},
+    )
+    tool = build_tool_registry(container).get("coordinator_route_rollover_prepare")
+    with pytest.raises(BridgeError, match="durable waiter"):
+        await tool.handler(
+            None,
+            SimpleNamespace(arguments={"route_id": "bridge"}),
+            SimpleNamespace(request_id="req-rollover-in-flight"),
+        )
+    assert container.route_registry.pending_rollover("bridge") is None

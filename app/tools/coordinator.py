@@ -334,23 +334,36 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
     async def rollover_prepare(ctx, params, request_context):
         arguments = params.arguments or {}
         route_id = container.route_registry.validate_route_id(arguments["route_id"])
-        route = container.route_registry.resolve(route_id)
-        if route is None:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
-        if not container.route_registry.is_bound(route):
-            raise BridgeError(
-                ErrorCode.POLICY_VIOLATION,
-                f"Route '{route_id}' is unbound; rollover cannot be prepared",
-                details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
-            )
-        coordinator_status = await container.coordinator.status(route["channel_id"])
-        if coordinator_status.get("state") != "idle":
-            raise BridgeError(
-                ErrorCode.POLICY_VIOLATION,
-                f"route coordinator is not idle: {coordinator_status.get('state')}",
-                retryable=True,
-            )
-        pending = container.route_registry.prepare_rollover(route_id)
+        async with container.route_registry.route_lock(route_id):
+            route = container.route_registry.resolve(route_id)
+            if route is None:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+            if not container.route_registry.is_bound(route):
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    f"Route '{route_id}' is unbound; rollover cannot be prepared",
+                    details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
+                )
+            generation = int(route.get("generation", 0))
+            coordinator_status = await container.coordinator.status(route["channel_id"])
+            if coordinator_status.get("state") != "idle":
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    f"route coordinator is not idle: {coordinator_status.get('state')}",
+                    retryable=True,
+                )
+            jobs = getattr(container, "jobs", None)
+            if jobs is not None and await jobs.has_durable_waiters(
+                handler_name="coordinator",
+                payload_match={"route_id": route_id, "generation": generation},
+            ):
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "route has an active durable waiter; rollover cannot be prepared",
+                    retryable=True,
+                    details={"route_id": route_id, "error_code": "PENDING_WAITER"},
+                )
+            pending = container.route_registry.prepare_rollover(route_id)
         safe_data = {
             "route_id": route_id,
             "state": "prepared",
@@ -430,22 +443,11 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         if route_id is not None:
             route_id_str = str(route_id)
             async with container.route_registry.route_lock(route_id_str):
-                route = container.route_registry.resolve(route_id_str)
-                if route is None or not container.route_registry.is_bound(route):
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "This logical route is unbound; cannot arm continuation",
-                        retryable=False,
-                    )
-                if (
-                    int(route.get("generation", -1)) != int(destination.get("generation", 0))
-                    or str(route.get("channel_id")) != str(destination.get("channel_id"))
-                ):
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "Route generation or channel is stale; cannot arm continuation",
-                        retryable=True,
-                    )
+                route = container.route_registry.require_wakeable_route(
+                    route_id_str,
+                    expected_generation=int(destination.get("generation", 0)),
+                    expected_channel=str(destination.get("channel_id")),
+                )
                 channel_id = str(route["channel_id"])
                 data = await container.coordinator.arm(
                     arguments["message"],
@@ -482,22 +484,11 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         if route_id is not None:
             route_id_str = str(route_id)
             async with container.route_registry.route_lock(route_id_str):
-                route = container.route_registry.resolve(route_id_str)
-                if route is None or not container.route_registry.is_bound(route):
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "This logical route is unbound; cannot register job waiter",
-                        retryable=False,
-                    )
-                if (
-                    int(route.get("generation", -1)) != int(destination.get("generation", 0))
-                    or str(route.get("channel_id")) != str(destination.get("channel_id"))
-                ):
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "Route generation or channel is stale; cannot register job waiter",
-                        retryable=True,
-                    )
+                route = container.route_registry.require_wakeable_route(
+                    route_id_str,
+                    expected_generation=int(destination.get("generation", 0)),
+                    expected_channel=str(destination.get("channel_id")),
+                )
                 gen = int(route["generation"])
                 chan = str(route["channel_id"])
                 payload = {
@@ -547,26 +538,16 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         if route_id is not None:
             route_id_str = str(route_id)
             async with container.route_registry.route_lock(route_id_str):
-                route = container.route_registry.resolve(route_id_str)
-                if route is None or not container.route_registry.is_bound(route):
+                try:
+                    route = container.route_registry.require_wakeable_route(
+                        route_id_str,
+                        expected_generation=int(destination.get("generation", 0)),
+                        expected_channel=str(destination.get("channel_id")),
+                    )
+                except BridgeError:
                     with suppress(Exception):
                         await container.jobs.cancel(repository, job.job_id)
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "This logical route is unbound; cannot register job waiter",
-                        retryable=False,
-                    )
-                if (
-                    int(route.get("generation", -1)) != int(destination.get("generation", 0))
-                    or str(route.get("channel_id")) != str(destination.get("channel_id"))
-                ):
-                    with suppress(Exception):
-                        await container.jobs.cancel(repository, job.job_id)
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "Route generation or channel is stale; cannot register job waiter",
-                        retryable=True,
-                    )
+                    raise
                 gen = int(route["generation"])
                 chan = str(route["channel_id"])
                 payload = {
