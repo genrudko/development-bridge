@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from mcp import types
-from mcp.server import Server
+from mcp.server import NotificationOptions, Server
 
 from app.api.context import new_request_context
 from app.api.errors import BridgeError, ErrorCode
@@ -22,6 +22,20 @@ from app.tools.compact import (
 )
 from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
 from app.tools.registry import build_tool_registry
+
+
+class DevelopmentBridgeServer(Server):
+    def create_initialization_options(
+        self,
+        notification_options=None,
+        experimental_capabilities=None,
+        extensions=None,
+    ):
+        if notification_options is None:
+            notification_options = NotificationOptions(tools_changed=True)
+        return super().create_initialization_options(
+            notification_options, experimental_capabilities, extensions
+        )
 
 
 def create_server(container: ApplicationContainer | None = None) -> Server:
@@ -44,7 +58,7 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
                 await application.telegram_supervisor.stop()
             await application.jobs.stop()
 
-    bridge_server = Server(application.settings.server.name, lifespan=lifespan)
+    bridge_server = DevelopmentBridgeServer(application.settings.server.name, lifespan=lifespan)
     bridge_server.extensions["io.modelcontextprotocol/ui"] = {
         "mimeTypes": ["text/html;profile=mcp-app"]
     }

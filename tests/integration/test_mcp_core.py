@@ -89,6 +89,8 @@ async def test_full_streamable_http_lifecycle_with_two_repositories(tmp_path):
                 ) as session:
                     initialize_result = await session.initialize()
                     assert initialize_result.server_info.name == "test-development-bridge"
+                    assert initialize_result.capabilities.tools is not None
+                    assert initialize_result.capabilities.tools.list_changed is True
 
                     lifecycle.append("tools/list")
                     listed = await session.list_tools()
