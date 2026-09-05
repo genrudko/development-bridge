@@ -37,10 +37,12 @@ class RouteControlService:
     def issue_control_token(self, route_id: str) -> dict:
         route_id = self.route_registry.validate_route_id(route_id)
         route = self.route_registry.resolve(route_id)
+        bootstrap_operation_id = None
         if route is None:
             pending = self.route_registry.pending_current_bind(route_id)
             if pending and pending.get("bootstrap"):
                 generation = 0
+                bootstrap_operation_id = str(pending["token"])
             else:
                 raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
         else:
@@ -54,6 +56,8 @@ class RouteControlService:
             "created_at": now,
             "expires_at": now + 3600.0,
         }
+        if bootstrap_operation_id is not None:
+            record["bootstrap_operation_id"] = bootstrap_operation_id
         self._control_tokens[token] = record
         return record
 
@@ -69,7 +73,21 @@ class RouteControlService:
         if target_route_id != record["route_id"]:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "route control token mismatch")
         route = self.route_registry.resolve(target_route_id)
-        if route is None:
+        bootstrap_operation_id = record.get("bootstrap_operation_id")
+        if bootstrap_operation_id is not None:
+            pending = self.route_registry.pending_current_bind(target_route_id)
+            if (
+                route is not None
+                or pending is None
+                or not pending.get("bootstrap")
+                or pending.get("token") != bootstrap_operation_id
+            ):
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "stale route control authorization for completed bootstrap",
+                )
+            current_gen = 0
+        elif route is None:
             pending = self.route_registry.pending_current_bind(target_route_id)
             if pending and pending.get("bootstrap"):
                 current_gen = 0

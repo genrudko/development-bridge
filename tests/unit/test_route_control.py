@@ -1484,6 +1484,32 @@ def test_route_control_bootstrap_flow_end_to_end_commits_generation_0(test_setup
     assert status_after["state"] == "bound"
 
 
+def test_bootstrap_control_token_is_invalid_after_commit(test_setup):
+    registry, _trace_store, service = test_setup
+    prepared = service.prepare_bind(
+        "newroute", session_id="session-1", bootstrap_if_missing=True
+    )
+    descriptor = service.issue_control_descriptor("newroute")
+    control_token = descriptor["control_token"]
+
+    # The bootstrap card may control only the still-pending bootstrap operation.
+    verified = service.verify_control_token(control_token, "newroute")
+    assert verified["generation"] == 0
+
+    service.accept_bind_return(
+        prepared["operation_id"],
+        "https://chatgpt.com/g/g-p-infra/c/conv-bootstrap-target",
+    )
+    committed = service.commit_bind(prepared["operation_id"])
+    assert committed["generation"] == 0
+    assert registry.resolve("newroute") is not None
+
+    # Commit is a security boundary even though bootstrap and route are both g0.
+    with pytest.raises(BridgeError) as exc_info:
+        service.verify_control_token(control_token, "newroute")
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+
+
 def test_route_control_bootstrap_failed_return_leaves_no_route(test_setup):
     registry, trace_store, service = test_setup
     prepared = service.prepare_bind("badroute", session_id="session-1", bootstrap_if_missing=True)
