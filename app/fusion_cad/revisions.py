@@ -130,6 +130,12 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
             if isinstance(b, Mapping):
                 bbox = b.get("bounding_box")
                 is_vis = bool(b.get("is_visible", True))
+                com = b.get("center_of_mass")
+                verts = b.get("vertices")
+                f_list = b.get("faces")
+                e_list = b.get("edges")
+                f_centroids = b.get("face_centroids")
+                geom_sig = b.get("geometric_signature")
                 body_items.append({
                     "name": str(b.get("name", "")),
                     "component": str(b.get("component")) if b.get("component") is not None else None,
@@ -141,6 +147,12 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
                     "faces_count": int(b.get("faces_count", 0)),
                     "edges_count": int(b.get("edges_count", 0)),
                     "bounding_box": _canonicalize_value(bbox) if bbox is not None else None,
+                    "center_of_mass": _canonicalize_value(com) if com is not None else None,
+                    "vertices": _canonicalize_value(verts) if verts is not None else None,
+                    "faces": _canonicalize_value(f_list) if f_list is not None else None,
+                    "edges": _canonicalize_value(e_list) if e_list is not None else None,
+                    "face_centroids": _canonicalize_value(f_centroids) if f_centroids is not None else None,
+                    "geometric_signature": _canonicalize_value(geom_sig) if geom_sig is not None else None,
                 })
         body_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
         canonical["bodies"] = body_items
@@ -155,6 +167,9 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
                 is_vis = bool(s.get("is_visible", True))
                 cons_count = int(s.get("constraints_count", len(constraints) if isinstance(constraints, (list, tuple)) else 0))
                 dim_count = int(s.get("dimensions_count", len(dimensions) if isinstance(dimensions, (list, tuple)) else 0))
+                curves = s.get("curves")
+                points = s.get("points")
+                s_bbox = s.get("bounding_box")
                 sketch_items.append({
                     "name": str(s.get("name", "")),
                     "component": str(s.get("component")) if s.get("component") is not None else None,
@@ -166,6 +181,9 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
                     "constraints": _canonicalize_value(constraints) if constraints is not None else None,
                     "dimensions_count": dim_count,
                     "dimensions": _canonicalize_value(dimensions) if dimensions is not None else None,
+                    "curves": _canonicalize_value(curves) if curves is not None else None,
+                    "points": _canonicalize_value(points) if points is not None else None,
+                    "bounding_box": _canonicalize_value(s_bbox) if s_bbox is not None else None,
                 })
         sketch_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
         canonical["sketches"] = sketch_items
@@ -192,6 +210,11 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
         attr_items: list[dict[str, Any]] = []
         doc_id_for_attr = canonical.get("document", {}).get("document_ref", "")
         if isinstance(raw_attrs, Mapping):
+            if not doc_id_for_attr or not str(doc_id_for_attr).strip():
+                raise FusionCadError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Cannot canonicalize document attributes without a stable document_ref",
+                )
             for k, v in raw_attrs.items():
                 attr_items.append({
                     "owner_type": "document",
@@ -203,9 +226,17 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
         elif isinstance(raw_attrs, (list, tuple, Sequence)):
             for a in raw_attrs:
                 if isinstance(a, Mapping):
+                    owner_t = str(a.get("owner_type", "document"))
+                    owner_id = str(a.get("owner_id", doc_id_for_attr if owner_t == "document" else ""))
+                    if not owner_id or not owner_id.strip():
+                        raise FusionCadError(
+                            ErrorCode.INVALID_ARGUMENT,
+                            f"Attribute for {owner_t} lacks stable owner_id; empty IDs or mutable names are rejected",
+                            details={"attribute": dict(a)},
+                        )
                     attr_items.append({
-                        "owner_type": str(a.get("owner_type", "document")),
-                        "owner_id": str(a.get("owner_id", doc_id_for_attr if str(a.get("owner_type", "document")) == "document" else "")),
+                        "owner_type": owner_t,
+                        "owner_id": owner_id,
                         "group": str(a.get("group", "bridge.cad/v1")),
                         "name": str(a.get("name", "")),
                         "value": str(a.get("value", "")),

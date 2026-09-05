@@ -1155,7 +1155,12 @@ async def test_async_transaction_mutations_lifecycle_operation_result_and_uncert
         "api_version": "fusion.cad/v1",
         "status": "succeeded",
         "summary": f"Transaction {operation} completed",
-        "data": {"transaction_id": "tx_1234", "operation": operation},
+        "data": {
+            "transaction_id": "tx_1234",
+            "operation": operation,
+            "fingerprint": "valid_real_fp_123",
+            "document_ref": "doc_1",
+        },
     }
     await container.desktop_nodes.submit_result("desk-1", cmd_id, {
         "content": [{"type": "text", "text": json.dumps(valid_cad_result)}],

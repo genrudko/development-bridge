@@ -15,7 +15,7 @@ from app.fusion_cad.capabilities import (
     get_required_capability,
 )
 from app.fusion_cad.errors import FusionCadError
-from app.fusion_cad.models import CadResult
+from app.fusion_cad.models import CadResult, DocumentState
 from app.fusion_cad.requests import (
     FusionInspectRequest,
     FusionMetadataRequest,
@@ -436,37 +436,48 @@ class FusionCadService:
         fp = None
         if isinstance(cad_result.data, (dict, Mapping)):
             fp = cad_result.data.get("fingerprint")
-        doc_state = cad_result.document
+        target_doc = (
+            (cad_result.document.document_ref if cad_result.document else None)
+            or (cad_result.data.get("document_ref") if isinstance(cad_result.data, (dict, Mapping)) else None)
+            or begin_doc_ref
+            or payload.get("document_ref")
+            or self._revision_tracker.active_document_ref
+        )
         observed_rec = None
-        if doc_state and doc_state.document_ref:
-            if fp:
-                observed_rec = self._revision_tracker.observe(doc_state.document_ref, fp)
-            elif doc_state.model_revision:
-                observed_rec = self._revision_tracker.observe(doc_state.document_ref, doc_state.model_revision)
-        elif fp:
-            fallback_doc = self._revision_tracker.active_document_ref or "doc_1"
-            observed_rec = self._revision_tracker.observe(fallback_doc, fp)
+        if target_doc and fp and isinstance(fp, str) and fp.strip():
+            observed_rec = self._revision_tracker.observe(target_doc, fp.strip())
+            doc_name = (
+                cad_result.document.name if cad_result.document
+                else (cad_result.data.get("name") if isinstance(cad_result.data, (dict, Mapping)) else None)
+            )
+            cad_result = cad_result.model_copy(
+                update={
+                    "document": DocumentState(
+                        document_ref=target_doc,
+                        model_revision=observed_rec.revision,
+                        name=doc_name,
+                        units="mm",
+                    )
+                }
+            )
+        elif target_doc and cad_result.document and cad_result.document.model_revision:
+            observed_rec = self._revision_tracker.current(target_doc)
 
         # 2. Transaction begin: persist authoritative baseline ONLY after proven successful terminal execution
         if effective_bundle_group == "transaction" and op == "begin":
             tx_id = begin_tx_id or payload.get("transaction_id")
             if isinstance(cad_result.data, (dict, Mapping)) and not tx_id:
                 tx_id = cad_result.data.get("transaction_id")
-            if not tx_id:
+            if not tx_id or not isinstance(tx_id, str) or not tx_id.strip():
                 raise FusionCadError(
                     ErrorCode.INVALID_ARGUMENT,
                     "transaction:begin completed without a transaction_id; cannot establish authoritative baseline",
                 )
 
-            target_doc = (
-                (cad_result.document.document_ref if cad_result.document else None)
-                or begin_doc_ref
-                or self._revision_tracker.active_document_ref
-            )
-            if not target_doc:
+            if not target_doc or not isinstance(target_doc, str) or not target_doc.strip():
                 raise FusionCadError(
                     ErrorCode.NO_ACTIVE_DESIGN,
-                    "transaction:begin completed without an active document reference",
+                    "transaction:begin completed without an active document reference or stable runtime identity",
                     details={"transaction_id": tx_id},
                 )
 
@@ -475,18 +486,34 @@ class FusionCadService:
                 if isinstance(cad_result.data, (dict, Mapping))
                 else None
             )
-            if tx_id and target_doc and proven_fp and isinstance(proven_fp, str) and proven_fp.strip():
-                rec = observed_rec or self._revision_tracker.current(target_doc)
-                if rec is None or rec.fingerprint != proven_fp.strip():
-                    rec = self._revision_tracker.observe(target_doc, proven_fp.strip())
-                self._revision_tracker.begin_transaction(
-                    tx_id,
-                    document_ref=target_doc,
-                    baseline_revision=rec.revision,
-                    baseline_fingerprint=proven_fp.strip(),
+            if not proven_fp or not isinstance(proven_fp, str) or not proven_fp.strip():
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "transaction:begin terminal success with missing, empty, or whitespace real fingerprint; failing closed to prevent unusable baseline",
+                    details={"transaction_id": tx_id, "document_ref": target_doc, "fingerprint": proven_fp},
                 )
+
+            rec = observed_rec or self._revision_tracker.current(target_doc)
+            if rec is None or rec.fingerprint != proven_fp.strip():
+                rec = self._revision_tracker.observe(target_doc, proven_fp.strip())
+            self._revision_tracker.begin_transaction(
+                tx_id,
+                document_ref=target_doc,
+                baseline_revision=rec.revision,
+                baseline_fingerprint=proven_fp.strip(),
+            )
             if isinstance(cad_result.data, dict) and tx_id:
                 cad_result.data["transaction_id"] = tx_id
+            cad_result = cad_result.model_copy(
+                update={
+                    "document": DocumentState(
+                        document_ref=target_doc,
+                        model_revision=rec.revision,
+                        name=cad_result.document.name if cad_result.document else None,
+                        units="mm",
+                    )
+                }
+            )
 
         # 3. Transaction commit / abort / rollback: clear stored baseline ONLY after proven terminal execution
         if effective_bundle_group == "transaction" and op in ("commit", "abort", "rollback"):
@@ -935,7 +962,11 @@ class FusionCadService:
                     return sub_result
 
                 # If sub_result was already a completed terminal execution (e.g. from a test mock):
-                if sub_result.get("status") in ("succeeded", "late_succeeded") or sub_result.get("api_version") == "fusion.cad/v1":
+                if (
+                    "content" in sub_result
+                    or sub_result.get("status") in ("succeeded", "late_succeeded")
+                    or sub_result.get("api_version") == "fusion.cad/v1"
+                ):
                     return self._finalize_completed_execution(
                         sub_result,
                         effective_bundle_group=effective_bundle_group,

@@ -709,23 +709,46 @@ class AdskFakeContext:
         class FakeOccurrence:
             def __init__(self, name="Occ1"):
                 self.name = name
+                self.entityToken = f"occ_token_{name}"
                 self.fullPathName = f"Root+{name}"
                 self.isVisible = True
                 self.isLightBulbOn = True
                 self.transform = FakeTransform()
                 self.attributes = FakeAttributes()
 
+        class FakeVertex:
+            def __init__(self, x=0.0, y=0.0, z=0.0):
+                self.geometry = FakePoint(x, y, z)
+
+        class FakeFace:
+            def __init__(self, area=10.0, centroid=None):
+                self.area = area
+                self.centroid = centroid or FakePoint(5.0, 5.0, 5.0)
+                self.geometry = type("FaceGeom", (), {"objectType": "PlaneSurface", "surfaceType": "PlaneSurface"})()
+
+        class FakeEdge:
+            def __init__(self, length=10.0):
+                self.length = length
+                self.geometry = type("EdgeGeom", (), {"objectType": "Line3D", "curveType": "Line3D"})()
+
+        class FakePhysicalProperties:
+            def __init__(self, com=None):
+                self.centerOfMass = com or FakePoint(5.0, 5.0, 5.0)
+
         class FakeBody:
             def __init__(self, ctx):
                 self._ctx = ctx
                 self.name = "Body1"
+                self.entityToken = "body_token_1"
                 self.isSolid = True
                 self.isVisible = True
                 self.isLightBulbOn = True
                 self.area = 50.0
-                self.faces = FakeCollection([object() for _ in range(6)])
-                self.edges = FakeCollection([object() for _ in range(12)])
+                self.faces = FakeCollection([FakeFace(area=10.0, centroid=FakePoint(i, i, i)) for i in range(6)])
+                self.edges = FakeCollection([FakeEdge(length=10.0) for _ in range(12)])
+                self.vertices = FakeCollection([FakeVertex(x=i, y=i, z=i) for i in range(8)])
                 self.boundingBox = FakeBoundingBox(FakePoint(0, 0, 0), FakePoint(10, 10, 10))
+                self.physicalProperties = FakePhysicalProperties(FakePoint(5.0, 5.0, 5.0))
                 self.attributes = FakeAttributes()
 
             @property
@@ -748,13 +771,41 @@ class AdskFakeContext:
                 self.value = val
                 self.parameter = Param(name, val, expr)
 
+        class FakeSketchCurve:
+            def __init__(self, length=10.0, sp=(0, 0, 0), ep=(10, 0, 0)):
+                self.length = length
+                self.objectType = "SketchLine"
+                self.geometry = type("CurveGeom", (), {
+                    "objectType": "Line3D",
+                    "startPoint": FakePoint(*sp),
+                    "endPoint": FakePoint(*ep),
+                })()
+                self.boundingBox = FakeBoundingBox(FakePoint(*sp), FakePoint(*ep))
+
+        class FakeSketchPoint:
+            def __init__(self, x=0.0, y=0.0, z=0.0):
+                self.geometry = FakePoint(x, y, z)
+
         class FakeSketch:
             def __init__(self):
                 self.name = "Sketch1"
+                self.entityToken = "sketch_token_1"
                 self.isVisible = True
                 self.isLightBulbOn = True
                 self.profiles = FakeCollection([object()])
-                self.sketchCurves = FakeCollection([object(), object(), object(), object()])
+                self.sketchCurves = FakeCollection([
+                    FakeSketchCurve(10.0, (0, 0, 0), (10, 0, 0)),
+                    FakeSketchCurve(10.0, (10, 0, 0), (10, 10, 0)),
+                    FakeSketchCurve(10.0, (10, 10, 0), (0, 10, 0)),
+                    FakeSketchCurve(10.0, (0, 10, 0), (0, 0, 0)),
+                ])
+                self.sketchPoints = FakeCollection([
+                    FakeSketchPoint(0, 0, 0),
+                    FakeSketchPoint(10, 0, 0),
+                    FakeSketchPoint(10, 10, 0),
+                    FakeSketchPoint(0, 10, 0),
+                ])
+                self.boundingBox = FakeBoundingBox(FakePoint(0, 0, 0), FakePoint(10, 10, 0))
                 self.geometricConstraints = FakeCollection([FakeConstraint()])
                 self.sketchDimensions = FakeCollection([FakeDimension()])
                 self.attributes = FakeAttributes()
@@ -764,6 +815,7 @@ class AdskFakeContext:
                 self._ctx = ctx
                 self.name = "Root"
                 self.id = "comp_root"
+                self.entityToken = "comp_token_root"
                 self.bRepBodies = FakeCollection([FakeBody(ctx)])
                 self.sketches = FakeCollection([FakeSketch()])
                 self.allOccurrences = FakeCollection([])
@@ -1024,7 +1076,10 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
             script = arguments["script"]
             scope = {
                 "__name__": "__main__",
-                "_transaction_commit_primitive": lambda payload: setattr(fake_adsk, "tx_committed", True),
+                "_transaction_commit_primitive": lambda payload: (
+                    setattr(fake_adsk, "tx_committed", True),
+                    setattr(fake_adsk, "volume", float(fake_adsk.volume) + 50.0),
+                ),
                 "_transaction_preview_primitive": lambda payload: setattr(fake_adsk, "tx_previewed", True),
             }
             exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
@@ -1413,7 +1468,10 @@ async def test_falsify_transaction_baseline_bypass_and_staging_bounds(
             script = arguments["script"]
             scope = {
                 "__name__": "__main__",
-                "_transaction_commit_primitive": lambda payload: setattr(fake_adsk, "tx_committed", True),
+                "_transaction_commit_primitive": lambda payload: (
+                    setattr(fake_adsk, "tx_committed", True),
+                    setattr(fake_adsk, "volume", float(fake_adsk.volume) + 50.0),
+                ),
                 "_transaction_preview_primitive": lambda payload: setattr(fake_adsk, "tx_previewed", True),
             }
             exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
@@ -1716,7 +1774,7 @@ async def test_falsify_async_transaction_lifecycle_queued_failed_and_succeeded(
         cad_service.finalize_terminal_operation(op_status_unc, {"status": "uncertain"})
     assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is None
 
-    # 3. Terminal succeeded begin with empty fingerprint does NOT establish baseline
+    # 3. Terminal succeeded begin with empty fingerprint fails closed and does NOT establish baseline
     op_status_succ = {
         "operation_id": "op_async_begin",
         "node_id": "desk-1",
@@ -1724,16 +1782,18 @@ async def test_falsify_async_transaction_lifecycle_queued_failed_and_succeeded(
         "summary": "transaction:begin",
         "checkpoint": {"operation": "begin", "group": "transaction", "transaction_id": "tx_async_1", "document_ref": "doc_1"},
     }
-    cad_service.finalize_terminal_operation(
-        op_status_succ,
-        {
-            "api_version": "fusion.cad/v1",
-            "status": "succeeded",
-            "summary": "Transaction begin completed",
-            "data": {"operation": "begin", "applied": True, "fingerprint": "", "transaction_id": "tx_async_1"},
-            "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
-        },
-    )
+    with pytest.raises(FusionCadError) as exc_empty_fp:
+        cad_service.finalize_terminal_operation(
+            op_status_succ,
+            {
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Transaction begin completed",
+                "data": {"operation": "begin", "applied": True, "fingerprint": "", "transaction_id": "tx_async_1"},
+                "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+            },
+        )
+    assert exc_empty_fp.value.code == ErrorCode.FUSION_API_ERROR
     assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is None
 
     # 4. Proven terminal succeeded begin with valid fingerprint persists authoritative baseline
@@ -1749,7 +1809,7 @@ async def test_falsify_async_transaction_lifecycle_queued_failed_and_succeeded(
     )
     stored = cad_service.revision_tracker.get_transaction_baseline("tx_async_1")
     assert stored is not None
-    assert stored["baseline_revision"] == "rev_2"
+    assert stored["baseline_revision"] == "rev_1"
     assert stored["baseline_fingerprint"] == "proven_fp_123"
 
     # 5. Async commit queued acknowledgment MUST NOT clear stored baseline
@@ -1903,6 +1963,7 @@ async def test_falsify_rendered_script_attribute_owner_relocation_changes_finger
                 class FakeOcc:
                     def __init__(self):
                         self.name = "Occ1"
+                        self.entityToken = "occ_token_1"
                         self.fullPathName = "Root+Occ1"
                         self.isVisible = True
                         self.isLightBulbOn = True
@@ -1993,9 +2054,21 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
         "missing_body_isSolid",
         "missing_body_visibility",
         "missing_body_bbox",
+        "missing_body_vertex_geometry",
+        "missing_body_attributes",
+        "missing_body_entityToken",
         "missing_sketch_visibility",
         "missing_sketch_profiles",
         "missing_sketch_geometricConstraints",
+        "missing_sketch_point_geometry",
+        "missing_sketch_attributes",
+        "missing_sketch_entityToken",
+        "missing_component_attributes",
+        "missing_component_entityToken",
+        "missing_occurrence_attributes",
+        "missing_occurrence_entityToken",
+        "missing_timeline_attributes",
+        "missing_timeline_entityToken",
         "unreadable_doc_attributes",
     ]
 
@@ -2032,6 +2105,12 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
                 root.bRepBodies.item(0).isLightBulbOn = None
             elif case == "missing_body_bbox":
                 root.bRepBodies.item(0).boundingBox = None
+            elif case == "missing_body_vertex_geometry":
+                root.bRepBodies.item(0).vertices = None
+            elif case == "missing_body_attributes":
+                root.bRepBodies.item(0).attributes = None
+            elif case == "missing_body_entityToken":
+                root.bRepBodies.item(0).entityToken = ""
             elif case == "missing_sketch_visibility":
                 root.sketches.item(0).isVisible = None
                 root.sketches.item(0).isLightBulbOn = None
@@ -2039,6 +2118,42 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
                 root.sketches.item(0).profiles = None
             elif case == "missing_sketch_geometricConstraints":
                 root.sketches.item(0).geometricConstraints = None
+            elif case == "missing_sketch_point_geometry":
+                root.sketches.item(0).sketchPoints = None
+            elif case == "missing_sketch_attributes":
+                root.sketches.item(0).attributes = None
+            elif case == "missing_sketch_entityToken":
+                root.sketches.item(0).entityToken = ""
+            elif case == "missing_component_attributes":
+                root.attributes = None
+            elif case == "missing_component_entityToken":
+                root.entityToken = ""
+                root.id = ""
+            elif case == "missing_occurrence_attributes":
+                class BadOccAttrs:
+                    name = "Occ1"
+                    entityToken = "occ_1"
+                    fullPathName = "Root+Occ1"
+                    isVisible = True
+                    isLightBulbOn = True
+                    transform = type("FakeTransform", (), {"asArray": lambda self: [1.0] * 16})()
+                    attributes = None
+                root.allOccurrences = type("FakeColl", (), {"count": 1, "item": lambda s, idx: BadOccAttrs()})()
+            elif case == "missing_occurrence_entityToken":
+                class BadOccToken:
+                    name = "Occ1"
+                    entityToken = ""
+                    fullPathName = "Root+Occ1"
+                    isVisible = True
+                    isLightBulbOn = True
+                    transform = type("FakeTransform", (), {"asArray": lambda self: [1.0] * 16})()
+                    attributes = type("FakeAttrs", (), {"count": 0, "item": lambda s, idx: None})()
+                root.allOccurrences = type("FakeColl", (), {"count": 1, "item": lambda s, idx: BadOccToken()})()
+            elif case == "missing_timeline_attributes":
+                design.timeline.item(0).attributes = None
+            elif case == "missing_timeline_entityToken":
+                design.timeline.item(0).entityToken = ""
+                design.timeline.item(0).entity.entityToken = ""
             elif case == "unreadable_doc_attributes":
                 doc.attributes = None
 
@@ -2056,3 +2171,200 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
                 )
             assert exc_case.value.code in (ErrorCode.CAPABILITY_UNAVAILABLE, ErrorCode.FUSION_API_ERROR), f"Unexpected code for case {case}: {exc_case.value.code}"
             assert primitive_reached is False, f"Primitive was reached for unreadable case {case}!"
+
+
+@pytest.mark.asyncio
+async def test_falsify_sketch_geometry_movement_triggers_revision_conflict_in_rendered_pipeline(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves altering sketch point coordinates without changing counts triggers REVISION_CONFLICT in rendered pipeline."""
+    with AdskFakeContext("doc_1", initial_volume=100.0):
+        cad_service = FusionCadService(mock_desktop_service)
+        matrix = CapabilityMatrix.from_records([
+            CapabilityRecord(name="metadata.attributes", state="supported"),
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(name="revision.external_change_detection", state="supported"),
+        ])
+        cad_service.set_node_capabilities("desk-1", matrix)
+
+        async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+            script = arguments["script"]
+            scope = {
+                "__name__": "__main__",
+                "_mutation_primitive": lambda payload: None,
+            }
+            exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+            return scope["_output"]
+
+        mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+        mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+
+        # 1. Snapshot read establishes initial baseline
+        snap_res = await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
+        assert isinstance(snap_res, CadResult)
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+        # 2. Alter sketch point geometry without changing count of sketch points or curves
+        import adsk.core
+        app = adsk.core.Application.get()
+        doc = app.activeDocument
+        design = doc.products.itemByClass("adsk::fusion::Design")
+        sketch = design.rootComponent.sketches.item(0)
+        # Move point 0 from (0, 0, 0) to (42.0, 99.0, 0)
+        sketch.sketchPoints.item(0).geometry.x = 42.0
+        sketch.sketchPoints.item(0).geometry.y = 99.0
+
+        # 3. Attempt mutation expecting rev_1 -> must fail closed with REVISION_CONFLICT
+        with pytest.raises(FusionCadError) as exc_info:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": "ent_1",
+                    "name": "tag",
+                    "value": "v1",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+        assert exc_info.value.code == ErrorCode.REVISION_CONFLICT
+        assert exc_info.value.details.get("applied") is False
+
+
+@pytest.mark.asyncio
+async def test_falsify_transaction_begin_fails_closed_without_establishing_baseline_on_empty_fingerprint_or_doc_ref(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves transaction:begin terminal execution with empty/whitespace fingerprint or missing doc_ref fails closed and does not establish a baseline."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # Case A: empty fingerprint returned by terminal script execution
+    mock_sub = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Executed transaction:begin",
+                "document": {"document_ref": "doc_tx_1", "model_revision": "rev_1"},
+                "data": {"transaction_id": "tx_bad_fp", "operation": "begin", "fingerprint": "   "},
+            }),
+        }],
+    })
+    mock_desktop_service.call = mock_sub
+    mock_desktop_service.submit = mock_sub
+
+    with pytest.raises(FusionCadError) as exc_fp:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "begin", "transaction_id": "tx_bad_fp"},
+            group="transaction",
+        )
+    assert exc_fp.value.code == ErrorCode.FUSION_API_ERROR
+    assert "missing, empty, or whitespace real fingerprint" in exc_fp.value.message
+    # Baseline must NOT be established
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_bad_fp") is None
+
+    # Case B: missing active document reference
+    mock_sub_no_doc = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Executed transaction:begin",
+                "document": None,
+                "data": {"transaction_id": "tx_no_doc", "operation": "begin", "fingerprint": "real_fp_123"},
+            }),
+        }],
+    })
+    mock_desktop_service.call = mock_sub_no_doc
+    mock_desktop_service.submit = mock_sub_no_doc
+
+    with pytest.raises(FusionCadError) as exc_doc:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "begin", "transaction_id": "tx_no_doc"},
+            group="transaction",
+        )
+    assert exc_doc.value.code == ErrorCode.NO_ACTIVE_DESIGN
+    assert "without an active document reference" in exc_doc.value.message
+    # Baseline must NOT be established
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_no_doc") is None
+
+
+@pytest.mark.asyncio
+async def test_falsify_rendered_mutation_returns_real_fusion_post_apply_fingerprint_and_advances_guard(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves mutation returns real Fusion-side post-apply fingerprint (not synthetic) and advances revision authority."""
+    with AdskFakeContext("doc_1", initial_volume=100.0):
+        cad_service = FusionCadService(mock_desktop_service)
+        matrix = CapabilityMatrix.from_records([
+            CapabilityRecord(name="metadata.attributes", state="supported"),
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(name="revision.external_change_detection", state="supported"),
+        ])
+        cad_service.set_node_capabilities("desk-1", matrix)
+
+        async def run_rendered_production_script(node_id: str, tool_name: str, arguments: dict, journal: dict | None = None):
+            script = arguments["script"]
+            scope = {
+                "__name__": "__main__",
+                "_mutation_primitive": lambda payload: None,
+            }
+            exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+            return scope["_output"]
+
+        mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
+        mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+
+        # Initial read
+        snap_res = await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
+        data_initial = snap_res.data if isinstance(snap_res, CadResult) else snap_res["data"]
+        initial_fp = data_initial.get("fingerprint")
+        assert initial_fp
+        assert "mutated" not in initial_fp
+
+        # Mutate
+        res = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": "ent_1",
+                "name": "tag",
+                "value": "v1",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+        data_res = res.data if isinstance(res, CadResult) else res["data"]
+        doc_res = res.document if isinstance(res, CadResult) else res["document"]
+        post_fp = data_res.get("fingerprint")
+        assert post_fp
+        assert post_fp != initial_fp
+        assert "mutated" not in post_fp
+        # Returned revision matches tracker current
+        assert (doc_res.model_revision if hasattr(doc_res, "model_revision") else doc_res["model_revision"]) == "rev_2"
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+        assert cad_service.revision_tracker.current("doc_1").fingerprint == post_fp
+
+        # Next mutation using fresh rev_2 succeeds
+        res2 = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": "ent_1",
+                "name": "tag2",
+                "value": "v2",
+                "expected_revision": "rev_2",
+            },
+            group="metadata",
+        )
+        data_res2 = res2.data if isinstance(res2, CadResult) else res2["data"]
+        doc_res2 = res2.document if isinstance(res2, CadResult) else res2["document"]
+        assert (doc_res2.model_revision if hasattr(doc_res2, "model_revision") else doc_res2["model_revision"]) == "rev_3"
+        assert data_res2.get("fingerprint") != post_fp

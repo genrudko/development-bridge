@@ -319,6 +319,65 @@ def collect_model_fingerprint(payload=None):
                     if edges is None or not hasattr(edges, "count"):
                         raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edges collection is unreadable")
 
+                    # Detailed vertex coordinates
+                    verts = getattr(b, "vertices", None)
+                    if verts is None or not hasattr(verts, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' vertices collection is unreadable")
+                    vert_items = []
+                    for vi in range(verts.count):
+                        v = verts.item(vi)
+                        v_geom = getattr(v, "geometry", None)
+                        if v_geom is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' vertex {vi} has unreadable geometry")
+                        vert_items.append([round(float(v_geom.x), 6), round(float(v_geom.y), 6), round(float(v_geom.z), 6)])
+                    vert_items.sort()
+
+                    # Detailed face signatures
+                    face_items = []
+                    for fi in range(faces.count):
+                        f = faces.item(fi)
+                        f_dict = {}
+                        fc = getattr(f, "centroid", None)
+                        if fc is not None:
+                            f_dict["centroid"] = [round(float(fc.x), 6), round(float(fc.y), 6), round(float(fc.z), 6)]
+                        fa = getattr(f, "area", None)
+                        if fa is not None:
+                            f_dict["area"] = canonicalize_value(float(fa))
+                        fg = getattr(f, "geometry", None)
+                        if fg is not None:
+                            f_dict["surface_type"] = str(getattr(fg, "objectType", None) or getattr(fg, "surfaceType", None) or "")
+                        if f_dict:
+                            face_items.append(f_dict)
+                    if face_items:
+                        face_items.sort(key=lambda x: json.dumps(x, sort_keys=True))
+
+                    # Detailed edge signatures
+                    edge_items = []
+                    for ei in range(edges.count):
+                        e = edges.item(ei)
+                        e_dict = {}
+                        if hasattr(e, "length") and getattr(e, "length", None) is not None:
+                            e_dict["length"] = canonicalize_value(float(e.length))
+                        eg = getattr(e, "geometry", None)
+                        if eg is not None:
+                            e_dict["curve_type"] = str(getattr(eg, "objectType", None) or getattr(eg, "curveType", None) or "")
+                        if e_dict:
+                            edge_items.append(e_dict)
+                    if edge_items:
+                        edge_items.sort(key=lambda x: json.dumps(x, sort_keys=True))
+
+                    # Center of mass / physical properties
+                    raw_com = None
+                    phys = getattr(b, "physicalProperties", None)
+                    if phys is None:
+                        get_phys = getattr(b, "getPhysicalProperties", None)
+                        if callable(get_phys):
+                            phys = get_phys()
+                    if phys is not None:
+                        com_pt = getattr(phys, "centerOfMass", None)
+                        if com_pt is not None:
+                            raw_com = [round(float(com_pt.x), 6), round(float(com_pt.y), 6), round(float(com_pt.z), 6)]
+
                     is_local_vis = bool(raw_local if raw_local is not None else raw_eff)
                     is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                     b_items.append({
@@ -332,6 +391,10 @@ def collect_model_fingerprint(payload=None):
                         "faces_count": faces.count,
                         "edges_count": edges.count,
                         "bounding_box": bbox,
+                        "center_of_mass": raw_com,
+                        "vertices": vert_items if vert_items else None,
+                        "faces": face_items if face_items else None,
+                        "edges": edge_items if edge_items else None,
                     })
                 except FusionScriptError:
                     raise
@@ -403,6 +466,62 @@ def collect_model_fingerprint(payload=None):
                             raise FusionScriptError("FUSION_API_ERROR", f"Failed to read dimension {di} on sketch '{s_name}': {exc}") from exc
                     dim_items.sort(key=lambda x: (x["name"], str(x.get("value"))))
 
+                    # Detailed curves geometry
+                    curve_items = []
+                    for c_idx in range(curves.count):
+                        cv = curves.item(c_idx)
+                        c_dict = {
+                            "type": str(getattr(cv, "objectType", None) or type(cv).__name__),
+                        }
+                        if hasattr(cv, "length") and getattr(cv, "length", None) is not None:
+                            c_dict["length"] = canonicalize_value(float(cv.length))
+
+                        c_geom = getattr(cv, "geometry", None)
+                        if c_geom is not None:
+                            if hasattr(c_geom, "startPoint") and getattr(c_geom, "startPoint", None) is not None:
+                                sp = c_geom.startPoint
+                                c_dict["start_point"] = [round(float(sp.x), 6), round(float(sp.y), 6), round(float(sp.z), 6)]
+                            if hasattr(c_geom, "endPoint") and getattr(c_geom, "endPoint", None) is not None:
+                                ep = c_geom.endPoint
+                                c_dict["end_point"] = [round(float(ep.x), 6), round(float(ep.y), 6), round(float(ep.z), 6)]
+                            if hasattr(c_geom, "center") and getattr(c_geom, "center", None) is not None:
+                                cp = c_geom.center
+                                c_dict["center"] = [round(float(cp.x), 6), round(float(cp.y), 6), round(float(cp.z), 6)]
+                            if hasattr(c_geom, "radius") and getattr(c_geom, "radius", None) is not None:
+                                c_dict["radius"] = canonicalize_value(float(c_geom.radius))
+
+                        c_bb = getattr(cv, "boundingBox", None)
+                        if c_bb and getattr(c_bb, "minPoint", None) and getattr(c_bb, "maxPoint", None):
+                            c_dict["bounding_box"] = {
+                                "min": [round(float(c_bb.minPoint.x), 6), round(float(c_bb.minPoint.y), 6), round(float(c_bb.minPoint.z), 6)],
+                                "max": [round(float(c_bb.maxPoint.x), 6), round(float(c_bb.maxPoint.y), 6), round(float(c_bb.maxPoint.z), 6)],
+                            }
+                        curve_items.append(c_dict)
+                    if curve_items:
+                        curve_items.sort(key=lambda x: json.dumps(x, sort_keys=True))
+
+                    # Sketch points
+                    sketch_pts = getattr(s, "sketchPoints", None)
+                    if sketch_pts is None or not hasattr(sketch_pts, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' sketchPoints collection is unreadable")
+                    pts_items = []
+                    for pi in range(sketch_pts.count):
+                        pt = sketch_pts.item(pi)
+                        pt_geom = getattr(pt, "geometry", None)
+                        if pt_geom is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' point {pi} has unreadable geometry")
+                        pts_items.append([round(float(pt_geom.x), 6), round(float(pt_geom.y), 6), round(float(pt_geom.z), 6)])
+                    pts_items.sort()
+
+                    # Sketch bounding box
+                    s_bb = getattr(s, "boundingBox", None)
+                    s_bbox = None
+                    if s_bb and getattr(s_bb, "minPoint", None) and getattr(s_bb, "maxPoint", None):
+                        s_bbox = {
+                            "min": [round(float(s_bb.minPoint.x), 6), round(float(s_bb.minPoint.y), 6), round(float(s_bb.minPoint.z), 6)],
+                            "max": [round(float(s_bb.maxPoint.x), 6), round(float(s_bb.maxPoint.y), 6), round(float(s_bb.maxPoint.z), 6)],
+                        }
+
                     is_local_vis = bool(raw_local if raw_local is not None else raw_eff)
                     is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                     s_items.append({
@@ -416,6 +535,9 @@ def collect_model_fingerprint(payload=None):
                         "constraints": cons_items,
                         "dimensions_count": len(dim_items),
                         "dimensions": dim_items,
+                        "curves": curve_items if curve_items else None,
+                        "points": pts_items if pts_items else None,
+                        "bounding_box": s_bbox,
                     })
                 except FusionScriptError:
                     raise
@@ -459,13 +581,18 @@ def collect_model_fingerprint(payload=None):
     attr_items = []
 
     def _read_owner_attributes(owner, owner_type, owner_id):
-        o_attrs = getattr(owner, "attributes", None)
-        if o_attrs is None:
-            return
-        if not hasattr(o_attrs, "count"):
+        if not owner_id or not isinstance(owner_id, str) or not owner_id.strip():
             raise FusionScriptError(
                 "CAPABILITY_UNAVAILABLE",
-                f"{owner_type} '{owner_id}' has invalid attributes collection",
+                f"{owner_type} lacks stable runtime identity; mutable name or empty ID cannot be used as authoritative owner identity",
+                details={"owner_type": owner_type, "owner_id": owner_id},
+            )
+        o_attrs = getattr(owner, "attributes", None)
+        if o_attrs is None or not hasattr(o_attrs, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"{owner_type} '{owner_id}' lacks attributes collection or attributes are unreadable; missing attribute collection cannot silently be treated as empty",
+                details={"owner_type": owner_type, "owner_id": owner_id},
             )
         for idx in range(o_attrs.count):
             try:
@@ -491,48 +618,82 @@ def collect_model_fingerprint(payload=None):
 
     # Component attributes
     for c in comps_list:
-        c_id = str(getattr(c, "id", "") or getattr(c, "entityToken", "") or getattr(c, "name", ""))
-        _read_owner_attributes(c, "component", c_id)
+        c_id = getattr(c, "entityToken", None) or getattr(c, "id", None)
+        if not c_id or not str(c_id).strip():
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"Component '{getattr(c, 'name', '')}' lacks stable runtime identity (entityToken or id); mutable component name cannot be used as authoritative identity",
+                details={"component_name": getattr(c, "name", None)},
+            )
+        _read_owner_attributes(c, "component", str(c_id).strip())
 
     # Occurrence attributes
     if design and root:
         all_occs = getattr(root, "allOccurrences", None)
-        if all_occs and hasattr(all_occs, "count"):
+        if all_occs is not None and hasattr(all_occs, "count"):
             for i in range(all_occs.count):
                 occ = all_occs.item(i)
-                occ_id = str(getattr(occ, "fullPathName", getattr(occ, "name", "")))
-                _read_owner_attributes(occ, "occurrence", occ_id)
+                occ_id = getattr(occ, "entityToken", None) or getattr(occ, "id", None)
+                if not occ_id or not str(occ_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Occurrence '{getattr(occ, 'name', '')}' lacks stable runtime identity (entityToken or id); mutable occurrence name cannot be used as authoritative identity",
+                        details={"occurrence_name": getattr(occ, "name", None)},
+                    )
+                _read_owner_attributes(occ, "occurrence", str(occ_id).strip())
 
     # Body attributes
     for c in comps_list:
-        c_name = str(getattr(c, "name", ""))
         bodies = getattr(c, "bRepBodies", None)
-        if bodies and hasattr(bodies, "count"):
+        if bodies is not None and hasattr(bodies, "count"):
             for b_idx in range(bodies.count):
                 b = bodies.item(b_idx)
-                b_id = f"{c_name}:{str(getattr(b, 'entityToken', '') or getattr(b, 'name', ''))}"
-                _read_owner_attributes(b, "body", b_id)
+                b_id = getattr(b, "entityToken", None) or getattr(b, "id", None)
+                if not b_id or not str(b_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Body '{getattr(b, 'name', '')}' lacks stable runtime identity (entityToken or id); mutable body name cannot be used as authoritative identity",
+                        details={"body_name": getattr(b, "name", None)},
+                    )
+                _read_owner_attributes(b, "body", str(b_id).strip())
 
     # Sketch attributes
     for c in comps_list:
-        c_name = str(getattr(c, "name", ""))
         sketches = getattr(c, "sketches", None)
-        if sketches and hasattr(sketches, "count"):
+        if sketches is not None and hasattr(sketches, "count"):
             for s_idx in range(sketches.count):
                 s = sketches.item(s_idx)
-                s_id = f"{c_name}:{str(getattr(s, 'entityToken', '') or getattr(s, 'name', ''))}"
-                _read_owner_attributes(s, "sketch", s_id)
+                s_id = getattr(s, "entityToken", None) or getattr(s, "id", None)
+                if not s_id or not str(s_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Sketch '{getattr(s, 'name', '')}' lacks stable runtime identity (entityToken or id); mutable sketch name cannot be used as authoritative identity",
+                        details={"sketch_name": getattr(s, "name", None)},
+                    )
+                _read_owner_attributes(s, "sketch", str(s_id).strip())
 
     # Timeline / Feature entity attributes
     if design and timeline and hasattr(timeline, "count"):
         for t_idx in range(timeline.count):
             t = timeline.item(t_idx)
-            t_id = str(getattr(t, "entityToken", None) or getattr(t, "id", None) or getattr(t, "name", "") or t_idx)
-            _read_owner_attributes(t, "timeline", t_id)
+            t_id = getattr(t, "entityToken", None) or getattr(t, "id", None)
+            if not t_id or not str(t_id).strip():
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Timeline item {t_idx} lacks stable runtime identity (entityToken or id); mutable timeline name cannot be used as authoritative identity",
+                    details={"timeline_index": t_idx},
+                )
+            _read_owner_attributes(t, "timeline", str(t_id).strip())
             feat = getattr(t, "entity", None)
             if feat:
-                f_id = str(getattr(feat, "entityToken", None) or getattr(feat, "id", None) or getattr(feat, "name", "") or t_id)
-                _read_owner_attributes(feat, "feature", f_id)
+                f_id = getattr(feat, "entityToken", None) or getattr(feat, "id", None)
+                if not f_id or not str(f_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Timeline feature on item {t_idx} lacks stable runtime identity (entityToken or id); mutable feature name cannot be used as authoritative identity",
+                        details={"timeline_index": t_idx},
+                    )
+                _read_owner_attributes(feat, "feature", str(f_id).strip())
 
     attr_items.sort(key=lambda x: (x["owner_type"], x["owner_id"], x["group"], x["name"], x.get("value", "")))
     canonical["attributes"] = attr_items

@@ -397,3 +397,135 @@ def test_falsify_begin_transaction_fails_closed_on_empty_fingerprint_or_unobserv
     assert bl["transaction_id"] == "tx_valid"
     assert bl["baseline_revision"] == "rev_1"
     assert bl["baseline_fingerprint"] == "valid-seed-fp"
+
+
+def test_falsify_moving_sketch_geometry_at_equal_counts_changes_fingerprint():
+    """Proves moving sketch geometry (curves or points) changes fingerprint even when counts and constraints are unchanged."""
+    sketch_base = {
+        "document_ref": "doc_1",
+        "sketches": [
+            {
+                "name": "Sketch1",
+                "component": "Root",
+                "profiles_count": 1,
+                "curves_count": 4,
+                "constraints_count": 1,
+                "constraints": [{"type": "HorizontalConstraint", "is_deletable": True}],
+                "dimensions_count": 1,
+                "dimensions": [{"name": "d1", "value": 10.0, "expression": "10 mm"}],
+                "curves": [
+                    {"type": "SketchLine", "length": 10.0, "start_point": [0.0, 0.0, 0.0], "end_point": [10.0, 0.0, 0.0]},
+                    {"type": "SketchLine", "length": 10.0, "start_point": [10.0, 0.0, 0.0], "end_point": [10.0, 10.0, 0.0]},
+                    {"type": "SketchLine", "length": 10.0, "start_point": [10.0, 10.0, 0.0], "end_point": [0.0, 10.0, 0.0]},
+                    {"type": "SketchLine", "length": 10.0, "start_point": [0.0, 10.0, 0.0], "end_point": [0.0, 0.0, 0.0]},
+                ],
+                "points": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]],
+                "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 0.0]},
+            }
+        ],
+    }
+
+    # Shifted geometry: exact same counts (profiles_count=1, curves_count=4, constraints_count=1, dimensions_count=1)
+    sketch_moved = {
+        "document_ref": "doc_1",
+        "sketches": [
+            {
+                "name": "Sketch1",
+                "component": "Root",
+                "profiles_count": 1,
+                "curves_count": 4,
+                "constraints_count": 1,
+                "constraints": [{"type": "HorizontalConstraint", "is_deletable": True}],
+                "dimensions_count": 1,
+                "dimensions": [{"name": "d1", "value": 10.0, "expression": "10 mm"}],
+                "curves": [
+                    {"type": "SketchLine", "length": 10.0, "start_point": [5.0, 0.0, 0.0], "end_point": [15.0, 0.0, 0.0]},
+                    {"type": "SketchLine", "length": 10.0, "start_point": [15.0, 0.0, 0.0], "end_point": [15.0, 10.0, 0.0]},
+                    {"type": "SketchLine", "length": 10.0, "start_point": [15.0, 10.0, 0.0], "end_point": [5.0, 10.0, 0.0]},
+                    {"type": "SketchLine", "length": 10.0, "start_point": [5.0, 10.0, 0.0], "end_point": [5.0, 0.0, 0.0]},
+                ],
+                "points": [[5.0, 0.0, 0.0], [15.0, 0.0, 0.0], [15.0, 10.0, 0.0], [5.0, 10.0, 0.0]],
+                "bounding_box": {"min": [5.0, 0.0, 0.0], "max": [15.0, 10.0, 0.0]},
+            }
+        ],
+    }
+
+    fp_base = compute_model_fingerprint(sketch_base)
+    fp_moved = compute_model_fingerprint(sketch_moved)
+    assert fp_base != fp_moved, "Moved sketch geometry with identical counts must produce distinct fingerprint"
+
+
+def test_falsify_materially_different_body_geometry_with_same_coarse_aggregates_changes_fingerprint():
+    """Proves materially different body geometry with identical coarse counts/area/volume/bbox produces distinct fingerprints."""
+    base_body = {
+        "document_ref": "doc_1",
+        "bodies": [
+            {
+                "name": "Body1",
+                "component": "Root",
+                "is_solid": True,
+                "is_visible": True,
+                "volume": 100.0,
+                "area": 50.0,
+                "faces_count": 6,
+                "edges_count": 12,
+                "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+                "center_of_mass": [5.0, 5.0, 4.0],
+                "vertices": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0]],
+                "faces": [
+                    {"centroid": [5.0, 5.0, 0.0], "area": 100.0, "surface_type": "PlaneSurface"},
+                    {"centroid": [5.0, 5.0, 10.0], "area": 100.0, "surface_type": "PlaneSurface"},
+                ],
+            }
+        ],
+    }
+
+    # Materially different body geometry: exact same volume (100.0), area (50.0), faces_count (6), edges_count (12), bbox
+    # but distinct center of mass, face centroids, and vertices
+    different_body = {
+        "document_ref": "doc_1",
+        "bodies": [
+            {
+                "name": "Body1",
+                "component": "Root",
+                "is_solid": True,
+                "is_visible": True,
+                "volume": 100.0,
+                "area": 50.0,
+                "faces_count": 6,
+                "edges_count": 12,
+                "bounding_box": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]},
+                "center_of_mass": [5.0, 5.0, 6.0],
+                "vertices": [[0.0, 0.0, 1.0], [10.0, 0.0, 1.0], [10.0, 10.0, 1.0], [0.0, 10.0, 1.0]],
+                "faces": [
+                    {"centroid": [5.0, 5.0, 1.0], "area": 100.0, "surface_type": "PlaneSurface"},
+                    {"centroid": [5.0, 5.0, 9.0], "area": 100.0, "surface_type": "PlaneSurface"},
+                ],
+            }
+        ],
+    }
+
+    fp_base = compute_model_fingerprint(base_body)
+    fp_diff = compute_model_fingerprint(different_body)
+    assert fp_base != fp_diff, "Bodies with identical volume/area/bbox/counts but different internal geometry must have distinct fingerprints"
+
+
+def test_falsify_attribute_owner_empty_id_or_whitespace_fails_closed():
+    """Proves attribute collections with empty or whitespace owner_id fail closed."""
+    # Empty string owner_id
+    with pytest.raises(FusionCadError) as exc_empty:
+        compute_model_fingerprint({
+            "document_ref": "doc_1",
+            "attributes": [{"owner_type": "body", "owner_id": "", "group": "bridge.cad/v1", "name": "tag", "value": "v"}],
+        })
+    assert exc_empty.value.code == ErrorCode.INVALID_ARGUMENT
+    assert "lacks stable owner_id" in exc_empty.value.message
+
+    # Whitespace-only owner_id
+    with pytest.raises(FusionCadError) as exc_ws:
+        compute_model_fingerprint({
+            "document_ref": "doc_1",
+            "attributes": [{"owner_type": "body", "owner_id": "   ", "group": "bridge.cad/v1", "name": "tag", "value": "v"}],
+        })
+    assert exc_ws.value.code == ErrorCode.INVALID_ARGUMENT
+    assert "lacks stable owner_id" in exc_ws.value.message
