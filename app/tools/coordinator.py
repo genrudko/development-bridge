@@ -238,7 +238,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         route = container.route_registry.resolve(route_id)
         if route is None and not bootstrap_if_missing:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
-        if session_id is not None:
+        if session_id is not None and route is not None:
             container.coordinator.unbind_session(session_id)
         if container.route_control is not None:
             prepared = container.route_control.prepare_bind(

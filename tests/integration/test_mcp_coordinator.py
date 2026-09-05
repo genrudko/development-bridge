@@ -936,6 +936,49 @@ async def test_bind_current_preserves_existing_route_delivery_lease(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bind_current_missing_route_bootstrap_preserves_existing_session_binding(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-existing",
+        "telegram-bridge-g0",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        mounted = await session.call_tool("coordinator_x_mount", {"route_id": "bridge"})
+        assert mounted.is_error is not True
+        assert len(container.coordinator._session_bindings) == 1
+        before = next(iter(container.coordinator._session_bindings.values())).copy()
+        assert before["route_id"] == "bridge"
+        assert before["channel_id"] == "telegram-bridge-g0"
+
+        pending = await session.call_tool(
+            "coordinator_route_bind_current",
+            {"route_id": "newroute", "bootstrap_if_missing": True},
+        )
+        assert pending.is_error is not True
+        assert pending.structured_content == {
+            "route_id": "newroute",
+            "state": "bind_pending",
+            "generation": 0,
+        }
+        assert container.route_registry.resolve("newroute") is None
+        assert len(container.coordinator._session_bindings) == 1
+        after = next(iter(container.coordinator._session_bindings.values())).copy()
+        assert after == before
+
+
+@pytest.mark.asyncio
 async def test_bind_current_missing_route_with_bootstrap_if_missing(tmp_path):
     settings = BridgeSettings.model_validate({
         "server": {"public_base_url": "https://bridge.example"},
