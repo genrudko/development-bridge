@@ -18,8 +18,12 @@ def executor_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...
 
     async def executor_start(ctx, params, request_context):
         arguments = params.arguments
-        configured = container.settings.executors.antigravity
         executor_name = ExecutorName(arguments["executor"]) if arguments.get("executor") else None
+        configured = (
+            container.settings.executors.openrouter
+            if executor_name is ExecutorName.OPENROUTER
+            else container.settings.executors.antigravity
+        )
         model = arguments.get("model")
         if model is not None and executor_name is not ExecutorName.OPENROUTER:
             raise BridgeError(

@@ -81,7 +81,13 @@ async def test_executor_tools_are_normalized_durable_and_hidden_capable(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_openrouter_mcp_executor_lifecycle(tmp_path):
+@pytest.mark.parametrize(("overrides", "expected_limits"), [
+    ({}, (123, 8192)),
+    ({"timeout_seconds": 45}, (45, 8192)),
+    ({"output_limit_bytes": 4096}, (123, 4096)),
+    ({"timeout_seconds": 45, "output_limit_bytes": 4096}, (45, 4096)),
+])
+async def test_openrouter_mcp_executor_lifecycle(tmp_path, overrides, expected_limits):
     root = create_git_repository(tmp_path, "repo")
     fake_worker = tmp_path / "fake_worker"
     fake_worker.write_text("#!/bin/sh\nprintf '%s\\n' '{\"status\":\"SUCCESS\",\"response\":\"worker completed\"}'\n")
@@ -91,8 +97,11 @@ async def test_openrouter_mcp_executor_lifecycle(tmp_path):
         "server": {"tool_surface": "compact"},
         "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
         "executors": {
+            "antigravity": {"task_timeout_seconds": 456, "output_limit_bytes": 16384},
             "openrouter": {
                 "enabled": True,
+                "task_timeout_seconds": 123,
+                "output_limit_bytes": 8192,
             }
         },
         "projects": [{"id": "project", "name": "Project", "repositories": [{
@@ -130,7 +139,9 @@ async def test_openrouter_mcp_executor_lifecycle(tmp_path):
 
                     # Verify successful start with allowlisted model persists model and attribution
                     started = json.loads((await session.call_tool("bridge_call", {"tool_name": "executor_start", "arguments": {
-                        **scope, "task": "review", "task_kind": "review", "executor": "openrouter", "model": "qwen/qwen3-coder-next"}})).content[0].text)["data"]
+                        **scope, "task": "review", "task_kind": "review", "executor": "openrouter", "model": "qwen/qwen3-coder-next", **overrides}})).content[0].text)["data"]
                     final = await terminal(session, scope, started["job_id"])
                     assert final["executor"] == "openrouter"
                     assert final["executor_model"] == "qwen/qwen3-coder-next"
+                    profile = container.jobs.store.execution_profile(started["job_id"])
+                    assert (profile.timeout_seconds, profile.output_limit_bytes) == expected_limits
