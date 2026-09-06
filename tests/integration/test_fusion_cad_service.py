@@ -5431,7 +5431,7 @@ async def test_failed_service_read_with_nested_tokens_never_leaks_secrets_in_cad
 
     # Legitimate non-token diagnostics must be preserved
     assert err.code == ErrorCode.REF_STALE
-    assert err.message == "Target entity reference ent_face_stale is stale"
+    assert err.message == "Referenced CAD entity is stale or no longer exists"
     assert err.details.get("target") == "ent_face_stale"
     assert (
         err.details.get("nested", {}).get("diagnostic")

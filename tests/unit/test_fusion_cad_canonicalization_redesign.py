@@ -260,42 +260,46 @@ def test_duplicate_semantic_names_remain_stable_across_lifecycle_ref_renames():
 # 3. Untrusted error boundaries across all 5 paths
 # ---------------------------------------------------------------------------
 
-SECRET_TOKEN = "secret::adsk::token::top_secret_9999"
+UNPATTERNED_MARKER = "NATIVE_VALUE_X9Y8Z7_NOT_PATTERNED"
 
 
-def _assert_zero_secret_leakage(exc: Exception, secret: str = SECRET_TOKEN) -> None:
-    """Verify that exception contains zero traces of secret in message, details, str, repr,
+def _assert_zero_secret_leakage(exc: Exception, secret: str = UNPATTERNED_MARKER) -> None:
+    """Verify that exception contains zero traces of secret/marker in message, details, str, repr,
     or formatted traceback, and has no __cause__ or __context__.
     """
     assert exc.__cause__ is None, f"__cause__ must be None, got {exc.__cause__!r}"
     assert exc.__context__ is None, f"__context__ must be None, got {exc.__context__!r}"
 
     msg = getattr(exc, "message", str(exc))
-    assert secret not in msg, f"Secret leaked in exception message: {msg}"
+    assert secret not in msg, f"Marker leaked in exception message: {msg}"
 
     details = getattr(exc, "details", {})
-    assert secret not in str(details), f"Secret leaked in exception details: {details}"
+    assert secret not in str(details), f"Marker leaked in exception details: {details}"
 
     exc_str = str(exc)
-    assert secret not in exc_str, f"Secret leaked in str(exc): {exc_str}"
+    assert secret not in exc_str, f"Marker leaked in str(exc): {exc_str}"
 
     exc_repr = repr(exc)
-    assert secret not in exc_repr, f"Secret leaked in repr(exc): {exc_repr}"
+    assert secret not in exc_repr, f"Marker leaked in repr(exc): {exc_repr}"
 
     formatted_tb = "".join(traceback.format_exception(exc))
     assert secret not in formatted_tb, (
-        f"Secret leaked in formatted traceback: {formatted_tb}"
+        f"Marker leaked in formatted traceback: {formatted_tb}"
     )
 
 
 def test_direct_result_error_boundary_confidentiality():
-    """Direct-result failure with secret token in raw error message or details."""
+    """Direct-result failure with arbitrary unpatterned marker in raw error message or details."""
     raw = {
         "status": "failed",
         "error": {
             "code": "FUSION_API_ERROR",
-            "message": f"Native API crashed with token: {SECRET_TOKEN}",
-            "details": {"native_token": SECRET_TOKEN, "sub": {"token": SECRET_TOKEN}},
+            "message": f"Native API crashed with unpatterned marker: {UNPATTERNED_MARKER}",
+            "details": {
+                "diagnostic": UNPATTERNED_MARKER,
+                "untrusted_info": UNPATTERNED_MARKER,
+                "ref": "ent_safe_123",
+            },
         },
     }
     with pytest.raises(FusionCadError) as exc_info:
@@ -303,10 +307,15 @@ def test_direct_result_error_boundary_confidentiality():
 
     _assert_zero_secret_leakage(exc_info.value)
     assert exc_info.value.code == ErrorCode.FUSION_API_ERROR
+    # Safe allowlisted diagnostic must survive
+    assert exc_info.value.details.get("ref") == "ent_safe_123"
+    # Arbitrary unpatterned fields must not survive
+    assert "diagnostic" not in exc_info.value.details
+    assert "untrusted_info" not in exc_info.value.details
 
 
 def test_content_block_error_boundary_confidentiality():
-    """Content-block failure with secret token embedded in JSON text content."""
+    """Content-block failure with unpatterned marker embedded in JSON text content."""
     raw = {
         "content": [
             {
@@ -316,8 +325,11 @@ def test_content_block_error_boundary_confidentiality():
                         "isError": True,
                         "error": {
                             "code": "REF_STALE",
-                            "message": f"Failed with {SECRET_TOKEN}",
-                            "details": {"token": SECRET_TOKEN},
+                            "message": f"Failed with {UNPATTERNED_MARKER}",
+                            "details": {
+                                "untrusted_field": UNPATTERNED_MARKER,
+                                "target": "ent_stale_target",
+                            },
                         },
                     }
                 ),
@@ -329,57 +341,81 @@ def test_content_block_error_boundary_confidentiality():
 
     _assert_zero_secret_leakage(exc_info.value)
     assert exc_info.value.code == ErrorCode.REF_STALE
+    assert exc_info.value.details.get("target") == "ent_stale_target"
+    assert "untrusted_field" not in exc_info.value.details
 
 
 def test_async_terminal_error_boundary_confidentiality():
-    """Async-terminal failure payload from desktop node containing secrets."""
+    """Async-terminal failure payload from desktop node containing unpatterned marker."""
     full = {
         "status": "failed",
         "error": {
-            "code": "FUSION_API_ERROR",
-            "message": f"Async operation failed: {SECRET_TOKEN}",
-            "details": {"entityToken": SECRET_TOKEN, "ref": "ent_123"},
+            "code": "TRANSACTION_CONFLICT",
+            "message": f"Async operation failed: {UNPATTERNED_MARKER}",
+            "details": {
+                "native_data": UNPATTERNED_MARKER,
+                "transaction_id": "tx_safe_456",
+                "applied": False,
+            },
         },
     }
     err_code, err_msg, err_details = FusionCadService._extract_error_info(full)
     exc = FusionCadError(err_code, err_msg, details=err_details)
     _assert_zero_secret_leakage(exc)
-    assert exc.details.get("ref") == "ent_123"
+    assert exc.code == ErrorCode.TRANSACTION_CONFLICT
+    assert exc.details.get("transaction_id") == "tx_safe_456"
+    assert exc.details.get("applied") is False
+    assert "native_data" not in exc.details
 
 
 def test_malformed_result_error_boundary_confidentiality():
-    """Malformed non-JSON or invalid schema response containing secret tokens."""
-    raw = {
+    """Malformed non-JSON or non-dict output containing unpatterned marker."""
+    # Case 1: non-JSON text content
+    raw_text = {
         "content": [
             {
                 "type": "text",
-                "text": f"Traceback (most recent call last):\n  File \x27fusion.py\x27, line 12\n    crash_with({SECRET_TOKEN})\nValueError: bad",
+                "text": f"Error: crash at {UNPATTERNED_MARKER}",
             }
         ]
     }
     with pytest.raises(FusionCadError) as exc_info:
-        FusionCadService.decode_domain_result(raw)
+        FusionCadService.decode_domain_result(raw_text)
 
     _assert_zero_secret_leakage(exc_info.value)
     assert exc_info.value.code == ErrorCode.FUSION_API_ERROR
 
+    # Case 2: non-dict raw result
+    raw_non_dict = f"Not a dict containing {UNPATTERNED_MARKER}"
+    with pytest.raises(FusionCadError) as exc_info_nd:
+        FusionCadService.decode_domain_result(raw_non_dict)
+
+    _assert_zero_secret_leakage(exc_info_nd.value)
+    assert exc_info_nd.value.code == ErrorCode.FUSION_API_ERROR
+
 
 @pytest.mark.asyncio
 async def test_tool_adapter_and_service_validation_error_confidentiality():
-    """Tool-adapter and service validation errors with secret token in input args."""
+    """Tool-adapter and service validation errors with unpatterned marker in input args."""
     # 1. Service request validation
     service = FusionCadService(desktop_nodes=MagicMock())
     invalid_req = {
-        "group": "sketch",
-        "operation": "create",
-        "untrusted_field": SECRET_TOKEN,
-        "parameters": [{"value": "not-a-float-with-secret-" + SECRET_TOKEN}],
+        "operation": "model_snapshot",
+        "node_id": "desk-1",
+        "detail": UNPATTERNED_MARKER,
+        "untrusted_field": UNPATTERNED_MARKER,
     }
     with pytest.raises(BridgeError) as exc_info_srv:
-        service._validate_request_dict(invalid_req)
+        service._validate_request_dict(invalid_req, group="read")
 
     _assert_zero_secret_leakage(exc_info_srv.value)
     assert exc_info_srv.value.code == ErrorCode.INVALID_ARGUMENT
+    # Verify validation_errors diagnostic does not echo raw input
+    val_errs_srv = exc_info_srv.value.details.get("validation_errors", [])
+    assert val_errs_srv, "validation_errors must be present"
+    for ve in val_errs_srv:
+        assert "input" not in ve, f"Raw input must not be echoed in validation_errors: {ve}"
+        assert "ctx" not in ve, f"Context object must not be echoed in validation_errors: {ve}"
 
     # 2. Tool adapter domain handler validation
     container = MagicMock()
@@ -389,7 +425,7 @@ async def test_tool_adapter_and_service_validation_error_confidentiality():
 
     class DummyParams:
         def __init__(self) -> None:
-            self.arguments = {"operation": "create", "bad_secret": SECRET_TOKEN}
+            self.arguments = {"operation": "create", "bad_arg": UNPATTERNED_MARKER}
 
     class DummyContext:
         request_id = "req_test_123"
@@ -399,3 +435,8 @@ async def test_tool_adapter_and_service_validation_error_confidentiality():
 
     _assert_zero_secret_leakage(exc_info_tool.value)
     assert exc_info_tool.value.code == ErrorCode.INVALID_ARGUMENT
+    val_errs_tool = exc_info_tool.value.details.get("validation_errors", [])
+    assert val_errs_tool, "validation_errors must be present in tool adapter error"
+    for ve in val_errs_tool:
+        assert "input" not in ve, f"Raw input must not be echoed in validation_errors: {ve}"
+        assert "ctx" not in ve, f"Context object must not be echoed in validation_errors: {ve}"

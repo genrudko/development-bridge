@@ -57,7 +57,7 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         if is_error:
             err_code, err_msg, err_details = FusionCadService._extract_error_info(full)
             summary = failure(
-                request_id, BridgeError(err_code, err_msg, details=err_details)
+                request_id, FusionCadError(err_code, err_msg, details=err_details)
             )
         else:
             summary = success(request_id, {"external_result": metadata})
@@ -128,7 +128,7 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             return to_mcp_result(
                 failure(
                     request_context.request_id,
-                    BridgeError(err_code, err_msg, details=err_details),
+                    FusionCadError(err_code, err_msg, details=err_details),
                 )
             )
         return to_mcp_result(success(request_context.request_id, data))
@@ -185,16 +185,13 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 safe_msg = format_safe_validation_message(
                     f"Invalid {tool_name} arguments", exc.errors()
                 )
-                val_err = BridgeError(
+                val_err = FusionCadError(
                     ErrorCode.INVALID_ARGUMENT,
                     safe_msg,
                     details={
                         "validation_errors": sanitize_validation_errors(exc.errors())
                     },
                 )
-                val_err.__cause__ = None
-                val_err.__context__ = None
-                val_err.__suppress_context__ = True
             if val_err is not None:
                 raise val_err
 
@@ -217,14 +214,11 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 and result.get("status") == "queued"
             ):
                 return to_mcp_result(success(request_context.request_id, result))
-            safe_int_err = BridgeError(
+            safe_int_err = FusionCadError(
                 ErrorCode.INTERNAL_ERROR,
                 f"Unexpected domain result format from {tool_name}",
-                details={"result": sanitize_public_payload(result)},
+                details={"tool_name": tool_name},
             )
-            safe_int_err.__cause__ = None
-            safe_int_err.__context__ = None
-            safe_int_err.__suppress_context__ = True
             raise safe_int_err
 
         return domain_handler

@@ -17,7 +17,9 @@ from app.fusion_cad.capabilities import (
 )
 from app.fusion_cad.errors import (
     FusionCadError,
+    filter_trusted_diagnostics,
     format_safe_validation_message,
+    get_safe_error_message,
     sanitize_error_message,
     sanitize_public_payload,
     sanitize_validation_errors,
@@ -310,12 +312,21 @@ class FusionCadService:
         return False
 
     @classmethod
+    def _resolve_safe_error_message(cls, err_code: ErrorCode, raw_details: Any) -> str:
+        if (
+            err_code == ErrorCode.NO_ACTIVE_DESIGN
+            and isinstance(raw_details, Mapping)
+            and "name" in raw_details
+        ):
+            return "Document lacks stable runtime identity"
+        return get_safe_error_message(err_code)
+
+    @classmethod
     def _extract_error_info(
         cls, payload: dict[str, Any]
     ) -> tuple[ErrorCode, str, dict[str, Any]]:
-        err_msg = "Native Fusion CAD execution failed"
-        err_details: dict[str, Any] = {"raw": sanitize_public_payload(payload)}
         err_code = ErrorCode.FUSION_API_ERROR
+        raw_details: Any = None
 
         if isinstance(payload.get("content"), list):
             for block in payload["content"]:
@@ -339,25 +350,16 @@ class FusionCadService:
                                     err_code = ErrorCode(str(code_str))
                                 except ValueError:
                                     err_code = ErrorCode.FUSION_API_ERROR
-                            err_msg = (
-                                err.get("message") or parsed.get("message") or err_msg
-                            )
-                            err_details = (
+                            raw_details = (
                                 err.get("details") or parsed.get("details") or parsed
                             )
                             return (
                                 err_code,
-                                str(err_msg),
-                                sanitize_public_payload(err_details),
+                                cls._resolve_safe_error_message(err_code, raw_details),
+                                filter_trusted_diagnostics(raw_details),
                             )
                     except (ValueError, TypeError):
-                        if text:
-                            err_msg = sanitize_error_message(text, err_code)
-                            return (
-                                err_code,
-                                err_msg,
-                                sanitize_public_payload(err_details),
-                            )
+                        pass
 
         if "error" in payload:
             err = payload["error"]
@@ -368,34 +370,27 @@ class FusionCadService:
                         err_code = ErrorCode(str(code_str))
                     except ValueError:
                         err_code = ErrorCode.FUSION_API_ERROR
-                err_msg = err.get("message") or payload.get("message") or err_msg
-                err_details = err.get("details") or payload.get("details") or err
+                raw_details = err.get("details") or payload.get("details")
             elif isinstance(err, str):
-                err_msg = err
+                pass
             return (
                 err_code,
-                sanitize_error_message(err_msg, err_code),
-                sanitize_public_payload(err_details),
+                cls._resolve_safe_error_message(err_code, raw_details),
+                filter_trusted_diagnostics(raw_details),
             )
 
-        if "message" in payload:
-            err_msg = str(payload["message"])
-            code_str = payload.get("code")
-            if code_str:
-                try:
-                    err_code = ErrorCode(str(code_str))
-                except ValueError:
-                    err_code = ErrorCode.FUSION_API_ERROR
-            return (
-                err_code,
-                sanitize_error_message(err_msg, err_code),
-                sanitize_public_payload(payload),
-            )
+        code_str = payload.get("code")
+        if code_str:
+            try:
+                err_code = ErrorCode(str(code_str))
+            except ValueError:
+                err_code = ErrorCode.FUSION_API_ERROR
 
+        raw_details = payload.get("details")
         return (
             err_code,
-            sanitize_error_message(err_msg, err_code),
-            sanitize_public_payload(err_details),
+            cls._resolve_safe_error_message(err_code, raw_details),
+            filter_trusted_diagnostics(raw_details),
         )
 
     @classmethod
@@ -409,7 +404,7 @@ class FusionCadService:
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
                 "Unexpected non-dict result type from desktop node",
-                details={"raw_result": sanitize_public_payload(raw_result)},
+                details={"parsed_type": type(raw_result).__name__},
             )
 
         if "isError" in raw_result and raw_result["isError"] is not False:
@@ -422,7 +417,7 @@ class FusionCadService:
                 raise FusionCadError(
                     ErrorCode.FUSION_API_ERROR,
                     "Native Fusion CAD execution returned empty content blocks",
-                    details={"raw_result": sanitize_public_payload(raw_result)},
+                    details={"content_type": "blocks"},
                 )
 
             for block in content_blocks:
@@ -434,7 +429,7 @@ class FusionCadService:
                         raise FusionCadError(
                             ErrorCode.FUSION_API_ERROR,
                             "Empty text content in native Fusion execution output",
-                            details={"block": sanitize_public_payload(block)},
+                            details={"content_type": "text"},
                         )
                     malformed_err: FusionCadError | None = None
                     try:
@@ -467,7 +462,7 @@ class FusionCadService:
                         raise FusionCadError(
                             ErrorCode.FUSION_API_ERROR,
                             "Unrecognized domain output from native Fusion script: missing or invalid api_version 'fusion.cad/v1'",
-                            details={"parsed": sanitize_public_payload(parsed)},
+                            details={"content_type": "json"},
                         )
 
                     candidate = dict(parsed)
@@ -491,7 +486,7 @@ class FusionCadService:
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
                 "No valid CAD text output found in native execution content",
-                details={"raw_result": sanitize_public_payload(raw_result)},
+                details={"content_type": "blocks"},
             )
 
         if raw_result.get("status") in ("failed", "error") or "error" in raw_result:
@@ -518,7 +513,7 @@ class FusionCadService:
         raise FusionCadError(
             ErrorCode.FUSION_API_ERROR,
             "Unrecognized domain output format from native Fusion script: missing or invalid api_version 'fusion.cad/v1'",
-            details={"raw_result": sanitize_public_payload(raw_result)},
+            details={"content_type": "unknown"},
         )
 
     def _finalize_completed_execution(
@@ -1034,15 +1029,19 @@ class FusionCadService:
             if node_id and (
                 has_binary_data(domain_payload) or self._is_oversized(domain_payload)
             ):
+                store_err: FusionCadError | None = None
                 try:
                     return self._desktop_nodes.store_external_result(
                         node_id, domain_payload
                     )
                 except Exception as exc:
-                    raise BridgeError(
+                    store_err = FusionCadError(
                         ErrorCode.INTERNAL_ERROR,
                         f"Failed to externalize binary result payload: {exc}",
-                    ) from exc
+                        details={"node_id": node_id},
+                    )
+                if store_err is not None:
+                    raise store_err
 
             if isinstance(result, dict) and not isinstance(result, CadResult):
                 return cad_result.model_dump(mode="python", exclude_none=True)
@@ -1151,10 +1150,9 @@ class FusionCadService:
             )
         op = request_dict.get("operation")
         if not op or not isinstance(op, str):
-            raise BridgeError(
+            raise FusionCadError(
                 ErrorCode.INVALID_ARGUMENT,
                 "Operation name is required in request payload",
-                details={"request": request_dict},
             )
 
         target_group = group
@@ -1243,7 +1241,7 @@ class FusionCadService:
             elif op == "set":
                 target_group = "style" if "visible" in request_dict else "metadata"
             else:
-                raise BridgeError(
+                raise FusionCadError(
                     ErrorCode.INVALID_ARGUMENT,
                     f"Unknown operation '{op}' in request payload",
                     details={"operation": op},
@@ -1274,13 +1272,13 @@ class FusionCadService:
                 "mutate" if target_group in ("metadata", "style") else target_group
             )
         else:
-            raise BridgeError(
+            raise FusionCadError(
                 ErrorCode.INVALID_ARGUMENT,
                 f"Unknown request group '{target_group}'",
                 details={"group": target_group},
             )
 
-        val_err: BridgeError | None = None
+        val_err: FusionCadError | None = None
         try:
             validated = adapter.validate_python(request_dict)
             return validated, target_group, bundle_group
@@ -1288,14 +1286,11 @@ class FusionCadService:
             safe_msg = format_safe_validation_message(
                 f"Invalid {target_group} request payload", exc.errors()
             )
-            val_err = BridgeError(
+            val_err = FusionCadError(
                 ErrorCode.INVALID_ARGUMENT,
                 safe_msg,
                 details={"validation_errors": sanitize_validation_errors(exc.errors())},
             )
-            val_err.__cause__ = None
-            val_err.__context__ = None
-            val_err.__suppress_context__ = True
         if val_err is not None:
             raise val_err
 
@@ -1656,7 +1651,7 @@ class FusionCadService:
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
                 "Unexpected non-dict result type from desktop node",
-                details={"raw_result": sanitize_public_payload(raw_result)},
+                details={"parsed_type": type(raw_result).__name__},
             )
 
         # Handle external_result reference already returned by desktop node
