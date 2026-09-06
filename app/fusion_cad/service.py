@@ -473,10 +473,27 @@ class FusionCadService:
                         f"Transaction '{tx_id}' {op} completed without applied=True (applied={applied_val!r}); preserving stored baseline",
                         details={"transaction_id": tx_id, "operation": op, "applied": applied_val},
                     )
-                res_doc = (
-                    (cad_result.document.document_ref if cad_result.document else None)
-                    or (cad_result.data.get("document_ref") if isinstance(cad_result.data, (dict, Mapping)) else None)
+                doc_doc_ref = (
+                    cad_result.document.document_ref if cad_result.document else None
                 )
+                data_doc_ref = (
+                    cad_result.data.get("document_ref")
+                    if isinstance(cad_result.data, (dict, Mapping))
+                    else None
+                )
+                if doc_doc_ref and data_doc_ref and doc_doc_ref != data_doc_ref:
+                    raise FusionCadError(
+                        ErrorCode.WRONG_DOCUMENT,
+                        f"Transaction '{tx_id}' {op} result document identity diverged between document state ('{doc_doc_ref}') and payload data ('{data_doc_ref}'); preserving stored baseline",
+                        details={
+                            "transaction_id": tx_id,
+                            "bound_document": stored_baseline["document_ref"],
+                            "result_document": doc_doc_ref,
+                            "data_document": data_doc_ref,
+                            "operation": op,
+                        },
+                    )
+                res_doc = doc_doc_ref or data_doc_ref
                 if not res_doc or not isinstance(res_doc, str) or not res_doc.strip():
                     raise FusionCadError(
                         ErrorCode.NO_ACTIVE_DESIGN,

@@ -1920,6 +1920,21 @@ async def test_falsify_async_transaction_lifecycle_queued_failed_and_succeeded(
     assert exc_wrong_doc.value.code == ErrorCode.WRONG_DOCUMENT
     assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
 
+    # 7b2. Diverged document identity between document state and payload data MUST NOT clear stored baseline
+    with pytest.raises(FusionCadError) as exc_diverged_doc:
+        cad_service.finalize_terminal_operation(
+            op_status_comm_succ,
+            {
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Transaction commit completed",
+                "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+                "data": {"operation": "commit", "applied": True, "transaction_id": "tx_async_1", "document_ref": "doc_diverged", "fingerprint": "proven_post_fp_456"},
+            },
+        )
+    assert exc_diverged_doc.value.code == ErrorCode.WRONG_DOCUMENT
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
+
     # 7c. Missing or empty authoritative fingerprint MUST NOT clear stored baseline
     with pytest.raises(FusionCadError) as exc_no_fp:
         cad_service.finalize_terminal_operation(
@@ -2709,6 +2724,28 @@ async def test_falsify_commit_preserves_baseline_on_failure_uncertain_or_inconsi
             group="transaction",
         )
     assert exc_wrong_doc.value.code == ErrorCode.WRONG_DOCUMENT
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_commit") is not None
+
+    # Case C2: Commit returns diverged document identity between document state and payload data -> baseline preserved
+    set_mock_resp({
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "transaction:commit",
+                "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+                "data": {"transaction_id": "tx_commit", "operation": "commit", "applied": True, "document_ref": "doc_diverged", "fingerprint": "new_fp_post"},
+            }),
+        }],
+        "isError": False,
+    })
+    with pytest.raises(FusionCadError) as exc_diverged_doc:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit"},
+            group="transaction",
+        )
+    assert exc_diverged_doc.value.code == ErrorCode.WRONG_DOCUMENT
     assert cad_service.revision_tracker.get_transaction_baseline("tx_commit") is not None
 
     # Case D: Commit returns empty/whitespace fingerprint -> baseline preserved
