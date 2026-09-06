@@ -782,56 +782,156 @@ def run():
         )
 
     if op == "query":
-        selector = PAYLOAD.get("selector", {})
-        limit = int(PAYLOAD.get("limit", 100))
+        attrs_by_owner = {}
+        for a in canonical_data.get("custom_attributes", []):
+            o_id = a.get("owner_id")
+            if o_id:
+                attrs_by_owner.setdefault(str(o_id), []).append(a)
+
         candidates = []
         for c in canonical_data.get("components", []):
-            candidates.append({"ref": c.get("ref") or f"ent_{c.get('id', 'comp')}", "name": c.get("name"), "kind": "component"})
+            c_name = str(c.get("name", ""))
+            c_id = str(c.get("id") or c.get("entityToken") or c_name)
+            c_attrs = attrs_by_owner.get(c_id, []) + (attrs_by_owner.get(c_name, []) if c_name != c_id else [])
+            c_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in c_attrs]
+            c_roles = [str(a.get("value")) for a in c_attrs if a.get("name") == "role"]
+            c_log = next((str(a.get("value")) for a in c_attrs if a.get("name") == "logical_object"), None)
+            c_recipe = next((str(a.get("value")) for a in c_attrs if a.get("name") == "recipe"), None)
+            c_tx = next((str(a.get("value")) for a in c_attrs if a.get("name") == "transaction_id"), None)
+            c_cand = {
+                "ref": c.get("ref") or f"ent_{c.get('id', 'comp')}",
+                "name": c_name,
+                "kind": "component",
+                "component_path": c.get("component_path") or (),
+                "tags": c_tags,
+                "role": c_roles or None,
+                "logical_object": c_log,
+                "recipe": c_recipe,
+                "transaction_id": c_tx,
+                "entityToken": c.get("entityToken"),
+            }
+            candidates.append(c_cand)
+
         for o in canonical_data.get("occurrences", []):
-            candidates.append({"ref": o.get("ref") or f"ent_{o.get('name', 'occ')}", "name": o.get("name"), "full_path_name": o.get("full_path_name"), "kind": "occurrence", "is_visible": o.get("is_visible")})
+            o_name = str(o.get("name", ""))
+            o_path = str(o.get("full_path_name") or o_name)
+            o_attrs = attrs_by_owner.get(o_path, []) + (attrs_by_owner.get(o_name, []) if o_name != o_path else [])
+            o_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in o_attrs]
+            o_roles = [str(a.get("value")) for a in o_attrs if a.get("name") == "role"]
+            o_log = next((str(a.get("value")) for a in o_attrs if a.get("name") == "logical_object"), None)
+            o_recipe = next((str(a.get("value")) for a in o_attrs if a.get("name") == "recipe"), None)
+            o_tx = next((str(a.get("value")) for a in o_attrs if a.get("name") == "transaction_id"), None)
+            o_cand = {
+                "ref": o.get("ref") or f"ent_{o_name}",
+                "name": o_name,
+                "full_path_name": o_path,
+                "kind": "occurrence",
+                "component_path": o.get("component_path") or (),
+                "occurrence": o.get("ref") or f"ent_{o_name}",
+                "is_visible": o.get("is_visible"),
+                "visible": o.get("is_visible"),
+                "transform": o.get("transform"),
+                "tags": o_tags,
+                "role": o_roles or None,
+                "logical_object": o_log,
+                "recipe": o_recipe,
+                "transaction_id": o_tx,
+                "entityToken": o.get("entityToken"),
+            }
+            candidates.append(o_cand)
+
         for b in canonical_data.get("bodies", []):
-            candidates.append({"ref": b.get("ref") or f"ent_{b.get('name', 'body')}", "name": b.get("name"), "component_path": (b.get("component_name"),) if b.get("component_name") else (), "kind": "body", "is_solid": b.get("is_solid"), "is_visible": b.get("is_visible")})
+            b_name = str(b.get("name", ""))
+            b_comp = b.get("component_name") or b.get("component")
+            b_attrs = attrs_by_owner.get(b_name, []) + (attrs_by_owner.get(f"{b_comp}:{b_name}", []) if b_comp else [])
+            b_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in b_attrs]
+            b_roles = [str(a.get("value")) for a in b_attrs if a.get("name") == "role"]
+            b_log = next((str(a.get("value")) for a in b_attrs if a.get("name") == "logical_object"), None)
+            b_recipe = next((str(a.get("value")) for a in b_attrs if a.get("name") == "recipe"), None)
+            b_tx = next((str(a.get("value")) for a in b_attrs if a.get("name") == "transaction_id"), None)
+            b_cand = {
+                "ref": b.get("ref") or f"ent_{b_name}",
+                "name": b_name,
+                "kind": "body",
+                "component_name": b_comp,
+                "component_path": b.get("component_path") or ((str(b_comp),) if b_comp else ()),
+                "is_solid": b.get("is_solid"),
+                "is_visible": b.get("is_visible"),
+                "visible": b.get("is_visible"),
+                "volume": b.get("volume"),
+                "area": b.get("area"),
+                "bounding_box": b.get("bounding_box"),
+                "appearance": b.get("appearance"),
+                "tags": b_tags,
+                "role": b_roles or None,
+                "logical_object": b_log,
+                "recipe": b_recipe,
+                "transaction_id": b_tx,
+                "entityToken": b.get("entityToken"),
+            }
+            candidates.append(b_cand)
+
         for s in canonical_data.get("sketches", []):
-            candidates.append({"ref": s.get("ref") or f"ent_{s.get('name', 'sk')}", "name": s.get("name"), "kind": "sketch"})
+            s_name = str(s.get("name", ""))
+            s_comp = s.get("component_name") or s.get("component")
+            s_attrs = attrs_by_owner.get(s_name, []) + (attrs_by_owner.get(f"{s_comp}:{s_name}", []) if s_comp else [])
+            s_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in s_attrs]
+            s_roles = [str(a.get("value")) for a in s_attrs if a.get("name") == "role"]
+            s_log = next((str(a.get("value")) for a in s_attrs if a.get("name") == "logical_object"), None)
+            s_recipe = next((str(a.get("value")) for a in s_attrs if a.get("name") == "recipe"), None)
+            s_tx = next((str(a.get("value")) for a in s_attrs if a.get("name") == "transaction_id"), None)
+            s_cand = {
+                "ref": s.get("ref") or f"ent_{s_name}",
+                "name": s_name,
+                "kind": "sketch",
+                "component_name": s_comp,
+                "component_path": s.get("component_path") or ((str(s_comp),) if s_comp else ()),
+                "is_visible": s.get("is_visible"),
+                "visible": s.get("is_visible"),
+                "bounding_box": s.get("bounding_box"),
+                "fully_constrained": s.get("fully_constrained"),
+                "tags": s_tags,
+                "role": s_roles or None,
+                "logical_object": s_log,
+                "recipe": s_recipe,
+                "transaction_id": s_tx,
+                "entityToken": s.get("entityToken"),
+            }
+            candidates.append(s_cand)
+
         for f in canonical_data.get("timeline", []):
-            candidates.append({"ref": f.get("ref") or f"ent_{f.get('name', 'feat')}", "name": f.get("name"), "feature_type": f.get("feature_type", "Feature"), "kind": "feature"})
+            f_name = str(f.get("name", ""))
+            f_attrs = attrs_by_owner.get(f_name, [])
+            f_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in f_attrs]
+            f_roles = [str(a.get("value")) for a in f_attrs if a.get("name") == "role"]
+            f_log = next((str(a.get("value")) for a in f_attrs if a.get("name") == "logical_object"), None)
+            f_recipe = next((str(a.get("value")) for a in f_attrs if a.get("name") == "recipe"), None)
+            f_tx = next((str(a.get("value")) for a in f_attrs if a.get("name") == "transaction_id"), None)
+            f_cand = {
+                "ref": f.get("ref") or f"ent_{f_name}",
+                "name": f_name,
+                "kind": "feature",
+                "feature_type": f.get("feature_type", "Feature"),
+                "timeline_index": f.get("index", 0),
+                "component_path": f.get("component_path") or (),
+                "is_suppressed": f.get("is_suppressed", False),
+                "health_status": f.get("health_status", "ok"),
+                "inputs": f.get("inputs", []),
+                "outputs": f.get("outputs", []),
+                "parent": f.get("parent"),
+                "children": f.get("children", []),
+                "tags": f_tags,
+                "role": f_roles or None,
+                "logical_object": f_log,
+                "recipe": f_recipe,
+                "transaction_id": f_tx,
+                "entityToken": f.get("entityToken"),
+            }
+            candidates.append(f_cand)
 
-        matched = []
-        for cand in candidates:
-            if "kind" in selector and selector["kind"]:
-                k_req = selector["kind"]
-                if isinstance(k_req, str) and cand.get("kind") != k_req:
-                    continue
-                if isinstance(k_req, (list, tuple)) and cand.get("kind") not in k_req:
-                    continue
-            if "name" in selector and selector["name"]:
-                n_req = selector["name"]
-                c_name = cand.get("name", "")
-                if isinstance(n_req, str) and c_name != n_req:
-                    continue
-                if isinstance(n_req, dict) and "regex" in n_req:
-                    import re
-                    if not re.search(n_req["regex"], c_name):
-                        continue
-            if "feature_type" in selector and selector["feature_type"]:
-                if cand.get("feature_type") != selector["feature_type"]:
-                    continue
-            if "visible" in selector and selector["visible"] is not None:
-                if cand.get("is_visible") != selector["visible"]:
-                    continue
-            matched.append(cand)
-            if len(matched) >= limit:
-                break
-
-        refs = [m.get("ref") for m in matched if m.get("ref")]
         return make_result(
-            data={
-                "matched_count": len(matched),
-                "normalized_selector": selector,
-                "refs": refs,
-                "entities": matched,
-            },
-            summary=f"Query matched {len(matched)} entities",
+            data={"candidates": candidates},
+            summary=f"Collected {len(candidates)} candidates for query",
             document=doc_state,
         )
 

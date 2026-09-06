@@ -863,19 +863,53 @@ class FusionCadService:
                 elif op == "query":
                     sel_input = payload.get("selector")
                     norm_sel = self._selector_engine.normalize(sel_input)
-                    candidates = []
+                    raw_candidates = []
                     if isinstance(cad_result.data, (dict, Mapping)):
-                        candidates = list(cad_result.data.get("entities", []))
-                    if not candidates and target_doc:
+                        raw_candidates = list(
+                            cad_result.data.get("candidates")
+                            or cad_result.data.get("entities")
+                            or []
+                        )
+                    if not raw_candidates and target_doc:
                         latest_snap = self._snapshot_store.get_latest(target_doc)
                         if latest_snap:
-                            candidates = (
+                            raw_candidates = (
                                 list(latest_snap.components)
                                 + list(latest_snap.occurrences)
                                 + list(latest_snap.bodies)
                                 + list(latest_snap.sketches)
                                 + list(latest_snap.features)
                             )
+                    candidates = []
+                    for idx, cand in enumerate(raw_candidates):
+                        if isinstance(cand, Mapping):
+                            d = dict(cand)
+                            raw_ref = d.get("ref") or f"ent_query_{idx}"
+                            native_tok = (
+                                d.get("entityToken")
+                                or d.get("native_token")
+                                or d.get("token")
+                            )
+                            if target_doc:
+                                iss = self._ref_registry.issue(
+                                    document_ref=target_doc,
+                                    kind=d.get("kind", "entity"),
+                                    name=d.get("name"),
+                                    component_path=d.get("component_path") or (),
+                                    native_token=native_tok,
+                                    opaque_ref=raw_ref
+                                    if re.match(ENTITY_REF_PATTERN, raw_ref)
+                                    else None,
+                                )
+                                d["ref"] = iss.ref
+                            # Strip native token fields before returning entities
+                            d.pop("entityToken", None)
+                            d.pop("native_token", None)
+                            d.pop("token", None)
+                            candidates.append(d)
+                        else:
+                            candidates.append(cand)
+
                     query_res = self._selector_engine.query(norm_sel, candidates)
                     limit = int(payload.get("limit", 100))
                     limited_entities = query_res.entities[:limit]
@@ -908,12 +942,17 @@ class FusionCadService:
                             if isinstance(item, Mapping):
                                 d = dict(item)
                                 raw_ref = d.get("ref") or f"ent_sel_{idx}"
+                                native_tok = (
+                                    d.get("entityToken")
+                                    or d.get("native_token")
+                                    or d.get("token")
+                                )
                                 if target_doc:
                                     iss = self._ref_registry.issue(
                                         document_ref=target_doc,
                                         kind=d.get("kind", "selection"),
                                         name=d.get("name"),
-                                        native_token=d.get("entityToken"),
+                                        native_token=native_tok,
                                         opaque_ref=raw_ref
                                         if re.match(ENTITY_REF_PATTERN, raw_ref)
                                         else None,
@@ -922,6 +961,10 @@ class FusionCadService:
                                 norm_refs.append(d["ref"])
                                 if "frame" not in d or d["frame"] is None:
                                     d["frame"] = {"space": "world", "ref": None}
+                                # Invariant: strip native/internal token fields before returning entities
+                                d.pop("entityToken", None)
+                                d.pop("native_token", None)
+                                d.pop("token", None)
                                 norm_ents.append(d)
                         cad_result = cad_result.model_copy(
                             update={

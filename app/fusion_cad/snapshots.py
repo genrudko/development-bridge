@@ -76,6 +76,7 @@ class ComponentSummary(BaseModel):
     ref: str = Field(..., pattern=ENTITY_REF_PATTERN)
     name: str = Field(..., min_length=1)
     kind: str = "component"
+    component_path: tuple[str, ...] = Field(default_factory=tuple)
     id: str | None = None
 
 
@@ -88,6 +89,7 @@ class OccurrenceSummary(BaseModel):
     name: str = Field(..., min_length=1)
     kind: str = "occurrence"
     full_path_name: str = Field(..., min_length=1)
+    component_path: tuple[str, ...] = Field(default_factory=tuple)
     is_visible: bool = True
     effective_visibility: bool = True
     transform: tuple[float, ...] | tuple[tuple[float, ...], ...] | None = None
@@ -159,9 +161,12 @@ class FeatureRecord(BaseModel):
     is_suppressed: bool = False
     health_status: str = "ok"
     diagnostic_message: str | None = None
+    component_path: tuple[str, ...] = Field(default_factory=tuple)
     dependencies: tuple[FeatureDependency, ...] = Field(default_factory=tuple)
     inputs: tuple[FeatureDependency, ...] = Field(default_factory=tuple)
     outputs: tuple[str, ...] = Field(default_factory=tuple)
+    parent: str | None = None
+    children: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class ParameterSummary(BaseModel):
@@ -176,6 +181,7 @@ class ParameterSummary(BaseModel):
     expression: str | None = None
     unit: str | None = "mm"
     is_user: bool = False
+    component_path: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class SketchReadResult(BaseModel):
@@ -227,7 +233,7 @@ class ModelSnapshot(BaseModel):
 
 def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
     """Compute deterministic SHA-256 structural hash of a semantic snapshot."""
-    # Build canonical payload omitting volatile identifiers (snapshot_id)
+    # Build canonical payload omitting volatile identifiers (snapshot_id, UUID refs, runtime IDs)
     canonical_body: dict[str, Any] = {}
 
     # 1. Document & revision
@@ -241,30 +247,105 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         counts = counts.model_dump(mode="python")
     canonical_body["counts"] = _canonicalize_value(counts)
 
-    # 3. Components (sorted by name, ref)
     comps = snapshot_dict.get("components", ())
+    occs = snapshot_dict.get("occurrences", ())
+    bodies = snapshot_dict.get("bodies", ())
+    sketches = snapshot_dict.get("sketches", ())
+    features = snapshot_dict.get("features", ())
+    params = snapshot_dict.get("parameters", ())
+
+    # Build semantic identifier map for volatile UUID-backed refs
+    ref_map: dict[str, str] = {}
+    for c in comps:
+        c_ref = getattr(c, "ref", None) or (
+            c.get("ref") if isinstance(c, Mapping) else None
+        )
+        c_name = getattr(c, "name", None) or (
+            c.get("name") if isinstance(c, Mapping) else ""
+        )
+        if c_ref:
+            ref_map[c_ref] = f"comp:{c_name}"
+    for o in occs:
+        o_ref = getattr(o, "ref", None) or (
+            o.get("ref") if isinstance(o, Mapping) else None
+        )
+        o_path = getattr(o, "full_path_name", None) or (
+            o.get("full_path_name") if isinstance(o, Mapping) else ""
+        )
+        if o_ref:
+            ref_map[o_ref] = f"occ:{o_path}"
+    for b in bodies:
+        b_ref = getattr(b, "ref", None) or (
+            b.get("ref") if isinstance(b, Mapping) else None
+        )
+        b_comp = getattr(b, "component_name", None) or (
+            b.get("component_name") if isinstance(b, Mapping) else ""
+        )
+        b_name = getattr(b, "name", None) or (
+            b.get("name") if isinstance(b, Mapping) else ""
+        )
+        if b_ref:
+            ref_map[b_ref] = f"body:{b_comp}:{b_name}"
+    for s in sketches:
+        s_ref = getattr(s, "ref", None) or (
+            s.get("ref") if isinstance(s, Mapping) else None
+        )
+        s_comp = getattr(s, "component_name", None) or (
+            s.get("component_name") if isinstance(s, Mapping) else ""
+        )
+        s_name = getattr(s, "name", None) or (
+            s.get("name") if isinstance(s, Mapping) else ""
+        )
+        if s_ref:
+            ref_map[s_ref] = f"sketch:{s_comp}:{s_name}"
+    for f in features:
+        f_ref = getattr(f, "ref", None) or (
+            f.get("ref") if isinstance(f, Mapping) else None
+        )
+        f_idx = getattr(f, "timeline_index", None) or (
+            f.get("timeline_index") if isinstance(f, Mapping) else 0
+        )
+        f_name = getattr(f, "name", None) or (
+            f.get("name") if isinstance(f, Mapping) else ""
+        )
+        if f_ref:
+            ref_map[f_ref] = f"feat:{f_idx}:{f_name}"
+    for p in params:
+        p_ref = getattr(p, "ref", None) or (
+            p.get("ref") if isinstance(p, Mapping) else None
+        )
+        p_name = getattr(p, "name", None) or (
+            p.get("name") if isinstance(p, Mapping) else ""
+        )
+        if p_ref:
+            ref_map[p_ref] = f"param:{p_name}"
+
+    # 3. Components (sorted by name)
     comp_list = []
     for c in comps:
         cd = c.model_dump(mode="python") if isinstance(c, BaseModel) else dict(c)
+        cd.pop("ref", None)
+        cd.pop("id", None)
         comp_list.append(cd)
-    comp_list.sort(key=lambda x: (x.get("name", ""), x.get("ref", "")))
+    comp_list.sort(key=lambda x: x.get("name", ""))
     canonical_body["components"] = _canonicalize_value(comp_list)
 
     # 4. Occurrences (sorted by full_path_name)
-    occs = snapshot_dict.get("occurrences", ())
     occ_list = []
     for o in occs:
         od = o.model_dump(mode="python") if isinstance(o, BaseModel) else dict(o)
+        od.pop("ref", None)
+        od.pop("id", None)
         occ_list.append(od)
     occ_list.sort(key=lambda x: x.get("full_path_name", ""))
     canonical_body["occurrences"] = _canonicalize_value(occ_list)
 
-    # 5. Bodies (sorted by component_name, name, ref)
-    bodies = snapshot_dict.get("bodies", ())
+    # 5. Bodies (sorted by component_name, name)
     body_list = []
     for b in bodies:
         bd = b.model_dump(mode="python") if isinstance(b, BaseModel) else dict(b)
-        # omit raw face/edge arrays from body summary for hash
+        bd.pop("ref", None)
+        bd.pop("id", None)
         bd.pop("faces", None)
         bd.pop("edges", None)
         body_list.append(bd)
@@ -272,40 +353,75 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         key=lambda x: (
             x.get("component_name") or "",
             x.get("name", ""),
-            x.get("ref", ""),
         )
     )
     canonical_body["bodies"] = _canonicalize_value(body_list)
 
-    # 6. Sketches (sorted by component_name, name, ref)
-    sketches = snapshot_dict.get("sketches", ())
+    # 6. Sketches (sorted by component_name, name)
     sk_list = []
     for s in sketches:
         sd = s.model_dump(mode="python") if isinstance(s, BaseModel) else dict(s)
+        sd.pop("ref", None)
+        sd.pop("id", None)
         sk_list.append(sd)
     sk_list.sort(
         key=lambda x: (
             x.get("component_name") or "",
             x.get("name", ""),
-            x.get("ref", ""),
         )
     )
     canonical_body["sketches"] = _canonicalize_value(sk_list)
 
     # 7. Features (sorted by timeline_index)
-    features = snapshot_dict.get("features", ())
     feat_list = []
     for f in features:
         fd = f.model_dump(mode="python") if isinstance(f, BaseModel) else dict(f)
+        fd.pop("ref", None)
+        fd.pop("id", None)
+        # Normalize dependencies / inputs using semantic ref map
+        for dep_key in ("inputs", "dependencies"):
+            if dep_key in fd and isinstance(fd[dep_key], (list, tuple)):
+                norm_deps = []
+                for dep in fd[dep_key]:
+                    dep_d = (
+                        dep.model_dump(mode="python")
+                        if isinstance(dep, BaseModel)
+                        else dict(dep)
+                    )
+                    d_ref = dep_d.get("ref", "")
+                    dep_d["target"] = ref_map.get(
+                        d_ref, d_ref if not str(d_ref).startswith("ent_") else ""
+                    )
+                    dep_d.pop("ref", None)
+                    norm_deps.append(dep_d)
+                fd[dep_key] = norm_deps
+        # Normalize outputs using semantic ref map
+        if "outputs" in fd and isinstance(fd["outputs"], (list, tuple)):
+            fd["outputs"] = [
+                ref_map.get(o, o if not str(o).startswith("ent_") else "")
+                for o in fd["outputs"]
+            ]
+        # Normalize parent / children
+        if fd.get("parent"):
+            p_val = fd["parent"]
+            fd["parent"] = ref_map.get(
+                p_val, p_val if not str(p_val).startswith("ent_") else ""
+            )
+        if fd.get("children"):
+            fd["children"] = [
+                ref_map.get(ch, ch if not str(ch).startswith("ent_") else "")
+                for ch in fd["children"]
+            ]
         feat_list.append(fd)
     feat_list.sort(key=lambda x: int(x.get("timeline_index", 0)))
     canonical_body["features"] = _canonicalize_value(feat_list)
 
     # 8. Parameters (sorted by is_user, name)
-    params = snapshot_dict.get("parameters", ())
     param_list = []
     for p in params:
         pd = p.model_dump(mode="python") if isinstance(p, BaseModel) else dict(p)
+        pd.pop("ref", None)
+        pd.pop("id", None)
         param_list.append(pd)
     param_list.sort(key=lambda x: (not x.get("is_user", False), x.get("name", "")))
     canonical_body["parameters"] = _canonicalize_value(param_list)
@@ -334,19 +450,23 @@ def normalize_feature(
     idx = int(raw.get("index", raw.get("timeline_index", 0)))
     name = str(raw.get("name", f"Feature_{idx}"))
     feat_type = str(raw.get("feature_type", raw.get("type", "Feature")))
+    tok = str(raw.get("entityToken") or "")
+    raw_id = str(raw.get("id") or "")
+    raw_ref = str(raw.get("ref") or "")
 
-    ref_str = str(raw.get("ref") or raw.get("id") or f"ent_feat_{idx}")
+    explicit_ref = raw_ref if re.match(ENTITY_REF_PATTERN, raw_ref) else None
+
     if ref_registry is not None:
         issued = ref_registry.issue(
             document_ref=document_ref,
             kind="feature",
             name=name,
-            native_token=str(raw.get("entityToken") or raw.get("id") or ""),
-            opaque_ref=ref_str if re.match(ENTITY_REF_PATTERN, ref_str) else None,
+            native_token=tok or (raw_id if raw_id and raw_id != explicit_ref else None),
+            opaque_ref=explicit_ref,
         )
         final_ref = issued.ref
     else:
-        final_ref = _safe_ent_ref(ref_str, "feat")
+        final_ref = _safe_ent_ref(explicit_ref or raw_id or f"ent_feat_{idx}", "feat")
 
     deps_raw = raw.get("inputs") or raw.get("dependencies") or []
     norm_deps: list[FeatureDependency] = []
@@ -378,6 +498,19 @@ def normalize_feature(
     outputs_raw = raw.get("outputs") or []
     norm_outputs = tuple(_safe_ent_ref(o, "out") for o in outputs_raw)
 
+    feat_comp_path = (
+        tuple(str(x) for x in raw.get("component_path", ()))
+        if raw.get("component_path")
+        else ((str(raw.get("component_name")),) if raw.get("component_name") else ())
+    )
+    parent_val = str(raw["parent"]) if raw.get("parent") is not None else None
+    children_raw = raw.get("children") or ()
+    children_val = (
+        tuple(str(ch) for ch in children_raw)
+        if isinstance(children_raw, (list, tuple))
+        else ()
+    )
+
     return FeatureRecord(
         ref=final_ref,
         timeline_index=idx,
@@ -386,9 +519,12 @@ def normalize_feature(
         is_suppressed=bool(raw.get("is_suppressed", False)),
         health_status=str(raw.get("health_status", "ok")),
         diagnostic_message=raw.get("diagnostic_message"),
+        component_path=feat_comp_path,
         dependencies=tuple(norm_deps),
         inputs=tuple(norm_deps),
         outputs=norm_outputs,
+        parent=parent_val,
+        children=children_val,
     )
 
 
@@ -505,18 +641,47 @@ def normalize_snapshot(
     for c in comps_raw:
         if isinstance(c, Mapping):
             c_name = str(c.get("name", ""))
-            c_id = str(c.get("id") or c.get("entityToken") or "")
+            c_tok = str(c.get("entityToken") or "")
+            raw_id = str(c.get("id") or "")
+            # Invariant: native token must never be exposed via ComponentSummary.id
+            native_tok = c_tok or (
+                raw_id
+                if raw_id and (len(raw_id) > 16 or raw_id.startswith("AQAA"))
+                else None
+            )
+            safe_id = None
+            if (
+                raw_id
+                and raw_id != c_tok
+                and not raw_id.startswith("AQAA")
+                and len(raw_id) <= 16
+            ):
+                safe_id = raw_id
+
             if ref_registry is not None:
                 iss = ref_registry.issue(
                     document_ref=doc_ref,
                     kind="component",
                     name=c_name,
-                    native_token=c_id or None,
+                    native_token=native_tok,
                 )
                 c_ref = iss.ref
             else:
-                c_ref = _safe_ent_ref(c.get("ref") or c_id or c_name, "comp")
-            norm_comps.append(ComponentSummary(ref=c_ref, name=c_name, id=c_id or None))
+                c_ref = _safe_ent_ref(c.get("ref") or safe_id or c_name, "comp")
+
+            c_path = (
+                tuple(str(x) for x in c.get("component_path", ()))
+                if c.get("component_path")
+                else ()
+            )
+            norm_comps.append(
+                ComponentSummary(
+                    ref=c_ref,
+                    name=c_name,
+                    component_path=c_path,
+                    id=safe_id,
+                )
+            )
     norm_comps.sort(key=lambda x: (x.name, x.ref))
 
     # 3. Occurrences
@@ -545,11 +710,17 @@ def normalize_snapshot(
             )
             is_vis = bool(o.get("is_visible", True))
             eff_vis = bool(o.get("effective_visibility", is_vis))
+            o_comp_path = (
+                tuple(str(x) for x in o.get("component_path", ()))
+                if o.get("component_path")
+                else ()
+            )
             norm_occs.append(
                 OccurrenceSummary(
                     ref=o_ref,
                     name=o_name,
                     full_path_name=o_path,
+                    component_path=o_comp_path,
                     is_visible=is_vis,
                     effective_visibility=eff_vis,
                     transform=t_tuple,
@@ -568,12 +739,17 @@ def normalize_snapshot(
         if isinstance(b, Mapping):
             b_name = str(b.get("name", "Body"))
             b_comp = b.get("component_name")
+            b_comp_path = (
+                tuple(str(x) for x in b.get("component_path", ()))
+                if b.get("component_path")
+                else ((str(b_comp),) if b_comp else ())
+            )
             if ref_registry is not None:
                 iss = ref_registry.issue(
                     document_ref=doc_ref,
                     kind="body",
                     name=b_name,
-                    component_path=(str(b_comp),) if b_comp else (),
+                    component_path=b_comp_path,
                     native_token=str(b.get("entityToken") or b.get("id") or b_name),
                 )
                 b_ref = iss.ref
@@ -610,7 +786,6 @@ def normalize_snapshot(
             total_edges += ec
             total_verts += vc
 
-            b_comp_path = (str(b_comp),) if b_comp else ()
             norm_bodies.append(
                 BodySummary(
                     ref=b_ref,
@@ -636,7 +811,11 @@ def normalize_snapshot(
         if isinstance(s, Mapping):
             s_name = str(s.get("name", "Sketch"))
             s_comp = s.get("component_name")
-            s_comp_path = (str(s_comp),) if s_comp else ()
+            s_comp_path = (
+                tuple(str(x) for x in s.get("component_path", ()))
+                if s.get("component_path")
+                else ((str(s_comp),) if s_comp else ())
+            )
             if ref_registry is not None:
                 iss = ref_registry.issue(
                     document_ref=doc_ref,
@@ -696,6 +875,15 @@ def normalize_snapshot(
                         else None
                     )
                     p_unit = str(p.get("unit", "mm"))
+                    p_comp_path = (
+                        tuple(str(x) for x in p.get("component_path", ()))
+                        if p.get("component_path")
+                        else (
+                            (str(p.get("component_name")),)
+                            if p.get("component_name")
+                            else ()
+                        )
+                    )
                     norm_params.append(
                         ParameterSummary(
                             name=p_name,
@@ -703,6 +891,7 @@ def normalize_snapshot(
                             expression=p_expr,
                             unit=p_unit,
                             is_user=is_u,
+                            component_path=p_comp_path,
                         )
                     )
     elif isinstance(params_raw, (list, tuple)):
@@ -717,6 +906,15 @@ def normalize_snapshot(
                 )
                 p_unit = str(p.get("unit", "mm"))
                 is_u = bool(p.get("is_user", False))
+                p_comp_path = (
+                    tuple(str(x) for x in p.get("component_path", ()))
+                    if p.get("component_path")
+                    else (
+                        (str(p.get("component_name")),)
+                        if p.get("component_name")
+                        else ()
+                    )
+                )
                 norm_params.append(
                     ParameterSummary(
                         name=p_name,
@@ -724,6 +922,7 @@ def normalize_snapshot(
                         expression=p_expr,
                         unit=p_unit,
                         is_user=is_u,
+                        component_path=p_comp_path,
                     )
                 )
     norm_params.sort(key=lambda x: (not x.is_user, x.name))

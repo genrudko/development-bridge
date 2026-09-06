@@ -4936,3 +4936,207 @@ async def test_fusion_read_synthetic_large_snapshot_externalization(
     assert latest_snap is not None
     assert latest_snap.counts.faces == 1000
     assert len(latest_snap.components) == 20
+
+
+@pytest.mark.asyncio
+async def test_falsify_finding_2_selection_normalization_strips_native_token_fields(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 2: Selection normalization consumes entityToken internally but strips native/internal token fields."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records(
+        [
+            CapabilityRecord(name="selection.primitives", state="supported"),
+            CapabilityRecord(name="design.access", state="supported"),
+        ]
+    )
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    sel_resp = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "api_version": "fusion.cad/v1",
+                        "status": "succeeded",
+                        "summary": "Selection read",
+                        "document": {
+                            "document_ref": "doc_sel_test",
+                            "model_revision": "rev_1",
+                        },
+                        "data": {
+                            "entities": [
+                                {
+                                    "ref": "ent_face_raw",
+                                    "kind": "BRepFace",
+                                    "name": "Face42",
+                                    "entityToken": "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm",
+                                    "native_token": "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm",
+                                    "token": "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm",
+                                    "selection_point": {
+                                        "x": 1.0,
+                                        "y": 2.0,
+                                        "z": 3.0,
+                                        "frame": {"space": "world"},
+                                    },
+                                    "frame": {"space": "world"},
+                                }
+                            ]
+                        },
+                    }
+                ),
+            }
+        ],
+        "isError": False,
+    }
+    mock_desktop_service.call = AsyncMock(return_value=sel_resp)
+    mock_desktop_service.submit = AsyncMock(return_value=sel_resp)
+
+    res = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "selection"},
+        group="read",
+    )
+    assert res.status == "succeeded"
+    assert res.data["count"] == 1
+    returned_entity = res.data["entities"][0]
+
+    # Public ref issued and registered
+    assert returned_entity["ref"].startswith("ent_")
+    # Invariant: native token consumed internally by registry
+    record = cad_service.ref_registry.get_internal_record(
+        returned_entity["ref"], "doc_sel_test"
+    )
+    assert record is not None
+    assert record.native_token == "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm"
+
+    # Invariant: returned public entity must STRIP entityToken, native_token, token
+    assert "entityToken" not in returned_entity
+    assert "native_token" not in returned_entity
+    assert "token" not in returned_entity
+    assert "AQAA" not in str(returned_entity)
+
+
+@pytest.mark.asyncio
+async def test_falsify_finding_4_query_supports_component_path_and_metadata_selectors(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 4: fusion_read:query must faithfully support Task 5 SelectorEngine semantics with full candidate metadata."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records(
+        [
+            CapabilityRecord(name="selection.primitives", state="supported"),
+            CapabilityRecord(name="design.access", state="supported"),
+        ]
+    )
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # Fusion script returns candidates with component_path, tags, logical_object, role, etc.
+    candidates_data = [
+        {
+            "ref": "ent_body_sched",
+            "name": "ScheduleTextBody",
+            "kind": "body",
+            "component_path": ["Root", "Panel:1"],
+            "occurrence": "ent_occ_panel1",
+            "is_visible": True,
+            "role": ["decorative_text"],
+            "tags": [
+                {
+                    "group": "bridge.cad/v1",
+                    "name": "layout",
+                    "value": "schedule",
+                }
+            ],
+            "logical_object": "text_schedule_01",
+        },
+        {
+            "ref": "ent_body_other",
+            "name": "BaseFrame",
+            "kind": "body",
+            "component_path": ["Root", "Frame:1"],
+            "occurrence": "ent_occ_frame1",
+            "is_visible": True,
+            "role": ["structural"],
+            "tags": [
+                {
+                    "group": "bridge.cad/v1",
+                    "name": "layout",
+                    "value": "frame",
+                }
+            ],
+            "logical_object": "text_frame_01",
+        },
+    ]
+
+    def make_query_resp(candidates):
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "api_version": "fusion.cad/v1",
+                            "status": "succeeded",
+                            "summary": "Candidates collected",
+                            "document": {
+                                "document_ref": "doc_query_meta",
+                                "model_revision": "rev_1",
+                            },
+                            "data": {"entities": candidates},
+                        }
+                    ),
+                }
+            ],
+            "isError": False,
+        }
+
+    mock_desktop_service.call = AsyncMock(return_value=make_query_resp(candidates_data))
+    mock_desktop_service.submit = AsyncMock(
+        return_value=make_query_resp(candidates_data)
+    )
+
+    # 1. Query by component_path selector
+    res_path = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "query",
+            "selector": {"component_path": ["Root", "Panel:1"]},
+        },
+        group="read",
+    )
+    assert res_path.status == "succeeded"
+    assert res_path.data["matched_count"] == 1
+    assert res_path.data["refs"] == ("ent_body_sched",)
+
+    # 2. Query by metadata tag selector
+    res_tag = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "query",
+            "selector": {
+                "tag": {
+                    "group": "bridge.cad/v1",
+                    "name": "layout",
+                    "value": "schedule",
+                }
+            },
+        },
+        group="read",
+    )
+    assert res_tag.status == "succeeded"
+    assert res_tag.data["matched_count"] == 1
+    assert res_tag.data["refs"] == ("ent_body_sched",)
+
+    # 3. Query by logical_object selector
+    res_logical = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "query",
+            "selector": {"logical_object": "text_schedule_01"},
+        },
+        group="read",
+    )
+    assert res_logical.status == "succeeded"
+    assert res_logical.data["matched_count"] == 1
+    assert res_logical.data["refs"] == ("ent_body_sched",)

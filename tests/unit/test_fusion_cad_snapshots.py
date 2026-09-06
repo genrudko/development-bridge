@@ -360,3 +360,158 @@ def test_selector_query_against_snapshot_components_and_features(raw_fixture: di
     # Query by regex
     res_regex = engine.query({"name": {"regex": "^Body"}}, candidates)
     assert res_regex.matched_count == 2
+
+
+def test_falsify_finding_1_native_token_never_exposed_in_component_summary_or_snapshot():
+    """Falsify Finding 1: Native Fusion entityToken must never be exposed via ComponentSummary.id or any snapshot field."""
+    from app.fusion_cad.refs import EntityRefRegistry
+
+    reg = EntityRefRegistry()
+    raw = {
+        "document": {"document_ref": "doc_tok_test"},
+        "components": [
+            {
+                "name": "LeakyComp",
+                "entityToken": "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm",
+            },
+            {
+                "name": "LeakyCompWithId",
+                "id": "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm",
+                "entityToken": "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm",
+            },
+        ],
+    }
+    snap = normalize_snapshot(raw, ref_registry=reg)
+    assert len(snap.components) == 2
+    for comp in snap.components:
+        # Verify public opaque ref is issued
+        assert comp.ref.startswith("ent_")
+        assert comp.ref != "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm"
+        # Invariant: entityToken must NOT leak via comp.id or any other field
+        assert getattr(comp, "id", None) != "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm"
+        assert getattr(comp, "entityToken", None) is None
+        assert "AQAA" not in str(comp.model_dump())
+
+
+def test_falsify_finding_3_structural_hash_deterministic_across_fresh_registries():
+    """Falsify Finding 3: Structural hash must be deterministic across two fresh EntityRefRegistry lifecycles."""
+    from app.fusion_cad.refs import EntityRefRegistry
+
+    raw_data = {
+        "document": {"document_ref": "doc_main_123"},
+        "model_revision": "rev_1",
+        "counts": {"faces": 2},
+        "components": [
+            {"name": "BracketComp", "entityToken": "tok_c2"},
+            {"name": "BaseComp", "entityToken": "tok_c1"},
+        ],
+        "occurrences": [
+            {
+                "name": "BracketComp:1",
+                "full_path_name": "BaseComp:1+BracketComp:1",
+                "entityToken": "tok_o1",
+            },
+        ],
+        "bodies": [
+            {
+                "name": "Body1",
+                "component_name": "BaseComp",
+                "entityToken": "tok_b1",
+                "volume": 10.0,
+                "area": 5.0,
+            },
+        ],
+        "sketches": [
+            {"name": "Sketch1", "component_name": "BaseComp", "entityToken": "tok_s1"},
+        ],
+        "timeline": [
+            {
+                "index": 0,
+                "name": "Extrude1",
+                "feature_type": "ExtrudeFeature",
+                "entityToken": "tok_f1",
+            },
+        ],
+        "parameters": [
+            {"name": "d1", "value": 50.0},
+        ],
+    }
+
+    reg1 = EntityRefRegistry()
+    reg2 = EntityRefRegistry()
+
+    snap1 = normalize_snapshot(raw_data, ref_registry=reg1)
+    snap2 = normalize_snapshot(raw_data, ref_registry=reg2)
+
+    # Prove registries generated distinct UUID-backed refs for the same native entities
+    assert snap1.components[0].ref != snap2.components[0].ref
+    assert snap1.bodies[0].ref != snap2.bodies[0].ref
+    # Invariant: structural hashes must match identically despite volatile UUID refs
+    assert snap1.structural_hash == snap2.structural_hash
+
+
+def test_falsify_finding_5_component_path_coverage_and_feature_parent_children():
+    """Falsify Finding 5 & Minor: component_path coverage and FeatureRecord parent/children."""
+
+    raw = {
+        "document": {"document_ref": "doc_path_test"},
+        "components": [
+            {
+                "name": "PartA",
+                "component_path": ["Root", "SubAssy", "PartA"],
+            }
+        ],
+        "occurrences": [
+            {
+                "name": "PartA:1",
+                "full_path_name": "Root/SubAssy:1/PartA:1",
+                "component_path": ["Root", "SubAssy:1"],
+            }
+        ],
+        "timeline": [
+            {
+                "index": 0,
+                "name": "Extrude1",
+                "feature_type": "ExtrudeFeature",
+                "component_path": ["Root", "SubAssy", "PartA"],
+                "parent": "ent_feat_parent",
+                "children": ["ent_feat_child1", "ent_feat_child2"],
+            }
+        ],
+        "parameters": [
+            {
+                "name": "Length",
+                "value": 100.0,
+                "component_path": ["Root", "SubAssy", "PartA"],
+            }
+        ],
+    }
+
+    snap = normalize_snapshot(raw)
+    comp = snap.components[0]
+    occ = snap.occurrences[0]
+    feat = snap.features[0]
+    param = snap.parameters[0]
+
+    assert comp.component_path == ("Root", "SubAssy", "PartA")
+    assert occ.component_path == ("Root", "SubAssy:1")
+    assert feat.component_path == ("Root", "SubAssy", "PartA")
+    assert feat.parent == "ent_feat_parent"
+    assert feat.children == ("ent_feat_child1", "ent_feat_child2")
+    assert param.component_path == ("Root", "SubAssy", "PartA")
+
+    # Default empty when not known (never fabricate)
+    raw_empty = {
+        "document": {"document_ref": "doc_path_empty"},
+        "components": [{"name": "RootComp"}],
+        "occurrences": [{"name": "RootComp:1", "full_path_name": "RootComp:1"}],
+        "timeline": [{"index": 0, "name": "BaseFeat", "feature_type": "Base"}],
+        "parameters": [{"name": "p1", "value": 1.0}],
+    }
+    snap_empty = normalize_snapshot(raw_empty)
+    assert snap_empty.components[0].component_path == ()
+    assert snap_empty.occurrences[0].component_path == ()
+    assert snap_empty.features[0].component_path == ()
+    assert snap_empty.features[0].parent is None
+    assert snap_empty.features[0].children == ()
+    assert snap_empty.parameters[0].component_path == ()
