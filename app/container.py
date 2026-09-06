@@ -421,6 +421,7 @@ def build_container(
             coordinator=coordinator,
             route_registry=route_registry,
         )
+        coordinator.set_delivery_notifier(telegram_supervisor.notify_wake_delivered)
     wake_settings = configured.coordinator_wake_delivery
     coordinator_wake_delivery = None
     if wake_settings.enabled:

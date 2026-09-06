@@ -257,6 +257,24 @@ class TelegramSupervisorService:
         self._last_error = None
         await self._notice("команда передана в ChatGPT.")
 
+    async def notify_wake_delivered(self, payload: dict[str, object]) -> None:
+        channel_id = str(payload.get("channel_id") or "")
+        route = (
+            self.route_registry.route_for_channel(channel_id)
+            if channel_id
+            else None
+        )
+        route_label = str(route["route_id"]) if route is not None else "legacy"
+        transport = str(payload.get("transport") or "unknown")
+        transport_label = "X" if transport == "x" else transport
+        attempt = max(1, int(payload.get("delivery_attempt") or 1))
+        max_attempts = max(1, int(payload.get("max_delivery_attempts") or 1))
+        await self._notice(
+            "✅ Wake успешно доставлен: "
+            f"route={route_label}, transport={transport_label}, "
+            f"attempt={attempt}/{max_attempts}."
+        )
+
     async def _escalation_loop(self) -> None:
         while True:
             await self._drain_escalations_once()

@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from secrets import token_urlsafe
 
 from app.api.errors import BridgeError, ErrorCode
+
+
+logger = logging.getLogger(__name__)
+DeliveryNotifier = Callable[[dict[str, object]], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -75,9 +80,11 @@ class CoordinatorService:
         state_path: Path | None = None,
         *,
         browser_preflight_required: bool = False,
+        delivery_notifier: DeliveryNotifier | None = None,
     ) -> None:
         self._state_path = state_path.expanduser() if state_path is not None else None
         self._browser_preflight_required = bool(browser_preflight_required)
+        self._delivery_notifier = delivery_notifier
         self._pending: dict[str, PendingWake] = {}
         self._cooldown_until: dict[str, float] = {}
         self._global_cooldown_until = 0.0
@@ -86,6 +93,34 @@ class CoordinatorService:
         self._started_at = time.time()
         self._lock = asyncio.Lock()
         self._load_state()
+
+    def set_delivery_notifier(self, notifier: DeliveryNotifier | None) -> None:
+        self._delivery_notifier = notifier
+
+    @staticmethod
+    def _delivery_notice_payload(
+        channel_id: str, transport: str, wake: PendingWake
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "channel_id": channel_id,
+            "transport": transport,
+            "delivery_attempt": max(1, wake.delivery_attempts),
+            "max_delivery_attempts": (
+                wake.max_delivery_attempts if wake.model_ack_required else 1
+            ),
+        }
+        if wake.continuation_id is not None:
+            payload["continuation_id"] = wake.continuation_id
+        return payload
+
+    async def _notify_delivery_best_effort(self, payload: dict[str, object]) -> None:
+        notifier = self._delivery_notifier
+        if notifier is None:
+            return
+        try:
+            await notifier(payload)
+        except Exception as exc:  # noqa: BLE001 - notification must never roll back delivery
+            logger.warning("Wake delivery notifier failed: %s", exc)
 
     def _load_state(self) -> None:
         if self._state_path is None:
@@ -965,6 +1000,7 @@ class CoordinatorService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "disposition is invalid")
         bounded_detail = self._bounded_transport_detail(detail)
         now = time.time()
+        notice_payload: dict[str, object] | None = None
         async with self._lock:
             wake = self._pending.get(channel_id)
             if wake is None or wake.claim_id != claim_id or wake.continuation_id is None:
@@ -985,11 +1021,13 @@ class CoordinatorService:
                 )
                 wake.transport_delivered = True
                 wake.transport_delivered_at = now
+                notice_payload = self._delivery_notice_payload(
+                    channel_id, transport_name, wake
+                )
                 if wake.model_acknowledged:
                     continuation_id = wake.continuation_id
                     next_continuation_id = self._promote_queued_locked(channel_id, wake, now)
-                    self._save_state()
-                    return {
+                    result = {
                         "channel_id": channel_id,
                         "continuation_id": continuation_id,
                         "finalized": True,
@@ -1001,21 +1039,36 @@ class CoordinatorService:
                         "followup_pending": next_continuation_id is not None,
                         "next_continuation_id": next_continuation_id,
                     }
-                wake.available_at = now
-                wake.escalation_at = now + wake.escalation_delay_seconds
-            elif disposition in {"uncertain", "owner_input_required"}:
-                wake.escalation_at = now
+                else:
+                    wake.available_at = now
+                    wake.escalation_at = now + wake.escalation_delay_seconds
+                    result = {
+                        "channel_id": channel_id,
+                        "continuation_id": wake.continuation_id,
+                        "finalized": True,
+                        "transport_name": transport_name,
+                        "disposition": disposition,
+                        "transport_delivered": wake.transport_delivered,
+                        "owner_input_required": wake.owner_input_required,
+                    }
+            else:
+                if disposition in {"uncertain", "owner_input_required"}:
+                    wake.escalation_at = now
+                result = {
+                    "channel_id": channel_id,
+                    "continuation_id": wake.continuation_id,
+                    "finalized": True,
+                    "transport_name": transport_name,
+                    "disposition": disposition,
+                    "transport_delivered": wake.transport_delivered,
+                    "owner_input_required": wake.owner_input_required,
+                }
 
             self._save_state()
-            return {
-                "channel_id": channel_id,
-                "continuation_id": wake.continuation_id,
-                "finalized": True,
-                "transport_name": transport_name,
-                "disposition": disposition,
-                "transport_delivered": wake.transport_delivered,
-                "owner_input_required": wake.owner_input_required,
-            }
+
+        if notice_payload is not None:
+            await self._notify_delivery_best_effort(notice_payload)
+        return result
 
     async def authorize_browser_preflight(
         self, channel_id: str, continuation_id: str
@@ -1065,6 +1118,7 @@ class CoordinatorService:
                 "state": "standby",
                 "delivery_lease_required": True,
             }
+        notice_payload: dict[str, object] | None = None
         async with self._lock:
             now = time.time()
             explicit_current_lease = self._delivery_lease_is_current(
@@ -1090,6 +1144,7 @@ class CoordinatorService:
                 self._cooldown_until.get(channel_id, 0.0),
                 cooldown_until,
             )
+            notice_payload = self._delivery_notice_payload(channel_id, "x", wake)
             if not wake.model_ack_required or wake.model_acknowledged:
                 continuation_id = wake.continuation_id
                 next_continuation_id = None
@@ -1098,37 +1153,42 @@ class CoordinatorService:
                 else:
                     del self._pending[channel_id]
                 self._save_state()
-                data = {"channel_id": channel_id, "acknowledged": True}
+                result = {"channel_id": channel_id, "acknowledged": True}
                 if continuation_id is not None:
-                    data.update({
+                    result.update({
                         "continuation_id": continuation_id,
                         "model_acknowledged": True,
                         "followup_pending": next_continuation_id is not None,
                         "next_continuation_id": next_continuation_id,
                     })
-                return data
+            else:
+                wake.claim_id = None
+                wake.lease_expires_at = None
+                wake.transport_delivered = True
+                wake.transport_delivered_at = now
+                wake.available_at = now
+                wake.escalation_at = now + wake.escalation_delay_seconds
+                self._save_state()
+                result = {
+                    "channel_id": channel_id,
+                    "acknowledged": True,
+                    "continuation_id": wake.continuation_id,
+                    "delivery_attempts": wake.delivery_attempts,
+                    "max_delivery_attempts": wake.max_delivery_attempts,
+                    "model_ack_required": True,
+                    "transport_delivered": True,
+                    "next_retry_seconds": None,
+                    "escalation_after_seconds": wake.escalation_delay_seconds,
+                    "web_turn_cooldown_seconds": self.MIN_WEB_TURN_INTERVAL_SECONDS,
+                }
 
-            wake.claim_id = None
-            wake.lease_expires_at = None
-            wake.transport_delivered = True
-            wake.transport_delivered_at = now
-            wake.available_at = now
-            wake.escalation_at = now + wake.escalation_delay_seconds
-            self._save_state()
-            return {
-                "channel_id": channel_id,
-                "acknowledged": True,
-                "continuation_id": wake.continuation_id,
-                "delivery_attempts": wake.delivery_attempts,
-                "max_delivery_attempts": wake.max_delivery_attempts,
-                "model_ack_required": True,
-                "transport_delivered": True,
-                "next_retry_seconds": None,
-                "escalation_after_seconds": wake.escalation_delay_seconds,
-                "web_turn_cooldown_seconds": self.MIN_WEB_TURN_INTERVAL_SECONDS,
-            }
+        if notice_payload is not None:
+            await self._notify_delivery_best_effort(notice_payload)
+        return result
 
-    async def observe_model_turn(self, channel_id: str, continuation_id: str) -> dict:
+    async def observe_model_turn(
+        self, channel_id: str, continuation_id: str
+    ) -> dict:
         """Record model activity without treating it as the continuation ACK."""
         channel_id = self.validate_channel(channel_id)
         continuation_id = self.validate_continuation_id(continuation_id)

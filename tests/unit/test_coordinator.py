@@ -808,3 +808,91 @@ async def test_model_turn_observation_keeps_continuation_until_explicit_ack():
     acknowledged = await service.model_ack(armed["continuation_id"] )
     assert acknowledged["acknowledged"] is True
     assert (await service.status("route-direct-observed", delivery_mode="direct"))["state"] == "idle"
+
+
+
+@pytest.mark.asyncio
+async def test_x_successful_delivery_notifies_once_and_duplicate_ack_does_not_repeat():
+    notices: list[dict[str, object]] = []
+
+    async def notifier(payload: dict[str, object]) -> None:
+        notices.append(dict(payload))
+
+    service = CoordinatorService()
+    service._delivery_notifier = notifier
+    armed = await service.arm_resilient(
+        "resume",
+        channel_id="route-notify",
+        retry_delays_seconds=(0, 0),
+    )
+    claim = await service.claim("route-notify")
+
+    delivered = await service.ack("route-notify", claim["claim_id"])
+    duplicate = await service.ack("route-notify", claim["claim_id"])
+
+    assert delivered["transport_delivered"] is True
+    assert duplicate["acknowledged"] is False
+    assert len(notices) == 1
+    assert notices[0] == {
+        "channel_id": "route-notify",
+        "transport": "x",
+        "delivery_attempt": 1,
+        "max_delivery_attempts": 3,
+        "continuation_id": armed["continuation_id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_direct_successful_delivery_notifies_with_transport_name():
+    notices: list[dict[str, object]] = []
+
+    async def notifier(payload: dict[str, object]) -> None:
+        notices.append(dict(payload))
+
+    service = CoordinatorService(browser_preflight_required=True)
+    service._delivery_notifier = notifier
+    armed = await service.arm_resilient(
+        "resume",
+        channel_id="route-direct-notify",
+        delay_seconds=0,
+    )
+    claim = await service.claim("route-direct-notify", delivery_mode="direct")
+
+    finalized = await service.finalize_transport(
+        "route-direct-notify",
+        claim["claim_id"],
+        "review-gpt",
+        "delivered",
+    )
+
+    assert finalized["transport_delivered"] is True
+    assert notices == [{
+        "channel_id": "route-direct-notify",
+        "transport": "review-gpt",
+        "delivery_attempt": 1,
+        "max_delivery_attempts": 3,
+        "continuation_id": armed["continuation_id"],
+    }]
+
+
+@pytest.mark.asyncio
+async def test_delivery_notifier_failure_does_not_rollback_successful_wake():
+    calls = 0
+
+    async def failing_notifier(payload: dict[str, object]) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("telegram unavailable")
+
+    service = CoordinatorService()
+    service._delivery_notifier = failing_notifier
+    await service.arm_resilient("resume", channel_id="route-notify-fail")
+    claim = await service.claim("route-notify-fail")
+
+    delivered = await service.ack("route-notify-fail", claim["claim_id"])
+
+    assert calls == 1
+    assert delivered["transport_delivered"] is True
+    status = await service.status("route-notify-fail")
+    assert status["state"] == "waiting_model_ack"
+    assert status["transport_delivered"] is True
