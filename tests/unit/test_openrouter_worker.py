@@ -617,3 +617,18 @@ def test_run_process_bwrap_args_does_not_ro_bind_entire_etc(repo):
         # Safe allowlist files should be ro-bind-try'd
         for safe_path in SAFE_ETC_ALLOWLIST:
             assert ["--ro-bind-try", safe_path, safe_path] in [cmd[i:i+3] for i in range(len(cmd)-2)]
+
+
+def test_bwrap_proc_fallback_includes_kernel_overflow_ids(monkeypatch):
+    import app.executors.openrouter_worker as worker
+    class Probe:
+        returncode = 1
+    monkeypatch.setattr(worker.subprocess, "run", lambda *a, **k: Probe())
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", None)
+    flags = worker.get_bwrap_proc_flags("/bin/bwrap")
+    joined = " ".join(flags)
+    assert "--tmpfs /proc" in joined
+    assert "--dir /proc/sys" in joined
+    assert "--dir /proc/sys/kernel" in joined
+    assert "/proc/sys/kernel/overflowuid" in joined
+    assert "/proc/sys/kernel/overflowgid" in joined

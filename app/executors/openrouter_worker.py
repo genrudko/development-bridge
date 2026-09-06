@@ -207,6 +207,19 @@ def get_scrubbed_env(repo_root: Path, sandbox_home: str = "/tmp/sandbox-home") -
 _BWRAP_PROC_FLAGS: list[str] | None = None
 
 
+def _bwrap_proc_fallback_flags() -> list[str]:
+    return [
+        "--tmpfs", "/proc",
+        "--dir", "/proc/sys",
+        "--dir", "/proc/sys/kernel",
+        "--ro-bind-try", "/proc/sys/kernel/overflowuid", "/proc/sys/kernel/overflowuid",
+        "--ro-bind-try", "/proc/sys/kernel/overflowgid", "/proc/sys/kernel/overflowgid",
+        "--ro-bind-try", "/proc/cpuinfo", "/proc/cpuinfo",
+        "--ro-bind-try", "/proc/meminfo", "/proc/meminfo",
+        "--ro-bind-try", "/proc/stat", "/proc/stat",
+    ]
+
+
 def get_bwrap_proc_flags(bwrap_bin: str) -> list[str]:
     global _BWRAP_PROC_FLAGS
     if _BWRAP_PROC_FLAGS is None:
@@ -219,19 +232,9 @@ def get_bwrap_proc_flags(bwrap_bin: str) -> list[str]:
             if probe.returncode == 0:
                 _BWRAP_PROC_FLAGS = ["--proc", "/proc"]
             else:
-                _BWRAP_PROC_FLAGS = [
-                    "--tmpfs", "/proc",
-                    "--ro-bind-try", "/proc/cpuinfo", "/proc/cpuinfo",
-                    "--ro-bind-try", "/proc/meminfo", "/proc/meminfo",
-                    "--ro-bind-try", "/proc/stat", "/proc/stat",
-                ]
+                _BWRAP_PROC_FLAGS = _bwrap_proc_fallback_flags()
         except Exception:
-            _BWRAP_PROC_FLAGS = [
-                "--tmpfs", "/proc",
-                "--ro-bind-try", "/proc/cpuinfo", "/proc/cpuinfo",
-                "--ro-bind-try", "/proc/meminfo", "/proc/meminfo",
-                "--ro-bind-try", "/proc/stat", "/proc/stat",
-            ]
+            _BWRAP_PROC_FLAGS = _bwrap_proc_fallback_flags()
     return list(_BWRAP_PROC_FLAGS)
 
 
