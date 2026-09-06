@@ -34,6 +34,18 @@ from app.fusion_cad.models import (
     Vector3,
     ViewRefSummary,
 )
+from app.fusion_cad.refs import (
+    EntityRefRegistry,
+    InternalEntityRecord,
+    ResolutionOutcome,
+    ResolutionResult,
+    convert_bounding_box,
+    convert_plane,
+    convert_point,
+    convert_ray,
+    convert_transform,
+    convert_vector,
+)
 from app.fusion_cad.requests import (
     FusionInspectRequest,
     FusionMetadataRequest,
@@ -74,6 +86,10 @@ from app.fusion_cad.schemas import (
     fusion_view_schema,
 )
 from app.fusion_cad.scripts import FusionCadScriptBundle
+from app.fusion_cad.selectors import (
+    SelectorEngine,
+    SelectorQueryResult,
+)
 from app.fusion_cad.service import FusionCadService
 
 __all__ = [
@@ -88,6 +104,7 @@ __all__ = [
     "CreatedBySelector",
     "DocumentState",
     "EntityRef",
+    "EntityRefRegistry",
     "EntitySelector",
     "FindingSeverity",
     "FrozenDict",
@@ -102,10 +119,15 @@ __all__ = [
     "FusionValidateRequest",
     "FusionViewRequest",
     "ImmutableMapping",
+    "InternalEntityRecord",
     "NamePattern",
     "Plane",
     "Point3",
     "Ray",
+    "ResolutionOutcome",
+    "ResolutionResult",
+    "SelectorEngine",
+    "SelectorQueryResult",
     "StabilityClass",
     "StageMetadataClearRoleAction",
     "StageMetadataRemoveAction",
@@ -136,6 +158,12 @@ __all__ = [
     "Vector3",
     "ViewRefSummary",
     "cad_error_to_bridge_error",
+    "convert_bounding_box",
+    "convert_plane",
+    "convert_point",
+    "convert_ray",
+    "convert_transform",
+    "convert_vector",
     "fusion_inspect_schema",
     "fusion_metadata_schema",
     "fusion_read_schema",

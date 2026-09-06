@@ -575,6 +575,12 @@ def run():
         return make_result(data={"text": PAYLOAD.get("text", "")}, summary="echo")
     if op == "test_op":
         return make_result(data={"operation": op}, summary=f"Executed read:{op}")
+    if op == "entity":
+        resolved = resolve_fusion_entity(PAYLOAD)
+        return make_result(
+            data=resolved,
+            summary=f"Resolved entity {PAYLOAD.get('ref') or PAYLOAD.get('native_token')}: {resolved.get('outcome')}",
+        )
 
     fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
     doc_state = {

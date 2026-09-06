@@ -970,7 +970,161 @@ def collect_model_fingerprint(payload=None):
     return fp, canonical, safe_doc_ref
 
 
+def resolve_fusion_entity(payload=None):
+    payload = payload or {}
+    import re
+
+    app = None
+    doc = None
+    design = None
+    try:
+        import adsk.core
+        app = adsk.core.Application.get()
+        if app:
+            doc = getattr(app, "activeDocument", None)
+    except Exception:
+        pass
+
+    try:
+        import adsk.fusion
+        if doc and hasattr(doc, "products"):
+            design = doc.products.itemByClass("adsk::fusion::Design")
+    except Exception:
+        pass
+
+    if not doc or not design:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Active document and design required for entity resolution",
+            details={"has_doc": bool(doc), "has_design": bool(design)},
+        )
+
+    # 1. Document identity check - fails BEFORE native lookup
+    doc_id = (
+        getattr(doc, "creationId", None)
+        or getattr(doc, "dataId", None)
+        or getattr(getattr(doc, "dataFile", None), "id", None)
+    )
+    clean_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(doc_id).strip()) if doc_id else "unknown"
+    safe_doc_ref = f"doc_{clean_id}"
+
+    req_doc = payload.get("document_ref") or payload.get("document")
+    if req_doc and req_doc != safe_doc_ref:
+        raise FusionScriptError(
+            "WRONG_DOCUMENT",
+            f"Requested document_ref '{req_doc}' does not match active document runtime identity '{safe_doc_ref}'",
+            details={"requested": req_doc, "active": safe_doc_ref},
+        )
+
+    native_token = payload.get("native_token")
+    kind = payload.get("kind")
+    name = payload.get("name")
+    component_path = payload.get("component_path") or ()
+    ref = payload.get("ref")
+
+    def _extract_native_info(entity):
+        tok = getattr(entity, "entityToken", None) or getattr(entity, "id", None)
+        ent_name = getattr(entity, "name", None)
+        ent_type = getattr(entity, "objectType", None) or type(entity).__name__
+        return {
+            "native_token": str(tok) if tok else None,
+            "name": ent_name,
+            "native_type": ent_type,
+            "document_ref": safe_doc_ref,
+        }
+
+    # 2. Native token lookup via design.findEntityByToken
+    if native_token and hasattr(design, "findEntityByToken"):
+        try:
+            resolved = design.findEntityByToken(native_token)
+            if resolved is not None:
+                if hasattr(resolved, "count"):
+                    if resolved.count == 1:
+                        return {
+                            "outcome": "exact",
+                            "ref": ref,
+                            "candidates": [_extract_native_info(resolved.item(0))],
+                            "document_ref": safe_doc_ref,
+                        }
+                    elif resolved.count > 1:
+                        cands = [_extract_native_info(resolved.item(i)) for i in range(resolved.count)]
+                        return {
+                            "outcome": "split",
+                            "ref": ref,
+                            "candidates": cands,
+                            "document_ref": safe_doc_ref,
+                        }
+                else:
+                    return {
+                        "outcome": "exact",
+                        "ref": ref,
+                        "candidates": [_extract_native_info(resolved)],
+                        "document_ref": safe_doc_ref,
+                    }
+        except Exception:
+            pass
+
+    # 3. Contextual fallback
+    root = getattr(design, "rootComponent", None)
+    target_comp = root
+    if component_path and root and hasattr(root, "occurrences"):
+        curr = root
+        for path_seg in component_path[1:]:
+            found_occ = None
+            if hasattr(curr, "occurrences"):
+                for idx in range(curr.occurrences.count):
+                    occ = curr.occurrences.item(idx)
+                    if getattr(occ, "name", None) == path_seg:
+                        found_occ = occ
+                        curr = getattr(occ, "component", curr)
+                        break
+            if not found_occ:
+                break
+        target_comp = curr
+
+    candidates = []
+    if target_comp and kind:
+        if kind == "body" and hasattr(target_comp, "bRepBodies"):
+            for i in range(target_comp.bRepBodies.count):
+                b = target_comp.bRepBodies.item(i)
+                if name is None or getattr(b, "name", None) == name:
+                    candidates.append(b)
+        elif kind == "sketch" and hasattr(target_comp, "sketches"):
+            for i in range(target_comp.sketches.count):
+                s = target_comp.sketches.item(i)
+                if name is None or getattr(s, "name", None) == name:
+                    candidates.append(s)
+        elif kind == "occurrence" and hasattr(target_comp, "occurrences"):
+            for i in range(target_comp.occurrences.count):
+                occ = target_comp.occurrences.item(i)
+                if name is None or getattr(occ, "name", None) == name:
+                    candidates.append(occ)
+
+    if len(candidates) == 1:
+        return {
+            "outcome": "exact",
+            "ref": ref,
+            "candidates": [_extract_native_info(candidates[0])],
+            "document_ref": safe_doc_ref,
+        }
+    elif len(candidates) > 1:
+        return {
+            "outcome": "ambiguous",
+            "ref": ref,
+            "candidates": [_extract_native_info(c) for c in candidates],
+            "document_ref": safe_doc_ref,
+        }
+
+    return {
+        "outcome": "stale",
+        "ref": ref,
+        "candidates": [],
+        "document_ref": safe_doc_ref,
+    }
+
+
 # __GROUP_SCRIPT__
+
 
 
 if __name__ == "__main__" or True:
