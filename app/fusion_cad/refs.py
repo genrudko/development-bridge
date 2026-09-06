@@ -263,6 +263,18 @@ class EntityRefRegistry:
                         "active_document_ref": active_document_ref,
                     },
                 )
+            if len(res.candidates) > 1:
+                raise FusionCadError(
+                    ErrorCode.REF_AMBIGUOUS,
+                    f"EntityRef '{res.ref}' declared exact outcome but returned {len(res.candidates)} candidates",
+                    details={
+                        "ref": res.ref,
+                        "active_document_ref": active_document_ref,
+                        "outcome": "exact",
+                        "candidate_count": len(res.candidates),
+                        "candidates": [getattr(c, "ref", str(c)) for c in res.candidates],
+                    },
+                )
             return res.candidates[0]
 
         if res.outcome == "wrong_document":
@@ -338,28 +350,39 @@ _IDENTITY_4X4: Matrix4x4 = (
 )
 
 
-def _check_occurrence_frame_safety(
+def _require_verified_transform(
     source_frame: CoordinateFrame,
     target_frame: CoordinateFrame,
     transform_matrix: Matrix4x4 | None,
-) -> None:
-    """Do not claim occurrence transform support from mere API presence.
+) -> Matrix4x4:
+    """Require an explicit verified transform for any conversion between different frames.
 
-    Occurrence transform requires explicit verified transform matrix;
-    without it, conversion must fail closed as degraded/unavailable.
+    No identity fallback merely because occurrence is absent. If transform is unavailable,
+    fail CAPABILITY_DEGRADED. Same-frame conversion is handled before calling this.
     """
-    if (
-        source_frame.space == "occurrence" or target_frame.space == "occurrence"
-    ) and transform_matrix is None:
+    if transform_matrix is None:
         raise FusionCadError(
             ErrorCode.CAPABILITY_DEGRADED,
-            "Occurrence coordinate frame conversion requires verified occurrence transform capability; "
-            "API presence alone does not guarantee contract support without runtime verification",
+            f"Coordinate frame conversion from '{source_frame.space}' to '{target_frame.space}' "
+            "requires an explicit verified transform matrix; "
+            "cannot fall back to identity transform across different frames",
             details={
                 "source_frame": source_frame.model_dump(),
                 "target_frame": target_frame.model_dump(),
             },
         )
+    return transform_matrix
+
+
+def _multiply_4x4(m1: Matrix4x4, m2: Matrix4x4) -> Matrix4x4:
+    res = []
+    for r in range(4):
+        row = []
+        for c in range(4):
+            val = sum(m1[r][k] * m2[k][c] for k in range(4))
+            row.append(round(val, 8))
+        res.append(tuple(row))
+    return tuple(res)
 
 
 def _apply_affine_point(pt: Point3, m: Matrix4x4) -> tuple[float, float, float]:
@@ -388,8 +411,7 @@ def convert_point(
     if point.frame == target_frame:
         return point
 
-    _check_occurrence_frame_safety(point.frame, target_frame, transform_matrix)
-    m = transform_matrix or _IDENTITY_4X4
+    m = _require_verified_transform(point.frame, target_frame, transform_matrix)
     nx, ny, nz = _apply_affine_point(point, m)
     return Point3(x=nx, y=ny, z=nz, frame=target_frame)
 
@@ -404,8 +426,7 @@ def convert_vector(
     if vector.frame == target_frame:
         return vector
 
-    _check_occurrence_frame_safety(vector.frame, target_frame, transform_matrix)
-    m = transform_matrix or _IDENTITY_4X4
+    m = _require_verified_transform(vector.frame, target_frame, transform_matrix)
     nx, ny, nz = _apply_affine_vector(vector, m)
     return Vector3(x=nx, y=ny, z=nz, frame=target_frame)
 
@@ -420,8 +441,7 @@ def convert_bounding_box(
     if bbox.frame == target_frame:
         return bbox
 
-    _check_occurrence_frame_safety(bbox.frame, target_frame, transform_matrix)
-    m = transform_matrix or _IDENTITY_4X4
+    m = _require_verified_transform(bbox.frame, target_frame, transform_matrix)
 
     xs = (bbox.min_point.x, bbox.max_point.x)
     ys = (bbox.min_point.y, bbox.max_point.y)
@@ -456,7 +476,7 @@ def convert_plane(
     if plane.frame == target_frame:
         return plane
 
-    _check_occurrence_frame_safety(plane.frame, target_frame, transform_matrix)
+    _require_verified_transform(plane.frame, target_frame, transform_matrix)
     new_origin = convert_point(
         plane.origin, target_frame, transform_matrix=transform_matrix
     )
@@ -487,7 +507,7 @@ def convert_ray(
     if ray.frame == target_frame:
         return ray
 
-    _check_occurrence_frame_safety(ray.frame, target_frame, transform_matrix)
+    _require_verified_transform(ray.frame, target_frame, transform_matrix)
     new_origin = convert_point(
         ray.origin, target_frame, transform_matrix=transform_matrix
     )
@@ -513,10 +533,15 @@ def convert_transform(
     *,
     transform_matrix: Matrix4x4 | None = None,
 ) -> Transform:
-    """Convert Transform matrix to target CoordinateFrame carrying explicit target frame."""
+    """Convert Transform matrix to target CoordinateFrame carrying explicit target frame.
+
+    Mathematically applies the frame conversion transform M to the transform A:
+    M_result = M @ A, ensuring consistency with point/vector conversions:
+    for any point p, (M @ A) @ p == convert_point(A @ p, target_frame).
+    """
     if transform.frame == target_frame:
         return transform
 
-    _check_occurrence_frame_safety(transform.frame, target_frame, transform_matrix)
-    # Target frame is explicitly stamped on the resulting Transform
-    return Transform(matrix=transform.matrix, frame=target_frame)
+    m = _require_verified_transform(transform.frame, target_frame, transform_matrix)
+    new_matrix = _multiply_4x4(m, transform.matrix)
+    return Transform(matrix=new_matrix, frame=target_frame)

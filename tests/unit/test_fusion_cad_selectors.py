@@ -264,3 +264,76 @@ def test_selector_normalization() -> None:
     assert norm.name.regex == "^SampleName$"
     assert norm.role == ("decorative",)
     assert norm.component_path == ("Root", "Sub")
+
+
+def test_bbox_region_cross_frame_safety_regression() -> None:
+    engine = SelectorEngine()
+    world_frame = CoordinateFrame(space="world")
+    comp_frame = CoordinateFrame(space="component", ref="ent_comp_1")
+
+    # Entity defined in component coordinate frame [0, 0, 0] -> [10, 10, 10]
+    entity = {
+        "ref": "ent_body_comp",
+        "kind": "body",
+        "name": "CompBody",
+        "bounding_box": BoundingBox(
+            min_point=Point3(x=0.0, y=0.0, z=0.0, frame=comp_frame),
+            max_point=Point3(x=10.0, y=10.0, z=10.0, frame=comp_frame),
+            frame=comp_frame,
+        ),
+    }
+
+    # Query in world coordinate frame with identical raw coordinates [0, 0, 0] -> [10, 10, 10]
+    selector = EntitySelector(
+        bbox_region=BoundingBox(
+            min_point=Point3(x=0.0, y=0.0, z=0.0, frame=world_frame),
+            max_point=Point3(x=10.0, y=10.0, z=10.0, frame=world_frame),
+            frame=world_frame,
+        )
+    )
+
+    # 1. Cross-frame without transform: MUST fail closed (never compare raw coordinates)
+    assert engine.matches(selector, entity) is False
+    assert engine.filter(selector, [entity]) == []
+
+    # 2. Context provides verified transform: translation (100, 100, 100)
+    transform_matrix = (
+        (1.0, 0.0, 0.0, 100.0),
+        (0.0, 1.0, 0.0, 100.0),
+        (0.0, 0.0, 1.0, 100.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    context = {"transform_matrix": transform_matrix}
+
+    # With transform, entity world coords are [100, 100, 100] -> [110, 110, 110]
+    # Query at [0, 10] does NOT match
+    assert engine.matches(selector, entity, context=context) is False
+    assert engine.filter(selector, [entity], context=context) == []
+
+    # Query overlapping [100, 110] DOES match with verified transform
+    matching_selector = EntitySelector(
+        bbox_region=BoundingBox(
+            min_point=Point3(x=95.0, y=95.0, z=95.0, frame=world_frame),
+            max_point=Point3(x=115.0, y=115.0, z=115.0, frame=world_frame),
+            frame=world_frame,
+        )
+    )
+    assert engine.matches(matching_selector, entity, context=context) is True
+    res = engine.filter(matching_selector, [entity], context=context)
+    assert len(res) == 1
+    assert res[0]["ref"] == "ent_body_comp"
+
+    # 3. Entity carries transform_matrix directly
+    entity_with_tf = dict(entity, transform_matrix=transform_matrix)
+    assert engine.matches(matching_selector, entity_with_tf) is True
+    assert engine.matches(selector, entity_with_tf) is False
+
+    # 4. Same frame comparison succeeds directly without transform
+    same_frame_selector = EntitySelector(
+        bbox_region=BoundingBox(
+            min_point=Point3(x=-5.0, y=-5.0, z=-5.0, frame=comp_frame),
+            max_point=Point3(x=15.0, y=15.0, z=15.0, frame=comp_frame),
+            frame=comp_frame,
+        )
+    )
+    assert engine.matches(same_frame_selector, entity) is True

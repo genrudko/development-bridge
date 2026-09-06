@@ -579,7 +579,7 @@ def run():
         resolved = resolve_fusion_entity(PAYLOAD)
         return make_result(
             data=resolved,
-            summary=f"Resolved entity {PAYLOAD.get('ref') or PAYLOAD.get('native_token')}: {resolved.get('outcome')}",
+            summary=f"Resolved entity {PAYLOAD.get('ref') or 'entity'}: {resolved.get('outcome')}",
         )
 
     fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)

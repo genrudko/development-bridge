@@ -1021,15 +1021,14 @@ def resolve_fusion_entity(payload=None):
     name = payload.get("name")
     component_path = payload.get("component_path") or ()
     ref = payload.get("ref")
+    geometry_signature = payload.get("geometry_signature")
 
-    def _extract_native_info(entity):
-        tok = getattr(entity, "entityToken", None) or getattr(entity, "id", None)
+    def _extract_candidate_info(entity):
         ent_name = getattr(entity, "name", None)
         ent_type = getattr(entity, "objectType", None) or type(entity).__name__
         return {
-            "native_token": str(tok) if tok else None,
-            "name": ent_name,
-            "native_type": ent_type,
+            "name": str(ent_name) if ent_name is not None else None,
+            "native_type": str(ent_type) if ent_type is not None else None,
             "document_ref": safe_doc_ref,
         }
 
@@ -1043,11 +1042,11 @@ def resolve_fusion_entity(payload=None):
                         return {
                             "outcome": "exact",
                             "ref": ref,
-                            "candidates": [_extract_native_info(resolved.item(0))],
+                            "candidates": [_extract_candidate_info(resolved.item(0))],
                             "document_ref": safe_doc_ref,
                         }
                     elif resolved.count > 1:
-                        cands = [_extract_native_info(resolved.item(i)) for i in range(resolved.count)]
+                        cands = [_extract_candidate_info(resolved.item(i)) for i in range(resolved.count)]
                         return {
                             "outcome": "split",
                             "ref": ref,
@@ -1058,7 +1057,7 @@ def resolve_fusion_entity(payload=None):
                     return {
                         "outcome": "exact",
                         "ref": ref,
-                        "candidates": [_extract_native_info(resolved)],
+                        "candidates": [_extract_candidate_info(resolved)],
                         "document_ref": safe_doc_ref,
                     }
         except Exception:
@@ -1067,51 +1066,182 @@ def resolve_fusion_entity(payload=None):
     # 3. Contextual fallback
     root = getattr(design, "rootComponent", None)
     target_comp = root
-    if component_path and root and hasattr(root, "occurrences"):
+    component_path_resolved = True
+
+    if component_path and root:
         curr = root
-        for path_seg in component_path[1:]:
-            found_occ = None
-            if hasattr(curr, "occurrences"):
-                for idx in range(curr.occurrences.count):
+        root_name = getattr(root, "name", None)
+        path_segs = list(component_path)
+        if path_segs and (path_segs[0] == root_name or path_segs[0] == "Root"):
+            path_segs = path_segs[1:]
+
+        for path_seg in path_segs:
+            found_comp = None
+            if hasattr(curr, "occurrences") and curr.occurrences is not None:
+                occ_count = getattr(curr.occurrences, "count", 0)
+                for idx in range(occ_count):
                     occ = curr.occurrences.item(idx)
                     if getattr(occ, "name", None) == path_seg:
-                        found_occ = occ
-                        curr = getattr(occ, "component", curr)
+                        found_comp = getattr(occ, "component", None)
                         break
-            if not found_occ:
+            if found_comp is None:
+                # Every segment must resolve exactly; missing/partial path cannot continue
+                component_path_resolved = False
+                target_comp = None
                 break
-        target_comp = curr
+            curr = found_comp
+        if component_path_resolved:
+            target_comp = curr
 
     candidates = []
-    if target_comp and kind:
-        if kind == "body" and hasattr(target_comp, "bRepBodies"):
-            for i in range(target_comp.bRepBodies.count):
+    if component_path_resolved and target_comp and kind:
+        if kind == "body" and hasattr(target_comp, "bRepBodies") and target_comp.bRepBodies is not None:
+            body_count = getattr(target_comp.bRepBodies, "count", 0)
+            for i in range(body_count):
                 b = target_comp.bRepBodies.item(i)
                 if name is None or getattr(b, "name", None) == name:
                     candidates.append(b)
-        elif kind == "sketch" and hasattr(target_comp, "sketches"):
-            for i in range(target_comp.sketches.count):
+        elif kind == "sketch" and hasattr(target_comp, "sketches") and target_comp.sketches is not None:
+            sketch_count = getattr(target_comp.sketches, "count", 0)
+            for i in range(sketch_count):
                 s = target_comp.sketches.item(i)
                 if name is None or getattr(s, "name", None) == name:
                     candidates.append(s)
-        elif kind == "occurrence" and hasattr(target_comp, "occurrences"):
-            for i in range(target_comp.occurrences.count):
+        elif kind == "occurrence" and hasattr(target_comp, "occurrences") and target_comp.occurrences is not None:
+            occ_count = getattr(target_comp.occurrences, "count", 0)
+            for i in range(occ_count):
                 occ = target_comp.occurrences.item(i)
                 if name is None or getattr(occ, "name", None) == name:
                     candidates.append(occ)
+        elif kind == "face" and hasattr(target_comp, "bRepBodies") and target_comp.bRepBodies is not None:
+            body_count = getattr(target_comp.bRepBodies, "count", 0)
+            for i in range(body_count):
+                b = target_comp.bRepBodies.item(i)
+                faces = getattr(b, "faces", None)
+                if faces is not None:
+                    face_count = getattr(faces, "count", 0)
+                    for j in range(face_count):
+                        f = faces.item(j)
+                        if name is None or getattr(f, "name", None) == name:
+                            candidates.append(f)
+        elif kind == "edge" and hasattr(target_comp, "bRepBodies") and target_comp.bRepBodies is not None:
+            body_count = getattr(target_comp.bRepBodies, "count", 0)
+            for i in range(body_count):
+                b = target_comp.bRepBodies.item(i)
+                edges = getattr(b, "edges", None)
+                if edges is not None:
+                    edge_count = getattr(edges, "count", 0)
+                    for j in range(edge_count):
+                        e = edges.item(j)
+                        if name is None or getattr(e, "name", None) == name:
+                            candidates.append(e)
+
+    def _matches_geometry_signature(ent, sig):
+        if not sig or not isinstance(sig, dict):
+            return True
+
+        def _approx_eq(v1, v2, tol=1e-4):
+            try:
+                return abs(float(v1) - float(v2)) <= tol
+            except (TypeError, ValueError):
+                return v1 == v2
+
+        for key, expected in sig.items():
+            actual = None
+            if key == "volume":
+                actual = getattr(ent, "volume", None)
+            elif key == "area":
+                actual = getattr(ent, "area", None)
+            elif key == "is_solid":
+                actual = getattr(ent, "isSolid", getattr(ent, "is_solid", None))
+            elif key == "faces_count":
+                fc = getattr(ent, "faces", None)
+                actual = getattr(fc, "count", None) if fc is not None else getattr(ent, "faces_count", None)
+            elif key == "edges_count":
+                ec = getattr(ent, "edges", None)
+                actual = getattr(ec, "count", None) if ec is not None else getattr(ent, "edges_count", None)
+            elif key == "curves_count":
+                sc = getattr(ent, "sketchCurves", None)
+                actual = getattr(sc, "count", None) if sc is not None else getattr(ent, "curves_count", None)
+            elif key == "profiles_count":
+                pc = getattr(ent, "profiles", None)
+                actual = getattr(pc, "count", None) if pc is not None else getattr(ent, "profiles_count", None)
+            elif key == "length":
+                actual = getattr(ent, "length", None)
+            elif key == "surface_type":
+                geom = getattr(ent, "geometry", None)
+                actual = getattr(geom, "objectType", None) or getattr(geom, "surfaceType", None) or (type(geom).__name__ if geom else None)
+            elif key == "curve_type":
+                geom = getattr(ent, "geometry", None)
+                actual = getattr(geom, "objectType", None) or getattr(geom, "curveType", None) or (type(geom).__name__ if geom else None)
+            elif key == "centroid":
+                c = getattr(ent, "centroid", None)
+                if c is not None and hasattr(c, "x") and hasattr(c, "y") and hasattr(c, "z"):
+                    actual = [c.x, c.y, c.z]
+                else:
+                    actual = getattr(ent, "centroid", None)
+            elif key == "bounding_box":
+                bb = getattr(ent, "boundingBox", None)
+                if bb is not None and getattr(bb, "minPoint", None) is not None and getattr(bb, "maxPoint", None) is not None:
+                    actual = {
+                        "min": [bb.minPoint.x, bb.minPoint.y, bb.minPoint.z],
+                        "max": [bb.maxPoint.x, bb.maxPoint.y, bb.maxPoint.z],
+                    }
+                else:
+                    actual = getattr(ent, "bounding_box", None)
+            else:
+                actual = getattr(ent, key, None)
+                if actual is None and isinstance(ent, dict):
+                    actual = ent.get(key)
+
+            if actual is None:
+                return False
+
+            if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+                if not _approx_eq(actual, expected):
+                    return False
+            elif isinstance(expected, (list, tuple)) and isinstance(actual, (list, tuple)):
+                if len(actual) != len(expected):
+                    return False
+                for a_val, e_val in zip(actual, expected):
+                    if not _approx_eq(a_val, e_val):
+                        return False
+            elif isinstance(expected, dict) and isinstance(actual, dict):
+                for sub_k, sub_e in expected.items():
+                    sub_a = actual.get(sub_k)
+                    if sub_a is None:
+                        return False
+                    if isinstance(sub_e, (int, float)):
+                        if not _approx_eq(sub_a, sub_e):
+                            return False
+                    elif isinstance(sub_e, (list, tuple)) and isinstance(sub_a, (list, tuple)):
+                        if len(sub_a) != len(sub_e):
+                            return False
+                        for a_v, e_v in zip(sub_a, sub_e):
+                            if not _approx_eq(a_v, e_v):
+                                return False
+                    elif sub_a != sub_e:
+                        return False
+            elif actual != expected:
+                return False
+
+        return True
+
+    if geometry_signature:
+        candidates = [c for c in candidates if _matches_geometry_signature(c, geometry_signature)]
 
     if len(candidates) == 1:
         return {
             "outcome": "exact",
             "ref": ref,
-            "candidates": [_extract_native_info(candidates[0])],
+            "candidates": [_extract_candidate_info(candidates[0])],
             "document_ref": safe_doc_ref,
         }
     elif len(candidates) > 1:
         return {
             "outcome": "ambiguous",
             "ref": ref,
-            "candidates": [_extract_native_info(c) for c in candidates],
+            "candidates": [_extract_candidate_info(c) for c in candidates],
             "document_ref": safe_doc_ref,
         }
 

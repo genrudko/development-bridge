@@ -101,7 +101,12 @@ class SelectorEngine:
             return entity.get(field, default)
         return getattr(entity, field, default)
 
-    def matches(self, selector: EntitySelector, entity: Any) -> bool:
+    def matches(
+        self,
+        selector: EntitySelector,
+        entity: Any,
+        context: Mapping[str, Any] | None = None,
+    ) -> bool:
         """Check if an entity matches all non-None criteria of the normalized selector."""
         # 1. kind
         if selector.kind is not None:
@@ -241,10 +246,41 @@ class SelectorEngine:
             )
             if ent_bbox is None:
                 return False
-            # Check bounding box overlap
             q = selector.bbox_region
             b = ent_bbox
-            # Overlap in 3D: not separated on any axis
+
+            # Frame safety: never compare raw coordinates across different frames
+            if b.frame != q.frame:
+                transform_matrix = None
+                if context and isinstance(context, Mapping):
+                    transform_matrix = context.get("transform_matrix")
+                    if transform_matrix is None and "transforms" in context:
+                        transforms = context["transforms"]
+                        if isinstance(transforms, Mapping):
+                            transform_matrix = transforms.get((b.frame, q.frame))
+                            if transform_matrix is None:
+                                transform_matrix = transforms.get(
+                                    (b.frame.space, q.frame.space)
+                                )
+                if transform_matrix is None:
+                    ent_tf = self._extract_attr(entity, "transform_matrix") or self._extract_attr(
+                        entity, "transform"
+                    )
+                    if isinstance(ent_tf, (list, tuple)):
+                        transform_matrix = ent_tf
+
+                if transform_matrix is None:
+                    # Fail closed: never compare raw coordinates from different frames
+                    return False
+
+                try:
+                    from app.fusion_cad.refs import convert_bounding_box
+
+                    b = convert_bounding_box(b, q.frame, transform_matrix=transform_matrix)
+                except (FusionCadError, ValueError, TypeError):
+                    return False
+
+            # Check bounding box overlap in identical coordinate frame
             separated = (
                 b.max_point.x < q.min_point.x
                 or b.min_point.x > q.max_point.x
@@ -280,10 +316,11 @@ class SelectorEngine:
         self,
         selector: EntitySelector | Mapping[str, Any] | None,
         candidates: Iterable[Any],
+        context: Mapping[str, Any] | None = None,
     ) -> list[Any]:
         """Filter candidate entities deterministically."""
         norm_sel = self.normalize(selector)
-        matched = [c for c in candidates if self.matches(norm_sel, c)]
+        matched = [c for c in candidates if self.matches(norm_sel, c, context=context)]
 
         # Deterministic sorting by ref, then name
         def sort_key(item: Any) -> tuple[str, str]:
@@ -331,20 +368,22 @@ class SelectorEngine:
         self,
         selector: EntitySelector | Mapping[str, Any] | None,
         candidates: Iterable[Any],
+        context: Mapping[str, Any] | None = None,
     ) -> Any:
         """Resolve exactly one target entity; fails closed with SELECTOR_EMPTY or SELECTOR_AMBIGUOUS."""
         norm_sel = self.normalize(selector)
-        matches = self.filter(norm_sel, candidates)
+        matches = self.filter(norm_sel, candidates, context=context)
         return self.enforce_single_target(matches, selector=norm_sel)
 
     def query(
         self,
         selector: EntitySelector | Mapping[str, Any] | None,
         candidates: Iterable[Any],
+        context: Mapping[str, Any] | None = None,
     ) -> SelectorQueryResult:
         """Execute deterministic multi-entity selector query returning matched_count and normalized selector."""
         norm_sel = self.normalize(selector)
-        matches = self.filter(norm_sel, candidates)
+        matches = self.filter(norm_sel, candidates, context=context)
         refs = tuple(
             str(self._extract_attr(m, "ref", ""))
             for m in matches
