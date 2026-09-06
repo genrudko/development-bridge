@@ -335,6 +335,46 @@ def test_coordinator_pending_mount_cannot_wake_but_legacy_explicit_channel_can(
     assert legacy_data["state"] == "pending"
 
 
+def test_coordinator_continue_coalesces_into_resilient_wake_without_downgrading(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-current",
+        "telegram-bridge-g0",
+    )
+    armed = asyncio.run(container.coordinator.arm_resilient(
+        "durable job finished",
+        channel_id="telegram-bridge-g0",
+        retry_delays_seconds=(30.0, 60.0),
+        escalation_delay_seconds=120.0,
+        escalation_message="telegram alert",
+    ))
+    continuation_id = armed["continuation_id"]
+
+    registry = build_tool_registry(container)
+    continue_tool = registry.get("coordinator_continue")
+
+    result = asyncio.run(continue_tool.handler(
+        None,
+        SimpleNamespace(arguments={
+            "route_id": "bridge",
+            "message": "continue message",
+            "conflict": "coalesce",
+        }),
+        SimpleNamespace(request_id="req-continue-coalesce"),
+    ))
+    data = json.loads(result.content[0].text)["data"]
+    assert data["coalesced"] is True
+    assert data["continuation_id"] == continuation_id
+    assert data["model_ack_required"] is True
+
+    status = asyncio.run(container.coordinator.status("telegram-bridge-g0", delivery_mode="direct"))
+    assert status["continuation_id"] == continuation_id
+
+
 def test_coordinator_route_takeover_hides_physical_route_identity(tmp_path: Path):
     settings = BridgeSettings.model_validate({
         "coordinator": {"route_registry_path": tmp_path / "routes.json"},

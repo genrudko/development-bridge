@@ -544,7 +544,6 @@ class CoordinatorService:
             if (
                 existing is not None
                 and conflict == "coalesce"
-                and model_ack_required
                 and existing.model_ack_required
             ):
                 data = self._coalesce_resilient_locked(

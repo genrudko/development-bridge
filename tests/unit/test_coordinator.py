@@ -162,6 +162,90 @@ async def test_resilient_events_batch_before_first_delivery_and_deduplicate():
 
 
 @pytest.mark.asyncio
+async def test_non_resilient_arm_coalesce_never_downgrades_existing_resilient_wake():
+    service = CoordinatorService()
+    armed = await service.arm_resilient(
+        "job completed",
+        channel_id="telegram-fusioncad-g0",
+        retry_delays_seconds=(30.0, 60.0),
+        escalation_delay_seconds=120.0,
+        escalation_message="telegram alert",
+    )
+    initial_continuation_id = armed["continuation_id"]
+
+    followup = await service.arm(
+        "coordinator continue message",
+        channel_id="telegram-fusioncad-g0",
+        delay_seconds=12.0,
+        conflict="coalesce",
+    )
+    assert followup["coalesced"] is True
+    assert followup["continuation_id"] == initial_continuation_id
+    assert followup["model_ack_required"] is True
+
+    pending = service._pending["telegram-fusioncad-g0"]
+    assert pending.continuation_id == initial_continuation_id
+    assert pending.model_ack_required is True
+    assert pending.max_delivery_attempts == 3
+    assert pending.retry_delays_seconds == [30.0, 60.0]
+    assert pending.escalation_delay_seconds == 120.0
+    assert pending.escalation_message == "telegram alert"
+    assert pending.message.split(service.BATCH_SEPARATOR) == [
+        "job completed",
+        "coordinator continue message",
+    ]
+
+    status = await service.status("telegram-fusioncad-g0", delivery_mode="direct")
+    assert status["continuation_id"] == initial_continuation_id
+
+
+@pytest.mark.asyncio
+async def test_non_resilient_arm_coalesce_on_claimed_resilient_wake_queues_without_rewriting_state():
+    service = CoordinatorService()
+    armed = await service.arm_resilient(
+        "job completed",
+        channel_id="telegram-fusioncad-g0",
+        retry_delays_seconds=(30.0, 60.0),
+        escalation_delay_seconds=120.0,
+        escalation_message="telegram alert",
+    )
+    initial_continuation_id = armed["continuation_id"]
+
+    claim = await service.claim("telegram-fusioncad-g0")
+    assert claim["claimed"] is True
+    claim_id = claim["claim_id"]
+    assert claim["delivery_attempt"] == 1
+
+    followup = await service.arm(
+        "queued second message",
+        channel_id="telegram-fusioncad-g0",
+        delay_seconds=12.0,
+        conflict="coalesce",
+    )
+    assert followup["coalesced"] is True
+    assert followup["continuation_id"] == initial_continuation_id
+    assert followup["model_ack_required"] is True
+    assert followup["queued_events"] == 1
+
+    pending = service._pending["telegram-fusioncad-g0"]
+    assert pending.continuation_id == initial_continuation_id
+    assert pending.claim_id == claim_id
+    assert pending.delivery_attempts == 1
+    assert pending.model_ack_required is True
+    assert pending.max_delivery_attempts == 3
+    assert pending.retry_delays_seconds == [30.0, 60.0]
+    assert pending.escalation_delay_seconds == 120.0
+    assert pending.escalation_message == "telegram alert"
+    assert pending.queued_messages == ["queued second message"]
+
+    # Transport acks delivery, then model ack consumes queued message
+    transport = await service.ack("telegram-fusioncad-g0", claim_id)
+    assert transport["transport_delivered"] is True
+    acked = await service.model_ack(initial_continuation_id)
+    assert acked["batched_messages"] == ["queued second message"]
+
+
+@pytest.mark.asyncio
 async def test_event_while_waiting_model_ack_is_consumed_by_same_turn():
     service = CoordinatorService()
     armed = await service.arm_resilient("A", channel_id="route-g2", retry_delays_seconds=(0, 0))
