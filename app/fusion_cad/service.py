@@ -15,7 +15,13 @@ from app.fusion_cad.capabilities import (
     FusionRuntimeIdentity,
     get_required_capability,
 )
-from app.fusion_cad.errors import FusionCadError
+from app.fusion_cad.errors import (
+    FusionCadError,
+    format_safe_validation_message,
+    sanitize_error_message,
+    sanitize_public_payload,
+    sanitize_validation_errors,
+)
 from app.fusion_cad.models import (
     ENTITY_REF_PATTERN,
     CadResult,
@@ -41,7 +47,6 @@ from app.fusion_cad.snapshots import (
     normalize_feature,
     normalize_sketch_read,
     normalize_snapshot,
-    sanitize_public_payload,
 )
 
 _GROUP_REQUEST_ADAPTERS: dict[str, TypeAdapter[Any]] = {
@@ -347,7 +352,7 @@ class FusionCadService:
                             )
                     except (ValueError, TypeError):
                         if text:
-                            err_msg = text
+                            err_msg = sanitize_error_message(text, err_code)
                             return (
                                 err_code,
                                 err_msg,
@@ -367,7 +372,11 @@ class FusionCadService:
                 err_details = err.get("details") or payload.get("details") or err
             elif isinstance(err, str):
                 err_msg = err
-            return err_code, str(err_msg), sanitize_public_payload(err_details)
+            return (
+                err_code,
+                sanitize_error_message(err_msg, err_code),
+                sanitize_public_payload(err_details),
+            )
 
         if "message" in payload:
             err_msg = str(payload["message"])
@@ -377,9 +386,17 @@ class FusionCadService:
                     err_code = ErrorCode(str(code_str))
                 except ValueError:
                     err_code = ErrorCode.FUSION_API_ERROR
-            return err_code, err_msg, sanitize_public_payload(payload)
+            return (
+                err_code,
+                sanitize_error_message(err_msg, err_code),
+                sanitize_public_payload(payload),
+            )
 
-        return err_code, err_msg, sanitize_public_payload(err_details)
+        return (
+            err_code,
+            sanitize_error_message(err_msg, err_code),
+            sanitize_public_payload(err_details),
+        )
 
     @classmethod
     def decode_domain_result(cls, raw_result: Any) -> CadResult:
@@ -391,7 +408,7 @@ class FusionCadService:
         if not isinstance(raw_result, dict):
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
-                f"Unexpected non-dict result type from desktop node: {type(raw_result).__name__}",
+                "Unexpected non-dict result type from desktop node",
                 details={"raw_result": sanitize_public_payload(raw_result)},
             )
 
@@ -419,20 +436,23 @@ class FusionCadService:
                             "Empty text content in native Fusion execution output",
                             details={"block": sanitize_public_payload(block)},
                         )
+                    malformed_err: FusionCadError | None = None
                     try:
                         parsed = json.loads(text)
                     except (ValueError, TypeError):
-                        raise FusionCadError(
+                        malformed_err = FusionCadError(
                             ErrorCode.FUSION_API_ERROR,
-                            f"Malformed non-JSON output from native Fusion script: {text[:200]}",
-                            details={"raw_output": text},
-                        ) from None
+                            "Malformed non-JSON output from native Fusion script",
+                            details={"content_type": "text"},
+                        )
+                    if malformed_err is not None:
+                        raise malformed_err
 
                     if not isinstance(parsed, dict):
                         raise FusionCadError(
                             ErrorCode.FUSION_API_ERROR,
-                            f"Invalid domain output type (expected JSON object, got {type(parsed).__name__})",
-                            details={"raw_output": text},
+                            "Invalid domain output type: expected JSON object",
+                            details={"parsed_type": type(parsed).__name__},
                         )
 
                     if (
@@ -446,24 +466,27 @@ class FusionCadService:
                     if parsed.get("api_version") != "fusion.cad/v1":
                         raise FusionCadError(
                             ErrorCode.FUSION_API_ERROR,
-                            f"Unrecognized domain output from native Fusion script: expected api_version 'fusion.cad/v1', got {parsed.get('api_version')!r}",
+                            "Unrecognized domain output from native Fusion script: missing or invalid api_version 'fusion.cad/v1'",
                             details={"parsed": sanitize_public_payload(parsed)},
                         )
 
                     candidate = dict(parsed)
                     candidate.pop("isError", None)
+                    val_err: FusionCadError | None = None
                     try:
                         return CadResult.model_validate(candidate)
                     except ValidationError as exc:
-                        raise FusionCadError(
+                        val_err = FusionCadError(
                             ErrorCode.FUSION_API_ERROR,
-                            f"Invalid fusion.cad/v1 response schema: {exc}",
+                            "Invalid fusion.cad/v1 response schema",
                             details={
-                                "validation_errors": sanitize_public_payload(
+                                "validation_errors": sanitize_validation_errors(
                                     exc.errors()
                                 )
                             },
-                        ) from None
+                        )
+                    if val_err is not None:
+                        raise val_err
 
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
@@ -478,19 +501,24 @@ class FusionCadService:
         if raw_result.get("api_version") == "fusion.cad/v1":
             candidate = dict(raw_result)
             candidate.pop("isError", None)
+            fallback_val_err: FusionCadError | None = None
             try:
                 return CadResult.model_validate(candidate)
             except ValidationError as exc:
-                raise FusionCadError(
+                fallback_val_err = FusionCadError(
                     ErrorCode.FUSION_API_ERROR,
-                    f"Invalid fusion.cad/v1 response schema: {exc}",
-                    details={"validation_errors": exc.errors()},
-                ) from exc
+                    "Invalid fusion.cad/v1 response schema",
+                    details={
+                        "validation_errors": sanitize_validation_errors(exc.errors())
+                    },
+                )
+            if fallback_val_err is not None:
+                raise fallback_val_err
 
         raise FusionCadError(
             ErrorCode.FUSION_API_ERROR,
             "Unrecognized domain output format from native Fusion script: missing or invalid api_version 'fusion.cad/v1'",
-            details={"raw_result": raw_result},
+            details={"raw_result": sanitize_public_payload(raw_result)},
         )
 
     def _finalize_completed_execution(
@@ -1252,15 +1280,24 @@ class FusionCadService:
                 details={"group": target_group},
             )
 
+        val_err: BridgeError | None = None
         try:
             validated = adapter.validate_python(request_dict)
             return validated, target_group, bundle_group
         except ValidationError as exc:
-            raise BridgeError(
+            safe_msg = format_safe_validation_message(
+                f"Invalid {target_group} request payload", exc.errors()
+            )
+            val_err = BridgeError(
                 ErrorCode.INVALID_ARGUMENT,
-                f"Invalid {target_group} request payload: {exc}",
-                details={"validation_errors": exc.errors()},
-            ) from exc
+                safe_msg,
+                details={"validation_errors": sanitize_validation_errors(exc.errors())},
+            )
+            val_err.__cause__ = None
+            val_err.__context__ = None
+            val_err.__suppress_context__ = True
+        if val_err is not None:
+            raise val_err
 
     def _classify_operation(
         self, group: str, payload: dict[str, Any]
@@ -1618,8 +1655,8 @@ class FusionCadService:
         if not isinstance(raw_result, dict):
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
-                f"Unexpected non-dict result type from desktop node: {type(raw_result).__name__}",
-                details={"raw_result": str(raw_result)},
+                "Unexpected non-dict result type from desktop node",
+                details={"raw_result": sanitize_public_payload(raw_result)},
             )
 
         # Handle external_result reference already returned by desktop node

@@ -8,32 +8,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.api.errors import ErrorCode
+from app.fusion_cad.canonicalization import canonicalize_value
 from app.fusion_cad.errors import FusionCadError
 
 
 def _canonicalize_value(val: Any) -> Any:
     """Recursively canonicalize values for deterministic JSON serialization."""
-    if val is None or isinstance(val, (bool, int, str)):
-        return val
-    if isinstance(val, float):
-        rounded = round(val, 6)
-        return 0.0 if rounded == 0.0 else rounded
-    if isinstance(val, Mapping):
-        return {k: _canonicalize_value(val[k]) for k in sorted(val.keys())}
-    if isinstance(val, (list, tuple, set, frozenset)):
-        canonical_items = [_canonicalize_value(x) for x in val]
-        try:
-            return sorted(
-                canonical_items,
-                key=lambda item: (
-                    json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-                    if isinstance(item, (dict, list, tuple))
-                    else str(item)
-                ),
-            )
-        except (TypeError, ValueError):
-            return canonical_items
-    return str(val)
+    return canonicalize_value(val)
 
 
 def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -72,54 +53,80 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
             doc_ref = ""
         canonical["document"] = {
             "document_ref": doc_ref,
-            "name": str(payload.get("name", "")) if payload.get("name") is not None else None,
+            "name": str(payload.get("name", ""))
+            if payload.get("name") is not None
+            else None,
             "is_modified": bool(payload.get("is_modified", False)),
             "saved_version": payload.get("saved_version"),
         }
 
     # 2. Timeline feature identity / health / suppression
-    if "timeline" in payload and isinstance(payload["timeline"], (list, tuple, Sequence)):
+    if "timeline" in payload and isinstance(
+        payload["timeline"], (list, tuple, Sequence)
+    ):
         timeline_items: list[dict[str, Any]] = []
         for item in payload["timeline"]:
             if isinstance(item, Mapping):
-                timeline_items.append({
-                    "index": int(item.get("index", 0)),
-                    "id": str(item.get("id") or item.get("entityToken") or item.get("index", "")),
-                    "name": str(item.get("name", "")),
-                    "is_suppressed": bool(item.get("is_suppressed", False)),
-                    "is_valid": bool(item.get("is_valid", True)),
-                    "is_rolled_back": bool(item.get("is_rolled_back", False)),
-                    "health_status": str(item.get("health_status")) if item.get("health_status") is not None else None,
-                })
+                timeline_items.append(
+                    {
+                        "index": int(item.get("index", 0)),
+                        "id": str(
+                            item.get("id")
+                            or item.get("entityToken")
+                            or item.get("index", "")
+                        ),
+                        "name": str(item.get("name", "")),
+                        "is_suppressed": bool(item.get("is_suppressed", False)),
+                        "is_valid": bool(item.get("is_valid", True)),
+                        "is_rolled_back": bool(item.get("is_rolled_back", False)),
+                        "health_status": str(item.get("health_status"))
+                        if item.get("health_status") is not None
+                        else None,
+                    }
+                )
         timeline_items.sort(key=lambda x: (x["index"], x["id"], x["name"]))
         canonical["timeline"] = timeline_items
 
     # 3. Components / occurrences / transforms
-    if "components" in payload and isinstance(payload["components"], (list, tuple, Sequence)):
+    if "components" in payload and isinstance(
+        payload["components"], (list, tuple, Sequence)
+    ):
         components_items: list[dict[str, Any]] = []
         for c in payload["components"]:
             if isinstance(c, Mapping):
-                components_items.append({
-                    "name": str(c.get("name", "")),
-                    "id": str(c.get("id", "")) if c.get("id") is not None else None,
-                })
+                components_items.append(
+                    {
+                        "name": str(c.get("name", "")),
+                        "id": str(c.get("id", "")) if c.get("id") is not None else None,
+                    }
+                )
         components_items.sort(key=lambda x: (x["name"], x.get("id") or ""))
         canonical["components"] = components_items
 
-    if "occurrences" in payload and isinstance(payload["occurrences"], (list, tuple, Sequence)):
+    if "occurrences" in payload and isinstance(
+        payload["occurrences"], (list, tuple, Sequence)
+    ):
         occ_items: list[dict[str, Any]] = []
         for occ in payload["occurrences"]:
             if isinstance(occ, Mapping):
                 transform = occ.get("transform")
-                canonical_transform = _canonicalize_value(transform) if transform is not None else None
+                canonical_transform = (
+                    _canonicalize_value(transform) if transform is not None else None
+                )
                 is_vis = bool(occ.get("is_visible", True))
-                occ_items.append({
-                    "name": str(occ.get("name", "")),
-                    "full_path_name": str(occ.get("full_path_name") or occ.get("name", "")),
-                    "is_visible": is_vis,
-                    "effective_visibility": bool(occ.get("effective_visibility", is_vis)),
-                    "transform": canonical_transform,
-                })
+                occ_items.append(
+                    {
+                        "name": str(occ.get("name", "")),
+                        "full_path_name": str(
+                            occ.get("full_path_name") or occ.get("name", "")
+                        ),
+                        "is_visible": is_vis,
+                        "effective_visibility": bool(
+                            occ.get("effective_visibility", is_vis)
+                        ),
+                        "transform": canonical_transform,
+                    }
+                )
         occ_items.sort(key=lambda x: x["full_path_name"])
         canonical["occurrences"] = occ_items
 
@@ -136,71 +143,125 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
                 e_list = b.get("edges")
                 f_centroids = b.get("face_centroids")
                 geom_sig = b.get("geometric_signature")
-                body_items.append({
-                    "name": str(b.get("name", "")),
-                    "component": str(b.get("component")) if b.get("component") is not None else None,
-                    "is_solid": bool(b.get("is_solid", True)),
-                    "is_visible": is_vis,
-                    "effective_visibility": bool(b.get("effective_visibility", is_vis)),
-                    "volume": _canonicalize_value(float(b.get("volume", 0.0))),
-                    "area": _canonicalize_value(float(b.get("area", 0.0))),
-                    "faces_count": int(b.get("faces_count", 0)),
-                    "edges_count": int(b.get("edges_count", 0)),
-                    "bounding_box": _canonicalize_value(bbox) if bbox is not None else None,
-                    "center_of_mass": _canonicalize_value(com) if com is not None else None,
-                    "vertices": _canonicalize_value(verts) if verts is not None else None,
-                    "faces": _canonicalize_value(f_list) if f_list is not None else None,
-                    "edges": _canonicalize_value(e_list) if e_list is not None else None,
-                    "face_centroids": _canonicalize_value(f_centroids) if f_centroids is not None else None,
-                    "geometric_signature": _canonicalize_value(geom_sig) if geom_sig is not None else None,
-                })
+                body_items.append(
+                    {
+                        "name": str(b.get("name", "")),
+                        "component": str(b.get("component"))
+                        if b.get("component") is not None
+                        else None,
+                        "is_solid": bool(b.get("is_solid", True)),
+                        "is_visible": is_vis,
+                        "effective_visibility": bool(
+                            b.get("effective_visibility", is_vis)
+                        ),
+                        "volume": _canonicalize_value(float(b.get("volume", 0.0))),
+                        "area": _canonicalize_value(float(b.get("area", 0.0))),
+                        "faces_count": int(b.get("faces_count", 0)),
+                        "edges_count": int(b.get("edges_count", 0)),
+                        "bounding_box": _canonicalize_value(bbox)
+                        if bbox is not None
+                        else None,
+                        "center_of_mass": _canonicalize_value(com)
+                        if com is not None
+                        else None,
+                        "vertices": _canonicalize_value(verts)
+                        if verts is not None
+                        else None,
+                        "faces": _canonicalize_value(f_list)
+                        if f_list is not None
+                        else None,
+                        "edges": _canonicalize_value(e_list)
+                        if e_list is not None
+                        else None,
+                        "face_centroids": _canonicalize_value(f_centroids)
+                        if f_centroids is not None
+                        else None,
+                        "geometric_signature": _canonicalize_value(geom_sig)
+                        if geom_sig is not None
+                        else None,
+                    }
+                )
         body_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
         canonical["bodies"] = body_items
 
     # 5. Sketches and constraints
-    if "sketches" in payload and isinstance(payload["sketches"], (list, tuple, Sequence)):
+    if "sketches" in payload and isinstance(
+        payload["sketches"], (list, tuple, Sequence)
+    ):
         sketch_items: list[dict[str, Any]] = []
         for s in payload["sketches"]:
             if isinstance(s, Mapping):
                 constraints = s.get("constraints")
                 dimensions = s.get("dimensions")
                 is_vis = bool(s.get("is_visible", True))
-                cons_count = int(s.get("constraints_count", len(constraints) if isinstance(constraints, (list, tuple)) else 0))
-                dim_count = int(s.get("dimensions_count", len(dimensions) if isinstance(dimensions, (list, tuple)) else 0))
+                cons_count = int(
+                    s.get(
+                        "constraints_count",
+                        len(constraints)
+                        if isinstance(constraints, (list, tuple))
+                        else 0,
+                    )
+                )
+                dim_count = int(
+                    s.get(
+                        "dimensions_count",
+                        len(dimensions) if isinstance(dimensions, (list, tuple)) else 0,
+                    )
+                )
                 curves = s.get("curves")
                 points = s.get("points")
                 s_bbox = s.get("bounding_box")
-                sketch_items.append({
-                    "name": str(s.get("name", "")),
-                    "component": str(s.get("component")) if s.get("component") is not None else None,
-                    "is_visible": is_vis,
-                    "effective_visibility": bool(s.get("effective_visibility", is_vis)),
-                    "profiles_count": int(s.get("profiles_count", 0)),
-                    "curves_count": int(s.get("curves_count", 0)),
-                    "constraints_count": cons_count,
-                    "constraints": _canonicalize_value(constraints) if constraints is not None else None,
-                    "dimensions_count": dim_count,
-                    "dimensions": _canonicalize_value(dimensions) if dimensions is not None else None,
-                    "curves": _canonicalize_value(curves) if curves is not None else None,
-                    "points": _canonicalize_value(points) if points is not None else None,
-                    "bounding_box": _canonicalize_value(s_bbox) if s_bbox is not None else None,
-                })
+                sketch_items.append(
+                    {
+                        "name": str(s.get("name", "")),
+                        "component": str(s.get("component"))
+                        if s.get("component") is not None
+                        else None,
+                        "is_visible": is_vis,
+                        "effective_visibility": bool(
+                            s.get("effective_visibility", is_vis)
+                        ),
+                        "profiles_count": int(s.get("profiles_count", 0)),
+                        "curves_count": int(s.get("curves_count", 0)),
+                        "constraints_count": cons_count,
+                        "constraints": _canonicalize_value(constraints)
+                        if constraints is not None
+                        else None,
+                        "dimensions_count": dim_count,
+                        "dimensions": _canonicalize_value(dimensions)
+                        if dimensions is not None
+                        else None,
+                        "curves": _canonicalize_value(curves)
+                        if curves is not None
+                        else None,
+                        "points": _canonicalize_value(points)
+                        if points is not None
+                        else None,
+                        "bounding_box": _canonicalize_value(s_bbox)
+                        if s_bbox is not None
+                        else None,
+                    }
+                )
         sketch_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
         canonical["sketches"] = sketch_items
 
     # 6. Parameter expressions and values
-    if "parameters" in payload and isinstance(payload["parameters"], (list, tuple, Sequence)):
+    if "parameters" in payload and isinstance(
+        payload["parameters"], (list, tuple, Sequence)
+    ):
         param_items: list[dict[str, Any]] = []
         for p in payload["parameters"]:
             if isinstance(p, Mapping):
                 val = p.get("value", 0.0)
-                param_items.append({
-                    "name": str(p.get("name", "")),
-                    "expression": str(p.get("expression", "")),
-                    "value": _canonicalize_value(val),
-                    "unit": str(p.get("unit", "")),
-                    "is_favorite": bool(p.get("is_favorite", False)),
-                })
+                param_items.append(
+                    {
+                        "name": str(p.get("name", "")),
+                        "expression": str(p.get("expression", "")),
+                        "value": _canonicalize_value(val),
+                        "unit": str(p.get("unit", "")),
+                        "is_favorite": bool(p.get("is_favorite", False)),
+                    }
+                )
         param_items.sort(key=lambda x: x["name"])
         canonical["parameters"] = param_items
 
@@ -216,32 +277,48 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
                     "Cannot canonicalize document attributes without a stable document_ref",
                 )
             for k, v in raw_attrs.items():
-                attr_items.append({
-                    "owner_type": "document",
-                    "owner_id": doc_id_for_attr,
-                    "group": "bridge.cad/v1",
-                    "name": str(k),
-                    "value": str(v),
-                })
+                attr_items.append(
+                    {
+                        "owner_type": "document",
+                        "owner_id": doc_id_for_attr,
+                        "group": "bridge.cad/v1",
+                        "name": str(k),
+                        "value": str(v),
+                    }
+                )
         elif isinstance(raw_attrs, (list, tuple, Sequence)):
             for a in raw_attrs:
                 if isinstance(a, Mapping):
                     owner_t = str(a.get("owner_type", "document"))
-                    owner_id = str(a.get("owner_id", doc_id_for_attr if owner_t == "document" else ""))
+                    owner_id = str(
+                        a.get(
+                            "owner_id", doc_id_for_attr if owner_t == "document" else ""
+                        )
+                    )
                     if not owner_id or not owner_id.strip():
                         raise FusionCadError(
                             ErrorCode.INVALID_ARGUMENT,
                             f"Attribute for {owner_t} lacks stable owner_id; empty IDs or mutable names are rejected",
                             details={"attribute": dict(a)},
                         )
-                    attr_items.append({
-                        "owner_type": owner_t,
-                        "owner_id": owner_id,
-                        "group": str(a.get("group", "bridge.cad/v1")),
-                        "name": str(a.get("name", "")),
-                        "value": str(a.get("value", "")),
-                    })
-        attr_items.sort(key=lambda x: (x["owner_type"], x["owner_id"], x["group"], x["name"], x.get("value", "")))
+                    attr_items.append(
+                        {
+                            "owner_type": owner_t,
+                            "owner_id": owner_id,
+                            "group": str(a.get("group", "bridge.cad/v1")),
+                            "name": str(a.get("name", "")),
+                            "value": str(a.get("value", "")),
+                        }
+                    )
+        attr_items.sort(
+            key=lambda x: (
+                x["owner_type"],
+                x["owner_id"],
+                x["group"],
+                x["name"],
+                x.get("value", ""),
+            )
+        )
         canonical["attributes"] = attr_items
 
     # 8. Effective visibility inputs
@@ -380,7 +457,11 @@ class RevisionTracker:
                 raise FusionCadError(
                     ErrorCode.REVISION_CONFLICT,
                     f"expected_revision is required for freshness check on document '{document_ref}'",
-                    details={"document_ref": document_ref, "expected_revision": None, "applied": False},
+                    details={
+                        "document_ref": document_ref,
+                        "expected_revision": None,
+                        "applied": False,
+                    },
                 )
             rec = self._documents.get(document_ref)
             if rec is None:
@@ -419,7 +500,9 @@ class RevisionTracker:
 
         return rec
 
-    def get_fingerprint(self, document_ref: str, revision: str | None = None) -> str | None:
+    def get_fingerprint(
+        self, document_ref: str, revision: str | None = None
+    ) -> str | None:
         """Retrieve fingerprint for a document at a specific revision or current."""
         if document_ref not in self._documents:
             return None
@@ -449,7 +532,8 @@ class RevisionTracker:
                 self._active_document_ref = None
             # Clear any transactions bound to this document
             to_remove = [
-                tid for tid, tb in self._transactions.items()
+                tid
+                for tid, tb in self._transactions.items()
                 if tb["document_ref"] == document_ref
             ]
             for tid in to_remove:
@@ -544,7 +628,9 @@ class RevisionTracker:
             "documents": dict(self._documents),
             "history": {doc: list(recs) for doc, recs in self._history.items()},
             "active_document_ref": self._active_document_ref,
-            "transactions": {tx_id: dict(data) for tx_id, data in self._transactions.items()},
+            "transactions": {
+                tx_id: dict(data) for tx_id, data in self._transactions.items()
+            },
         }
 
     def restore(self, snapshot: dict[str, Any]) -> None:
@@ -552,4 +638,6 @@ class RevisionTracker:
         self._documents = dict(snapshot["documents"])
         self._history = {doc: list(recs) for doc, recs in snapshot["history"].items()}
         self._active_document_ref = snapshot["active_document_ref"]
-        self._transactions = {tx_id: dict(data) for tx_id, data in snapshot["transactions"].items()}
+        self._transactions = {
+            tx_id: dict(data) for tx_id, data in snapshot["transactions"].items()
+        }

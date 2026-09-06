@@ -57,7 +57,7 @@ def canonicalize_value(val):
         return 0.0 if rounded == 0.0 else rounded
     if isinstance(val, dict):
         return {k: canonicalize_value(val[k]) for k in sorted(val.keys())}
-    if isinstance(val, (list, tuple, set)):
+    if isinstance(val, (set, frozenset)):
         items = [canonicalize_value(x) for x in val]
         try:
             return sorted(
@@ -66,6 +66,9 @@ def canonicalize_value(val):
             )
         except Exception:
             return items
+    if isinstance(val, (list, tuple)):
+        items = [canonicalize_value(x) for x in val]
+        return tuple(items) if isinstance(val, tuple) else items
     return str(val)
 
 

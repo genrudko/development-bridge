@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from app.fusion_cad.canonicalization import canonicalize_value
 from app.fusion_cad.errors import (
     CAD_NON_RETRYABLE_CODES,
     FusionCadError,
     cad_error_to_bridge_error,
+    format_safe_validation_message,
     is_cad_error_retryable,
+    sanitize_error_message,
+    sanitize_public_payload,
+    sanitize_validation_errors,
 )
 from app.fusion_cad.models import (
     BoundingBox,
@@ -102,7 +107,6 @@ from app.fusion_cad.snapshots import (
     normalize_feature,
     normalize_sketch_read,
     normalize_snapshot,
-    sanitize_public_payload,
 )
 
 __all__ = [
@@ -177,6 +181,7 @@ __all__ = [
     "Vector3",
     "ViewRefSummary",
     "cad_error_to_bridge_error",
+    "canonicalize_value",
     "compute_structural_hash",
     "convert_bounding_box",
     "convert_plane",
@@ -184,6 +189,7 @@ __all__ = [
     "convert_ray",
     "convert_transform",
     "convert_vector",
+    "format_safe_validation_message",
     "fusion_inspect_schema",
     "fusion_metadata_schema",
     "fusion_read_schema",
@@ -195,5 +201,7 @@ __all__ = [
     "normalize_feature",
     "normalize_sketch_read",
     "normalize_snapshot",
+    "sanitize_error_message",
     "sanitize_public_payload",
+    "sanitize_validation_errors",
 ]

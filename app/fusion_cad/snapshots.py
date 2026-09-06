@@ -5,7 +5,7 @@ import json
 import re
 import uuid
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -24,17 +24,7 @@ from app.fusion_cad.refs import EntityRefRegistry
 
 DependencyType = Literal["exact", "inferred", "unknown"]
 
-NATIVE_TOKEN_KEYS = frozenset(
-    {
-        "entityToken",
-        "entitytoken",
-        "native_token",
-        "nativetoken",
-        "token",
-        "entity_token",
-        "nativeToken",
-    }
-)
+from app.fusion_cad.errors import sanitize_public_payload
 
 VOLATILE_HASH_KEYS = frozenset({"snapshot_id", "snapshotid"})
 IDENTIFIER_REF_KEYS = frozenset(
@@ -57,30 +47,6 @@ IDENTIFIER_REF_KEYS = frozenset(
         "component",
     }
 )
-
-
-def sanitize_public_payload(val: Any) -> Any:
-    """Recursively sanitize public payloads by removing native token aliases without stringifying values.
-
-    Preserves legitimate public opaque refs, semantic fields, and python types (float, int, bool, str, None).
-    Handles Mapping, ImmutableMapping, list, tuple, and nested structures.
-    """
-    if isinstance(val, Mapping):
-        clean_map: dict[Any, Any] = {}
-        for k, v in val.items():
-            if isinstance(k, str) and (
-                k in NATIVE_TOKEN_KEYS or k.lower() in NATIVE_TOKEN_KEYS
-            ):
-                continue
-            clean_map[k] = sanitize_public_payload(v)
-        if isinstance(val, ImmutableMapping):
-            return ImmutableMapping(clean_map)
-        return clean_map
-    if isinstance(val, tuple):
-        return tuple(sanitize_public_payload(x) for x in val)
-    if isinstance(val, list):
-        return [sanitize_public_payload(x) for x in val]
-    return val
 
 
 def _canonicalize_structural_value(
@@ -115,9 +81,17 @@ def _canonicalize_structural_value(
 
             # 2. Key is an entity ref in a ref-keyed mapping
             if k_str in ref_map:
-                clean_map[ref_map[k_str]] = _canonicalize_structural_value(
+                target_key = ref_map[k_str]
+                canon_val = _canonicalize_structural_value(
                     v, ref_map, is_identifier=False
                 )
+                if target_key in clean_map:
+                    col_idx = 1
+                    while f"{target_key}#collision:{col_idx}" in clean_map:
+                        col_idx += 1
+                    clean_map[f"{target_key}#collision:{col_idx}"] = canon_val
+                else:
+                    clean_map[target_key] = canon_val
             elif k_str.startswith("ent_") and re.match(ENTITY_REF_PATTERN, k_str):
                 unknown_ref_entries.append(
                     _canonicalize_structural_value(v, ref_map, is_identifier=False)
@@ -154,7 +128,7 @@ def _canonicalize_structural_value(
 
         return {k: clean_map[k] for k in sorted(clean_map.keys())}
 
-    if isinstance(val, (list, tuple, set, frozenset)):
+    if isinstance(val, (set, frozenset)):
         canonical_items = [
             _canonicalize_structural_value(x, ref_map, is_identifier=is_identifier)
             for x in val
@@ -175,6 +149,12 @@ def _canonicalize_structural_value(
             )
         except (TypeError, ValueError):
             return canonical_items
+    if isinstance(val, (list, tuple)):
+        items = [
+            _canonicalize_structural_value(x, ref_map, is_identifier=is_identifier)
+            for x in val
+        ]
+        return tuple(items) if isinstance(val, tuple) else items
     return str(val)
 
 
@@ -383,6 +363,48 @@ class ModelSnapshot(BaseModel):
     detail: Literal["compact", "full"] = "compact"
 
 
+def _populate_semantic_ref_map(
+    items: Sequence[Any],
+    key_func: Any,
+    ref_map: dict[str, str],
+    prefix: str,
+    omit_keys: Sequence[str] = ("ref", "id", "faces", "edges"),
+) -> None:
+    groups: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    for item in items:
+        ref = getattr(item, "ref", None) or (
+            item.get("ref") if isinstance(item, Mapping) else None
+        )
+        if not ref:
+            continue
+        sem_key = str(key_func(item))
+        data = (
+            item.model_dump(mode="python")
+            if isinstance(item, BaseModel)
+            else dict(item)
+        )
+        for ok in omit_keys:
+            data.pop(ok, None)
+        groups.setdefault(sem_key, []).append((str(ref), data))
+
+    for sem_key, group in groups.items():
+        if len(group) == 1:
+            ref_map[group[0][0]] = f"{prefix}:{sem_key}"
+        else:
+            sorted_dups = sorted(
+                group,
+                key=lambda x: json.dumps(
+                    x[1],
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ),
+            )
+            for idx, (ref, _) in enumerate(sorted_dups):
+                ref_map[ref] = f"{prefix}:{sem_key}:{idx}"
+
+
 def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
     """Compute deterministic SHA-256 structural hash of a semantic snapshot."""
     # Build canonical payload omitting volatile identifiers (snapshot_id, UUID refs, runtime IDs)
@@ -407,69 +429,63 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
 
     # Build semantic identifier map for volatile UUID-backed refs
     ref_map: dict[str, str] = {}
-    for c in comps:
-        c_ref = getattr(c, "ref", None) or (
-            c.get("ref") if isinstance(c, Mapping) else None
-        )
-        c_name = getattr(c, "name", None) or (
-            c.get("name") if isinstance(c, Mapping) else ""
-        )
-        if c_ref:
-            ref_map[c_ref] = f"comp:{c_name}"
-    for o in occs:
-        o_ref = getattr(o, "ref", None) or (
-            o.get("ref") if isinstance(o, Mapping) else None
-        )
-        o_path = getattr(o, "full_path_name", None) or (
-            o.get("full_path_name") if isinstance(o, Mapping) else ""
-        )
-        if o_ref:
-            ref_map[o_ref] = f"occ:{o_path}"
-    for b in bodies:
-        b_ref = getattr(b, "ref", None) or (
-            b.get("ref") if isinstance(b, Mapping) else None
-        )
-        b_comp = getattr(b, "component_name", None) or (
-            b.get("component_name") if isinstance(b, Mapping) else ""
-        )
-        b_name = getattr(b, "name", None) or (
-            b.get("name") if isinstance(b, Mapping) else ""
-        )
-        if b_ref:
-            ref_map[b_ref] = f"body:{b_comp}:{b_name}"
-    for s in sketches:
-        s_ref = getattr(s, "ref", None) or (
-            s.get("ref") if isinstance(s, Mapping) else None
-        )
-        s_comp = getattr(s, "component_name", None) or (
-            s.get("component_name") if isinstance(s, Mapping) else ""
-        )
-        s_name = getattr(s, "name", None) or (
-            s.get("name") if isinstance(s, Mapping) else ""
-        )
-        if s_ref:
-            ref_map[s_ref] = f"sketch:{s_comp}:{s_name}"
-    for f in features:
-        f_ref = getattr(f, "ref", None) or (
-            f.get("ref") if isinstance(f, Mapping) else None
-        )
-        f_idx = getattr(f, "timeline_index", None) or (
-            f.get("timeline_index") if isinstance(f, Mapping) else 0
-        )
-        f_name = getattr(f, "name", None) or (
-            f.get("name") if isinstance(f, Mapping) else ""
-        )
-        if f_ref:
-            ref_map[f_ref] = f"feat:{f_idx}:{f_name}"
-    for p in params:
-        p_ref = getattr(p, "ref", None) or (
-            p.get("ref") if isinstance(p, Mapping) else None
-        )
-        p_name = getattr(p, "name", None) or (
-            p.get("name") if isinstance(p, Mapping) else ""
-        )
-        if p_ref:
-            ref_map[p_ref] = f"param:{p_name}"
+    _populate_semantic_ref_map(
+        comps,
+        lambda c: (
+            getattr(c, "name", None)
+            or (c.get("name") if isinstance(c, Mapping) else "")
+        ),
+        ref_map,
+        "comp",
+        omit_keys=("ref", "id"),
+    )
+    _populate_semantic_ref_map(
+        occs,
+        lambda o: (
+            getattr(o, "full_path_name", None)
+            or (o.get("full_path_name") if isinstance(o, Mapping) else "")
+        ),
+        ref_map,
+        "occ",
+        omit_keys=("ref", "id"),
+    )
+    _populate_semantic_ref_map(
+        bodies,
+        lambda b: (
+            f"{getattr(b, 'component_name', None) or (b.get('component_name') if isinstance(b, Mapping) else '')}:{getattr(b, 'name', None) or (b.get('name') if isinstance(b, Mapping) else '')}"
+        ),
+        ref_map,
+        "body",
+        omit_keys=("ref", "id", "faces", "edges"),
+    )
+    _populate_semantic_ref_map(
+        sketches,
+        lambda s: (
+            f"{getattr(s, 'component_name', None) or (s.get('component_name') if isinstance(s, Mapping) else '')}:{getattr(s, 'name', None) or (s.get('name') if isinstance(s, Mapping) else '')}"
+        ),
+        ref_map,
+        "sketch",
+        omit_keys=("ref", "id"),
+    )
+    _populate_semantic_ref_map(
+        features,
+        lambda f: (
+            f"{getattr(f, 'timeline_index', None) or (f.get('timeline_index') if isinstance(f, Mapping) else 0)}:{getattr(f, 'name', None) or (f.get('name') if isinstance(f, Mapping) else '')}"
+        ),
+        ref_map,
+        "feat",
+        omit_keys=("ref", "id"),
+    )
+    _populate_semantic_ref_map(
+        params,
+        lambda p: (
+            getattr(p, "name", None)
+            or (p.get("name") if isinstance(p, Mapping) else "")
+        ),
+        ref_map,
+        "param",
+        omit_keys=("ref", "id"),
+    )
 
     faces = snapshot_dict.get("faces") or ()
     if isinstance(faces, (list, tuple)):
@@ -481,7 +497,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
                 face.get("id") if isinstance(face, Mapping) else None
             )
             if f_ref:
-                ref_map[f_ref] = f"face:{f_id or idx}"
+                ref_map[str(f_ref)] = f"face:{f_id or idx}"
 
     edges = snapshot_dict.get("edges") or ()
     if isinstance(edges, (list, tuple)):
@@ -493,7 +509,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
                 edge.get("id") if isinstance(edge, Mapping) else None
             )
             if e_ref:
-                ref_map[e_ref] = f"edge:{e_id or idx}"
+                ref_map[str(e_ref)] = f"edge:{e_id or idx}"
 
     canonical_body["counts"] = _canonicalize_structural_value(counts, ref_map)
 
@@ -504,7 +520,18 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         cd.pop("ref", None)
         cd.pop("id", None)
         comp_list.append(cd)
-    comp_list.sort(key=lambda x: x.get("name", ""))
+    comp_list.sort(
+        key=lambda x: (
+            x.get("name", ""),
+            json.dumps(
+                x,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
+        )
+    )
     canonical_body["components"] = _canonicalize_structural_value(comp_list, ref_map)
 
     # 4. Occurrences (sorted by full_path_name)
@@ -514,7 +541,18 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         od.pop("ref", None)
         od.pop("id", None)
         occ_list.append(od)
-    occ_list.sort(key=lambda x: x.get("full_path_name", ""))
+    occ_list.sort(
+        key=lambda x: (
+            x.get("full_path_name", ""),
+            json.dumps(
+                x,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
+        )
+    )
     canonical_body["occurrences"] = _canonicalize_structural_value(occ_list, ref_map)
 
     # 5. Bodies (sorted by component_name, name)
@@ -530,6 +568,13 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         key=lambda x: (
             x.get("component_name") or "",
             x.get("name", ""),
+            json.dumps(
+                x,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
         )
     )
     canonical_body["bodies"] = _canonicalize_structural_value(body_list, ref_map)
@@ -545,6 +590,13 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         key=lambda x: (
             x.get("component_name") or "",
             x.get("name", ""),
+            json.dumps(
+                x,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
         )
     )
     canonical_body["sketches"] = _canonicalize_structural_value(sk_list, ref_map)
@@ -590,7 +642,19 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
                 for ch in fd["children"]
             ]
         feat_list.append(fd)
-    feat_list.sort(key=lambda x: int(x.get("timeline_index", 0)))
+    feat_list.sort(
+        key=lambda x: (
+            int(x.get("timeline_index", 0)),
+            x.get("name", ""),
+            json.dumps(
+                x,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
+        )
+    )
     canonical_body["features"] = _canonicalize_structural_value(feat_list, ref_map)
 
     # 8. Parameters (sorted by is_user, name)
@@ -600,7 +664,19 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         pd.pop("ref", None)
         pd.pop("id", None)
         param_list.append(pd)
-    param_list.sort(key=lambda x: (not x.get("is_user", False), x.get("name", "")))
+    param_list.sort(
+        key=lambda x: (
+            not x.get("is_user", False),
+            x.get("name", ""),
+            json.dumps(
+                x,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ),
+        )
+    )
     canonical_body["parameters"] = _canonicalize_structural_value(param_list, ref_map)
 
     # 9. Summaries
