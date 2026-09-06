@@ -55,7 +55,9 @@ def test_openrouter_probe_ready():
 
 
 def test_openrouter_launch_default_model_and_env(repository):
-    settings = OpenRouterExecutorSettings(enabled=True, api_key=SecretStr("sk-test"))
+    settings = OpenRouterExecutorSettings(
+        enabled=True, api_key=SecretStr("sk-test"), max_turns=75
+    )
     executor = OpenRouterExecutor(settings)
     status = executor.probe(busy=False)
     request = ExecutorRequest("implement feature X", TaskKind.IMPLEMENTATION, ExecutorName.OPENROUTER, 300, 262144, None)
@@ -68,6 +70,8 @@ def test_openrouter_launch_default_model_and_env(repository):
     assert "--model" in launch.arguments
     model_idx = launch.arguments.index("--model")
     assert launch.arguments[model_idx + 1] == "deepseek/deepseek-v4-flash-0731"
+    max_turns_idx = launch.arguments.index("--max-turns")
+    assert launch.arguments[max_turns_idx + 1] == "75"
     assert "Task:\nimplement feature X" in launch.stdin
 
 

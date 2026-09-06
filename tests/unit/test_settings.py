@@ -30,6 +30,15 @@ def test_openrouter_executor_is_disabled_by_default():
         "qwen/qwen3-coder-next",
     )
     assert settings.executors.openrouter.model == "deepseek/deepseek-v4-flash-0731"
+    assert settings.executors.openrouter.max_turns == 120
+
+
+@pytest.mark.parametrize("max_turns", [0, 501])
+def test_openrouter_executor_rejects_out_of_bounds_max_turns(max_turns):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate(
+            {"executors": {"openrouter": {"max_turns": max_turns}}}
+        )
 
 
 def test_openrouter_executor_settings_custom_valid():
@@ -79,6 +88,13 @@ def test_openrouter_executor_loads_api_key_and_enabled_from_env():
     assert settings.executors.openrouter.api_key is not None
     assert settings.executors.openrouter.api_key.get_secret_value() == "test-key-123"
     assert settings.executors.openrouter.model == "qwen/qwen3-coder-next"
+
+
+def test_openrouter_executor_loads_max_turns_from_env():
+    settings = load_settings(
+        environ={"DEVELOPMENT_BRIDGE_OPENROUTER_MAX_TURNS": "75"}
+    )
+    assert settings.executors.openrouter.max_turns == 75
 
 
 @pytest.mark.parametrize("field,value", [

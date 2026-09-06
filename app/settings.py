@@ -119,6 +119,7 @@ class OpenRouterExecutorSettings(BaseModel):
         "qwen/qwen3-coder-next",
     )
     task_timeout_seconds: float = Field(default=900, gt=0, le=3600)
+    max_turns: int = Field(default=120, ge=1, le=500)
     output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
 
     @model_validator(mode="after")
@@ -712,6 +713,8 @@ def load_settings(
         or environment.get("OPENROUTER_BASE_URL")
     ):
         openrouter_updates["api_base_url"] = or_base_url
+    if or_max_turns := environment.get("DEVELOPMENT_BRIDGE_OPENROUTER_MAX_TURNS"):
+        openrouter_updates["max_turns"] = or_max_turns
 
     if openrouter_updates:
         current_or = settings.executors.openrouter

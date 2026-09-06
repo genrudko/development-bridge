@@ -672,7 +672,7 @@ class OpenRouterWorker:
         base_url: str = "https://openrouter.ai/api/v1",
         task: str = "",
         task_kind: str = "implementation",
-        max_turns: int = 30,
+        max_turns: int = 120,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.model = model
@@ -797,7 +797,12 @@ class OpenRouterWorker:
                 })
 
         if final_response is None:
-            final_response = "Execution reached maximum turns limit."
+            return {
+                "status": "ERROR",
+                "reason": "max_turns_exhausted",
+                "error": "Execution reached maximum turns limit.",
+                "usage": self.cumulative_usage,
+            }
 
         return {
             "status": "SUCCESS",
@@ -811,6 +816,7 @@ def main() -> None:
     parser.add_argument("--model", required=True, help="Allowlisted model to invoke")
     parser.add_argument("--base-url", default="https://openrouter.ai/api/v1", help="OpenRouter base URL")
     parser.add_argument("--task-kind", default="implementation", help="Task kind")
+    parser.add_argument("--max-turns", type=int, default=120, help="Maximum model/tool turns")
     args = parser.parse_args()
 
     api_key = (
@@ -836,6 +842,7 @@ def main() -> None:
         base_url=args.base_url,
         task=task_prompt,
         task_kind=args.task_kind,
+        max_turns=args.max_turns,
     )
     result = worker.run()
     sys.stdout.write(json.dumps(result) + "\n")

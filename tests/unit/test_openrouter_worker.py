@@ -10,6 +10,7 @@ import pytest
 
 from app.executors.openrouter_worker import (
     OpenRouterWorker,
+    main,
     read_file,
     write_file,
     search_files,
@@ -333,9 +334,67 @@ def test_openrouter_worker_hits_max_turns_limit(repo):
     }
     with patch.object(worker, "_post_chat", return_value=tool_resp):
         res = worker.run()
-    assert res["status"] == "SUCCESS"
-    assert "maximum turns" in res["response"]
+    assert res["status"] == "ERROR"
+    assert res["reason"] == "max_turns_exhausted"
+    assert "maximum turns limit" in res["error"]
     assert res["usage"]["total_tokens"] == 30
+
+
+def test_openrouter_worker_main_propagates_max_turns(repo, monkeypatch, capsys):
+    worker = MagicMock()
+    worker.run.return_value = {"status": "SUCCESS", "response": "done", "usage": {}}
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-api-key")
+    monkeypatch.setattr(sys, "argv", [
+        "openrouter_worker.py",
+        "--model", "deepseek/deepseek-v4-flash-0731",
+        "--max-turns", "75",
+    ])
+    monkeypatch.setattr(sys, "stdin", MagicMock(read=MagicMock(return_value="task")))
+
+    with patch("app.executors.openrouter_worker.OpenRouterWorker", return_value=worker) as worker_class:
+        main()
+
+    assert worker_class.call_args.kwargs["max_turns"] == 75
+    assert json.loads(capsys.readouterr().out)["status"] == "SUCCESS"
+
+
+def test_openrouter_worker_main_exits_nonzero_on_max_turns_exhaustion(
+    repo, monkeypatch, capsys
+):
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-api-key")
+    monkeypatch.setattr(sys, "argv", [
+        "openrouter_worker.py",
+        "--model", "deepseek/deepseek-v4-flash-0731",
+        "--max-turns", "1",
+    ])
+    monkeypatch.setattr(sys, "stdin", MagicMock(read=MagicMock(return_value="task")))
+    tool_response = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_x",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"file.txt"}',
+                    },
+                }],
+            },
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+    with patch.object(OpenRouterWorker, "_post_chat", return_value=tool_response):
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+    assert exc_info.value.code == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["reason"] == "max_turns_exhausted"
+    assert result["usage"]["total_tokens"] == 15
 
 
 def test_process_tool_timeout(repo):

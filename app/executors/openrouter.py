@@ -106,6 +106,8 @@ class OpenRouterExecutor:
             self._settings.api_base_url,
             "--task-kind",
             request.task_kind.value,
+            "--max-turns",
+            str(self._settings.max_turns),
         )
         return ExecutorLaunch(
             executable=self._python_executable,
