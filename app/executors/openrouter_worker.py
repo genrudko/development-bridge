@@ -123,6 +123,15 @@ def search_files(repo_root: Path, query: str, path: str = ".") -> str:
 
 BWRAP_PATH: str = "/bin/bwrap"
 
+SAFE_ETC_ALLOWLIST: tuple[str, ...] = (
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    "/etc/localtime",
+    "/etc/ld.so.cache",
+)
+BWRAP_SAFE_ETC_ALLOWLIST = SAFE_ETC_ALLOWLIST
+
 ALLOWED_EXECUTABLES = {"pytest", "python", "python3", "git", "ruff"}
 
 SAFE_ENV_KEYS = ("PATH", "LANG", "LC_ALL")
@@ -492,9 +501,14 @@ def run_process(
     ]
     bwrap_cmd.extend(get_bwrap_proc_flags(bwrap_bin))
 
-    for sys_dir in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"):
+    for sys_dir in ("/usr", "/lib", "/lib64", "/bin", "/sbin"):
         if os.path.isdir(sys_dir):
             bwrap_cmd.extend(["--ro-bind-try", sys_dir, sys_dir])
+
+    # Synthetic minimal /etc: do not ro-bind entire host /etc
+    bwrap_cmd.extend(["--dir", "/etc"])
+    for safe_path in SAFE_ETC_ALLOWLIST:
+        bwrap_cmd.extend(["--ro-bind-try", safe_path, safe_path])
 
     # Repository is the only writable host tree exposed
     bwrap_cmd.extend(["--bind", str(repo_resolved), str(repo_resolved)])

@@ -572,3 +572,48 @@ def test_run_process_fails_closed_when_bwrap_unavailable(repo, monkeypatch):
     res = run_process(repo, "python", ["dummy.py"])
     assert "error" in res.lower() or "rejected" in res.lower()
     assert "hello" not in res
+
+
+def test_run_process_does_not_expose_broad_host_etc(repo):
+    script = repo / "inspect_sandbox_etc.py"
+    script.write_text(
+        "import os\n"
+        "entries = sorted(os.listdir('/etc')) if os.path.isdir('/etc') else []\n"
+        "safe = {'passwd', 'group', 'nsswitch.conf', 'localtime', 'ld.so.cache'}\n"
+        "forbidden_sample = [name for name in ('ssh', 'systemd', 'environment', 'sudoers', 'shadow', 'cron.d', 'profile') if os.path.exists(f'/etc/{name}')]\n"
+        "unexpected = [e for e in entries if e not in safe]\n"
+        "present_safe = [e for e in entries if e in safe]\n"
+        "print('FORBIDDEN_FOUND:', forbidden_sample)\n"
+        "print('UNEXPECTED_COUNT:', len(unexpected))\n"
+        "print('PRESENT_SAFE:', sorted(present_safe))\n",
+        encoding="utf-8",
+    )
+    res = run_process(repo, "python", ["inspect_sandbox_etc.py"])
+    assert "exit code: 0" in res
+    assert "FORBIDDEN_FOUND: []" in res
+    assert "UNEXPECTED_COUNT: 0" in res
+    host_safe = [
+        name for name in ('passwd', 'group', 'nsswitch.conf', 'localtime', 'ld.so.cache')
+        if os.path.exists(f'/etc/{name}')
+    ]
+    assert f"PRESENT_SAFE: {sorted(host_safe)}" in res
+
+
+def test_run_process_bwrap_args_does_not_ro_bind_entire_etc(repo):
+    from app.executors.openrouter_worker import SAFE_ETC_ALLOWLIST
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "ok"
+        mock_run.return_value.stderr = ""
+        (repo / "dummy.py").write_text("print('hello')", encoding="utf-8")
+        run_process(repo, "python", ["dummy.py"])
+        assert mock_run.called
+        cmd = mock_run.call_args[0][0]
+        # Full host /etc must NOT be ro-bound
+        assert ["--ro-bind-try", "/etc", "/etc"] not in [cmd[i:i+3] for i in range(len(cmd)-2)]
+        assert ["--ro-bind", "/etc", "/etc"] not in [cmd[i:i+3] for i in range(len(cmd)-2)]
+        # Synthetic /etc directory must be created
+        assert ["--dir", "/etc"] in [cmd[i:i+2] for i in range(len(cmd)-1)]
+        # Safe allowlist files should be ro-bind-try'd
+        for safe_path in SAFE_ETC_ALLOWLIST:
+            assert ["--ro-bind-try", safe_path, safe_path] in [cmd[i:i+3] for i in range(len(cmd)-2)]
