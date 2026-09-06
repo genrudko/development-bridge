@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from app.api.errors import ErrorCode
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.models import (
+    ENTITY_REF_PATTERN,
     BoundingBox,
     CoordinateFrame,
     EntityRef,
@@ -454,15 +456,18 @@ def test_resolve_one_exact_with_multiple_candidates_fails_closed_ref_ambiguous()
     assert secret_entity not in str(exc_info.value.details)
     assert secret_entity not in json.dumps(exc_info.value.details)
 
-    # Safe metadata preserved
+    # Only opaque public ref preserved; untrusted raw metadata stripped
     safe_cands = exc_info.value.details.get("candidates")
     assert isinstance(safe_cands, list)
     assert len(safe_cands) == 2
     assert safe_cands[0] == {
         "ref": "ent_0123456789abcdef",
-        "name": "CandidateOne",
-        "native_type": "adsk::fusion::BRepBody",
     }
+    assert safe_cands[1] == {
+        "ref": "ent_fedcba9876543210",
+    }
+    assert "name" not in safe_cands[0]
+    assert "native_type" not in safe_cands[0]
 
 
 def test_resolve_one_split_and_ambiguous_never_expose_native_tokens_in_error_details() -> (
@@ -549,3 +554,161 @@ def test_resolve_one_exact_with_zero_candidates_fails_closed_ref_stale() -> None
         )
 
     assert exc_info.value.code == ErrorCode.REF_STALE
+
+
+@pytest.mark.parametrize("declared_outcome", ["exact", "split", "ambiguous"])
+def test_candidate_metadata_aliasing_native_token_never_leaks(
+    declared_outcome: ResolutionOutcome,
+) -> None:
+    """Candidate metadata matching or containing native tokens/secrets must never leak."""
+    registry = EntityRefRegistry()
+    active_doc = "doc_doc1"
+    secret_native = "adsk::native::token::0123456789abcdef"
+    secret_entity = "adsk::entity::token::fedcba9876543210"
+
+    issued = registry.issue(
+        document_ref=active_doc,
+        kind="body",
+        name="TestBody",
+        native_token=secret_native,
+    )
+
+    candidate_1 = {
+        "ref": "ent_1111222233334444",
+        "name": secret_native,
+        "kind": f"kind_{secret_entity}",
+        "native_type": secret_native,
+        "native_token": secret_native,
+        "entityToken": secret_entity,
+    }
+    candidate_2 = {
+        "ref": "ent_5555666677778888",
+        "name": f"prefix_{secret_native}_suffix",
+        "kind": secret_entity,
+        "native_type": f"type_{secret_entity}",
+        "native_token": secret_native,
+        "entityToken": secret_entity,
+    }
+
+    def aliased_candidate_resolver(
+        record: InternalEntityRecord,
+    ) -> tuple[ResolutionOutcome, list[Any]]:
+        return declared_outcome, [candidate_1, candidate_2]
+
+    with pytest.raises(FusionCadError) as exc_info:
+        registry.resolve_one(
+            issued,
+            active_document_ref=active_doc,
+            native_resolver=aliased_candidate_resolver,
+        )
+
+    expected_code = (
+        ErrorCode.REF_SPLIT if declared_outcome == "split" else ErrorCode.REF_AMBIGUOUS
+    )
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.details.get("candidate_count") == 2
+
+    # Verify secret tokens are absent from str, repr, details str, and details JSON
+    err_str = str(exc_info.value)
+    err_repr = repr(exc_info.value)
+    details_str = str(exc_info.value.details)
+    details_json = json.dumps(exc_info.value.details)
+
+    assert secret_native not in err_str
+    assert secret_native not in err_repr
+    assert secret_native not in details_str
+    assert secret_native not in details_json
+
+    assert secret_entity not in err_str
+    assert secret_entity not in err_repr
+    assert secret_entity not in details_str
+    assert secret_entity not in details_json
+
+    # Exposed candidates must only expose opaque public refs matching ENTITY_REF_PATTERN
+    exposed_candidates = exc_info.value.details.get("candidates")
+    assert isinstance(exposed_candidates, list)
+    assert len(exposed_candidates) == 2
+    for cand in exposed_candidates:
+        assert isinstance(cand, dict)
+        assert "name" not in cand
+        assert "kind" not in cand
+        assert "native_type" not in cand
+        assert "native_token" not in cand
+        assert "entityToken" not in cand
+        assert set(cand.keys()) == {"ref"}
+        assert re.match(ENTITY_REF_PATTERN, cand["ref"])
+
+
+def test_native_resolver_exception_caught_and_never_leaks_token() -> None:
+    """Exceptions from native_resolver must be caught at registry boundary as safe FusionCadError."""
+    registry = EntityRefRegistry()
+    active_doc = "doc_doc1"
+    secret_native = "adsk::native::token::crashing_resolver_secret"
+
+    issued = registry.issue(
+        document_ref=active_doc,
+        kind="body",
+        name="TestBody",
+        native_token=secret_native,
+    )
+
+    def crashing_native_resolver(record: InternalEntityRecord) -> Any:
+        raise RuntimeError(
+            f"Internal Fusion crash with secret token: {record.native_token}"
+        )
+
+    # 1. Test resolve() raises FusionCadError with FUSION_API_ERROR and safe details
+    with pytest.raises(FusionCadError) as exc_resolve:
+        registry.resolve(
+            issued,
+            active_document_ref=active_doc,
+            native_resolver=crashing_native_resolver,
+        )
+
+    assert exc_resolve.value.code == ErrorCode.FUSION_API_ERROR
+    assert exc_resolve.value.message == "Native entity resolution failed"
+    assert exc_resolve.value.details == {
+        "ref": issued.ref,
+        "document_ref": active_doc,
+    }
+
+    assert secret_native not in str(exc_resolve.value)
+    assert secret_native not in repr(exc_resolve.value)
+    assert secret_native not in str(exc_resolve.value.details)
+    assert secret_native not in json.dumps(exc_resolve.value.details)
+
+    # 2. Test resolve_one() also propagates safe FusionCadError
+    with pytest.raises(FusionCadError) as exc_resolve_one:
+        registry.resolve_one(
+            issued,
+            active_document_ref=active_doc,
+            native_resolver=crashing_native_resolver,
+        )
+
+    assert exc_resolve_one.value.code == ErrorCode.FUSION_API_ERROR
+    assert exc_resolve_one.value.message == "Native entity resolution failed"
+    assert exc_resolve_one.value.details == {
+        "ref": issued.ref,
+        "document_ref": active_doc,
+    }
+
+    assert secret_native not in str(exc_resolve_one.value)
+    assert secret_native not in repr(exc_resolve_one.value)
+    assert secret_native not in str(exc_resolve_one.value.details)
+    assert secret_native not in json.dumps(exc_resolve_one.value.details)
+
+    # 3. Preserve wrong-document check before native lookup: crashing resolver is NOT called
+    res_wrong_doc = registry.resolve(
+        issued,
+        active_document_ref="doc_different",
+        native_resolver=crashing_native_resolver,
+    )
+    assert res_wrong_doc.outcome == "wrong_document"
+
+    with pytest.raises(FusionCadError) as exc_wrong:
+        registry.resolve_one(
+            issued,
+            active_document_ref="doc_different",
+            native_resolver=crashing_native_resolver,
+        )
+    assert exc_wrong.value.code == ErrorCode.WRONG_DOCUMENT

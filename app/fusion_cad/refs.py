@@ -70,50 +70,24 @@ class ResolutionResult(BaseModel):
 
 
 def _safe_candidate_detail(candidate: Any) -> dict[str, str]:
-    """Extract safe candidate metadata (opaque public ref, safe name, kind/native_type).
+    """Extract safe candidate metadata (opaque public ref matching ENTITY_REF_PATTERN).
 
-    Never stringifies raw candidate objects or exposes tokens/secrets.
+    Never exposes raw name/kind/native_type, stringifies raw candidate objects,
+    or exposes tokens/secrets.
     """
     safe: dict[str, str] = {}
+    raw_ref: Any = None
     if isinstance(candidate, (InternalEntityRecord, EntityRef)):
-        safe["ref"] = candidate.ref
-        if candidate.name is not None:
-            safe["name"] = str(candidate.name)
-        if candidate.kind is not None:
-            safe["kind"] = str(candidate.kind)
-        if candidate.native_type is not None:
-            safe["native_type"] = str(candidate.native_type)
-        return safe
-
-    if isinstance(candidate, dict):
+        raw_ref = candidate.ref
+    elif isinstance(candidate, dict):
         raw_ref = candidate.get("ref")
-        if isinstance(raw_ref, str) and re.match(ENTITY_REF_PATTERN, raw_ref):
-            safe["ref"] = raw_ref
-        name = candidate.get("name")
-        if name is not None:
-            safe["name"] = str(name)
-        kind = candidate.get("kind")
-        if kind is not None:
-            safe["kind"] = str(kind)
-        native_type = candidate.get("native_type")
-        if native_type is not None:
-            safe["native_type"] = str(native_type)
-        return safe
+    elif isinstance(candidate, str):
+        raw_ref = candidate
+    else:
+        raw_ref = getattr(candidate, "ref", None)
 
-    raw_ref = getattr(candidate, "ref", None)
     if isinstance(raw_ref, str) and re.match(ENTITY_REF_PATTERN, raw_ref):
         safe["ref"] = raw_ref
-    name = getattr(candidate, "name", None)
-    if name is not None:
-        safe["name"] = str(name)
-    kind = getattr(candidate, "kind", None)
-    if kind is not None:
-        safe["kind"] = str(kind)
-    native_type = getattr(candidate, "native_type", None) or getattr(
-        candidate, "objectType", None
-    )
-    if native_type is not None:
-        safe["native_type"] = str(native_type)
     return safe
 
 
@@ -274,7 +248,17 @@ class EntityRefRegistry:
 
         # 4. Native resolver lookup
         if native_resolver is not None:
-            outcome, candidates = native_resolver(record)
+            try:
+                outcome, candidates = native_resolver(record)
+            except Exception as exc:
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Native entity resolution failed",
+                    details={
+                        "ref": ref_str,
+                        "document_ref": active_document_ref,
+                    },
+                ) from exc
             return ResolutionResult(
                 ref=ref_str,
                 outcome=outcome,
