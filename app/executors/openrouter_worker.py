@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -103,52 +104,365 @@ def search_files(repo_root: Path, query: str, path: str = ".") -> str:
         return f"Error: search_files rejected: {exc}"
 
 
-FORBIDDEN_COMMAND_PATTERNS = [
-    r"\bgit\s+push\b",
-    r"\bgit\s+remote\b",
-    r"\bgh\b",
-    r"\bsudo\b",
-    r"\bsystemctl\b",
-    r"\bservice\b",
-    r"\bssh\b",
-    r"\bscp\b",
-    r"\bsftp\b",
-    r"\bcurl\b",
-    r"\bwget\b",
-    r"\bnc\b",
-    r"\bnetcat\b",
-    r"\bsocat\b",
-    r"\bdocker\b",
-    r"\bpodman\b",
-    r"\bkubectl\b",
-    r"\bhelm\b",
-    r"\bterraform\b",
-    r"\bansible\b",
-]
+ALLOWED_EXECUTABLES = {"pytest", "python", "python3", "git", "ruff"}
+
+SAFE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "HOME")
+
+# Pytest allowed options
+ALLOWED_PYTEST_OPTIONS_VALUELESS = {
+    "-v", "-vv", "-vvv", "-q", "-qq", "-s", "-x", "--exitfirst",
+    "-l", "--showlocals", "--collect-only", "--fixtures",
+    "--disable-warnings", "--disable-pytest-warnings",
+    "--strict-markers", "--strict-config",
+    "-ra", "-rA", "-rf", "-rs", "-rE", "-rx", "-rp", "-rP",
+    "--import-mode=importlib", "--import-mode=prepend", "--import-mode=append",
+    "--continue-on-collection-errors",
+}
+ALLOWED_PYTEST_OPTIONS_WITH_VALUE = {
+    "-k", "-m", "--maxfail", "--durations", "--tb", "-p",
+}
+
+# Python allowed flags
+ALLOWED_PYTHON_FLAGS = {"-u", "-B", "-v", "-O", "-OO", "-W", "-E"}
+
+# Git allowed subcommands
+ALLOWED_GIT_READONLY_SUBCMDS = {"status", "diff", "log", "show"}
+ALLOWED_GIT_WRITE_SUBCMDS = {"add", "commit"}
+
+ALLOWED_GIT_STATUS_OPTIONS = {
+    "-s", "--short", "-b", "--branch", "-u", "-uno", "-unormal", "-uall",
+    "--untracked-files", "--ignored", "-v", "--verbose", "--",
+}
+ALLOWED_GIT_DIFF_OPTIONS = {
+    "--stat", "--cached", "--staged", "-p", "-u", "--check",
+    "--name-only", "--name-status", "-w", "--ignore-all-space", "--word-diff", "--",
+}
+ALLOWED_GIT_LOG_OPTIONS = {
+    "--oneline", "--stat", "-p", "--graph", "--decorate", "--summary",
+    "--name-only", "--name-status", "--",
+}
+ALLOWED_GIT_SHOW_OPTIONS = {
+    "--stat", "--oneline", "-p", "--name-only", "--name-status", "--",
+}
+ALLOWED_GIT_ADD_OPTIONS = {
+    "-u", "--update", "-A", "--all", "-n", "--dry-run", "--",
+}
+ALLOWED_GIT_COMMIT_OPTIONS = {
+    "-m", "--message", "-a", "--all", "--amend", "--no-edit", "--signoff",
+}
+
+# Ruff allowed subcommands and options
+ALLOWED_RUFF_SUBCMDS = {"check", "format"}
+ALLOWED_RUFF_OPTIONS = {"--fix", "--diff", "-v", "-q", "--select", "--ignore"}
 
 
-def run_process(repo_root: Path, command: str, task: str = "", timeout: float = 60.0) -> str:
-    # Check for path escapes in command line
-    if ".." in command:
-        # Check if .. is used for directory traversal
-        if re.search(r"(?:^|\s|\/)\.\.(?:\/|\s|$)", command):
-            return "Error: command rejected due to path traversal ('..')."
+def get_scrubbed_env(repo_root: Path) -> dict[str, str]:
+    scrubbed: dict[str, str] = {}
+    for var in SAFE_ENV_KEYS:
+        if var in os.environ:
+            scrubbed[var] = os.environ[var]
 
-    # Check forbidden commands
-    for pattern in FORBIDDEN_COMMAND_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return f"Error: command rejected by policy (matches forbidden pattern {pattern})."
+    python_bin_dir = str(Path(sys.executable).parent)
+    current_path = scrubbed.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    if python_bin_dir not in current_path.split(os.pathsep):
+        scrubbed["PATH"] = f"{python_bin_dir}{os.pathsep}{current_path}"
 
-    # Check git commit / add constraints
-    if re.search(r"\bgit\s+commit\b", command, re.IGNORECASE):
-        if "commit" not in task.lower():
-            return "Error: git commit is permitted only when the task explicitly asks for commit."
+    if "HOME" not in scrubbed:
+        scrubbed["HOME"] = str(repo_root.resolve())
+
+    # Explicitly exclude secrets, credentials, and SSH_CONNECTION
+    for k in list(scrubbed.keys()):
+        upper = k.upper()
+        if (
+            "OPENROUTER" in upper
+            or "DEVELOPMENT_BRIDGE" in upper
+            or "SECRET" in upper
+            or "TOKEN" in upper
+            or "KEY" in upper
+            or "SSH" in upper
+            or upper == "SSH_CONNECTION"
+        ):
+            del scrubbed[k]
+
+    return scrubbed
+
+
+def resolve_executable(executable: str, env_path: str) -> str | None:
+    venv_bin = Path(sys.executable).parent
+    if executable in ("python", "python3"):
+        target = venv_bin / executable
+        if target.is_file() and os.access(target, os.X_OK):
+            return str(target)
+        return sys.executable
+    if executable == "pytest":
+        target = venv_bin / "pytest"
+        if target.is_file() and os.access(target, os.X_OK):
+            return str(target)
+    if executable == "ruff":
+        target = venv_bin / "ruff"
+        if target.is_file() and os.access(target, os.X_OK):
+            return str(target)
+
+    return shutil.which(executable, path=env_path)
+
+
+def run_process(
+    repo_root: Path,
+    executable: str,
+    arguments: list[str] | None = None,
+    task: str = "",
+    timeout: float = 60.0,
+) -> str:
+    if not executable or not isinstance(executable, str):
+        return "Error: executable name must be a non-empty string."
+
+    clean_exec = executable.strip()
+    if " " in clean_exec or "/" in clean_exec or "\\" in clean_exec:
+        return f"Error: invalid executable name {executable!r}."
+
+    if clean_exec not in ALLOWED_EXECUTABLES:
+        return (
+            f"Error: executable '{clean_exec}' is not permitted. "
+            f"Only allowlisted tools ({', '.join(sorted(ALLOWED_EXECUTABLES))}) are permitted."
+        )
+
+    if arguments is None:
+        raw_args: list[str] = []
+    elif isinstance(arguments, list):
+        raw_args = [str(x) for x in arguments]
+    elif isinstance(arguments, (tuple,)):
+        raw_args = [str(x) for x in arguments]
+    elif isinstance(arguments, str):
+        raw_args = [arguments] if arguments else []
+    else:
+        return "Error: arguments must be a list of strings."
+
+    # Validate argument strings: reject null bytes, absolute paths, and parent directory traversal
+    for arg in raw_args:
+        if "\0" in arg:
+            return f"Error: invalid argument containing null byte: {arg!r}"
+        if arg.startswith("/") or arg.startswith("~"):
+            return f"Error: absolute path or home path rejected: {arg!r}"
+        if ".." in Path(arg).parts or arg == "..":
+            return f"Error: directory traversal ('..') rejected: {arg!r}"
+
+    # Executable-specific validation (fail closed)
+    if clean_exec in ("python", "python3"):
+        idx = 0
+        while idx < len(raw_args):
+            arg = raw_args[idx]
+            if arg in ("-c", "--command") or arg.startswith("-c="):
+                return "Error: python inline code execution (-c) is rejected."
+            if arg == "-m":
+                if idx + 1 >= len(raw_args):
+                    return "Error: python -m requires a module name."
+                mod = raw_args[idx + 1]
+                if "/" in mod or "\\" in mod or ".." in mod:
+                    return f"Error: invalid module name: {mod!r}"
+                mod_parts = mod.split(".")
+                mod_path = repo_root.joinpath(*mod_parts)
+                is_local = (
+                    mod_path.with_suffix(".py").is_file()
+                    or (mod_path / "__init__.py").is_file()
+                    or mod_path.is_dir()
+                )
+                if not is_local:
+                    return (
+                        f"Error: python -m module '{mod}' is not a repository-local module. "
+                        "External module execution is forbidden."
+                    )
+                try:
+                    check_path_confinement(repo_root, mod_parts[0])
+                except Exception as exc:
+                    return f"Error: module path escapes repository root: {exc}"
+                idx += 2
+                continue
+            if arg.startswith("-"):
+                if arg not in ALLOWED_PYTHON_FLAGS:
+                    return f"Error: unknown or disallowed python flag: {arg!r}"
+                idx += 1
+                continue
+            # Positional argument: script path
+            try:
+                confined = check_path_confinement(repo_root, arg)
+                if not confined.is_file():
+                    return f"Error: script '{arg}' does not exist or is not a regular file."
+            except Exception as exc:
+                return f"Error: script path rejected: {exc}"
+            # Validate remaining script args: check any path-like arguments
+            for script_arg in raw_args[idx + 1:]:
+                if "/" in script_arg or script_arg.endswith((".py", ".txt", ".json", ".md", ".yml", ".yaml")):
+                    try:
+                        check_path_confinement(repo_root, script_arg)
+                    except Exception as exc:
+                        return f"Error: script argument path rejected: {exc}"
+            break
+
+    elif clean_exec == "pytest":
+        idx = 0
+        while idx < len(raw_args):
+            arg = raw_args[idx]
+            if arg in ALLOWED_PYTEST_OPTIONS_VALUELESS:
+                idx += 1
+                continue
+            if arg in ALLOWED_PYTEST_OPTIONS_WITH_VALUE:
+                if idx + 1 >= len(raw_args):
+                    return f"Error: pytest option '{arg}' requires a value."
+                val = raw_args[idx + 1]
+                if arg in ("--maxfail", "--durations"):
+                    if not val.isdigit():
+                        return f"Error: pytest option '{arg}' requires an integer value."
+                elif arg == "--tb":
+                    if val not in ("short", "auto", "line", "native", "no", "long"):
+                        return f"Error: invalid --tb value '{val}'."
+                idx += 2
+                continue
+            if any(arg.startswith(prefix) for prefix in ("--tb=", "--maxfail=", "--durations=", "--color=")):
+                idx += 1
+                continue
+            if arg.startswith("-"):
+                return f"Error: unknown or disallowed pytest option: {arg!r}"
+            # Positional argument: test path
+            test_target = arg.split("::", 1)[0]
+            try:
+                check_path_confinement(repo_root, test_target)
+            except Exception as exc:
+                return f"Error: pytest target rejected: {exc}"
+            idx += 1
+
+    elif clean_exec == "git":
+        if not raw_args:
+            return "Error: git requires a subcommand (e.g. status, diff, log, show, add, commit)."
+        subcmd = raw_args[0]
+        if subcmd not in (ALLOWED_GIT_READONLY_SUBCMDS | ALLOWED_GIT_WRITE_SUBCMDS):
+            return (
+                f"Error: git subcommand '{subcmd}' is not permitted. "
+                f"Allowed: {', '.join(sorted(ALLOWED_GIT_READONLY_SUBCMDS | ALLOWED_GIT_WRITE_SUBCMDS))}."
+            )
+        if subcmd in ALLOWED_GIT_WRITE_SUBCMDS:
+            if "commit" not in task.lower():
+                return (
+                    f"Error: git {subcmd} is permitted only when the original task explicitly requests commit."
+                )
+
+        if subcmd == "status":
+            for arg in raw_args[1:]:
+                if arg.startswith("-"):
+                    if arg not in ALLOWED_GIT_STATUS_OPTIONS:
+                        return f"Error: disallowed git status option: {arg!r}"
+                elif arg != ".":
+                    try:
+                        check_path_confinement(repo_root, arg)
+                    except Exception as exc:
+                        return f"Error: git status path rejected: {exc}"
+
+        elif subcmd == "diff":
+            for arg in raw_args[1:]:
+                if arg.startswith("-"):
+                    if arg not in ALLOWED_GIT_DIFF_OPTIONS and not re.match(r"^-U\d+$", arg):
+                        return f"Error: disallowed git diff option: {arg!r}"
+                elif arg != ".":
+                    if "/" in arg or "." in arg:
+                        try:
+                            check_path_confinement(repo_root, arg)
+                        except Exception as exc:
+                            return f"Error: git diff path rejected: {exc}"
+
+        elif subcmd == "log":
+            idx = 1
+            while idx < len(raw_args):
+                arg = raw_args[idx]
+                if arg.startswith("-"):
+                    if arg in ("-n", "--max-count"):
+                        if idx + 1 >= len(raw_args) or not raw_args[idx + 1].isdigit():
+                            return "Error: git log -n requires an integer count."
+                        idx += 2
+                        continue
+                    elif re.match(r"^-\d+$", arg):
+                        idx += 1
+                        continue
+                    elif arg not in ALLOWED_GIT_LOG_OPTIONS:
+                        return f"Error: disallowed git log option: {arg!r}"
+                elif arg != ".":
+                    if "/" in arg or "." in arg:
+                        try:
+                            check_path_confinement(repo_root, arg)
+                        except Exception as exc:
+                            return f"Error: git log path rejected: {exc}"
+                idx += 1
+
+        elif subcmd == "show":
+            for arg in raw_args[1:]:
+                if arg.startswith("-"):
+                    if arg not in ALLOWED_GIT_SHOW_OPTIONS:
+                        return f"Error: disallowed git show option: {arg!r}"
+                elif arg != ".":
+                    if ":" in arg:
+                        _, target_path = arg.split(":", 1)
+                        try:
+                            check_path_confinement(repo_root, target_path)
+                        except Exception as exc:
+                            return f"Error: git show target rejected: {exc}"
+                    elif "/" in arg or "." in arg:
+                        try:
+                            check_path_confinement(repo_root, arg)
+                        except Exception as exc:
+                            return f"Error: git show path rejected: {exc}"
+
+        elif subcmd == "add":
+            for arg in raw_args[1:]:
+                if arg.startswith("-"):
+                    if arg not in ALLOWED_GIT_ADD_OPTIONS:
+                        return f"Error: disallowed git add option: {arg!r}"
+                elif arg != ".":
+                    try:
+                        check_path_confinement(repo_root, arg)
+                    except Exception as exc:
+                        return f"Error: git add path rejected: {exc}"
+
+        elif subcmd == "commit":
+            idx = 1
+            while idx < len(raw_args):
+                arg = raw_args[idx]
+                if arg in ("-m", "--message"):
+                    if idx + 1 >= len(raw_args):
+                        return "Error: git commit -m requires a message argument."
+                    idx += 2
+                    continue
+                elif arg.startswith("-"):
+                    if arg not in ALLOWED_GIT_COMMIT_OPTIONS:
+                        return f"Error: disallowed git commit option: {arg!r}"
+                else:
+                    return f"Error: unexpected argument for git commit: {arg!r}"
+                idx += 1
+
+    elif clean_exec == "ruff":
+        if not raw_args:
+            return "Error: ruff requires a subcommand ('check' or 'format')."
+        subcmd = raw_args[0]
+        if subcmd not in ALLOWED_RUFF_SUBCMDS:
+            return f"Error: ruff subcommand '{subcmd}' is not permitted. Only 'check' and 'format' are allowed."
+        for arg in raw_args[1:]:
+            if arg.startswith("-"):
+                if arg not in ALLOWED_RUFF_OPTIONS:
+                    return f"Error: disallowed ruff option: {arg!r}"
+            elif arg != ".":
+                try:
+                    check_path_confinement(repo_root, arg)
+                except Exception as exc:
+                    return f"Error: ruff path rejected: {exc}"
+
+    env = get_scrubbed_env(repo_root)
+    resolved = resolve_executable(clean_exec, env.get("PATH", ""))
+    if not resolved:
+        return f"Error: executable '{clean_exec}' is not available or not found in PATH."
 
     try:
         proc = subprocess.run(
-            command,
-            shell=True,
+            [resolved, *raw_args],
+            shell=False,
             cwd=str(repo_root.resolve()),
+            env=env,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -215,13 +529,21 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_process",
-            "description": "Execute a bounded command within repository root",
+            "description": "Execute an allowlisted command with structured arguments within repository root",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command to run"}
+                    "executable": {
+                        "type": "string",
+                        "description": "Allowlisted executable: 'pytest', 'python', 'python3', 'git', or 'ruff'",
+                    },
+                    "arguments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of command arguments",
+                    },
                 },
-                "required": ["command"],
+                "required": ["executable"],
             },
         },
     },
@@ -284,7 +606,12 @@ class OpenRouterWorker:
         elif name == "search_files":
             return search_files(self.repo_root, args.get("query", ""), args.get("path", "."))
         elif name == "run_process":
-            return run_process(self.repo_root, args.get("command", ""), task=self.task)
+            return run_process(
+                self.repo_root,
+                executable=args.get("executable", ""),
+                arguments=args.get("arguments"),
+                task=self.task,
+            )
         else:
             return f"Error: unknown tool '{name}'"
 
