@@ -87,12 +87,31 @@ def run():
                     details={"document_ref": post_doc_ref or doc_ref, "applied": False},
                 )
 
+            if not post_doc_ref or not isinstance(post_doc_ref, str) or not post_doc_ref.strip():
+                return make_error(
+                    "NO_ACTIVE_DESIGN",
+                    "Document lacks stable runtime identity after transaction commit",
+                    details={"applied": False},
+                )
+
+            expected_doc = PAYLOAD.get("document_ref")
+            if expected_doc and expected_doc != post_doc_ref:
+                return make_error(
+                    "WRONG_DOCUMENT",
+                    f"Active document {post_doc_ref} does not match expected document {expected_doc} after transaction commit",
+                    details={
+                        "document_ref": post_doc_ref,
+                        "expected_document_ref": expected_doc,
+                        "applied": False,
+                    },
+                )
+
             if post_fp == current_fp:
                 return make_error(
                     "MUTATION_FAILED",
                     "Transaction commit failed to produce distinct post-apply model state; cannot advance model revision",
                     details={
-                        "document_ref": post_doc_ref or doc_ref,
+                        "document_ref": post_doc_ref,
                         "initial_fingerprint": current_fp,
                         "post_fingerprint": post_fp,
                         "applied": False,
@@ -104,7 +123,7 @@ def run():
                     "operation": op,
                     "applied": True,
                     "fingerprint": post_fp,
-                    "document_ref": post_doc_ref or doc_ref,
+                    "document_ref": post_doc_ref,
                     "transaction_id": PAYLOAD.get("transaction_id"),
                 },
                 summary=f"Executed transaction:{op}",
