@@ -589,6 +589,252 @@ def run():
         "name": canonical_data.get("document", {}).get("name") or "active",
         "units": "mm",
     }
+    if op == "model_snapshot":
+        detail = PAYLOAD.get("detail", "compact")
+        comps = canonical_data.get("components", [])
+        occs = canonical_data.get("occurrences", [])
+        bodies = canonical_data.get("bodies", [])
+        sketches = canonical_data.get("sketches", [])
+        timeline = canonical_data.get("timeline", [])
+        params = canonical_data.get("parameters", [])
+        if isinstance(params, dict):
+            param_count = len(params.get("model_parameters", [])) + len(params.get("user_parameters", []))
+        elif isinstance(params, list):
+            param_count = len(params)
+        else:
+            param_count = 0
+        total_faces = sum(int(b.get("faces_count") or len(b.get("faces", [])) or 0) for b in bodies)
+        total_edges = sum(int(b.get("edges_count") or len(b.get("edges", [])) or 0) for b in bodies)
+        total_verts = sum(int(b.get("vertices_count") or len(b.get("vertices", [])) or 0) for b in bodies)
+
+        counts = {
+            "components": len(comps),
+            "occurrences": len(occs),
+            "bodies": len(bodies),
+            "sketches": len(sketches),
+            "features": len(timeline),
+            "parameters": param_count,
+            "faces": total_faces,
+            "edges": total_edges,
+            "vertices": total_verts,
+        }
+
+        sanitized_bodies = []
+        for b in bodies:
+            b_copy = dict(b)
+            if detail == "compact":
+                b_copy.pop("faces", None)
+                b_copy.pop("edges", None)
+                b_copy.pop("vertices", None)
+            sanitized_bodies.append(b_copy)
+
+        snapshot_data = {
+            "operation": "model_snapshot",
+            "detail": detail,
+            "fingerprint": fp,
+            "counts": counts,
+            "components": comps,
+            "occurrences": occs,
+            "bodies": sanitized_bodies,
+            "sketches": sketches,
+            "features": timeline,
+            "parameters": params,
+            "visibility": {"effective_visibility": canonical_data.get("effective_visibility", [])},
+            "appearance": {},
+            "health": {"is_healthy": True},
+            "logical_objects": canonical_data.get("custom_attributes", []),
+        }
+        if detail == "full":
+            all_faces = []
+            all_edges = []
+            for b in bodies:
+                all_faces.extend(b.get("faces", []))
+                all_edges.extend(b.get("edges", []))
+            if all_faces:
+                snapshot_data["faces"] = all_faces
+            if all_edges:
+                snapshot_data["edges"] = all_edges
+
+        return make_result(data=snapshot_data, summary=f"Model snapshot captured for {doc_ref}", document=doc_state)
+
+    if op == "feature_tree":
+        features = canonical_data.get("timeline", [])
+        enriched = []
+        for f in features:
+            f_copy = dict(f)
+            f_copy["timeline_index"] = f_copy.get("index", 0)
+            f_copy["feature_type"] = f_copy.get("feature_type", "Feature")
+            inputs = f_copy.get("inputs", [])
+            norm_inputs = []
+            for inp in inputs:
+                dep_type = inp.get("dependency_type", "unknown")
+                if dep_type not in ("exact", "inferred", "unknown"):
+                    dep_type = "unknown"
+                norm_inputs.append({
+                    "ref": inp.get("ref") or f"ent_{inp.get('id', 'dep')}",
+                    "kind": inp.get("kind"),
+                    "dependency_type": dep_type,
+                })
+            f_copy["inputs"] = norm_inputs
+            f_copy["dependencies"] = norm_inputs
+            enriched.append(f_copy)
+        return make_result(data={"features": enriched, "count": len(enriched)}, summary=f"Feature tree read ({len(enriched)} features)", document=doc_state)
+
+    if op == "sketch":
+        target_ref = PAYLOAD.get("ref", "")
+        sketches = canonical_data.get("sketches", [])
+        matching_sketch = None
+        for sk in sketches:
+            if sk.get("ref") == target_ref or sk.get("name") == target_ref or sk.get("id") == target_ref:
+                matching_sketch = dict(sk)
+                break
+        if matching_sketch is None:
+            resolved = resolve_fusion_entity({"ref": target_ref, "kind": "sketch"})
+            record = resolved.get("record") or {}
+            matching_sketch = {
+                "ref": target_ref,
+                "name": record.get("name", target_ref),
+                "fully_constrained": None,
+                "profiles": [],
+                "constraints": [],
+                "dimensions": [],
+                "geometry": {},
+            }
+        matching_sketch.pop("dof", None)
+        if not PAYLOAD.get("include_profiles", True):
+            matching_sketch["profiles"] = []
+        if not PAYLOAD.get("include_constraints", True):
+            matching_sketch["constraints"] = []
+        return make_result(data=matching_sketch, summary=f"Read sketch {target_ref}", document=doc_state)
+
+    if op == "parameters":
+        params = canonical_data.get("parameters", {})
+        include_model = PAYLOAD.get("include_model_params", True)
+        include_user = PAYLOAD.get("include_user_params", True)
+        if isinstance(params, dict):
+            filtered_params = {}
+            if include_model:
+                filtered_params["model_parameters"] = params.get("model_parameters", [])
+            if include_user:
+                filtered_params["user_parameters"] = params.get("user_parameters", [])
+            params = filtered_params
+        elif isinstance(params, (list, tuple)):
+            params = [
+                p for p in params
+                if (include_user if (isinstance(p, dict) and p.get("is_user")) else include_model)
+            ]
+        return make_result(data={"parameters": params}, summary="Parameters read", document=doc_state)
+
+    if op == "visibility":
+        target = PAYLOAD.get("target")
+        vis_list = canonical_data.get("effective_visibility", [])
+        if target:
+            target_str = target.get("ref") if isinstance(target, dict) else str(target)
+            vis_list = [v for v in vis_list if v.get("ref") == target_str or v.get("target") == target_str]
+        vis_data = {
+            "target": target,
+            "effective_visibility": vis_list,
+        }
+        return make_result(data=vis_data, summary="Visibility read", document=doc_state)
+
+    if op == "selection":
+        selected_items = []
+        try:
+            import adsk.core
+            app = adsk.core.Application.get()
+            if app and hasattr(app, "userInterface"):
+                ui = app.userInterface
+                if ui and hasattr(ui, "activeSelections"):
+                    selections = ui.activeSelections
+                    for i in range(selections.count):
+                        sel = selections.item(i)
+                        ent = getattr(sel, "entity", None)
+                        pt = getattr(sel, "point", None)
+                        pt_dict = None
+                        if pt:
+                            pt_dict = {
+                                "x": round(float(pt.x), 6),
+                                "y": round(float(pt.y), 6),
+                                "z": round(float(pt.z), 6),
+                                "frame": {"space": "world", "ref": None},
+                            }
+                        ent_name = getattr(ent, "name", None) if ent else None
+                        ent_type = type(ent).__name__ if ent else "Unknown"
+                        safe_ref = f"ent_sel_{i}"
+                        selected_items.append({
+                            "ref": safe_ref,
+                            "kind": ent_type,
+                            "name": ent_name,
+                            "selection_point": pt_dict,
+                            "frame": {"space": "world", "ref": None},
+                        })
+        except Exception:
+            pass
+
+        if "mock_selection" in PAYLOAD and isinstance(PAYLOAD["mock_selection"], list):
+            selected_items = PAYLOAD["mock_selection"]
+
+        refs = [s.get("ref") for s in selected_items if s.get("ref")]
+        return make_result(
+            data={"count": len(selected_items), "refs": refs, "entities": selected_items},
+            summary=f"Selection read ({len(selected_items)} selected)",
+            document=doc_state,
+        )
+
+    if op == "query":
+        selector = PAYLOAD.get("selector", {})
+        limit = int(PAYLOAD.get("limit", 100))
+        candidates = []
+        for c in canonical_data.get("components", []):
+            candidates.append({"ref": c.get("ref") or f"ent_{c.get('id', 'comp')}", "name": c.get("name"), "kind": "component"})
+        for o in canonical_data.get("occurrences", []):
+            candidates.append({"ref": o.get("ref") or f"ent_{o.get('name', 'occ')}", "name": o.get("name"), "full_path_name": o.get("full_path_name"), "kind": "occurrence", "is_visible": o.get("is_visible")})
+        for b in canonical_data.get("bodies", []):
+            candidates.append({"ref": b.get("ref") or f"ent_{b.get('name', 'body')}", "name": b.get("name"), "component_path": (b.get("component_name"),) if b.get("component_name") else (), "kind": "body", "is_solid": b.get("is_solid"), "is_visible": b.get("is_visible")})
+        for s in canonical_data.get("sketches", []):
+            candidates.append({"ref": s.get("ref") or f"ent_{s.get('name', 'sk')}", "name": s.get("name"), "kind": "sketch"})
+        for f in canonical_data.get("timeline", []):
+            candidates.append({"ref": f.get("ref") or f"ent_{f.get('name', 'feat')}", "name": f.get("name"), "feature_type": f.get("feature_type", "Feature"), "kind": "feature"})
+
+        matched = []
+        for cand in candidates:
+            if "kind" in selector and selector["kind"]:
+                k_req = selector["kind"]
+                if isinstance(k_req, str) and cand.get("kind") != k_req:
+                    continue
+                if isinstance(k_req, (list, tuple)) and cand.get("kind") not in k_req:
+                    continue
+            if "name" in selector and selector["name"]:
+                n_req = selector["name"]
+                c_name = cand.get("name", "")
+                if isinstance(n_req, str) and c_name != n_req:
+                    continue
+                if isinstance(n_req, dict) and "regex" in n_req:
+                    import re
+                    if not re.search(n_req["regex"], c_name):
+                        continue
+            if "feature_type" in selector and selector["feature_type"]:
+                if cand.get("feature_type") != selector["feature_type"]:
+                    continue
+            if "visible" in selector and selector["visible"] is not None:
+                if cand.get("is_visible") != selector["visible"]:
+                    continue
+            matched.append(cand)
+            if len(matched) >= limit:
+                break
+
+        refs = [m.get("ref") for m in matched if m.get("ref")]
+        return make_result(
+            data={
+                "matched_count": len(matched),
+                "normalized_selector": selector,
+                "refs": refs,
+                "entities": matched,
+            },
+            summary=f"Query matched {len(matched)} entities",
+            document=doc_state,
+        )
+
     result_data = {
         "operation": op,
         "fingerprint": fp,

@@ -91,6 +91,18 @@ from app.fusion_cad.selectors import (
     SelectorQueryResult,
 )
 from app.fusion_cad.service import FusionCadService
+from app.fusion_cad.snapshots import (
+    FeatureDependency,
+    FeatureRecord,
+    ModelSnapshot,
+    SketchReadResult,
+    SnapshotCounts,
+    SnapshotStore,
+    compute_structural_hash,
+    normalize_feature,
+    normalize_sketch_read,
+    normalize_snapshot,
+)
 
 __all__ = [
     "CAD_NON_RETRYABLE_CODES",
@@ -106,6 +118,8 @@ __all__ = [
     "EntityRef",
     "EntityRefRegistry",
     "EntitySelector",
+    "FeatureDependency",
+    "FeatureRecord",
     "FindingSeverity",
     "FrozenDict",
     "FusionCadError",
@@ -120,6 +134,7 @@ __all__ = [
     "FusionViewRequest",
     "ImmutableMapping",
     "InternalEntityRecord",
+    "ModelSnapshot",
     "NamePattern",
     "Plane",
     "Point3",
@@ -128,6 +143,9 @@ __all__ = [
     "ResolutionResult",
     "SelectorEngine",
     "SelectorQueryResult",
+    "SketchReadResult",
+    "SnapshotCounts",
+    "SnapshotStore",
     "StabilityClass",
     "StageMetadataClearRoleAction",
     "StageMetadataRemoveAction",
@@ -158,6 +176,7 @@ __all__ = [
     "Vector3",
     "ViewRefSummary",
     "cad_error_to_bridge_error",
+    "compute_structural_hash",
     "convert_bounding_box",
     "convert_plane",
     "convert_point",
@@ -172,4 +191,7 @@ __all__ = [
     "fusion_validate_schema",
     "fusion_view_schema",
     "is_cad_error_retryable",
+    "normalize_feature",
+    "normalize_sketch_read",
+    "normalize_snapshot",
 ]
