@@ -7,6 +7,7 @@ from app.fusion_cad.snapshots import (
     ModelSnapshot,
     SnapshotCounts,
     SnapshotStore,
+    compute_structural_hash,
     normalize_feature,
     normalize_sketch_read,
     normalize_snapshot,
@@ -515,3 +516,307 @@ def test_falsify_finding_5_component_path_coverage_and_feature_parent_children()
     assert snap_empty.features[0].parent is None
     assert snap_empty.features[0].children == ()
     assert snap_empty.parameters[0].component_path == ()
+
+
+def test_nested_unique_token_secrets_sanitized_across_sketch_snapshot_and_summaries():
+    """Regression: nested unique token secrets in mappings/lists must never leak through model_dump/str/repr/json."""
+    secret_prof_tok = "secret::adsk::token::prof::12345"
+    secret_prof_nested = "secret::adsk::token::prof_nested::67890"
+    secret_const_tok = "secret::adsk::token::const::abcdef"
+    secret_dim_tok = "secret::adsk::token::dim::112233"
+    secret_geom_tok = "secret::adsk::token::geom::445566"
+    secret_proj_tok = "secret::adsk::token::proj::778899"
+    secret_text_tok = "secret::adsk::token::text::aabbcc"
+    secret_sk_health_tok = "secret::adsk::token::sk_health::ddeeff"
+
+    raw_sketch = {
+        "ref": "ent_sketch_secure",
+        "name": "SecureSketch",
+        "profiles": [
+            {
+                "name": "Profile1",
+                "entityToken": secret_prof_tok,
+                "area": 12.5,
+                "nested_items": [{"token": secret_prof_nested, "tag": "inner"}],
+            }
+        ],
+        "constraints": [
+            {
+                "type": "Coincident",
+                "native_token": secret_const_tok,
+                "is_satisfied": True,
+            }
+        ],
+        "dimensions": [{"name": "d1", "value": 50.0, "entityToken": secret_dim_tok}],
+        "geometry": {
+            "lines": [
+                {"native_token": secret_geom_tok, "length": 10.0, "is_valid": True}
+            ]
+        },
+        "linked_projection_state": [{"token": secret_proj_tok, "status": "linked"}],
+        "texts": [{"text": "CAD", "entityToken": secret_text_tok, "size": 3.5}],
+        "health": {
+            "status": "ok",
+            "native_token": secret_sk_health_tok,
+        },
+    }
+
+    sketch_res = normalize_sketch_read(raw_sketch)
+    dump_str = str(sketch_res.model_dump(mode="python"))
+    repr_str = repr(sketch_res)
+    str_str = str(sketch_res)
+
+    for secret in (
+        secret_prof_tok,
+        secret_prof_nested,
+        secret_const_tok,
+        secret_dim_tok,
+        secret_geom_tok,
+        secret_proj_tok,
+        secret_text_tok,
+        secret_sk_health_tok,
+    ):
+        assert secret not in dump_str, f"Leaked {secret} in sketch model_dump"
+        assert secret not in repr_str, f"Leaked {secret} in sketch repr"
+        assert secret not in str_str, f"Leaked {secret} in sketch str"
+
+    # Verify non-token semantic fields and types are strictly preserved without stringification
+    assert sketch_res.profiles[0]["area"] == 12.5
+    assert isinstance(sketch_res.profiles[0]["area"], float)
+    assert sketch_res.profiles[0]["nested_items"][0]["tag"] == "inner"
+    assert sketch_res.constraints[0]["type"] == "Coincident"
+    assert sketch_res.constraints[0]["is_satisfied"] is True
+    assert isinstance(sketch_res.constraints[0]["is_satisfied"], bool)
+    assert sketch_res.dimensions[0]["value"] == 50.0
+    assert isinstance(sketch_res.dimensions[0]["value"], float)
+    assert sketch_res.geometry["lines"][0]["length"] == 10.0
+    assert sketch_res.linked_projection_state[0]["status"] == "linked"
+    assert sketch_res.texts[0]["text"] == "CAD"
+    assert sketch_res.health["status"] == "ok"
+
+    # Full snapshot with faces, edges, visibility, appearance, health, and logical_objects
+    secret_face_tok = "secret::adsk::token::face::100"
+    secret_face_nested = "secret::adsk::token::face_nested::101"
+    secret_edge_tok = "secret::adsk::token::edge::200"
+    secret_vis_tok = "secret::adsk::token::vis::300"
+    secret_app_tok = "secret::adsk::token::app::400"
+    secret_snap_health_tok = "secret::adsk::token::snap_health::500"
+    secret_lo_tok = "secret::adsk::token::lo::600"
+    secret_lo_nested = "secret::adsk::token::lo_nested::601"
+
+    raw_snapshot = {
+        "document": {"document_ref": "doc_sec_test"},
+        "model_revision": "rev_1",
+        "counts": {"faces": 1, "edges": 1, "vertices": 1},
+        "faces": [
+            {
+                "id": "face_1",
+                "area": 25.5,
+                "entityToken": secret_face_tok,
+                "sub_faces": [{"token": secret_face_nested}],
+            }
+        ],
+        "edges": [
+            {
+                "id": "edge_1",
+                "length": 15.2,
+                "native_token": secret_edge_tok,
+            }
+        ],
+        "visibility": {
+            "effective_visibility": [
+                {
+                    "ref": "ent_body_1",
+                    "is_visible": True,
+                    "token": secret_vis_tok,
+                }
+            ]
+        },
+        "appearance": {
+            "materials": [
+                {
+                    "name": "Titanium",
+                    "entityToken": secret_app_tok,
+                }
+            ]
+        },
+        "health": {
+            "status": "healthy",
+            "native_token": secret_snap_health_tok,
+        },
+        "logical_objects": [
+            {
+                "group": "mfg",
+                "name": "role",
+                "value": "flange",
+                "entityToken": secret_lo_tok,
+                "metadata": {"token": secret_lo_nested, "weight": 4.2},
+            }
+        ],
+    }
+
+    snap = normalize_snapshot(raw_snapshot, detail="full")
+    snap_dump_str = str(snap.model_dump(mode="python"))
+    snap_repr_str = repr(snap)
+    snap_str_str = str(snap)
+
+    for secret in (
+        secret_face_tok,
+        secret_face_nested,
+        secret_edge_tok,
+        secret_vis_tok,
+        secret_app_tok,
+        secret_snap_health_tok,
+        secret_lo_tok,
+        secret_lo_nested,
+    ):
+        assert secret not in snap_dump_str, f"Leaked {secret} in snapshot model_dump"
+        assert secret not in snap_repr_str, f"Leaked {secret} in snapshot repr"
+        assert secret not in snap_str_str, f"Leaked {secret} in snapshot str"
+
+    # Verify types and fields preserved
+    assert snap.faces[0]["area"] == 25.5
+    assert isinstance(snap.faces[0]["area"], float)
+    assert snap.edges[0]["length"] == 15.2
+    assert snap.visibility["effective_visibility"][0]["is_visible"] is True
+    assert isinstance(snap.visibility["effective_visibility"][0]["is_visible"], bool)
+    assert snap.appearance["materials"][0]["name"] == "Titanium"
+    assert snap.health["status"] == "healthy"
+    assert snap.logical_objects[0]["value"] == "flange"
+    assert snap.logical_objects[0]["metadata"]["weight"] == 4.2
+
+
+def test_structural_hash_stability_with_nested_lifecycle_refs_and_snapshot_id():
+    """Regression: identical payloads differing only in nested ent_lifecycle_* and snapshot_id hash equal,
+    while real semantic mutations hash different.
+    """
+    payload1 = {
+        "document_ref": "doc_main_123",
+        "model_revision": "rev_1",
+        "snapshot_id": "snap_lifecycle_a1",
+        "counts": {"faces": 10},
+        "components": [{"name": "PartA", "ref": "ent_lifecycle_c1"}],
+        "visibility": {
+            "effective_visibility": [
+                {
+                    "ref": "ent_lifecycle_c1",
+                    "target": "ent_lifecycle_c1",
+                    "is_visible": True,
+                }
+            ]
+        },
+        "appearance": {
+            "effective_appearance": [
+                {"target": "ent_lifecycle_c1", "material": "Steel"}
+            ]
+        },
+        "health": {
+            "status": "ok",
+            "snapshot_id": "snap_lifecycle_a1",
+            "diagnostics": [{"entity_ref": "ent_lifecycle_c1", "is_healthy": True}],
+        },
+        "logical_objects": [
+            {
+                "group": "cad",
+                "name": "role",
+                "value": "bracket",
+                "owner_ref": "ent_lifecycle_c1",
+                "snapshot_id": "snap_lifecycle_a1",
+            }
+        ],
+    }
+
+    payload2 = {
+        "document_ref": "doc_main_123",
+        "model_revision": "rev_1",
+        "snapshot_id": "snap_lifecycle_b2",
+        "counts": {"faces": 10},
+        "components": [{"name": "PartA", "ref": "ent_lifecycle_c2"}],
+        "visibility": {
+            "effective_visibility": [
+                {
+                    "ref": "ent_lifecycle_c2",
+                    "target": "ent_lifecycle_c2",
+                    "is_visible": True,
+                }
+            ]
+        },
+        "appearance": {
+            "effective_appearance": [
+                {"target": "ent_lifecycle_c2", "material": "Steel"}
+            ]
+        },
+        "health": {
+            "status": "ok",
+            "snapshot_id": "snap_lifecycle_b2",
+            "diagnostics": [{"entity_ref": "ent_lifecycle_c2", "is_healthy": True}],
+        },
+        "logical_objects": [
+            {
+                "group": "cad",
+                "name": "role",
+                "value": "bracket",
+                "owner_ref": "ent_lifecycle_c2",
+                "snapshot_id": "snap_lifecycle_b2",
+            }
+        ],
+    }
+
+    hash1 = compute_structural_hash(payload1)
+    hash2 = compute_structural_hash(payload2)
+
+    # Invariant: volatile lifecycle identities and snapshot IDs must not destabilize structural hash
+    assert hash1 == hash2, (
+        f"Structural hashes differed on volatile lifecycle refs/snapshot_id: {hash1} vs {hash2}"
+    )
+
+    # Semantic mutations:
+    # 1. Visibility mutation (True -> False)
+    payload_vis_mut = {
+        **payload1,
+        "visibility": {
+            "effective_visibility": [
+                {
+                    "ref": "ent_lifecycle_c1",
+                    "target": "ent_lifecycle_c1",
+                    "is_visible": False,
+                }
+            ]
+        },
+    }
+    hash_vis_mut = compute_structural_hash(payload_vis_mut)
+    assert hash_vis_mut != hash1, (
+        "Visibility mutation must yield different structural hash"
+    )
+
+    # 2. Logical object semantic role mutation ("bracket" -> "stiffener")
+    payload_role_mut = {
+        **payload1,
+        "logical_objects": [
+            {
+                "group": "cad",
+                "name": "role",
+                "value": "stiffener",
+                "owner_ref": "ent_lifecycle_c1",
+                "snapshot_id": "snap_lifecycle_a1",
+            }
+        ],
+    }
+    hash_role_mut = compute_structural_hash(payload_role_mut)
+    assert hash_role_mut != hash1, (
+        "Logical object role mutation must yield different structural hash"
+    )
+
+    # 3. Health status mutation ("ok" -> "degraded")
+    payload_health_mut = {
+        **payload1,
+        "health": {
+            "status": "degraded",
+            "snapshot_id": "snap_lifecycle_a1",
+            "diagnostics": [{"entity_ref": "ent_lifecycle_c1", "is_healthy": False}],
+        },
+    }
+    hash_health_mut = compute_structural_hash(payload_health_mut)
+    assert hash_health_mut != hash1, (
+        "Health mutation must yield different structural hash"
+    )

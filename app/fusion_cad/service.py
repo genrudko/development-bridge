@@ -41,6 +41,7 @@ from app.fusion_cad.snapshots import (
     normalize_feature,
     normalize_sketch_read,
     normalize_snapshot,
+    sanitize_public_payload,
 )
 
 _GROUP_REQUEST_ADAPTERS: dict[str, TypeAdapter[Any]] = {
@@ -771,7 +772,11 @@ class FusionCadService:
                         update={
                             "document": doc_state,
                             "data": ImmutableMapping(
-                                snapshot.model_dump(mode="python", exclude_none=True)
+                                sanitize_public_payload(
+                                    snapshot.model_dump(
+                                        mode="python", exclude_none=True
+                                    )
+                                )
                             ),
                         }
                     )
@@ -780,11 +785,13 @@ class FusionCadService:
                         feats = cad_result.data.get("features", [])
                         if isinstance(feats, (list, tuple)):
                             norm_feats = [
-                                normalize_feature(
-                                    f,
-                                    ref_registry=self._ref_registry,
-                                    document_ref=target_doc or "doc_active",
-                                ).model_dump(mode="python", exclude_none=True)
+                                sanitize_public_payload(
+                                    normalize_feature(
+                                        f,
+                                        ref_registry=self._ref_registry,
+                                        document_ref=target_doc or "doc_active",
+                                    ).model_dump(mode="python", exclude_none=True)
+                                )
                                 for f in feats
                                 if isinstance(f, Mapping)
                             ]
@@ -815,8 +822,10 @@ class FusionCadService:
                         cad_result = cad_result.model_copy(
                             update={
                                 "data": ImmutableMapping(
-                                    sketch_res.model_dump(
-                                        mode="python", exclude_none=True
+                                    sanitize_public_payload(
+                                        sketch_res.model_dump(
+                                            mode="python", exclude_none=True
+                                        )
                                     )
                                 )
                             }
@@ -840,7 +849,11 @@ class FusionCadService:
                                 )
                             cad_result = cad_result.model_copy(
                                 update={
-                                    "data": ImmutableMapping({"parameters": filtered})
+                                    "data": ImmutableMapping(
+                                        sanitize_public_payload(
+                                            {"parameters": filtered}
+                                        )
+                                    )
                                 }
                             )
                         elif isinstance(params_raw, (list, tuple)):
@@ -856,7 +869,12 @@ class FusionCadService:
                             cad_result = cad_result.model_copy(
                                 update={
                                     "data": ImmutableMapping(
-                                        {"parameters": tuple(filtered_list)}
+                                        {
+                                            "parameters": tuple(
+                                                sanitize_public_payload(p)
+                                                for p in filtered_list
+                                            )
+                                        }
                                     )
                                 }
                             )
@@ -902,11 +920,8 @@ class FusionCadService:
                                     else None,
                                 )
                                 d["ref"] = iss.ref
-                            # Strip native token fields before returning entities
-                            d.pop("entityToken", None)
-                            d.pop("native_token", None)
-                            d.pop("token", None)
-                            candidates.append(d)
+                            d_clean = sanitize_public_payload(d)
+                            candidates.append(d_clean)
                         else:
                             candidates.append(cand)
 
@@ -926,7 +941,7 @@ class FusionCadService:
                                     "entities": tuple(
                                         e.model_dump(mode="python", exclude_none=True)
                                         if isinstance(e, BaseModel)
-                                        else e
+                                        else sanitize_public_payload(e)
                                         for e in limited_entities
                                     ),
                                 }
@@ -961,11 +976,8 @@ class FusionCadService:
                                 norm_refs.append(d["ref"])
                                 if "frame" not in d or d["frame"] is None:
                                     d["frame"] = {"space": "world", "ref": None}
-                                # Invariant: strip native/internal token fields before returning entities
-                                d.pop("entityToken", None)
-                                d.pop("native_token", None)
-                                d.pop("token", None)
-                                norm_ents.append(d)
+                                d_clean = sanitize_public_payload(d)
+                                norm_ents.append(d_clean)
                         cad_result = cad_result.model_copy(
                             update={
                                 "data": ImmutableMapping(

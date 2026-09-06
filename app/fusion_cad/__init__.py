@@ -102,6 +102,7 @@ from app.fusion_cad.snapshots import (
     normalize_feature,
     normalize_sketch_read,
     normalize_snapshot,
+    sanitize_public_payload,
 )
 
 __all__ = [
@@ -194,4 +195,5 @@ __all__ = [
     "normalize_feature",
     "normalize_sketch_read",
     "normalize_snapshot",
+    "sanitize_public_payload",
 ]

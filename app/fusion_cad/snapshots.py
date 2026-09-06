@@ -21,9 +21,124 @@ from app.fusion_cad.models import (
     Point3,
 )
 from app.fusion_cad.refs import EntityRefRegistry
-from app.fusion_cad.revisions import _canonicalize_value
 
 DependencyType = Literal["exact", "inferred", "unknown"]
+
+NATIVE_TOKEN_KEYS = frozenset(
+    {
+        "entityToken",
+        "entitytoken",
+        "native_token",
+        "nativetoken",
+        "token",
+        "entity_token",
+        "nativeToken",
+    }
+)
+
+VOLATILE_HASH_KEYS = frozenset({"snapshot_id", "snapshotid"})
+IDENTIFIER_REF_KEYS = frozenset(
+    {
+        "ref",
+        "target",
+        "target_ref",
+        "owner_ref",
+        "owner_id",
+        "entity_ref",
+        "reporter",
+        "parent",
+    }
+)
+
+
+def sanitize_public_payload(val: Any) -> Any:
+    """Recursively sanitize public payloads by removing native token aliases without stringifying values.
+
+    Preserves legitimate public opaque refs, semantic fields, and python types (float, int, bool, str, None).
+    Handles Mapping, ImmutableMapping, list, tuple, and nested structures.
+    """
+    if isinstance(val, Mapping):
+        clean_map: dict[Any, Any] = {}
+        for k, v in val.items():
+            if isinstance(k, str) and (
+                k in NATIVE_TOKEN_KEYS or k.lower() in NATIVE_TOKEN_KEYS
+            ):
+                continue
+            clean_map[k] = sanitize_public_payload(v)
+        if isinstance(val, ImmutableMapping):
+            return ImmutableMapping(clean_map)
+        return clean_map
+    if isinstance(val, tuple):
+        return tuple(sanitize_public_payload(x) for x in val)
+    if isinstance(val, list):
+        return [sanitize_public_payload(x) for x in val]
+    return val
+
+
+def _canonicalize_structural_value(val: Any, ref_map: Mapping[str, str]) -> Any:
+    """Recursively canonicalize semantic model payload for structural hashing.
+
+    Removes/replaces volatile lifecycle identities (snapshot_id and opaque lifecycle refs
+    as identifiers) while retaining mutation-sensitive values and without collapsing real
+    semantic differences.
+    """
+    if val is None or isinstance(val, (bool, int)):
+        return val
+    if isinstance(val, float):
+        rounded = round(val, 6)
+        return 0.0 if rounded == 0.0 else rounded
+    if isinstance(val, str):
+        if val in ref_map:
+            return ref_map[val]
+        if val.startswith("ent_") and re.match(ENTITY_REF_PATTERN, val):
+            return ""
+        return val
+    if isinstance(val, Mapping):
+        clean_map: dict[str, Any] = {}
+        for k, v in val.items():
+            k_str = str(k)
+            # 1. Volatile snapshot_id keys are removed entirely
+            if k_str in VOLATILE_HASH_KEYS or k_str.lower() in VOLATILE_HASH_KEYS:
+                continue
+            # 2. Key is an opaque lifecycle ref in a dictionary mapping
+            target_key = ref_map.get(k_str, k_str)
+            if target_key.startswith("ent_") and re.match(
+                ENTITY_REF_PATTERN, target_key
+            ):
+                target_key = "ent_ref"
+
+            # 3. Value handling for identifier ref fields
+            if (
+                k_str in IDENTIFIER_REF_KEYS or k_str.lower() in IDENTIFIER_REF_KEYS
+            ) and isinstance(v, str):
+                if v in ref_map:
+                    clean_map[target_key] = ref_map[v]
+                elif v.startswith("ent_") or re.match(ENTITY_REF_PATTERN, v):
+                    clean_map[target_key] = ""
+                else:
+                    clean_map[target_key] = v
+            else:
+                clean_map[target_key] = _canonicalize_structural_value(v, ref_map)
+        return {k: clean_map[k] for k in sorted(clean_map.keys())}
+    if isinstance(val, (list, tuple, set, frozenset)):
+        canonical_items = [_canonicalize_structural_value(x, ref_map) for x in val]
+        try:
+            return sorted(
+                canonical_items,
+                key=lambda item: (
+                    json.dumps(
+                        item,
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    if isinstance(item, (dict, list, tuple))
+                    else str(item)
+                ),
+            )
+        except (TypeError, ValueError):
+            return canonical_items
+    return str(val)
 
 
 def _safe_ent_ref(ref_candidate: Any, fallback_prefix: str = "ent") -> str:
@@ -245,7 +360,6 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
     counts = snapshot_dict.get("counts")
     if isinstance(counts, BaseModel):
         counts = counts.model_dump(mode="python")
-    canonical_body["counts"] = _canonicalize_value(counts)
 
     comps = snapshot_dict.get("components", ())
     occs = snapshot_dict.get("occurrences", ())
@@ -320,6 +434,32 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         if p_ref:
             ref_map[p_ref] = f"param:{p_name}"
 
+    faces = snapshot_dict.get("faces") or ()
+    if isinstance(faces, (list, tuple)):
+        for idx, face in enumerate(faces):
+            f_ref = getattr(face, "ref", None) or (
+                face.get("ref") if isinstance(face, Mapping) else None
+            )
+            f_id = getattr(face, "id", None) or (
+                face.get("id") if isinstance(face, Mapping) else None
+            )
+            if f_ref:
+                ref_map[f_ref] = f"face:{f_id or idx}"
+
+    edges = snapshot_dict.get("edges") or ()
+    if isinstance(edges, (list, tuple)):
+        for idx, edge in enumerate(edges):
+            e_ref = getattr(edge, "ref", None) or (
+                edge.get("ref") if isinstance(edge, Mapping) else None
+            )
+            e_id = getattr(edge, "id", None) or (
+                edge.get("id") if isinstance(edge, Mapping) else None
+            )
+            if e_ref:
+                ref_map[e_ref] = f"edge:{e_id or idx}"
+
+    canonical_body["counts"] = _canonicalize_structural_value(counts, ref_map)
+
     # 3. Components (sorted by name)
     comp_list = []
     for c in comps:
@@ -328,7 +468,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         cd.pop("id", None)
         comp_list.append(cd)
     comp_list.sort(key=lambda x: x.get("name", ""))
-    canonical_body["components"] = _canonicalize_value(comp_list)
+    canonical_body["components"] = _canonicalize_structural_value(comp_list, ref_map)
 
     # 4. Occurrences (sorted by full_path_name)
     occ_list = []
@@ -338,7 +478,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         od.pop("id", None)
         occ_list.append(od)
     occ_list.sort(key=lambda x: x.get("full_path_name", ""))
-    canonical_body["occurrences"] = _canonicalize_value(occ_list)
+    canonical_body["occurrences"] = _canonicalize_structural_value(occ_list, ref_map)
 
     # 5. Bodies (sorted by component_name, name)
     body_list = []
@@ -355,7 +495,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
             x.get("name", ""),
         )
     )
-    canonical_body["bodies"] = _canonicalize_value(body_list)
+    canonical_body["bodies"] = _canonicalize_structural_value(body_list, ref_map)
 
     # 6. Sketches (sorted by component_name, name)
     sk_list = []
@@ -370,7 +510,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
             x.get("name", ""),
         )
     )
-    canonical_body["sketches"] = _canonicalize_value(sk_list)
+    canonical_body["sketches"] = _canonicalize_structural_value(sk_list, ref_map)
 
     # 7. Features (sorted by timeline_index)
     feat_list = []
@@ -414,7 +554,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
             ]
         feat_list.append(fd)
     feat_list.sort(key=lambda x: int(x.get("timeline_index", 0)))
-    canonical_body["features"] = _canonicalize_value(feat_list)
+    canonical_body["features"] = _canonicalize_structural_value(feat_list, ref_map)
 
     # 8. Parameters (sorted by is_user, name)
     param_list = []
@@ -424,7 +564,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
         pd.pop("id", None)
         param_list.append(pd)
     param_list.sort(key=lambda x: (not x.get("is_user", False), x.get("name", "")))
-    canonical_body["parameters"] = _canonicalize_value(param_list)
+    canonical_body["parameters"] = _canonicalize_structural_value(param_list, ref_map)
 
     # 9. Summaries
     for key in ("visibility", "appearance", "health", "logical_objects"):
@@ -432,7 +572,7 @@ def compute_structural_hash(snapshot_dict: Mapping[str, Any]) -> str:
             val = snapshot_dict[key]
             if isinstance(val, BaseModel):
                 val = val.model_dump(mode="python")
-            canonical_body[key] = _canonicalize_value(val)
+            canonical_body[key] = _canonicalize_structural_value(val, ref_map)
 
     serialized = json.dumps(
         canonical_body, sort_keys=True, ensure_ascii=False, separators=(",", ":")
@@ -560,7 +700,7 @@ def normalize_sketch_read(
     profiles_list = []
     for p in raw_profiles:
         if isinstance(p, Mapping):
-            p_dict = dict(p)
+            p_dict = dict(sanitize_public_payload(p))
             if "ref" in p_dict:
                 p_dict["ref"] = _safe_ent_ref(p_dict["ref"], "prof")
             profiles_list.append(ImmutableMapping(p_dict))
@@ -568,19 +708,23 @@ def normalize_sketch_read(
     # Constraints
     raw_constraints = raw.get("constraints", []) if include_constraints else []
     constraints_list = [
-        ImmutableMapping(dict(c)) for c in raw_constraints if isinstance(c, Mapping)
+        ImmutableMapping(dict(sanitize_public_payload(c)))
+        for c in raw_constraints
+        if isinstance(c, Mapping)
     ]
 
     # Dimensions
     raw_dimensions = raw.get("dimensions", [])
     dimensions_list = [
-        ImmutableMapping(dict(d)) for d in raw_dimensions if isinstance(d, Mapping)
+        ImmutableMapping(dict(sanitize_public_payload(d)))
+        for d in raw_dimensions
+        if isinstance(d, Mapping)
     ]
 
     # Geometry
     geom = raw.get("geometry", {})
     geom_dict = (
-        ImmutableMapping(dict(geom))
+        ImmutableMapping(dict(sanitize_public_payload(geom)))
         if isinstance(geom, Mapping)
         else ImmutableMapping({})
     )
@@ -588,7 +732,9 @@ def normalize_sketch_read(
     # Plane
     plane_raw = raw.get("plane")
     plane_imm = (
-        ImmutableMapping(dict(plane_raw)) if isinstance(plane_raw, Mapping) else None
+        ImmutableMapping(dict(sanitize_public_payload(plane_raw)))
+        if isinstance(plane_raw, Mapping)
+        else None
     )
 
     return SketchReadResult(
@@ -601,16 +747,16 @@ def normalize_sketch_read(
         profiles=tuple(profiles_list),
         fully_constrained=fc_bool,
         linked_projection_state=tuple(
-            ImmutableMapping(dict(x))
+            ImmutableMapping(dict(sanitize_public_payload(x)))
             for x in raw.get("linked_projection_state", [])
             if isinstance(x, Mapping)
         ),
         texts=tuple(
-            ImmutableMapping(dict(x))
+            ImmutableMapping(dict(sanitize_public_payload(x)))
             for x in raw.get("texts", [])
             if isinstance(x, Mapping)
         ),
-        health=ImmutableMapping(dict(raw.get("health", {})))
+        health=ImmutableMapping(dict(sanitize_public_payload(raw.get("health", {}))))
         if isinstance(raw.get("health"), Mapping)
         else ImmutableMapping({}),
         dof=None,  # strictly None; do not invent numeric DOF
@@ -957,35 +1103,35 @@ def normalize_snapshot(
     if detail == "full":
         if "faces" in raw and isinstance(raw["faces"], (list, tuple)):
             faces_tuple = tuple(
-                ImmutableMapping(dict(f))
+                ImmutableMapping(dict(sanitize_public_payload(f)))
                 for f in raw["faces"]
                 if isinstance(f, Mapping)
             )
         if "edges" in raw and isinstance(raw["edges"], (list, tuple)):
             edges_tuple = tuple(
-                ImmutableMapping(dict(e))
+                ImmutableMapping(dict(sanitize_public_payload(e)))
                 for e in raw["edges"]
                 if isinstance(e, Mapping)
             )
 
     # 10. Summaries (visibility, appearance, health, logical objects)
     vis_data = (
-        ImmutableMapping(dict(raw.get("visibility", {})))
+        ImmutableMapping(dict(sanitize_public_payload(raw.get("visibility", {}))))
         if isinstance(raw.get("visibility"), Mapping)
         else ImmutableMapping({})
     )
     app_data = (
-        ImmutableMapping(dict(raw.get("appearance", {})))
+        ImmutableMapping(dict(sanitize_public_payload(raw.get("appearance", {}))))
         if isinstance(raw.get("appearance"), Mapping)
         else ImmutableMapping({})
     )
     health_data = (
-        ImmutableMapping(dict(raw.get("health", {})))
+        ImmutableMapping(dict(sanitize_public_payload(raw.get("health", {}))))
         if isinstance(raw.get("health"), Mapping)
         else ImmutableMapping({})
     )
     logical_objs = tuple(
-        ImmutableMapping(dict(lo))
+        ImmutableMapping(dict(sanitize_public_payload(lo)))
         for lo in raw.get("logical_objects", [])
         if isinstance(lo, Mapping)
     )

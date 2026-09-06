@@ -5140,3 +5140,221 @@ async def test_falsify_finding_4_query_supports_component_path_and_metadata_sele
     assert res_logical.status == "succeeded"
     assert res_logical.data["matched_count"] == 1
     assert res_logical.data["refs"] == ("ent_body_sched",)
+
+
+@pytest.mark.asyncio
+async def test_service_read_operations_never_leak_nested_native_tokens(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Regression: Service-level read operations (model_snapshot, sketch, query, selection)
+    must sanitize nested native token aliases without stringifying values.
+    """
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records(
+        [
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(name="sketch.access", state="supported"),
+            CapabilityRecord(name="timeline.access", state="supported"),
+            CapabilityRecord(name="selection.primitives", state="supported"),
+        ]
+    )
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    secret_snap_tok = "secret::adsk::token::service_snap::9999"
+    secret_sk_tok = "secret::adsk::token::service_sk::8888"
+    secret_query_tok = "secret::adsk::token::service_query::7777"
+    secret_sel_tok = "secret::adsk::token::service_sel::6666"
+
+    # 1. read:model_snapshot with nested tokens in faces, logical_objects, etc.
+    raw_snap_resp = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "api_version": "fusion.cad/v1",
+                        "status": "succeeded",
+                        "summary": "Snapshot captured",
+                        "document": {
+                            "document_ref": "doc_sec_service",
+                            "model_revision": "rev_1",
+                        },
+                        "data": {
+                            "counts": {"faces": 1, "edges": 1, "vertices": 1},
+                            "components": [{"name": "C1"}],
+                            "occurrences": [{"name": "C1:1", "full_path_name": "C1:1"}],
+                            "bodies": [
+                                {"name": "B1", "faces_count": 1, "edges_count": 1}
+                            ],
+                            "sketches": [{"name": "S1"}],
+                            "timeline": [
+                                {"index": 0, "name": "F1", "feature_type": "Extrude"}
+                            ],
+                            "parameters": {
+                                "model_parameters": [],
+                                "user_parameters": [],
+                            },
+                            "faces": [
+                                {
+                                    "id": "f1",
+                                    "area": 10.5,
+                                    "entityToken": secret_snap_tok,
+                                }
+                            ],
+                            "logical_objects": [
+                                {
+                                    "name": "role",
+                                    "value": "mount",
+                                    "nested": {"token": secret_snap_tok},
+                                }
+                            ],
+                        },
+                    }
+                ),
+            }
+        ],
+        "isError": False,
+    }
+    mock_desktop_service.call = AsyncMock(return_value=raw_snap_resp)
+    mock_desktop_service.submit = AsyncMock(return_value=raw_snap_resp)
+
+    res_snap = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "model_snapshot", "detail": "full"},
+        group="read",
+    )
+    snap_str = str(res_snap.model_dump(mode="python"))
+    assert secret_snap_tok not in snap_str, (
+        "Leaked secret token in service model_snapshot"
+    )
+    # Ensure float area is preserved as float
+    assert res_snap.data["faces"][0]["area"] == 10.5
+
+    # 2. read:sketch with nested token in profiles
+    raw_sk_resp = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "api_version": "fusion.cad/v1",
+                        "status": "succeeded",
+                        "summary": "Sketch read",
+                        "document": {
+                            "document_ref": "doc_sec_service",
+                            "model_revision": "rev_1",
+                        },
+                        "data": {
+                            "sketch": {
+                                "ref": "ent_sk_1",
+                                "name": "Sk1",
+                                "profiles": [
+                                    {
+                                        "name": "p1",
+                                        "area": 3.14,
+                                        "entityToken": secret_sk_tok,
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ),
+            }
+        ],
+        "isError": False,
+    }
+    mock_desktop_service.call = AsyncMock(return_value=raw_sk_resp)
+    mock_desktop_service.submit = AsyncMock(return_value=raw_sk_resp)
+
+    res_sk = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "sketch", "ref": "ent_sk_1"},
+        group="read",
+    )
+    sk_str = str(res_sk.model_dump(mode="python"))
+    assert secret_sk_tok not in sk_str, "Leaked secret token in service sketch"
+    assert res_sk.data["profiles"][0]["area"] == 3.14
+
+    # 3. read:query with nested token in candidate tags/metadata
+    raw_query_resp = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "api_version": "fusion.cad/v1",
+                        "status": "succeeded",
+                        "summary": "Candidates collected",
+                        "document": {
+                            "document_ref": "doc_sec_service",
+                            "model_revision": "rev_1",
+                        },
+                        "data": {
+                            "entities": [
+                                {
+                                    "ref": "ent_q_1",
+                                    "name": "Q1",
+                                    "kind": "body",
+                                    "entityToken": secret_query_tok,
+                                    "metadata": {
+                                        "token": secret_query_tok,
+                                        "count": 42,
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ),
+            }
+        ],
+        "isError": False,
+    }
+    mock_desktop_service.call = AsyncMock(return_value=raw_query_resp)
+    mock_desktop_service.submit = AsyncMock(return_value=raw_query_resp)
+
+    res_query = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "query", "selector": {"kind": "body"}},
+        group="read",
+    )
+    query_str = str(res_query.model_dump(mode="python"))
+    assert secret_query_tok not in query_str, "Leaked secret token in service query"
+    assert res_query.data["entities"][0]["metadata"]["count"] == 42
+
+    # 4. read:selection with nested token
+    raw_sel_resp = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "api_version": "fusion.cad/v1",
+                        "status": "succeeded",
+                        "summary": "Selection read",
+                        "document": {
+                            "document_ref": "doc_sec_service",
+                            "model_revision": "rev_1",
+                        },
+                        "data": {
+                            "entities": [
+                                {
+                                    "ref": "ent_sel_1",
+                                    "name": "SelectedFace",
+                                    "kind": "BRepFace",
+                                    "entityToken": secret_sel_tok,
+                                    "extra": {"nested_tok": {"token": secret_sel_tok}},
+                                }
+                            ]
+                        },
+                    }
+                ),
+            }
+        ],
+        "isError": False,
+    }
+    mock_desktop_service.call = AsyncMock(return_value=raw_sel_resp)
+    mock_desktop_service.submit = AsyncMock(return_value=raw_sel_resp)
+
+    res_sel = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "selection"},
+        group="read",
+    )
+    sel_str = str(res_sel.model_dump(mode="python"))
+    assert secret_sel_tok not in sel_str, "Leaked secret token in service selection"
