@@ -1202,16 +1202,18 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
         await cad_service.execute({"node_id": "desk-1", "operation": "model_snapshot"}, group="read")
         assert cad_service.revision_tracker.current("doc_1").revision == "rev_3"
 
-        # 7. Abort stale transaction and begin fresh one at rev_3
-        await cad_service.execute(
-            {
-                "node_id": "desk-1",
-                "operation": "abort",
-                "transaction_id": "tx_1234",
-            },
-            group="transaction",
-        )
-        assert cad_service.revision_tracker.get_transaction_baseline("tx_1234") is None
+        # 7. Abort on stale diverged transaction fails with REVISION_CONFLICT and preserves baseline
+        with pytest.raises(BridgeError) as exc_abort:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "abort",
+                    "transaction_id": "tx_1234",
+                },
+                group="transaction",
+            )
+        assert exc_abort.value.code == ErrorCode.REVISION_CONFLICT
+        assert cad_service.revision_tracker.get_transaction_baseline("tx_1234") is not None
 
         await cad_service.execute(
             {
@@ -2522,7 +2524,7 @@ async def test_falsify_abort_rollback_preserves_baseline_on_failure_uncertain_or
                 "status": "succeeded",
                 "summary": "transaction:abort",
                 "document": None,
-                "data": {"transaction_id": "tx_abort", "fingerprint": "baseline_fp_1"},
+                "data": {"transaction_id": "tx_abort", "operation": "abort", "applied": True, "fingerprint": "baseline_fp_1"},
             }),
         }],
         "isError": False,
@@ -2544,7 +2546,7 @@ async def test_falsify_abort_rollback_preserves_baseline_on_failure_uncertain_or
                 "status": "succeeded",
                 "summary": "transaction:abort",
                 "document": {"document_ref": "doc_other", "model_revision": "rev_1"},
-                "data": {"transaction_id": "tx_abort", "fingerprint": "baseline_fp_1"},
+                "data": {"transaction_id": "tx_abort", "operation": "abort", "applied": True, "fingerprint": "baseline_fp_1"},
             }),
         }],
         "isError": False,
@@ -2566,7 +2568,7 @@ async def test_falsify_abort_rollback_preserves_baseline_on_failure_uncertain_or
                 "status": "succeeded",
                 "summary": "transaction:abort",
                 "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
-                "data": {"transaction_id": "tx_abort", "fingerprint": "   "},
+                "data": {"transaction_id": "tx_abort", "operation": "abort", "applied": True, "fingerprint": "   "},
             }),
         }],
         "isError": False,
@@ -2588,7 +2590,7 @@ async def test_falsify_abort_rollback_preserves_baseline_on_failure_uncertain_or
                 "status": "succeeded",
                 "summary": "transaction:abort",
                 "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
-                "data": {"transaction_id": "tx_abort", "fingerprint": "diverged_random_fp"},
+                "data": {"transaction_id": "tx_abort", "operation": "abort", "applied": True, "fingerprint": "diverged_random_fp"},
             }),
         }],
         "isError": False,
@@ -2610,7 +2612,7 @@ async def test_falsify_abort_rollback_preserves_baseline_on_failure_uncertain_or
                 "status": "succeeded",
                 "summary": "transaction:abort",
                 "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
-                "data": {"transaction_id": "tx_abort", "fingerprint": "baseline_fp_1"},
+                "data": {"transaction_id": "tx_abort", "operation": "abort", "applied": True, "fingerprint": "baseline_fp_1"},
             }),
         }],
         "isError": False,
@@ -3044,3 +3046,225 @@ async def test_falsify_mandatory_attribute_collections_fail_closed(
                 )
             assert exc_case.value.code in (ErrorCode.CAPABILITY_UNAVAILABLE, ErrorCode.FUSION_API_ERROR)
             assert primitive_reached is False
+
+
+@pytest.mark.asyncio
+async def test_falsify_commit_abort_rollback_require_applied_is_true(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves commit/abort/rollback fails closed and preserves baseline and tracker when applied is missing, False, or non-bool."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    def set_mock_resp(data_payload):
+        resp = {
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": "transaction execution",
+                    "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+                    "data": data_payload,
+                }),
+            }],
+            "isError": False,
+        }
+        mock_desktop_service.call = AsyncMock(return_value=resp)
+        mock_desktop_service.submit = AsyncMock(return_value=resp)
+
+    # 1. Commit with applied=False preserves baseline and does not advance tracker
+    cad_service.revision_tracker.observe("doc_1", "base_fp")
+    cad_service.revision_tracker.begin_transaction("tx_commit_1", "doc_1", "rev_1", "base_fp")
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_commit_1") is not None
+    set_mock_resp({"transaction_id": "tx_commit_1", "operation": "commit", "applied": False, "fingerprint": "new_fp"})
+    with pytest.raises(FusionCadError) as exc_false:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit_1"},
+            group="transaction",
+        )
+    assert exc_false.value.code == ErrorCode.FUSION_API_ERROR
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_commit_1") is not None
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+    assert cad_service.revision_tracker.current("doc_1").fingerprint == "base_fp"
+
+    # 2. Commit with missing applied preserves baseline and does not advance tracker
+    set_mock_resp({"transaction_id": "tx_commit_1", "operation": "commit", "fingerprint": "new_fp"})
+    with pytest.raises(FusionCadError) as exc_missing:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit_1"},
+            group="transaction",
+        )
+    assert exc_missing.value.code == ErrorCode.FUSION_API_ERROR
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_commit_1") is not None
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+    # 3. Commit with non-bool applied ("true", 1, None) preserves baseline and tracker
+    for non_bool in ["true", 1, None, [True]]:
+        set_mock_resp({"transaction_id": "tx_commit_1", "operation": "commit", "applied": non_bool, "fingerprint": "new_fp"})
+        with pytest.raises(FusionCadError) as exc_non_bool:
+            await cad_service.execute(
+                {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit_1"},
+                group="transaction",
+            )
+        assert exc_non_bool.value.code == ErrorCode.FUSION_API_ERROR
+        assert cad_service.revision_tracker.get_transaction_baseline("tx_commit_1") is not None
+        assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+    # 4. Abort and rollback with applied=False preserve baseline
+    cad_service.revision_tracker.begin_transaction("tx_abort_1", "doc_1", "rev_1", "base_fp")
+    set_mock_resp({"transaction_id": "tx_abort_1", "operation": "abort", "applied": False, "fingerprint": "base_fp"})
+    with pytest.raises(FusionCadError) as exc_abort:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_abort_1"},
+            group="transaction",
+        )
+    assert exc_abort.value.code == ErrorCode.FUSION_API_ERROR
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_abort_1") is not None
+
+    cad_service.revision_tracker.begin_transaction("tx_rollback_1", "doc_1", "rev_1", "base_fp")
+    set_mock_resp({"transaction_id": "tx_rollback_1", "operation": "rollback", "applied": "true", "fingerprint": "base_fp"})
+    with pytest.raises(FusionCadError) as exc_rollback:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "rollback", "transaction_id": "tx_rollback_1"},
+            group="transaction",
+        )
+    assert exc_rollback.value.code == ErrorCode.FUSION_API_ERROR
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_rollback_1") is not None
+
+
+@pytest.mark.asyncio
+async def test_falsify_abort_rollback_rejects_divergent_tracker_fingerprint(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves baseline='base', tracker current='external', abort/rollback result='external' => REVISION_CONFLICT and baseline preserved."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # 1. Seed baseline='base'
+    cad_service.revision_tracker.observe("doc_1", "base")
+    cad_service.revision_tracker.begin_transaction("tx_abort_div", "doc_1", "rev_1", "base")
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_abort_div") is not None
+
+    # 2. External change advances tracker to 'external'
+    cad_service.revision_tracker.observe("doc_1", "external")
+    assert cad_service.revision_tracker.current("doc_1").fingerprint == "external"
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+    def set_mock_resp(op_name, fp):
+        resp = {
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": f"transaction:{op_name}",
+                    "document": {"document_ref": "doc_1", "model_revision": "rev_2"},
+                    "data": {
+                        "transaction_id": f"tx_{op_name}_div",
+                        "operation": op_name,
+                        "applied": True,
+                        "fingerprint": fp,
+                    },
+                }),
+            }],
+            "isError": False,
+        }
+        mock_desktop_service.call = AsyncMock(return_value=resp)
+        mock_desktop_service.submit = AsyncMock(return_value=resp)
+
+    # 3. Abort returns result fp='external' -> REVISION_CONFLICT, baseline preserved, tracker NOT restored
+    set_mock_resp("abort", "external")
+    with pytest.raises(FusionCadError) as exc_abort:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_abort_div"},
+            group="transaction",
+        )
+    assert exc_abort.value.code == ErrorCode.REVISION_CONFLICT
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_abort_div") is not None
+    assert cad_service.revision_tracker.current("doc_1").fingerprint == "external"
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+    # 4. Rollback returns result fp='external' -> REVISION_CONFLICT, baseline preserved, tracker NOT restored
+    cad_service.revision_tracker.begin_transaction("tx_rollback_div", "doc_1", "rev_1", "base")
+    set_mock_resp("rollback", "external")
+    with pytest.raises(FusionCadError) as exc_rb:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "rollback", "transaction_id": "tx_rollback_div"},
+            group="transaction",
+        )
+    assert exc_rb.value.code == ErrorCode.REVISION_CONFLICT
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_rollback_div") is not None
+    assert cad_service.revision_tracker.current("doc_1").fingerprint == "external"
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+
+@pytest.mark.asyncio
+async def test_falsify_externalization_failure_preserves_baseline_and_tracker_authority(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves outward failure during store_external_result preserves baseline and tracker authority unchanged."""
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records([
+        CapabilityRecord(name="transaction.preview_replay", state="supported"),
+        CapabilityRecord(name="design.access", state="supported"),
+        CapabilityRecord(name="revision.external_change_detection", state="supported"),
+    ])
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    # 1. Seed baseline
+    cad_service.revision_tracker.observe("doc_1", "base_fp")
+    cad_service.revision_tracker.begin_transaction("tx_ext_fail", "doc_1", "rev_1", "base_fp")
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_ext_fail") is not None
+
+    # 2. Return a successful commit result containing binary data
+    resp = {
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "transaction:commit with binary payload",
+                "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+                "data": {
+                    "transaction_id": "tx_ext_fail",
+                    "operation": "commit",
+                    "applied": True,
+                    "fingerprint": "post_fp",
+                    "screenshot_bytes": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                },
+            }),
+        }],
+        "isError": False,
+    }
+    mock_desktop_service.call = AsyncMock(return_value=resp)
+    mock_desktop_service.submit = AsyncMock(return_value=resp)
+
+    # 3. Force store_external_result to fail
+    mock_desktop_service.store_external_result = MagicMock(
+        side_effect=RuntimeError("External artifact storage disk full")
+    )
+
+    with pytest.raises(BridgeError) as exc_ext:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_ext_fail"},
+            group="transaction",
+        )
+    assert exc_ext.value.code == ErrorCode.INTERNAL_ERROR
+    assert "External artifact storage disk full" in exc_ext.value.message
+
+    # Baseline authority must remain preserved
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_ext_fail") is not None
+    # Tracker authority must remain unchanged at rev_1 and base_fp
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+    assert cad_service.revision_tracker.current("doc_1").fingerprint == "base_fp"

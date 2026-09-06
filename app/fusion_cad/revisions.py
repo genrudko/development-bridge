@@ -537,3 +537,19 @@ class RevisionTracker:
     def clear_transaction(self, transaction_id: str) -> None:
         """Remove stored transaction baseline (after commit, abort, or rollback)."""
         self._transactions.pop(transaction_id, None)
+
+    def snapshot(self) -> dict[str, Any]:
+        """Create a deep snapshot of current tracker and transaction authority."""
+        return {
+            "documents": dict(self._documents),
+            "history": {doc: list(recs) for doc, recs in self._history.items()},
+            "active_document_ref": self._active_document_ref,
+            "transactions": {tx_id: dict(data) for tx_id, data in self._transactions.items()},
+        }
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        """Restore tracker and transaction authority from a snapshot."""
+        self._documents = dict(snapshot["documents"])
+        self._history = {doc: list(recs) for doc, recs in snapshot["history"].items()}
+        self._active_document_ref = snapshot["active_document_ref"]
+        self._transactions = {tx_id: dict(data) for tx_id, data in snapshot["transactions"].items()}
