@@ -1,8 +1,10 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 
 import pytest
 
@@ -163,13 +165,18 @@ def test_process_tool_rejects_unknown_options(repo):
     assert "rejected" in res.lower() or "not permitted" in res.lower() or "error" in res.lower()
 
 
-def test_process_tool_git_commit_constraints(repo):
-    # When task does NOT ask for commit
+def test_process_tool_rejects_git_write_operations(repo):
+    # Git commit is rejected even when task mentions commit
     res = run_process(repo, "git", ["commit", "-m", "msg"], task="just fix bug")
-    assert "rejected" in res.lower() or "permitted only" in res.lower()
+    assert "rejected" in res.lower() or "not permitted" in res.lower()
 
-    # When task asks for commit
     task = "Fix the bug and commit your changes"
+    commit_res = run_process(repo, "git", ["commit", "-m", "msg"], task=task)
+    assert "rejected" in commit_res.lower() or "not permitted" in commit_res.lower()
+
+    add_res = run_process(repo, "git", ["add", "file.txt"], task=task)
+    assert "rejected" in add_res.lower() or "not permitted" in add_res.lower()
+
     # git status is allowed
     status_res = run_process(repo, "git", ["status"], task=task)
     assert "rejected" not in status_res.lower()
@@ -183,6 +190,7 @@ def test_process_tool_git_commit_constraints(repo):
     assert "rejected" in push_res.lower() or "not permitted" in push_res.lower()
     remote_res = run_process(repo, "git", ["remote", "-v"], task=task)
     assert "rejected" in remote_res.lower() or "not permitted" in remote_res.lower()
+
 
 
 def test_process_tool_scrubs_secret_environment(repo, monkeypatch):
@@ -394,25 +402,13 @@ def test_process_tool_runs_pytest_local_test(repo):
     assert "1 passed" in res
 
 
-def test_process_tool_git_add_and_commit_when_authorized(repo):
-    import shutil
-    import subprocess
-    if (repo / ".git").exists():
-        shutil.rmtree(repo / ".git")
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
-
-    (repo / "new_code.py").write_text("x = 42\n", encoding="utf-8")
+def test_process_tool_rejects_git_add_and_commit(repo):
     task = "Implement feature and commit changes"
-
-    # Git add
     add_res = run_process(repo, "git", ["add", "new_code.py"], task=task)
-    assert "exit code: 0" in add_res
+    assert "rejected" in add_res.lower() or "not permitted" in add_res.lower()
 
-    # Git commit
     commit_res = run_process(repo, "git", ["commit", "-m", "add new code"], task=task)
-    assert "exit code: 0" in commit_res
+    assert "rejected" in commit_res.lower() or "not permitted" in commit_res.lower()
 
 
 def test_process_tool_rejects_invalid_executable_and_args(repo):
@@ -433,10 +429,146 @@ def test_process_tool_rejects_symlink_escape_across_all_tools(repo):
     if not symlink_file.exists():
         os.symlink(outside_file, symlink_file)
 
-    # Git add symlink escaping repo
-    res_git = run_process(repo, "git", ["add", "sym_ext.py"], task="commit")
-    assert "rejected" in res_git.lower() or "escapes" in res_git.lower() or "error" in res_git.lower()
-
     # Pytest target symlink escaping repo
     res_pytest = run_process(repo, "pytest", ["sym_ext.py"])
     assert "rejected" in res_pytest.lower() or "escapes" in res_pytest.lower() or "error" in res_pytest.lower()
+
+
+def test_search_files_skips_symlink_escaping_repo(repo, tmp_path):
+    outside_sentinel = tmp_path / "host_sentinel_secret.txt"
+    outside_sentinel.write_text("HOST_SENTINEL_SECRET_TOKEN_42", encoding="utf-8")
+    symlink_file = repo / "symlink_leak.txt"
+    os.symlink(outside_sentinel, symlink_file)
+
+    res = search_files(repo, "HOST_SENTINEL_SECRET_TOKEN_42")
+    assert "symlink_leak.txt" not in res
+    assert "No matches found" in res
+
+
+
+def test_run_process_blocks_reading_host_secret_outside_repo(repo, tmp_path):
+    outside_sentinel = tmp_path / "outside_host_secret.txt"
+    outside_sentinel.write_text("HOST_SENTINEL_FS_ESCAPE_999", encoding="utf-8")
+    script = repo / "read_host_secret.py"
+    script.write_text(
+        f"import os\n"
+        f"path = {str(outside_sentinel)!r}\n"
+        f"try:\n"
+        f"    with open(path) as f:\n"
+        f"        print('LEAKED:', f.read())\n"
+        f"except Exception as exc:\n"
+        f"    print('READ_BLOCKED:', type(exc).__name__)\n",
+        encoding="utf-8",
+    )
+    res = run_process(repo, "python", ["read_host_secret.py"])
+    assert "HOST_SENTINEL_FS_ESCAPE_999" not in res
+    assert "READ_BLOCKED" in res
+
+
+def test_run_process_blocks_network_access(repo):
+    script = repo / "check_net.py"
+    script.write_text(
+        "import urllib.request\n"
+        "try:\n"
+        "    urllib.request.urlopen('http://example.com', timeout=2)\n"
+        "    print('NET_SUCCESS')\n"
+        "except Exception as exc:\n"
+        "    print('NET_BLOCKED:', type(exc).__name__)\n",
+        encoding="utf-8",
+    )
+    res = run_process(repo, "python", ["check_net.py"])
+    assert "NET_SUCCESS" not in res
+    assert "NET_BLOCKED" in res
+
+
+def test_run_process_blocks_parent_openrouter_api_key_inspection(repo):
+    sentinel_key = "sk-sentinel-parent-secret-forbidden-leak-999"
+    script_text = (
+        "import os\n"
+        f"target = {repr(sentinel_key)}.encode()\n"
+        "ppid = os.getppid()\n"
+        "leaked = False\n"
+        "try:\n"
+        "    with open(f'/proc/{ppid}/environ', 'rb') as f:\n"
+        "        if target in f.read():\n"
+        "            leaked = True\n"
+        "except Exception:\n"
+        "    pass\n"
+        "if leaked:\n"
+        "    print('LEAKED_KEY')\n"
+        "else:\n"
+        "    print('KEY_PROTECTED')\n"
+    )
+    (repo / "spy_parent.py").write_text(script_text, encoding="utf-8")
+    test_code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from app.executors.openrouter_worker import run_process\n"
+        f"repo = Path({str(repo)!r})\n"
+        "res = run_process(repo, 'python', ['spy_parent.py'])\n"
+        "print('RESULT:', res)\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", test_code],
+        env={**os.environ, "OPENROUTER_API_KEY": sentinel_key},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0
+    assert "LEAKED_KEY" not in proc.stdout
+    assert sentinel_key not in proc.stdout
+    assert "KEY_PROTECTED" in proc.stdout
+
+
+
+
+
+
+def test_run_process_protects_git_and_venv_from_writes(repo):
+    (repo / ".venv").mkdir(exist_ok=True)
+    worker_venv_str = str(Path(sys.prefix).resolve())
+    script = repo / "attempt_tamper.py"
+    script.write_text(
+        "import os\n"
+        f"worker_venv = {worker_venv_str!r}\n"
+        "git_failed = False\n"
+        "try:\n"
+        "    with open('.git/tamper.txt', 'w') as f:\n"
+        "        f.write('tamper')\n"
+        "except OSError:\n"
+        "    git_failed = True\n"
+        "venv_failed = False\n"
+        "try:\n"
+        "    with open('.venv/tamper.txt', 'w') as f:\n"
+        "        f.write('tamper')\n"
+        "except OSError:\n"
+        "    venv_failed = True\n"
+        "worker_venv_failed = False\n"
+        "try:\n"
+        "    with open(f'{worker_venv}/tamper.txt', 'w') as f:\n"
+        "        f.write('tamper')\n"
+        "except OSError:\n"
+        "    worker_venv_failed = True\n"
+        "repo_ok = False\n"
+        "try:\n"
+        "    with open('allowed.txt', 'w') as f:\n"
+        "        f.write('ok')\n"
+        "    repo_ok = True\n"
+        "except OSError:\n"
+        "    pass\n"
+        "print(f'GIT_PROTECTED:{git_failed} VENV_PROTECTED:{venv_failed} WORKER_VENV_PROTECTED:{worker_venv_failed} REPO_WRITE:{repo_ok}')\n",
+        encoding="utf-8",
+    )
+    res = run_process(repo, "python", ["attempt_tamper.py"])
+    assert "GIT_PROTECTED:True" in res
+    assert "VENV_PROTECTED:True" in res
+    assert "WORKER_VENV_PROTECTED:True" in res
+    assert "REPO_WRITE:True" in res
+
+
+def test_run_process_fails_closed_when_bwrap_unavailable(repo, monkeypatch):
+    monkeypatch.setattr("app.executors.openrouter_worker.BWRAP_PATH", "/nonexistent/bwrap")
+    (repo / "dummy.py").write_text("print('hello')", encoding="utf-8")
+    res = run_process(repo, "python", ["dummy.py"])
+    assert "error" in res.lower() or "rejected" in res.lower()
+    assert "hello" not in res

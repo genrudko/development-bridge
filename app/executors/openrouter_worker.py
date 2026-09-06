@@ -76,12 +76,29 @@ def search_files(repo_root: Path, query: str, path: str = ".") -> str:
         search_dir = check_path_confinement(repo_root, path)
         if not search_dir.is_dir():
             return f"Error: '{path}' is not a directory."
+        resolved_repo = repo_root.resolve()
         matches: list[str] = []
         for root, dirs, files in os.walk(search_dir):
             if ".git" in dirs:
                 dirs.remove(".git")
+            dirs_to_skip = []
+            for d in dirs:
+                d_path = Path(root) / d
+                if d_path.is_symlink():
+                    try:
+                        d_path.resolve().relative_to(resolved_repo)
+                    except ValueError:
+                        dirs_to_skip.append(d)
+            for d in dirs_to_skip:
+                dirs.remove(d)
+
             for fname in sorted(files):
                 file_path = Path(root) / fname
+                if file_path.is_symlink():
+                    try:
+                        file_path.resolve().relative_to(resolved_repo)
+                    except ValueError:
+                        continue
                 try:
                     text = file_path.read_text(encoding="utf-8", errors="ignore")
                     if query in text:
@@ -104,9 +121,11 @@ def search_files(repo_root: Path, query: str, path: str = ".") -> str:
         return f"Error: search_files rejected: {exc}"
 
 
+BWRAP_PATH: str = "/bin/bwrap"
+
 ALLOWED_EXECUTABLES = {"pytest", "python", "python3", "git", "ruff"}
 
-SAFE_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "HOME")
+SAFE_ENV_KEYS = ("PATH", "LANG", "LC_ALL")
 
 # Pytest allowed options
 ALLOWED_PYTEST_OPTIONS_VALUELESS = {
@@ -125,9 +144,9 @@ ALLOWED_PYTEST_OPTIONS_WITH_VALUE = {
 # Python allowed flags
 ALLOWED_PYTHON_FLAGS = {"-u", "-B", "-v", "-O", "-OO", "-W", "-E"}
 
-# Git allowed subcommands
+# Git allowed subcommands (read-only only in v1)
 ALLOWED_GIT_READONLY_SUBCMDS = {"status", "diff", "log", "show"}
-ALLOWED_GIT_WRITE_SUBCMDS = {"add", "commit"}
+ALLOWED_GIT_WRITE_SUBCMDS: set[str] = set()
 
 ALLOWED_GIT_STATUS_OPTIONS = {
     "-s", "--short", "-b", "--branch", "-u", "-uno", "-unormal", "-uall",
@@ -144,31 +163,19 @@ ALLOWED_GIT_LOG_OPTIONS = {
 ALLOWED_GIT_SHOW_OPTIONS = {
     "--stat", "--oneline", "-p", "--name-only", "--name-status", "--",
 }
-ALLOWED_GIT_ADD_OPTIONS = {
-    "-u", "--update", "-A", "--all", "-n", "--dry-run", "--",
-}
-ALLOWED_GIT_COMMIT_OPTIONS = {
-    "-m", "--message", "-a", "--all", "--amend", "--no-edit", "--signoff",
-}
 
 # Ruff allowed subcommands and options
 ALLOWED_RUFF_SUBCMDS = {"check", "format"}
 ALLOWED_RUFF_OPTIONS = {"--fix", "--diff", "-v", "-q", "--select", "--ignore"}
 
 
-def get_scrubbed_env(repo_root: Path) -> dict[str, str]:
+def get_scrubbed_env(repo_root: Path, sandbox_home: str = "/tmp/sandbox-home") -> dict[str, str]:
     scrubbed: dict[str, str] = {}
     for var in SAFE_ENV_KEYS:
         if var in os.environ:
             scrubbed[var] = os.environ[var]
 
-    python_bin_dir = str(Path(sys.executable).parent)
-    current_path = scrubbed.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-    if python_bin_dir not in current_path.split(os.pathsep):
-        scrubbed["PATH"] = f"{python_bin_dir}{os.pathsep}{current_path}"
-
-    if "HOME" not in scrubbed:
-        scrubbed["HOME"] = str(repo_root.resolve())
+    scrubbed["HOME"] = sandbox_home
 
     # Explicitly exclude secrets, credentials, and SSH_CONNECTION
     for k in list(scrubbed.keys()):
@@ -180,6 +187,7 @@ def get_scrubbed_env(repo_root: Path) -> dict[str, str]:
             or "TOKEN" in upper
             or "KEY" in upper
             or "SSH" in upper
+            or "CREDENTIAL" in upper
             or upper == "SSH_CONNECTION"
         ):
             del scrubbed[k]
@@ -187,23 +195,61 @@ def get_scrubbed_env(repo_root: Path) -> dict[str, str]:
     return scrubbed
 
 
-def resolve_executable(executable: str, env_path: str) -> str | None:
-    venv_bin = Path(sys.executable).parent
-    if executable in ("python", "python3"):
-        target = venv_bin / executable
-        if target.is_file() and os.access(target, os.X_OK):
-            return str(target)
-        return sys.executable
-    if executable == "pytest":
-        target = venv_bin / "pytest"
-        if target.is_file() and os.access(target, os.X_OK):
-            return str(target)
-    if executable == "ruff":
-        target = venv_bin / "ruff"
-        if target.is_file() and os.access(target, os.X_OK):
-            return str(target)
+_BWRAP_PROC_FLAGS: list[str] | None = None
 
+
+def get_bwrap_proc_flags(bwrap_bin: str) -> list[str]:
+    global _BWRAP_PROC_FLAGS
+    if _BWRAP_PROC_FLAGS is None:
+        try:
+            probe = subprocess.run(
+                [bwrap_bin, "--unshare-all", "--dev", "/dev", "--proc", "/proc", "/bin/true"],
+                capture_output=True,
+                timeout=2.0,
+            )
+            if probe.returncode == 0:
+                _BWRAP_PROC_FLAGS = ["--proc", "/proc"]
+            else:
+                _BWRAP_PROC_FLAGS = [
+                    "--tmpfs", "/proc",
+                    "--ro-bind-try", "/proc/cpuinfo", "/proc/cpuinfo",
+                    "--ro-bind-try", "/proc/meminfo", "/proc/meminfo",
+                    "--ro-bind-try", "/proc/stat", "/proc/stat",
+                ]
+        except Exception:
+            _BWRAP_PROC_FLAGS = [
+                "--tmpfs", "/proc",
+                "--ro-bind-try", "/proc/cpuinfo", "/proc/cpuinfo",
+                "--ro-bind-try", "/proc/meminfo", "/proc/meminfo",
+                "--ro-bind-try", "/proc/stat", "/proc/stat",
+            ]
+    return list(_BWRAP_PROC_FLAGS)
+
+
+def resolve_runtime_venv(repo_root: Path) -> tuple[Path | None, bool]:
+    local_venv = repo_root / ".venv"
+    if (local_venv / "bin").is_dir():
+        return local_venv.resolve(), True
+    prefix = Path(sys.prefix).resolve()
+    if (prefix / "bin").is_dir():
+        return prefix, False
+    return None, False
+
+
+def resolve_executable(executable: str, venv_path: Path | None, env_path: str) -> str | None:
+    if venv_path:
+        target = venv_path / "bin" / executable
+        if target.is_file() and os.access(target, os.X_OK):
+            return str(target)
+        if executable in ("python", "python3"):
+            py_target = venv_path / "bin" / "python"
+            if py_target.is_file() and os.access(py_target, os.X_OK):
+                return str(py_target)
+    if executable in ("python", "python3"):
+        if os.path.isfile(sys.executable) and os.access(sys.executable, os.X_OK):
+            return sys.executable
     return shutil.which(executable, path=env_path)
+
 
 
 def run_process(
@@ -332,18 +378,13 @@ def run_process(
 
     elif clean_exec == "git":
         if not raw_args:
-            return "Error: git requires a subcommand (e.g. status, diff, log, show, add, commit)."
+            return "Error: git requires a subcommand (e.g. status, diff, log, show)."
         subcmd = raw_args[0]
-        if subcmd not in (ALLOWED_GIT_READONLY_SUBCMDS | ALLOWED_GIT_WRITE_SUBCMDS):
+        if subcmd not in ALLOWED_GIT_READONLY_SUBCMDS:
             return (
-                f"Error: git subcommand '{subcmd}' is not permitted. "
-                f"Allowed: {', '.join(sorted(ALLOWED_GIT_READONLY_SUBCMDS | ALLOWED_GIT_WRITE_SUBCMDS))}."
+                f"Error: git subcommand '{subcmd}' is not permitted in v1. "
+                f"Allowed read-only subcommands: {', '.join(sorted(ALLOWED_GIT_READONLY_SUBCMDS))}."
             )
-        if subcmd in ALLOWED_GIT_WRITE_SUBCMDS:
-            if "commit" not in task.lower():
-                return (
-                    f"Error: git {subcmd} is permitted only when the original task explicitly requests commit."
-                )
 
         if subcmd == "status":
             for arg in raw_args[1:]:
@@ -409,33 +450,6 @@ def run_process(
                         except Exception as exc:
                             return f"Error: git show path rejected: {exc}"
 
-        elif subcmd == "add":
-            for arg in raw_args[1:]:
-                if arg.startswith("-"):
-                    if arg not in ALLOWED_GIT_ADD_OPTIONS:
-                        return f"Error: disallowed git add option: {arg!r}"
-                elif arg != ".":
-                    try:
-                        check_path_confinement(repo_root, arg)
-                    except Exception as exc:
-                        return f"Error: git add path rejected: {exc}"
-
-        elif subcmd == "commit":
-            idx = 1
-            while idx < len(raw_args):
-                arg = raw_args[idx]
-                if arg in ("-m", "--message"):
-                    if idx + 1 >= len(raw_args):
-                        return "Error: git commit -m requires a message argument."
-                    idx += 2
-                    continue
-                elif arg.startswith("-"):
-                    if arg not in ALLOWED_GIT_COMMIT_OPTIONS:
-                        return f"Error: disallowed git commit option: {arg!r}"
-                else:
-                    return f"Error: unexpected argument for git commit: {arg!r}"
-                idx += 1
-
     elif clean_exec == "ruff":
         if not raw_args:
             return "Error: ruff requires a subcommand ('check' or 'format')."
@@ -452,16 +466,97 @@ def run_process(
                 except Exception as exc:
                     return f"Error: ruff path rejected: {exc}"
 
-    env = get_scrubbed_env(repo_root)
-    resolved = resolve_executable(clean_exec, env.get("PATH", ""))
+    bwrap_bin = BWRAP_PATH
+    if not (os.path.isfile(bwrap_bin) and os.access(bwrap_bin, os.X_OK)):
+        return f"Error: {bwrap_bin} is not available. Sandboxed execution failed closed."
+
+    repo_resolved = repo_root.resolve()
+    venv_path, is_repo_local = resolve_runtime_venv(repo_resolved)
+    sandbox_path = (
+        f"{venv_path / 'bin'}:/usr/local/bin:/usr/bin:/bin"
+        if venv_path
+        else "/usr/local/bin:/usr/bin:/bin"
+    )
+    resolved = resolve_executable(clean_exec, venv_path, sandbox_path)
     if not resolved:
         return f"Error: executable '{clean_exec}' is not available or not found in PATH."
 
+    sandbox_home = "/tmp/sandbox-home"
+    bwrap_cmd: list[str] = [
+        bwrap_bin,
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--dev", "/dev",
+        "--tmpfs", "/tmp",
+    ]
+    bwrap_cmd.extend(get_bwrap_proc_flags(bwrap_bin))
+
+    for sys_dir in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"):
+        if os.path.isdir(sys_dir):
+            bwrap_cmd.extend(["--ro-bind-try", sys_dir, sys_dir])
+
+    # Repository is the only writable host tree exposed
+    bwrap_cmd.extend(["--bind", str(repo_resolved), str(repo_resolved)])
+
+    # Protect repo-local .venv if present
+    if (repo_resolved / ".venv").exists():
+        bwrap_cmd.extend(["--ro-bind", str(repo_resolved / ".venv"), str(repo_resolved / ".venv")])
+
+    # If runtime venv is outside repo, mount it read-only
+    if venv_path and not is_repo_local and venv_path.exists():
+        bwrap_cmd.extend(["--ro-bind", str(venv_path), str(venv_path)])
+
+    # Protect .git metadata read-only
+    if (repo_resolved / ".git").exists():
+        bwrap_cmd.extend(["--ro-bind", str(repo_resolved / ".git"), str(repo_resolved / ".git")])
+        if (repo_resolved / ".git").is_file():
+            try:
+                git_content = (repo_resolved / ".git").read_text(encoding="utf-8", errors="ignore").strip()
+                if git_content.startswith("gitdir:"):
+                    gitdir_raw = git_content.split(":", 1)[1].strip()
+                    gitdir_path = Path(gitdir_raw)
+                    if not gitdir_path.is_absolute():
+                        gitdir_path = (repo_resolved / gitdir_path).resolve()
+                    else:
+                        gitdir_path = gitdir_path.resolve()
+                    if gitdir_path.exists():
+                        bwrap_cmd.extend(["--ro-bind", str(gitdir_path), str(gitdir_path)])
+                        commondir_file = gitdir_path / "commondir"
+                        if commondir_file.is_file():
+                            commondir_raw = commondir_file.read_text(encoding="utf-8", errors="ignore").strip()
+                            commondir_path = Path(commondir_raw)
+                            if not commondir_path.is_absolute():
+                                commondir_path = (gitdir_path / commondir_path).resolve()
+                            else:
+                                commondir_path = commondir_path.resolve()
+                            if commondir_path.exists():
+                                bwrap_cmd.extend(["--ro-bind", str(commondir_path), str(commondir_path)])
+            except Exception:
+                pass
+
+    # Synthetic HOME not equal to host HOME
+    bwrap_cmd.extend([
+        "--dir", sandbox_home,
+        "--setenv", "HOME", sandbox_home,
+        "--setenv", "PATH", sandbox_path,
+    ])
+
+    for k in ("LANG", "LC_ALL"):
+        if k in os.environ:
+            bwrap_cmd.extend(["--setenv", k, os.environ[k]])
+
+    bwrap_cmd.extend(["--chdir", str(repo_resolved)])
+    bwrap_cmd.extend([resolved, *raw_args])
+
+    env = get_scrubbed_env(repo_resolved, sandbox_home=sandbox_home)
+    env["PATH"] = sandbox_path
+
     try:
         proc = subprocess.run(
-            [resolved, *raw_args],
+            bwrap_cmd,
             shell=False,
-            cwd=str(repo_root.resolve()),
+            cwd=str(repo_resolved),
             env=env,
             capture_output=True,
             text=True,
@@ -478,6 +573,7 @@ def run_process(
         return f"Error: command timed out after {timeout} seconds."
     except Exception as exc:
         return f"Error executing command: {exc}"
+
 
 
 TOOLS: list[dict[str, Any]] = [
