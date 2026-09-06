@@ -1,5 +1,6 @@
 from mcp import types
 
+from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
@@ -18,12 +19,20 @@ def executor_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...
     async def executor_start(ctx, params, request_context):
         arguments = params.arguments
         configured = container.settings.executors.antigravity
+        executor_name = ExecutorName(arguments["executor"]) if arguments.get("executor") else None
+        model = arguments.get("model")
+        if model is not None and executor_name is not ExecutorName.OPENROUTER:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "model parameter is only supported for the openrouter executor",
+            )
         request = ExecutorRequest(
             task=arguments["task"], task_kind=TaskKind(arguments["task_kind"]),
-            executor=ExecutorName(arguments["executor"]) if arguments.get("executor") else None,
+            executor=executor_name,
             timeout_seconds=arguments.get("timeout_seconds", configured.task_timeout_seconds),
             output_limit_bytes=arguments.get("output_limit_bytes", configured.output_limit_bytes),
             idempotency_key=arguments.get("idempotency_key"),
+            model=model,
         )
         job = await container.executors.start(repository(arguments), request, request_context.request_id)
         return to_mcp_result(success(request_context.request_id, job.status_dict()))
@@ -40,7 +49,8 @@ def executor_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...
             inputSchema={"type": "object", "properties": {**base,
                 "task": {"type": "string", "minLength": 1, "maxLength": 65536},
                 "task_kind": {"type": "string", "enum": ["implementation", "review", "other"]},
-                "executor": {"type": "string", "enum": ["codex", "antigravity"]},
+                "executor": {"type": "string", "enum": ["codex", "antigravity", "openrouter"]},
+                "model": {"type": "string", "minLength": 1, "maxLength": 128},
                 "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
                 "output_limit_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
                 "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}},

@@ -554,7 +554,14 @@ class JobService:
             if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 128):
                 raise BridgeError(ErrorCode.INVALID_ARGUMENT, "executor attribution is invalid")
         if (not isinstance(environment_keys, tuple) or len(environment_keys) != len(set(environment_keys))
-                or any(key not in {"HOME", "SSH_CONNECTION"} for key in environment_keys)):
+                or any(key not in {
+                    "HOME",
+                    "SSH_CONNECTION",
+                    "OPENROUTER_API_KEY",
+                    "DEVELOPMENT_BRIDGE_OPENROUTER_API_KEY",
+                    "OPENROUTER_BASE_URL",
+                    "DEVELOPMENT_BRIDGE_OPENROUTER_BASE_URL",
+                } for key in environment_keys)):
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "environment_keys are invalid")
         payload = {
             "project_id": repository.project_id,
@@ -1011,11 +1018,12 @@ class JobService:
 
     @staticmethod
     def _executor_result_failure(job: JobRecord) -> str | None:
-        if job.executor != "antigravity":
+        if job.executor not in {"antigravity", "openrouter"}:
             return None
-        diagnostic = job.stderr[:16_384].decode("utf-8", errors="replace").lower()
-        if "auto-denied" in diagnostic or ("permission" in diagnostic and "cannot prompt" in diagnostic):
-            return "executor_permission_denied"
+        if job.executor == "antigravity":
+            diagnostic = job.stderr[:16_384].decode("utf-8", errors="replace").lower()
+            if "auto-denied" in diagnostic or ("permission" in diagnostic and "cannot prompt" in diagnostic):
+                return "executor_permission_denied"
         if job.stdout_truncated:
             return "executor_result_invalid"
         try:

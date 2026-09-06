@@ -42,11 +42,11 @@ def repository(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_status_uses_repository_busy_and_returns_both_executors(repository):
+async def test_status_uses_repository_busy_and_returns_three_executors(repository):
     jobs, antigravity = Jobs(True), Antigravity(status())
     result = await ExecutorService(jobs, antigravity, ExecutorSelector()).status(repository)
     assert antigravity.probes == [True]
-    assert [item["executor"] for item in result["executors"]] == ["codex", "antigravity"]
+    assert [item["executor"] for item in result["executors"]] == ["codex", "antigravity", "openrouter"]
 
 
 @pytest.mark.asyncio
@@ -130,3 +130,143 @@ async def test_busy_automatic_selection_keeps_antigravity_when_quota_ok(reposito
     assert job.job_id == "job_1"
     assert jobs.calls[0][1]["executor"] == "antigravity"
     assert jobs.calls[0][1]["require_repository_idle"] is False
+
+
+class FakeOpenRouter:
+    def __init__(self, available=True, authenticated=True, last_error=None):
+        self.available = available
+        self.authenticated = authenticated
+        self.last_error = last_error
+        self.probes = []
+
+    def probe(self, *, busy):
+        self.probes.append(busy)
+        return ExecutorStatus(
+            ExecutorName.OPENROUTER,
+            self.available,
+            self.authenticated,
+            busy,
+            "deepseek/deepseek-v4-flash-0731",
+            QuotaState.UNKNOWN,
+            None,
+            None,
+            self.last_error,
+            None,
+            None,
+        )
+
+    def launch(self, repository, request, status):
+        if not status.available or not status.authenticated:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "blocked", details={"reason": status.last_error})
+        model = request.model or "deepseek/deepseek-v4-flash-0731"
+        if model not in {"deepseek/deepseek-v4-flash-0731", "qwen/qwen3-coder-next"}:
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "model not allowlisted", details={"reason": "model_not_allowlisted"})
+        return ExecutorLaunch(
+            "python3",
+            ("worker.py", "--model", model),
+            "prompt",
+            ("HOME", "OPENROUTER_API_KEY"),
+            ExecutorName.OPENROUTER,
+            model,
+            QuotaState.UNKNOWN,
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_openrouter_submits_durable_execution_and_persists_model(repository):
+    jobs = Jobs()
+    antigravity = Antigravity(status())
+    openrouter = FakeOpenRouter()
+    req = ExecutorRequest(
+        "task",
+        TaskKind.IMPLEMENTATION,
+        ExecutorName.OPENROUTER,
+        100,
+        2048,
+        "same",
+        model="qwen/qwen3-coder-next",
+    )
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
+        repository, req, "req_1"
+    )
+    assert job.job_id == "job_1"
+    assert len(jobs.calls) == 1
+    kwargs = jobs.calls[0][1]
+    assert kwargs["executor"] == "openrouter"
+    assert kwargs["executor_model"] == "qwen/qwen3-coder-next"
+    assert kwargs["require_repository_idle"] is False
+
+
+@pytest.mark.asyncio
+async def test_busy_explicit_openrouter_submits_queueable_job(repository):
+    jobs = Jobs(busy=True)
+    antigravity = Antigravity(status(busy=True))
+    openrouter = FakeOpenRouter()
+    req = ExecutorRequest(
+        "task", TaskKind.IMPLEMENTATION, ExecutorName.OPENROUTER, 100, 2048, "same"
+    )
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
+        repository, req, "req_1"
+    )
+    assert job.job_id == "job_1"
+    assert jobs.calls[0][1]["executor"] == "openrouter"
+    assert jobs.calls[0][1]["require_repository_idle"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_on_non_openrouter_rejected(repository):
+    jobs = Jobs()
+    antigravity = Antigravity(status())
+    openrouter = FakeOpenRouter()
+    req = ExecutorRequest(
+        "task",
+        TaskKind.IMPLEMENTATION,
+        ExecutorName.CODEX,
+        100,
+        2048,
+        "same",
+        model="qwen/qwen3-coder-next",
+    )
+    with pytest.raises(BridgeError) as exc_info:
+        await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
+            repository, req, "req_1"
+        )
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_model_not_allowlisted_fails_closed_before_job_creation(repository):
+    jobs = Jobs()
+    antigravity = Antigravity(status())
+    openrouter = FakeOpenRouter()
+    req = ExecutorRequest(
+        "task",
+        TaskKind.IMPLEMENTATION,
+        ExecutorName.OPENROUTER,
+        100,
+        2048,
+        "same",
+        model="forbidden/model",
+    )
+    with pytest.raises(BridgeError) as exc_info:
+        await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
+            repository, req, "req_1"
+        )
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+    assert exc_info.value.details.get("reason") == "model_not_allowlisted"
+    assert jobs.calls == []
+
+
+@pytest.mark.asyncio
+async def test_automatic_selection_unchanged(repository):
+    jobs = Jobs()
+    antigravity = Antigravity(status(quota=QuotaState.UNKNOWN))
+    openrouter = FakeOpenRouter()
+    req = ExecutorRequest("task", TaskKind.IMPLEMENTATION, None, 100, 2048, "same")
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
+        repository, req, "req_1"
+    )
+    assert job.job_id == "job_1"
+    # Even with openrouter present, automatic selection picks codex (or antigravity when suitable), never openrouter!
+    assert jobs.calls[0][1]["executor"] in {"codex", "antigravity"}
+    assert jobs.calls[0][1]["executor"] != "openrouter"

@@ -30,6 +30,7 @@ from app.executors import (
     AsyncioProcessRunner,
     ExecutorSelector,
     ExecutorService,
+    OpenRouterExecutor,
 )
 from app.files import FileService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
@@ -283,6 +284,7 @@ def build_container(
         jobs,
         AntigravityExecutor(configured.executors.antigravity, AsyncioProcessRunner()),
         ExecutorSelector(),
+        openrouter=OpenRouterExecutor(configured.executors.openrouter),
     )
     job_artifact_exports = JobArtifactExportService(
         jobs,

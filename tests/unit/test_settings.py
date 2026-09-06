@@ -21,6 +21,65 @@ def test_antigravity_executor_settings_are_bounded():
     assert settings.executors.antigravity.executable == Path("/opt/agy/bin/agy")
     assert settings.executors.antigravity.model == "gemini-3.1-pro"
 
+def test_openrouter_executor_is_disabled_by_default():
+    settings = BridgeSettings()
+    assert settings.executors.openrouter.enabled is False
+    assert settings.executors.openrouter.api_key is None
+    assert settings.executors.openrouter.allowed_models == (
+        "deepseek/deepseek-v4-flash-0731",
+        "qwen/qwen3-coder-next",
+    )
+    assert settings.executors.openrouter.model == "deepseek/deepseek-v4-flash-0731"
+
+
+def test_openrouter_executor_settings_custom_valid():
+    settings = BridgeSettings.model_validate(
+        {
+            "executors": {
+                "openrouter": {
+                    "enabled": True,
+                    "model": "qwen/qwen3-coder-next",
+                }
+            }
+        }
+    )
+    assert settings.executors.openrouter.enabled is True
+    assert settings.executors.openrouter.model == "qwen/qwen3-coder-next"
+
+
+def test_openrouter_executor_settings_model_must_be_in_allowlist():
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate(
+            {"executors": {"openrouter": {"model": "unsupported/model"}}}
+        )
+
+
+def test_openrouter_executor_rejects_api_key_in_config_file(tmp_path):
+    config = tmp_path / "bridge.yaml"
+    config.write_text(
+        "version: 1\n"
+        "executors:\n"
+        "  openrouter:\n"
+        "    api_key: secret-key\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="deployment environment"):
+        load_settings(config, environ={})
+
+
+def test_openrouter_executor_loads_api_key_and_enabled_from_env():
+    settings = load_settings(
+        environ={
+            "DEVELOPMENT_BRIDGE_OPENROUTER_API_KEY": "test-key-123",
+            "DEVELOPMENT_BRIDGE_OPENROUTER_ENABLED": "true",
+            "DEVELOPMENT_BRIDGE_OPENROUTER_MODEL": "qwen/qwen3-coder-next",
+        }
+    )
+    assert settings.executors.openrouter.enabled is True
+    assert settings.executors.openrouter.api_key is not None
+    assert settings.executors.openrouter.api_key.get_secret_value() == "test-key-123"
+    assert settings.executors.openrouter.model == "qwen/qwen3-coder-next"
+
 
 @pytest.mark.parametrize("field,value", [
     ("probe_timeout_seconds", 0), ("task_timeout_seconds", 3601),

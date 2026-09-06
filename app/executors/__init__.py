@@ -10,6 +10,7 @@ from app.executors.models import (
 )
 from app.executors.antigravity import AntigravityExecutor, AsyncioProcessRunner, ProcessResult, ProcessRunner
 from app.executors.codex import CodexExecutor
+from app.executors.openrouter import OpenRouterExecutor
 from app.executors.selector import ExecutorSelector
 from app.executors.service import ExecutorService
 
@@ -27,6 +28,7 @@ __all__ = [
     "ProcessResult",
     "ProcessRunner",
     "CodexExecutor",
+    "OpenRouterExecutor",
     "ExecutorSelector",
     "ExecutorService",
 ]

@@ -108,10 +108,37 @@ class AntigravityExecutorSettings(BaseModel):
     quota_cache_max_age_seconds: float = Field(default=120, gt=0, le=3600)
 
 
+class OpenRouterExecutorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    api_key: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    api_base_url: str = "https://openrouter.ai/api/v1"
+    model: str = "deepseek/deepseek-v4-flash-0731"
+    allowed_models: tuple[str, ...] = (
+        "deepseek/deepseek-v4-flash-0731",
+        "qwen/qwen3-coder-next",
+    )
+    task_timeout_seconds: float = Field(default=900, gt=0, le=3600)
+    output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
+
+    @model_validator(mode="after")
+    def validate_openrouter_model(self) -> OpenRouterExecutorSettings:
+        if not self.allowed_models:
+            raise ValueError("openrouter allowed_models must not be empty")
+        if self.model not in self.allowed_models:
+            raise ValueError(
+                f"openrouter model '{self.model}' must be in allowed_models: {self.allowed_models}"
+            )
+        return self
+
+
 class ExecutorSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     antigravity: AntigravityExecutorSettings = Field(
         default_factory=AntigravityExecutorSettings
+    )
+    openrouter: OpenRouterExecutorSettings = Field(
+        default_factory=OpenRouterExecutorSettings
     )
 
 
@@ -482,6 +509,14 @@ def load_settings(
             raise ValueError(
                 "Operator dashboard secrets must be supplied through the deployment environment"
             )
+        if (
+            isinstance(raw.get("executors"), dict)
+            and isinstance(raw["executors"].get("openrouter"), dict)
+            and "api_key" in raw["executors"]["openrouter"]
+        ):
+            raise ValueError(
+                "OpenRouter API key must be supplied through the deployment environment"
+            )
         settings = BridgeSettings.model_validate(raw)
 
     server_updates: dict[str, Any] = {}
@@ -658,6 +693,40 @@ def load_settings(
             **operator_dashboard_updates,
         }
         environment_updates["operator_dashboard"] = OperatorDashboardSettings.model_validate(full_ops)
+
+    openrouter_updates: dict[str, Any] = {}
+    if openrouter_key := (
+        environment.get("DEVELOPMENT_BRIDGE_OPENROUTER_API_KEY")
+        or environment.get("OPENROUTER_API_KEY")
+    ):
+        openrouter_updates["api_key"] = SecretStr(openrouter_key)
+    if raw_or_enabled := environment.get("DEVELOPMENT_BRIDGE_OPENROUTER_ENABLED"):
+        normalized = raw_or_enabled.strip().lower()
+        if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise ValueError("DEVELOPMENT_BRIDGE_OPENROUTER_ENABLED must be a boolean")
+        openrouter_updates["enabled"] = normalized in {"1", "true", "yes", "on"}
+    if or_model := environment.get("DEVELOPMENT_BRIDGE_OPENROUTER_MODEL"):
+        openrouter_updates["model"] = or_model
+    if or_base_url := (
+        environment.get("DEVELOPMENT_BRIDGE_OPENROUTER_BASE_URL")
+        or environment.get("OPENROUTER_BASE_URL")
+    ):
+        openrouter_updates["api_base_url"] = or_base_url
+
+    if openrouter_updates:
+        current_or = settings.executors.openrouter
+        full_or = {
+            **current_or.model_dump(),
+            **(
+                {"api_key": current_or.api_key}
+                if current_or.api_key is not None
+                else {}
+            ),
+            **openrouter_updates,
+        }
+        openrouter = OpenRouterExecutorSettings.model_validate(full_or)
+        executors = settings.executors.model_copy(update={"openrouter": openrouter})
+        environment_updates["executors"] = executors
 
     if environment_updates:
         settings = settings.model_copy(update=environment_updates)

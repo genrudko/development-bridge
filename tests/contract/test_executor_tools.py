@@ -14,6 +14,7 @@ def test_executor_tools_have_exact_closed_schemas():
     props = start["properties"]
     assert props["task"]["maxLength"] == 65536
     assert props["task_kind"]["enum"] == ["implementation", "review", "other"]
-    assert props["executor"]["enum"] == ["codex", "antigravity"]
+    assert props["executor"]["enum"] == ["codex", "antigravity", "openrouter"]
+    assert props["model"]["type"] == "string" and props["model"]["maxLength"] == 128
     assert props["timeout_seconds"]["exclusiveMinimum"] == 0 and props["timeout_seconds"]["maximum"] == 3600
     assert props["output_limit_bytes"]["minimum"] == 1024 and props["output_limit_bytes"]["maximum"] == 1048576

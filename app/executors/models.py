@@ -9,6 +9,7 @@ from enum import StrEnum
 class ExecutorName(StrEnum):
     CODEX = "codex"
     ANTIGRAVITY = "antigravity"
+    OPENROUTER = "openrouter"
 
 
 class QuotaState(StrEnum):
@@ -85,6 +86,7 @@ class ExecutorRequest:
     timeout_seconds: float
     output_limit_bytes: int
     idempotency_key: str | None
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
