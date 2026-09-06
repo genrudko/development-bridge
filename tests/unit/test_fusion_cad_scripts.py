@@ -455,11 +455,30 @@ def test_resolve_fusion_entity_candidates_never_leak_native_tokens() -> None:
         assert secret_token not in json.dumps(res_exact["candidates"])
 
         # 2. Contextual match without native token
+        # 2a. Root/name-only without component_path and geometry_signature MUST NOT produce exact
+        res_name_only = scope["resolve_fusion_entity"](
+            {
+                "ref": "ent_test_3",
+                "kind": "body",
+                "name": "Bracket",
+                "document_ref": "doc_doc1",
+            }
+        )
+        assert res_name_only["outcome"] == "ambiguous"
+        assert len(res_name_only["candidates"]) == 1
+        assert "native_token" not in res_name_only["candidates"][0]
+        assert "entityToken" not in res_name_only["candidates"][0]
+        assert secret_token not in json.dumps(res_name_only["candidates"])
+
+        # 2b. Complete contextual match with complete component_path and geometry_signature -> exact
+        fake_body.volume = 100.0
         res_ctx = scope["resolve_fusion_entity"](
             {
                 "ref": "ent_test_3",
                 "kind": "body",
                 "name": "Bracket",
+                "component_path": ("Root",),
+                "geometry_signature": {"volume": 100.0},
                 "document_ref": "doc_doc1",
             }
         )
@@ -482,7 +501,9 @@ def test_resolve_fusion_entity_candidates_never_leak_native_tokens() -> None:
     split_cand_b = _FakeEntity("SplitB", secret_tok_b)
     split_coll = _FakeCollection([split_cand_a, split_cand_b])
 
-    with _mock_adsk_env(doc_id="doc1", find_token_fn=lambda t: split_coll, root_component=root):
+    with _mock_adsk_env(
+        doc_id="doc1", find_token_fn=lambda t: split_coll, root_component=root
+    ):
         res_split = scope["resolve_fusion_entity"](
             {
                 "ref": "ent_test_2",
@@ -499,8 +520,12 @@ def test_resolve_fusion_entity_candidates_never_leak_native_tokens() -> None:
         assert secret_tok_b not in json.dumps(res_split["candidates"])
 
 
-def test_contextual_resolver_fails_closed_on_missing_or_partial_component_path() -> None:
-    sub_comp = _FakeComponent("SubComp", bodies=[_FakeEntity("ChildBody", "tok_child")])
+def test_contextual_resolver_fails_closed_on_missing_or_partial_component_path() -> (
+    None
+):
+    child_body = _FakeEntity("ChildBody", "tok_child")
+    child_body.volume = 50.0
+    sub_comp = _FakeComponent("SubComp", bodies=[child_body])
     occ_sub1 = _FakeOccurrence("Sub1", sub_comp)
     root = _FakeComponent("Root", occurrences=[occ_sub1])
 
@@ -510,8 +535,22 @@ def test_contextual_resolver_fails_closed_on_missing_or_partial_component_path()
         scope: dict = {}
         exec(compile(script, "<test-path>", "exec"), scope)  # noqa: S102
 
-        # Complete matching path: ("Root", "Sub1") -> succeeds
+        # Complete matching path with usable geometry signature: ("Root", "Sub1") -> exact
         res_ok = scope["resolve_fusion_entity"](
+            {
+                "ref": "ent_1",
+                "kind": "body",
+                "name": "ChildBody",
+                "component_path": ("Root", "Sub1"),
+                "geometry_signature": {"volume": 50.0},
+                "document_ref": "doc_doc1",
+            }
+        )
+        assert res_ok["outcome"] == "exact"
+        assert len(res_ok["candidates"]) == 1
+
+        # Complete matching path WITHOUT geometry signature -> fails closed to ambiguous, NEVER exact!
+        res_no_sig = scope["resolve_fusion_entity"](
             {
                 "ref": "ent_1",
                 "kind": "body",
@@ -520,8 +559,8 @@ def test_contextual_resolver_fails_closed_on_missing_or_partial_component_path()
                 "document_ref": "doc_doc1",
             }
         )
-        assert res_ok["outcome"] == "exact"
-        assert len(res_ok["candidates"]) == 1
+        assert res_no_sig["outcome"] == "ambiguous"
+        assert len(res_no_sig["candidates"]) == 1
 
         # Missing / partial path segment: Sub2 does not exist under Sub1
         # Must FAIL CLOSED (outcome='stale', candidates=[]), never continue from Sub1!
@@ -531,6 +570,7 @@ def test_contextual_resolver_fails_closed_on_missing_or_partial_component_path()
                 "kind": "body",
                 "name": "ChildBody",
                 "component_path": ("Root", "Sub1", "MissingSub2"),
+                "geometry_signature": {"volume": 50.0},
                 "document_ref": "doc_doc1",
             }
         )
@@ -544,6 +584,7 @@ def test_contextual_resolver_fails_closed_on_missing_or_partial_component_path()
                 "kind": "body",
                 "name": "ChildBody",
                 "component_path": ("Root", "NonExistent"),
+                "geometry_signature": {"volume": 50.0},
                 "document_ref": "doc_doc1",
             }
         )
@@ -564,8 +605,22 @@ def test_contextual_resolver_geometry_signature_participates_in_matching() -> No
         scope: dict = {}
         exec(compile(script, "<test-geom>", "exec"), scope)  # noqa: S102
 
-        # 1. Exactly one candidate matches geometry signature -> exact
+        # 1. Exactly one candidate matches geometry signature WITH complete component_path -> exact
         res_exact = scope["resolve_fusion_entity"](
+            {
+                "ref": "ent_1",
+                "kind": "body",
+                "name": "Bracket",
+                "component_path": ("Root",),
+                "geometry_signature": {"volume": 100.0, "faces_count": 6},
+                "document_ref": "doc_doc1",
+            }
+        )
+        assert res_exact["outcome"] == "exact"
+        assert len(res_exact["candidates"]) == 1
+
+        # 2. Geometry signature matches BUT component_path absent -> fails closed to ambiguous, NEVER exact!
+        res_no_path = scope["resolve_fusion_entity"](
             {
                 "ref": "ent_1",
                 "kind": "body",
@@ -574,15 +629,16 @@ def test_contextual_resolver_geometry_signature_participates_in_matching() -> No
                 "document_ref": "doc_doc1",
             }
         )
-        assert res_exact["outcome"] == "exact"
-        assert len(res_exact["candidates"]) == 1
+        assert res_no_path["outcome"] == "ambiguous"
+        assert len(res_no_path["candidates"]) == 1
 
-        # 2. Zero candidates match geometry signature -> stale
+        # 3. Zero candidates match geometry signature -> stale
         res_stale = scope["resolve_fusion_entity"](
             {
                 "ref": "ent_1",
                 "kind": "body",
                 "name": "Bracket",
+                "component_path": ("Root",),
                 "geometry_signature": {"volume": 999.0},
                 "document_ref": "doc_doc1",
             }
@@ -590,7 +646,7 @@ def test_contextual_resolver_geometry_signature_participates_in_matching() -> No
         assert res_stale["outcome"] == "stale"
         assert res_stale["candidates"] == []
 
-        # 3. Multiple plausible candidates match geometry signature -> ambiguous, never guess!
+        # 4. Multiple plausible candidates match geometry signature -> ambiguous, never guess!
         b3 = _FakeEntity("Bracket", "tok_b3", volume=100.0, is_solid=True)
         b3.faces = _FakeCollection([object()] * 6)
         root.bRepBodies = _FakeCollection([b1, b2, b3])
@@ -600,6 +656,7 @@ def test_contextual_resolver_geometry_signature_participates_in_matching() -> No
                 "ref": "ent_1",
                 "kind": "body",
                 "name": "Bracket",
+                "component_path": ("Root",),
                 "geometry_signature": {"volume": 100.0, "faces_count": 6},
                 "document_ref": "doc_doc1",
             }

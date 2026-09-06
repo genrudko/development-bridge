@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
@@ -66,6 +67,54 @@ class ResolutionResult(BaseModel):
     candidates: tuple[Any, ...] = Field(default_factory=tuple)
     record: InternalEntityRecord | None = None
     message: str | None = None
+
+
+def _safe_candidate_detail(candidate: Any) -> dict[str, str]:
+    """Extract safe candidate metadata (opaque public ref, safe name, kind/native_type).
+
+    Never stringifies raw candidate objects or exposes tokens/secrets.
+    """
+    safe: dict[str, str] = {}
+    if isinstance(candidate, (InternalEntityRecord, EntityRef)):
+        safe["ref"] = candidate.ref
+        if candidate.name is not None:
+            safe["name"] = str(candidate.name)
+        if candidate.kind is not None:
+            safe["kind"] = str(candidate.kind)
+        if candidate.native_type is not None:
+            safe["native_type"] = str(candidate.native_type)
+        return safe
+
+    if isinstance(candidate, dict):
+        raw_ref = candidate.get("ref")
+        if isinstance(raw_ref, str) and re.match(ENTITY_REF_PATTERN, raw_ref):
+            safe["ref"] = raw_ref
+        name = candidate.get("name")
+        if name is not None:
+            safe["name"] = str(name)
+        kind = candidate.get("kind")
+        if kind is not None:
+            safe["kind"] = str(kind)
+        native_type = candidate.get("native_type")
+        if native_type is not None:
+            safe["native_type"] = str(native_type)
+        return safe
+
+    raw_ref = getattr(candidate, "ref", None)
+    if isinstance(raw_ref, str) and re.match(ENTITY_REF_PATTERN, raw_ref):
+        safe["ref"] = raw_ref
+    name = getattr(candidate, "name", None)
+    if name is not None:
+        safe["name"] = str(name)
+    kind = getattr(candidate, "kind", None)
+    if kind is not None:
+        safe["kind"] = str(kind)
+    native_type = getattr(candidate, "native_type", None) or getattr(
+        candidate, "objectType", None
+    )
+    if native_type is not None:
+        safe["native_type"] = str(native_type)
+    return safe
 
 
 class EntityRefRegistry:
@@ -261,9 +310,12 @@ class EntityRefRegistry:
                     details={
                         "ref": res.ref,
                         "active_document_ref": active_document_ref,
+                        "outcome": "exact",
+                        "candidate_count": 0,
                     },
                 )
             if len(res.candidates) > 1:
+                safe_candidates = [_safe_candidate_detail(c) for c in res.candidates]
                 raise FusionCadError(
                     ErrorCode.REF_AMBIGUOUS,
                     f"EntityRef '{res.ref}' declared exact outcome but returned {len(res.candidates)} candidates",
@@ -272,7 +324,7 @@ class EntityRefRegistry:
                         "active_document_ref": active_document_ref,
                         "outcome": "exact",
                         "candidate_count": len(res.candidates),
-                        "candidates": [getattr(c, "ref", str(c)) for c in res.candidates],
+                        "candidates": safe_candidates,
                     },
                 )
             return res.candidates[0]
@@ -296,10 +348,12 @@ class EntityRefRegistry:
                     "ref": res.ref,
                     "active_document_ref": active_document_ref,
                     "outcome": "stale",
+                    "candidate_count": len(res.candidates),
                 },
             )
 
         if res.outcome == "split":
+            safe_candidates = [_safe_candidate_detail(c) for c in res.candidates]
             raise FusionCadError(
                 ErrorCode.REF_SPLIT,
                 f"EntityRef '{res.ref}' resolved to multiple split candidates ({len(res.candidates)})",
@@ -308,11 +362,12 @@ class EntityRefRegistry:
                     "active_document_ref": active_document_ref,
                     "outcome": "split",
                     "candidate_count": len(res.candidates),
-                    "candidates": [getattr(c, "ref", str(c)) for c in res.candidates],
+                    "candidates": safe_candidates,
                 },
             )
 
         if res.outcome == "ambiguous":
+            safe_candidates = [_safe_candidate_detail(c) for c in res.candidates]
             raise FusionCadError(
                 ErrorCode.REF_AMBIGUOUS,
                 f"EntityRef '{res.ref}' contextual resolution is ambiguous with {len(res.candidates)} candidates",
@@ -321,7 +376,7 @@ class EntityRefRegistry:
                     "active_document_ref": active_document_ref,
                     "outcome": "ambiguous",
                     "candidate_count": len(res.candidates),
-                    "candidates": [getattr(c, "ref", str(c)) for c in res.candidates],
+                    "candidates": safe_candidates,
                 },
             )
 
@@ -332,6 +387,7 @@ class EntityRefRegistry:
                 "ref": res.ref,
                 "active_document_ref": active_document_ref,
                 "outcome": res.outcome,
+                "candidate_count": len(res.candidates),
             },
         )
 

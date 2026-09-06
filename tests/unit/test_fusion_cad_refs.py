@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -280,7 +281,9 @@ def test_coordinate_frame_conversions_world_component_sketch() -> None:
     assert xf_world.matrix[2][3] == 60.0
 
 
-def test_cross_frame_conversions_require_verified_transform_no_identity_fallback() -> None:
+def test_cross_frame_conversions_require_verified_transform_no_identity_fallback() -> (
+    None
+):
     world_frame = CoordinateFrame(space="world")
     comp_frame = CoordinateFrame(space="component", ref="ent_comp_1")
     sketch_frame = CoordinateFrame(space="sketch", ref="ent_sketch_1")
@@ -398,16 +401,36 @@ def test_convert_transform_mathematical_composition_and_point_consistency() -> N
     assert pt_via_composed.z == pt_via_convert.z
 
 
-def test_resolve_one_exact_with_multiple_candidates_fails_closed_ref_ambiguous() -> None:
+def test_resolve_one_exact_with_multiple_candidates_fails_closed_ref_ambiguous() -> (
+    None
+):
     registry = EntityRefRegistry()
     active_doc = "doc_doc1"
     issued = registry.issue(document_ref=active_doc, kind="body", name="TestBody")
 
-    # Native resolver buggy/flaky: declares "exact" but returns 2 candidates
+    secret_native = "SECRET_NATIVE_TOKEN_XYZ_999"
+    secret_entity = "SECRET_ENTITY_TOKEN_ABC_888"
+
+    # Native resolver buggy/flaky: declares "exact" but returns 2 candidates with native tokens
     def buggy_native_resolver(
         record: InternalEntityRecord,
     ) -> tuple[ResolutionOutcome, list[Any]]:
-        return "exact", [{"id": "candidate_1"}, {"id": "candidate_2"}]
+        return "exact", [
+            {
+                "ref": "ent_0123456789abcdef",
+                "name": "CandidateOne",
+                "native_type": "adsk::fusion::BRepBody",
+                "native_token": secret_native,
+                "entityToken": secret_entity,
+            },
+            {
+                "ref": "ent_fedcba9876543210",
+                "name": "CandidateTwo",
+                "native_type": "adsk::fusion::BRepBody",
+                "native_token": secret_native + "_2",
+                "entityToken": secret_entity + "_2",
+            },
+        ]
 
     with pytest.raises(FusionCadError) as exc_info:
         registry.resolve_one(
@@ -420,6 +443,92 @@ def test_resolve_one_exact_with_multiple_candidates_fails_closed_ref_ambiguous()
     assert exc_info.value.code == ErrorCode.REF_AMBIGUOUS
     assert exc_info.value.details.get("candidate_count") == 2
     assert exc_info.value.details.get("outcome") == "exact"
+
+    # Secrets MUST NOT leak into exception message, repr, details, or stringification
+    assert secret_native not in str(exc_info.value)
+    assert secret_native not in repr(exc_info.value)
+    assert secret_native not in str(exc_info.value.details)
+    assert secret_native not in json.dumps(exc_info.value.details)
+    assert secret_entity not in str(exc_info.value)
+    assert secret_entity not in repr(exc_info.value)
+    assert secret_entity not in str(exc_info.value.details)
+    assert secret_entity not in json.dumps(exc_info.value.details)
+
+    # Safe metadata preserved
+    safe_cands = exc_info.value.details.get("candidates")
+    assert isinstance(safe_cands, list)
+    assert len(safe_cands) == 2
+    assert safe_cands[0] == {
+        "ref": "ent_0123456789abcdef",
+        "name": "CandidateOne",
+        "native_type": "adsk::fusion::BRepBody",
+    }
+
+
+def test_resolve_one_split_and_ambiguous_never_expose_native_tokens_in_error_details() -> (
+    None
+):
+    registry = EntityRefRegistry()
+    active_doc = "doc_doc1"
+    issued = registry.issue(document_ref=active_doc, kind="body", name="TestBody")
+
+    secret_native = "SECRET_NATIVE_TOKEN_SPLIT_XYZ"
+    secret_entity = "SECRET_ENTITY_TOKEN_AMBIGUOUS_ABC"
+
+    candidate_dicts = [
+        {
+            "ref": "ent_1111222233334444",
+            "name": "PartA",
+            "kind": "body",
+            "native_type": "adsk::fusion::BRepBody",
+            "native_token": secret_native,
+            "entityToken": secret_entity,
+        },
+        {
+            "ref": "ent_5555666677778888",
+            "name": "PartB",
+            "kind": "body",
+            "native_type": "adsk::fusion::BRepBody",
+            "native_token": secret_native + "_b",
+            "entityToken": secret_entity + "_b",
+        },
+    ]
+
+    # 1. Test split outcome
+    with pytest.raises(FusionCadError) as exc_split:
+        registry.resolve_one(
+            issued,
+            active_document_ref=active_doc,
+            native_resolver=lambda rec: ("split", candidate_dicts),
+        )
+    assert exc_split.value.code == ErrorCode.REF_SPLIT
+    assert exc_split.value.details.get("candidate_count") == 2
+    assert secret_native not in str(exc_split.value)
+    assert secret_native not in repr(exc_split.value)
+    assert secret_native not in str(exc_split.value.details)
+    assert secret_native not in json.dumps(exc_split.value.details)
+    assert secret_entity not in str(exc_split.value)
+    assert secret_entity not in repr(exc_split.value)
+    assert secret_entity not in str(exc_split.value.details)
+    assert secret_entity not in json.dumps(exc_split.value.details)
+
+    # 2. Test ambiguous outcome
+    with pytest.raises(FusionCadError) as exc_ambig:
+        registry.resolve_one(
+            issued,
+            active_document_ref=active_doc,
+            native_resolver=lambda rec: ("ambiguous", candidate_dicts),
+        )
+    assert exc_ambig.value.code == ErrorCode.REF_AMBIGUOUS
+    assert exc_ambig.value.details.get("candidate_count") == 2
+    assert secret_native not in str(exc_ambig.value)
+    assert secret_native not in repr(exc_ambig.value)
+    assert secret_native not in str(exc_ambig.value.details)
+    assert secret_native not in json.dumps(exc_ambig.value.details)
+    assert secret_entity not in str(exc_ambig.value)
+    assert secret_entity not in repr(exc_ambig.value)
+    assert secret_entity not in str(exc_ambig.value.details)
+    assert secret_entity not in json.dumps(exc_ambig.value.details)
 
 
 def test_resolve_one_exact_with_zero_candidates_fails_closed_ref_stale() -> None:

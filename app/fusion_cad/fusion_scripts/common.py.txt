@@ -1067,6 +1067,7 @@ def resolve_fusion_entity(payload=None):
     root = getattr(design, "rootComponent", None)
     target_comp = root
     component_path_resolved = True
+    has_complete_path = False
 
     if component_path and root:
         curr = root
@@ -1092,6 +1093,7 @@ def resolve_fusion_entity(payload=None):
             curr = found_comp
         if component_path_resolved:
             target_comp = curr
+            has_complete_path = True
 
     candidates = []
     if component_path_resolved and target_comp and kind:
@@ -1227,16 +1229,35 @@ def resolve_fusion_entity(payload=None):
 
         return True
 
-    if geometry_signature:
+    def _is_usable_geometry_signature(sig):
+        if not sig or not isinstance(sig, dict):
+            return False
+        return any(v is not None for v in sig.values())
+
+    has_usable_geom = _is_usable_geometry_signature(geometry_signature)
+    if has_usable_geom:
         candidates = [c for c in candidates if _matches_geometry_signature(c, geometry_signature)]
 
+    # Fail closed: unambiguous exact recovery requires both complete component_path and usable geometry_signature
+    has_sufficient_context = has_complete_path and has_usable_geom
+
     if len(candidates) == 1:
-        return {
-            "outcome": "exact",
-            "ref": ref,
-            "candidates": [_extract_candidate_info(candidates[0])],
-            "document_ref": safe_doc_ref,
-        }
+        if has_sufficient_context:
+            return {
+                "outcome": "exact",
+                "ref": ref,
+                "candidates": [_extract_candidate_info(candidates[0])],
+                "document_ref": safe_doc_ref,
+            }
+        else:
+            # Insufficient contextual identity (e.g. name/kind alone at root or missing signature):
+            # cannot declare exact; return ambiguous according to evidence
+            return {
+                "outcome": "ambiguous",
+                "ref": ref,
+                "candidates": [_extract_candidate_info(candidates[0])],
+                "document_ref": safe_doc_ref,
+            }
     elif len(candidates) > 1:
         return {
             "outcome": "ambiguous",
