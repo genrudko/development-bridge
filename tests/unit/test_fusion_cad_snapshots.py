@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from app.api.errors import ErrorCode
+from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.snapshots import (
     FeatureDependency,
     ModelSnapshot,
@@ -819,4 +821,182 @@ def test_structural_hash_stability_with_nested_lifecycle_refs_and_snapshot_id():
     hash_health_mut = compute_structural_hash(payload_health_mut)
     assert hash_health_mut != hash1, (
         "Health mutation must yield different structural hash"
+    )
+
+
+def test_failed_cad_error_boundary_sanitizes_nested_token_aliases():
+    """Regression (a): failed CAD error boundary must expose no secret via FusionCadError details/message/str/repr."""
+    secret_tok = "secret::adsk::token::err_test::9999"
+    secret_nested = "secret::adsk::token::nested_err::8888"
+    raw_error_payload = {
+        "isError": True,
+        "error": {
+            "code": "REF_STALE",
+            "message": "Reference ent_stale_123 is stale",
+            "details": {
+                "entityToken": secret_tok,
+                "target": "ent_stale_123",
+                "nested": {
+                    "token": secret_nested,
+                    "native_token": secret_tok,
+                    "code": "STALE_TARGET",
+                },
+            },
+        },
+    }
+    # Direct FusionCadError instantiation with nested details
+    err = FusionCadError(
+        ErrorCode.REF_STALE,
+        "Reference ent_stale_123 is stale",
+        details=raw_error_payload["error"]["details"],
+    )
+    for secret in (secret_tok, secret_nested):
+        assert secret not in str(err.details), f"Leaked {secret} in err.details"
+        assert secret not in str(err), f"Leaked {secret} in str(err)"
+        assert secret not in repr(err), f"Leaked {secret} in repr(err)"
+        assert secret not in err.message, f"Leaked {secret} in err.message"
+
+    # Legitimate non-token diagnostics must be preserved
+    assert err.code == ErrorCode.REF_STALE
+    assert err.message == "Reference ent_stale_123 is stale"
+    assert err.details.get("target") == "ent_stale_123"
+    assert err.details.get("nested", {}).get("code") == "STALE_TARGET"
+
+
+def test_structural_canonicalization_preserves_ent_prefixed_semantic_strings():
+    """Regression (c): semantic strings that merely look like ent_* (tag/role/value/name)
+    must remain mutation-sensitive, producing different hashes.
+    """
+    base_payload = {
+        "document_ref": "doc_main_123",
+        "model_revision": "rev_1",
+        "counts": {"faces": 1},
+        "components": [{"name": "ent_custom_part", "ref": "ent_c1"}],
+        "logical_objects": [
+            {
+                "group": "mfg",
+                "name": "ent_tag_name",
+                "value": "ent_bracket",
+                "role": "ent_primary_mount",
+                "owner_ref": "ent_c1",
+            }
+        ],
+    }
+    hash_base = compute_structural_hash(base_payload)
+
+    # 1. Mutating value from "ent_bracket" to "ent_stiffener"
+    payload_val_mut = {
+        **base_payload,
+        "logical_objects": [
+            {
+                "group": "mfg",
+                "name": "ent_tag_name",
+                "value": "ent_stiffener",
+                "role": "ent_primary_mount",
+                "owner_ref": "ent_c1",
+            }
+        ],
+    }
+    hash_val_mut = compute_structural_hash(payload_val_mut)
+    assert hash_val_mut != hash_base, (
+        "Semantic string mutation in 'value' matching ent_* must change structural hash"
+    )
+
+    # 2. Mutating role from "ent_primary_mount" to "ent_secondary_mount"
+    payload_role_mut = {
+        **base_payload,
+        "logical_objects": [
+            {
+                "group": "mfg",
+                "name": "ent_tag_name",
+                "value": "ent_bracket",
+                "role": "ent_secondary_mount",
+                "owner_ref": "ent_c1",
+            }
+        ],
+    }
+    hash_role_mut = compute_structural_hash(payload_role_mut)
+    assert hash_role_mut != hash_base, (
+        "Semantic string mutation in 'role' matching ent_* must change structural hash"
+    )
+
+    # 3. Mutating component name from "ent_custom_part" to "ent_other_part"
+    payload_comp_mut = {
+        **base_payload,
+        "components": [{"name": "ent_other_part", "ref": "ent_c1"}],
+    }
+    hash_comp_mut = compute_structural_hash(payload_comp_mut)
+    assert hash_comp_mut != hash_base, (
+        "Semantic string mutation in component 'name' matching ent_* must change structural hash"
+    )
+
+
+def test_unknown_ref_keyed_mappings_preserve_multiplicity_and_values():
+    """Regression (b) & (d): unknown ref-keyed mappings with multiple entries must:
+    - produce identical hashes across lifecycles with different concrete key names (b)
+    - produce different hashes when values change, e.g. {ent_a: True, ent_b: False} vs both false (d)
+    - produce different hashes when multiplicity changes (e.g. 1 entry vs 2 entries) (d)
+    without collisions or dependence on concrete lifecycle key names.
+    """
+    # Lifecycle 1: keys ent_lifecycle_a and ent_lifecycle_b
+    payload_l1 = {
+        "document_ref": "doc_main_123",
+        "model_revision": "rev_1",
+        "snapshot_id": "snap_l1",
+        "counts": {"faces": 2},
+        "visibility": {
+            "ent_lifecycle_a": True,
+            "ent_lifecycle_b": False,
+        },
+    }
+
+    # Lifecycle 2: different concrete keys ent_lifecycle_x and ent_lifecycle_y, different snapshot_id
+    payload_l2 = {
+        "document_ref": "doc_main_123",
+        "model_revision": "rev_1",
+        "snapshot_id": "snap_l2",
+        "counts": {"faces": 2},
+        "visibility": {
+            "ent_lifecycle_y": False,
+            "ent_lifecycle_x": True,
+        },
+    }
+
+    hash_l1 = compute_structural_hash(payload_l1)
+    hash_l2 = compute_structural_hash(payload_l2)
+
+    # Invariant (b): lifecycle-only identifier refs/snapshot_id must hash invariant
+    assert hash_l1 == hash_l2, (
+        f"Structural hashes must be invariant across lifecycles for unknown ref keys: {hash_l1} vs {hash_l2}"
+    )
+
+    # Value mutation (d): {ent_a: True, ent_b: False} vs both False
+    payload_both_false = {
+        "document_ref": "doc_main_123",
+        "model_revision": "rev_1",
+        "snapshot_id": "snap_l1",
+        "counts": {"faces": 2},
+        "visibility": {
+            "ent_lifecycle_a": False,
+            "ent_lifecycle_b": False,
+        },
+    }
+    hash_both_false = compute_structural_hash(payload_both_false)
+    assert hash_both_false != hash_l1, (
+        "Unknown ref-keyed mapping with {ent_a: True, ent_b: False} vs both False must produce different hashes"
+    )
+
+    # Multiplicity mutation (d): 1 entry vs 2 entries
+    payload_single = {
+        "document_ref": "doc_main_123",
+        "model_revision": "rev_1",
+        "snapshot_id": "snap_l1",
+        "counts": {"faces": 2},
+        "visibility": {
+            "ent_lifecycle_a": True,
+        },
+    }
+    hash_single = compute_structural_hash(payload_single)
+    assert hash_single != hash_l1, (
+        "Unknown ref-keyed mapping multiplicity difference must produce different hashes"
     )

@@ -42,11 +42,19 @@ IDENTIFIER_REF_KEYS = frozenset(
         "ref",
         "target",
         "target_ref",
+        "targetref",
         "owner_ref",
+        "ownerref",
         "owner_id",
+        "ownerid",
         "entity_ref",
+        "entityref",
         "reporter",
         "parent",
+        "children",
+        "outputs",
+        "occurrence",
+        "component",
     }
 )
 
@@ -75,7 +83,9 @@ def sanitize_public_payload(val: Any) -> Any:
     return val
 
 
-def _canonicalize_structural_value(val: Any, ref_map: Mapping[str, str]) -> Any:
+def _canonicalize_structural_value(
+    val: Any, ref_map: Mapping[str, str], is_identifier: bool = False
+) -> Any:
     """Recursively canonicalize semantic model payload for structural hashing.
 
     Removes/replaces volatile lifecycle identities (snapshot_id and opaque lifecycle refs
@@ -88,40 +98,67 @@ def _canonicalize_structural_value(val: Any, ref_map: Mapping[str, str]) -> Any:
         rounded = round(val, 6)
         return 0.0 if rounded == 0.0 else rounded
     if isinstance(val, str):
-        if val in ref_map:
-            return ref_map[val]
-        if val.startswith("ent_") and re.match(ENTITY_REF_PATTERN, val):
-            return ""
+        if is_identifier:
+            if val in ref_map:
+                return ref_map[val]
+            if val.startswith("ent_") and re.match(ENTITY_REF_PATTERN, val):
+                return ""
         return val
     if isinstance(val, Mapping):
         clean_map: dict[str, Any] = {}
+        unknown_ref_entries: list[Any] = []
         for k, v in val.items():
             k_str = str(k)
             # 1. Volatile snapshot_id keys are removed entirely
             if k_str in VOLATILE_HASH_KEYS or k_str.lower() in VOLATILE_HASH_KEYS:
                 continue
-            # 2. Key is an opaque lifecycle ref in a dictionary mapping
-            target_key = ref_map.get(k_str, k_str)
-            if target_key.startswith("ent_") and re.match(
-                ENTITY_REF_PATTERN, target_key
-            ):
-                target_key = "ent_ref"
 
-            # 3. Value handling for identifier ref fields
-            if (
-                k_str in IDENTIFIER_REF_KEYS or k_str.lower() in IDENTIFIER_REF_KEYS
-            ) and isinstance(v, str):
-                if v in ref_map:
-                    clean_map[target_key] = ref_map[v]
-                elif v.startswith("ent_") or re.match(ENTITY_REF_PATTERN, v):
-                    clean_map[target_key] = ""
-                else:
-                    clean_map[target_key] = v
+            # 2. Key is an entity ref in a ref-keyed mapping
+            if k_str in ref_map:
+                clean_map[ref_map[k_str]] = _canonicalize_structural_value(
+                    v, ref_map, is_identifier=False
+                )
+            elif k_str.startswith("ent_") and re.match(ENTITY_REF_PATTERN, k_str):
+                unknown_ref_entries.append(
+                    _canonicalize_structural_value(v, ref_map, is_identifier=False)
+                )
             else:
-                clean_map[target_key] = _canonicalize_structural_value(v, ref_map)
+                # 3. Field key: check if field is an identifier ref field
+                is_field_id = (
+                    k_str in IDENTIFIER_REF_KEYS or k_str.lower() in IDENTIFIER_REF_KEYS
+                )
+                clean_map[k_str] = _canonicalize_structural_value(
+                    v, ref_map, is_identifier=is_field_id
+                )
+
+        if unknown_ref_entries:
+            try:
+                sorted_entries = sorted(
+                    unknown_ref_entries,
+                    key=lambda item: (
+                        json.dumps(
+                            item,
+                            sort_keys=True,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        if isinstance(item, (dict, list, tuple))
+                        else str(item)
+                    ),
+                )
+            except (TypeError, ValueError):
+                sorted_entries = unknown_ref_entries
+
+            for idx, item in enumerate(sorted_entries):
+                clean_map[f"ent_ref:{idx}"] = item
+
         return {k: clean_map[k] for k in sorted(clean_map.keys())}
+
     if isinstance(val, (list, tuple, set, frozenset)):
-        canonical_items = [_canonicalize_structural_value(x, ref_map) for x in val]
+        canonical_items = [
+            _canonicalize_structural_value(x, ref_map, is_identifier=is_identifier)
+            for x in val
+        ]
         try:
             return sorted(
                 canonical_items,

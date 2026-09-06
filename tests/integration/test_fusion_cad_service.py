@@ -5358,3 +5358,82 @@ async def test_service_read_operations_never_leak_nested_native_tokens(
     )
     sel_str = str(res_sel.model_dump(mode="python"))
     assert secret_sel_tok not in sel_str, "Leaked secret token in service selection"
+
+
+@pytest.mark.asyncio
+async def test_failed_service_read_with_nested_tokens_never_leaks_secrets_in_cad_error(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Regression (a): failed service read with nested token aliases in error/details
+    must expose no secret via FusionCadError details/message/str/repr.
+    """
+    cad_service = FusionCadService(mock_desktop_service)
+    matrix = CapabilityMatrix.from_records(
+        [
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(name="sketch.access", state="supported"),
+        ]
+    )
+    cad_service.set_node_capabilities("desk-1", matrix)
+
+    secret_native_tok = "secret::adsk::token::fail_read::9999"
+    secret_nested_tok = "secret::adsk::token::fail_read_nested::8888"
+    secret_err_tok = "secret::adsk::token::fail_err_alias::7777"
+
+    raw_error_resp = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "api_version": "fusion.cad/v1",
+                        "status": "failed",
+                        "error": {
+                            "code": "REF_STALE",
+                            "message": "Target entity reference ent_face_stale is stale",
+                            "details": {
+                                "entityToken": secret_native_tok,
+                                "target": "ent_face_stale",
+                                "nested": {
+                                    "native_token": secret_nested_tok,
+                                    "token": secret_err_tok,
+                                    "diagnostic": "topological_recompute_diverged",
+                                },
+                            },
+                        },
+                    }
+                ),
+            }
+        ],
+        "isError": True,
+    }
+    mock_desktop_service.call = AsyncMock(return_value=raw_error_resp)
+    mock_desktop_service.submit = AsyncMock(return_value=raw_error_resp)
+
+    # 1. model_snapshot failure
+    with pytest.raises(FusionCadError) as exc_info:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "model_snapshot", "detail": "full"},
+            group="read",
+        )
+    err = exc_info.value
+    err_details_str = str(err.details)
+    err_str = str(err)
+    err_repr = repr(err)
+
+    for secret in (secret_native_tok, secret_nested_tok, secret_err_tok):
+        assert secret not in err_details_str, (
+            f"Leaked {secret} in FusionCadError.details"
+        )
+        assert secret not in err_str, f"Leaked {secret} in FusionCadError str()"
+        assert secret not in err_repr, f"Leaked {secret} in FusionCadError repr()"
+        assert secret not in err.message, f"Leaked {secret} in FusionCadError message"
+
+    # Legitimate non-token diagnostics must be preserved
+    assert err.code == ErrorCode.REF_STALE
+    assert err.message == "Target entity reference ent_face_stale is stale"
+    assert err.details.get("target") == "ent_face_stale"
+    assert (
+        err.details.get("nested", {}).get("diagnostic")
+        == "topological_recompute_diverged"
+    )
