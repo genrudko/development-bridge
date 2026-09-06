@@ -248,17 +248,20 @@ class EntityRefRegistry:
 
         # 4. Native resolver lookup
         if native_resolver is not None:
+            safe_error: FusionCadError | None = None
             try:
                 outcome, candidates = native_resolver(record)
-            except Exception as exc:
-                raise FusionCadError(
+            except Exception:  # noqa: BLE001
+                safe_error = FusionCadError(
                     ErrorCode.FUSION_API_ERROR,
                     "Native entity resolution failed",
                     details={
                         "ref": ref_str,
                         "document_ref": active_document_ref,
                     },
-                ) from exc
+                )
+            if safe_error is not None:
+                raise safe_error
             return ResolutionResult(
                 ref=ref_str,
                 outcome=outcome,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import traceback
 from typing import Any
 
 import pytest
@@ -644,6 +645,7 @@ def test_native_resolver_exception_caught_and_never_leaks_token() -> None:
     registry = EntityRefRegistry()
     active_doc = "doc_doc1"
     secret_native = "adsk::native::token::crashing_resolver_secret"
+    raw_message = f"Internal Fusion crash with secret token: {secret_native}"
 
     issued = registry.issue(
         document_ref=active_doc,
@@ -653,9 +655,7 @@ def test_native_resolver_exception_caught_and_never_leaks_token() -> None:
     )
 
     def crashing_native_resolver(record: InternalEntityRecord) -> Any:
-        raise RuntimeError(
-            f"Internal Fusion crash with secret token: {record.native_token}"
-        )
+        raise RuntimeError(raw_message)
 
     # 1. Test resolve() raises FusionCadError with FUSION_API_ERROR and safe details
     with pytest.raises(FusionCadError) as exc_resolve:
@@ -671,6 +671,12 @@ def test_native_resolver_exception_caught_and_never_leaks_token() -> None:
         "ref": issued.ref,
         "document_ref": active_doc,
     }
+
+    assert exc_resolve.value.__cause__ is None
+    assert exc_resolve.value.__context__ is None
+    formatted_tb_resolve = "".join(traceback.format_exception(exc_resolve.value))
+    assert secret_native not in formatted_tb_resolve
+    assert raw_message not in formatted_tb_resolve
 
     assert secret_native not in str(exc_resolve.value)
     assert secret_native not in repr(exc_resolve.value)
@@ -691,6 +697,14 @@ def test_native_resolver_exception_caught_and_never_leaks_token() -> None:
         "ref": issued.ref,
         "document_ref": active_doc,
     }
+
+    assert exc_resolve_one.value.__cause__ is None
+    assert exc_resolve_one.value.__context__ is None
+    formatted_tb_resolve_one = "".join(
+        traceback.format_exception(exc_resolve_one.value)
+    )
+    assert secret_native not in formatted_tb_resolve_one
+    assert raw_message not in formatted_tb_resolve_one
 
     assert secret_native not in str(exc_resolve_one.value)
     assert secret_native not in repr(exc_resolve_one.value)
