@@ -5668,7 +5668,9 @@ async def test_fusion_inspect_describe_area_volume_perimeter_centroid(
 async def test_fusion_inspect_bounding_box_oriented_bbox_and_edge(
     mock_desktop_service: DesktopNodeService,
 ):
-    """Proves bounding_box/oriented_bbox carry explicit frames and edge length is exact."""
+    """Proves bounding_box carries explicit frames, body oriented_bbox fails closed
+    (the axis-aligned body.boundingBox is never relabeled as an oriented_bbox),
+    and edge length is exact."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
         script = arguments["script"]
         scope = {"__name__": "__main__"}
@@ -5697,16 +5699,19 @@ async def test_fusion_inspect_bounding_box_oriented_bbox_and_edge(
         assert res_bb.data["bounding_box"]["min_point"]["x"] == 0.0
         assert res_bb.data["bounding_box"]["max_point"]["z"] == 100.0
 
-        # oriented_bbox has center, axes, extents, frame
-        res_obb = await cad_service.execute(
-            {"node_id": "desk-1", "operation": "oriented_bbox", "target": refs["body"]},
-            group="inspect",
-        )
-        obb = res_obb.data["oriented_bbox"]
-        assert len(obb["axes"]) == 3
-        assert obb["extents"] == (50.0, 50.0, 50.0)
-        assert obb["frame"]["space"] == "world"
-        assert obb["center"]["frame"]["space"] == "world"
+        # Body oriented_bbox must FAIL CLOSED: this P0 path has no exact
+        # Fusion OBB measure API, and the axis-aligned body.boundingBox must
+        # never be relabeled as an oriented bounding box.
+        with pytest.raises(FusionCadError) as exc_obb:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "oriented_bbox",
+                    "target": refs["body"],
+                },
+                group="inspect",
+            )
+        assert exc_obb.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
 
         # edge perimeter/length
         res_edge = await cad_service.execute(
@@ -6374,3 +6379,59 @@ async def test_fusion_inspect_concentric_offset_exceeds_tolerance(
         assert res.data["matches"] is False
         assert res.data["measured"]["angle_deg"] == pytest.approx(0.0)
         assert res.data["measured"]["offset_mm"] == pytest.approx(10.0)
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_face_oriented_bbox_straight_edges_exact_curved_edge_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves face oriented_bbox is exact only for positively verified
+    straight-edged polygonal boundaries and fails closed for curved edges."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+
+        # Straight-edged polygonal face (4 Line3D edges): exact vertex projection.
+        res_obb = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "oriented_bbox",
+                "target": refs["face"],
+            },
+            group="inspect",
+        )
+        obb = res_obb.data["oriented_bbox"]
+        assert len(obb["axes"]) == 3
+        assert obb["extents"] == pytest.approx((50.0, 50.0, 0.0))
+        assert obb["frame"]["space"] == "world"
+        assert obb["center"]["frame"]["space"] == "world"
+
+        # Curved boundary edge: must fail closed, never a guessed vertex box.
+        face_edge = body.faces.item(0).loops.item(0).edges.item(0)
+        face_edge.geometry.objectType = "Arc3D"
+        face_edge.geometry.curveType = "Arc3D"
+        with pytest.raises(FusionCadError) as exc_curved:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "oriented_bbox",
+                    "target": refs["face"],
+                },
+                group="inspect",
+            )
+        assert exc_curved.value.code == ErrorCode.UNSUPPORTED_GEOMETRY

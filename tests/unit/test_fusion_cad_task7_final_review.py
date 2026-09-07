@@ -18,7 +18,6 @@ from app.fusion_cad.inspect import (
 )
 from app.fusion_cad.service import FusionCadService
 
-
 # =========================================================================
 # FINAL REVIEW BLOCKER 1: _inject_inspect_target_hints must resolve opaque
 # refs within the effective document context only. Cross-document opaque refs
@@ -144,7 +143,7 @@ class _FakeDesign:
     def __init__(self):
         self.rootComponent = _FakeRoot()
 
-    def findEntityByToken(self, token):  # noqa: ARG002
+    def findEntityByToken(self, token):
         return None
 
 
@@ -387,3 +386,134 @@ def test_finding3_preserves_valid_explicit_world_frame_results():
     )
     assert res_desc.frame.space == "world"
     assert res_desc.measures["volume"]["unit"] == "mm^3"
+
+# =========================================================================
+# FINAL REVIEW OBB REPAIR (latest Codex re-review):
+#  - Finding 4: _face_oriented_bbox must fail closed (UNSUPPORTED_GEOMETRY)
+#    for curved/unknown boundary edges; vertex projection is exact only for
+#    positively verified straight-edged polygonal faces (extrema of a linear
+#    function over a polygon occur at vertices).
+#  - Finding 5: _body_oriented_bbox must NEVER relabel the axis-aligned
+#    body.boundingBox as an oriented_bbox; without an exact Fusion OBB / measure
+#    API it must fail closed with UNSUPPORTED_GEOMETRY.
+# =========================================================================
+
+
+class _ObbPoint:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+
+
+class _ObbVertex:
+    def __init__(self, x, y, z):
+        self.geometry = _ObbPoint(x, y, z)
+
+
+class _ObbEdgeGeom:
+    def __init__(self, curve_type):
+        self.objectType = curve_type
+        self.curveType = curve_type
+
+
+class _ObbEdge:
+    def __init__(self, curve_type="Line3D", geometry=None):
+        self.geometry = geometry if geometry is not None else _ObbEdgeGeom(curve_type)
+
+
+class _ObbLoop:
+    def __init__(self, edges):
+        self.edges = _Coll(edges)
+
+
+class _ObbFaceGeom:
+    def __init__(self, origin, normal, reference_vector=None):
+        self.objectType = "PlaneSurface"
+        self.origin = origin
+        self.normal = normal
+        if reference_vector is not None:
+            self.referenceVector = reference_vector
+
+
+class _ObbFace:
+    def __init__(self, geom, loops, vertices):
+        self.geometry = geom
+        self.loops = _Coll(loops)
+        self.vertices = _Coll(vertices)
+
+
+def _square_obb_face(edge_types):
+    """Planar face on z=0 with four boundary edge types and square corners."""
+    origin = _ObbPoint(0.0, 0.0, 0.0)
+    normal = _ObbPoint(0.0, 0.0, 1.0)
+    vertices = [
+        _ObbVertex(0.0, 0.0, 0.0),
+        _ObbVertex(10.0, 0.0, 0.0),
+        _ObbVertex(10.0, 10.0, 0.0),
+        _ObbVertex(0.0, 10.0, 0.0),
+    ]
+    loop = _ObbLoop([_ObbEdge(t) for t in edge_types])
+    return _ObbFace(_ObbFaceGeom(origin, normal), [loop], vertices)
+
+
+def test_finding4_curved_edge_face_oriented_bbox_fails_closed(inspect_scope):
+    """Falsifies the under-sized guess: a planar face with a curved boundary edge
+    must NOT return a vertex-only projected oriented_bbox (extrema can lie
+    between vertices on the curve); it must fail closed with UNSUPPORTED_GEOMETRY."""
+    face = _square_obb_face(["Arc3D", "Line3D", "Line3D", "Line3D"])
+    with pytest.raises(inspect_scope["FusionScriptError"]) as exc:
+        inspect_scope["_face_oriented_bbox"](face)
+    assert exc.value.code == "UNSUPPORTED_GEOMETRY"
+
+
+def test_finding4_unknown_curve_face_oriented_bbox_fails_closed(inspect_scope):
+    """An edge whose curve type cannot be proven straight must also fail closed."""
+    face = _square_obb_face(["Line3D", "Line3D", "Line3D", "Line3D"])
+    face.loops.item(0).edges.item(2).geometry = _ObbEdgeGeom("Spline3D")
+    with pytest.raises(inspect_scope["FusionScriptError"]) as exc:
+        inspect_scope["_face_oriented_bbox"](face)
+    assert exc.value.code == "UNSUPPORTED_GEOMETRY"
+
+
+def test_finding4_missing_edge_geometry_face_oriented_bbox_fails_closed(inspect_scope):
+    """An edge without readable geometry cannot be proven straight; fail closed."""
+    face = _square_obb_face(["Line3D", "Line3D", "Line3D", "Line3D"])
+    face.loops.item(0).edges.item(1).geometry = None
+    with pytest.raises(inspect_scope["FusionScriptError"]) as exc:
+        inspect_scope["_face_oriented_bbox"](face)
+    assert exc.value.code == "UNSUPPORTED_GEOMETRY"
+
+
+def test_finding4_straight_edge_polygonal_face_oriented_bbox_exact(inspect_scope):
+    """Control: a positively verified straight-edged polygonal face returns an
+    exact vertex-projected oriented_bbox (extrema of a polygon occur at vertices)."""
+    face = _square_obb_face(["Line3D", "Line3D", "Line3D", "Line3D"])
+    res = inspect_scope["_face_oriented_bbox"](face)
+    assert set(res.keys()) == {"center", "axes", "extents", "frame"}
+    assert len(res["axes"]) == 3
+    assert all(len(a) == 3 for a in res["axes"])
+    # 10 cm square -> 100 mm, half-extents 50 mm; planar normal extent 0 mm.
+    assert res["extents"] == [50.0, 50.0, 0.0]
+    assert res["frame"] == {"space": "world", "ref": None}
+
+
+def test_finding5_body_oriented_bbox_fails_closed_never_relabels_aabb(inspect_scope):
+    """Falsifies the relabel bug: _body_oriented_bbox must NEVER return the
+    axis-aligned body.boundingBox as an oriented bounding box; without an exact
+    Fusion OBB / measure API it fails closed with UNSUPPORTED_GEOMETRY."""
+    class _BB:
+        def __init__(self, min_pt, max_pt):
+            self.minPoint = min_pt
+            self.maxPoint = max_pt
+
+    class _Body:
+        pass
+
+    body = _Body()
+    body.boundingBox = _BB(
+        _ObbPoint(2.0, 3.0, 4.0), _ObbPoint(12.0, 13.0, 14.0)
+    )
+    with pytest.raises(inspect_scope["FusionScriptError"]) as exc:
+        inspect_scope["_body_oriented_bbox"](body)
+    assert exc.value.code == "UNSUPPORTED_GEOMETRY"
