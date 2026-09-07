@@ -7544,3 +7544,148 @@ async def test_mutate_script_never_falls_back_to_document_owner_for_unresolved_t
         # The document owner never received metadata while echoing the entity ref
         assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _document_attributes()
         assert ("bridge.cad/v1", "finish") not in _document_attributes()
+
+
+# =========================================================================
+# Task 10 final narrow repair: Attributes.add null/mismatch fail-closed
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_metadata_provenance_add_null_fails_closed_and_restores_exact_state(
+    fake_desktop,
+):
+    """Verified Fusion semantics: Attributes.add(groupName, name, value) returns
+    the created/existing Attribute, or null when creation fails. When the
+    explicit metadata write succeeds but the provenance Attributes.add returns
+    null (persisting no provenance), the command must fail closed and the exact
+    pre-command reserved metadata state must be restored: the plan must never be
+    recorded/applied and the post-apply fingerprint must never permit reporting
+    success without persisted provenance."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs_cls = type(doc.attributes)
+    current_add = attrs_cls.add
+
+    def add_null_provenance(self, group_name, name, value):
+        # Provenance creation FAILS at the Fusion layer: Attributes.add returns
+        # null and no provenance attribute is persisted.
+        if name == PROVENANCE_ATTRIBUTE_NAME:
+            return None
+        return current_add(self, group_name, name, value)
+
+    attrs_cls.add = add_null_provenance
+    try:
+        baseline_body_attrs = _body_attributes()
+        baseline_body_attr_count = _body_attr_count()
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+    finally:
+        attrs_cls.add = current_add
+
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    # Exact pre-command reserved metadata state restored: the successful
+    # explicit write was compensated and no provenance was left behind.
+    assert _body_attributes() == baseline_body_attrs
+    assert _body_attr_count() == baseline_body_attr_count
+    # The document owner never received the metadata either.
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _document_attributes()
+    assert ("bridge.cad/v1", "finish") not in _document_attributes()
+
+
+@pytest.mark.asyncio
+async def test_metadata_provenance_add_mismatched_attribute_fails_closed_and_restores(
+    fake_desktop,
+):
+    """Repair: when Attributes.add returns an Attribute whose group/name/value
+    does not match the requested write, the write cannot be verified as applied;
+    the command fails closed and the exact pre-command reserved metadata state
+    is restored instead of reporting a fingerprint-distinct success."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    # 1. First successful set creates "finish" + provenance on the body owner.
+    res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set",
+            "target": body_ref,
+            "name": "finish",
+            "value": "old-finish",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    res_data = res.data if isinstance(res, CadResult) else res["data"]
+    assert res_data.get("applied") is True
+
+    # 2. Model real Fusion overwrite semantics, then make the provenance add
+    # return the EXISTING attribute object WITHOUT applying the requested value
+    # (a returned Attribute that does not match the requested write).
+    _enable_fake_fusion_add_overwrite(fake_adsk)
+
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs_cls = type(doc.attributes)
+    current_add = attrs_cls.add
+
+    def add_stale_provenance(self, group_name, name, value):
+        if name == PROVENANCE_ATTRIBUTE_NAME:
+            for i in range(self.count):
+                existing = self.item(i)
+                if (
+                    getattr(existing, "groupName", None) == group_name
+                    and getattr(existing, "name", None) == name
+                ):
+                    # Returned Attribute does NOT match the requested write:
+                    # the runtime returned the existing object with its stale value.
+                    return existing
+        return current_add(self, group_name, name, value)
+
+    attrs_cls.add = add_stale_provenance
+    try:
+        baseline_body_attrs = _body_attributes()
+        baseline_body_attr_count = _body_attr_count()
+        assert baseline_body_attrs[("bridge.cad/v1", "finish")] == "old-finish"
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_2",
+                },
+                group="metadata",
+            )
+    finally:
+        attrs_cls.add = current_add
+
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    # Exact pre-command reserved metadata state restored: the overwritten
+    # "finish" value was compensated and the stale provenance is untouched.
+    assert _body_attributes() == baseline_body_attrs
+    assert _body_attr_count() == baseline_body_attr_count

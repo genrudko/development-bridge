@@ -258,7 +258,26 @@ def run():
                         "Attribute collection does not support writes; metadata compensation is unavailable and partial metadata may remain",
                         details={"operation": op, "compensated": False},
                     )
-                restore_attrs.add(_RESERVED_GROUP, name, value)
+                restored_attr = restore_attrs.add(_RESERVED_GROUP, name, value)
+                if restored_attr is None:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Compensation Attributes.add returned null; metadata compensation is unavailable and partial metadata may remain",
+                        details={"operation": op, "compensated": False},
+                    )
+                restored_group = str(getattr(restored_attr, "groupName", "") or "")
+                restored_name = str(getattr(restored_attr, "name", "") or "")
+                restored_value = str(getattr(restored_attr, "value", "") or "")
+                if (
+                    restored_group != _RESERVED_GROUP
+                    or restored_name != name
+                    or restored_value != value
+                ):
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Compensation Attributes.add returned an Attribute that does not match the restore write; metadata compensation is unavailable and partial metadata may remain",
+                        details={"operation": op, "compensated": False},
+                    )
             else:
                 raise FusionScriptError(
                     "FUSION_API_ERROR",
@@ -369,6 +388,35 @@ def run():
                     existing_value = str(getattr(a, "value", "") or "")
                     break
                 new_attr = attrs.add(_RESERVED_GROUP, wr_name, str(wr_value))
+                # Verified Fusion semantics: Attributes.add(groupName, name,
+                # value) returns the created or updated Attribute, or null when
+                # creation fails. The returned Attribute is validated BEFORE the
+                # write is marked applied or enters the undo log, so a null or
+                # mismatched result can never be reported as an applied write
+                # (nor deleted as a fake "created" attribute). On null/mismatch
+                # this raises, the except handler below compensates every PRIOR
+                # plan write/removal via the undo log, and the post-rollback
+                # snapshot check in _rollback_metadata fails closed if the
+                # failed write persisted anything unverifiable.
+                if new_attr is None:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Attributes.add returned null for a metadata write; the write cannot be verified as applied",
+                        details={"operation": op, "attribute_name": wr_name},
+                    )
+                added_group = str(getattr(new_attr, "groupName", "") or "")
+                added_name = str(getattr(new_attr, "name", "") or "")
+                added_value = str(getattr(new_attr, "value", "") or "")
+                if (
+                    added_group != _RESERVED_GROUP
+                    or added_name != wr_name
+                    or added_value != str(wr_value)
+                ):
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Attributes.add returned an Attribute that does not match the requested metadata write; the write cannot be verified as applied",
+                        details={"operation": op, "attribute_name": wr_name},
+                    )
                 if existed:
                     undo_actions.append(("restored", wr_name, existing_value))
                 else:
