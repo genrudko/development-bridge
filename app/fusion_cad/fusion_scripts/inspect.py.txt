@@ -954,10 +954,53 @@ def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
             "UNSUPPORTED_GEOMETRY",
             "Face-to-face thickness requires exact coincident rectangular wall faces; concave, holed, or disjoint faces are ambiguous",
         )
-    # Conservative proof 3: an unambiguous wall pair is bounded by exactly two
+    # Conservative proof 3: POSITIVE support envelope. P0 thickness returns an
+    # exact value ONLY with positive proof that the same solid is a simple
+    # rectangular-prismatic six-face BRep: exactly six faces, every face a simple
+    # planar rectangle (no extra faces, no curved/nonplanar faces, no hole or
+    # extra/inner-loop topology). Otherwise the material path cannot be proven
+    # uninterrupted and the value must fail UNSUPPORTED_GEOMETRY.
+    faces = getattr(body_a, "faces", None)
+    if faces is None or not hasattr(faces, "count"):
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires a readable body faces collection; ambiguous topology",
+        )
+    if faces.count != 6:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires exactly six planar rectangular faces (rectangular-prismatic solid wall); extra faces are ambiguous",
+            details={"face_count": faces.count},
+        )
+    all_planes = []
+    for i in range(faces.count):
+        f = faces.item(i)
+        if f is face_a or f is face_b:
+            continue
+        try:
+            of, nf = _face_plane(f)
+        except FusionScriptError:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Face-to-face thickness is ambiguous: a curved/nonplanar face prevents proving a simple uninterrupted uniform solid wall",
+                details={"face_id": getattr(f, "entityToken", None)},
+            )
+        try:
+            u = _perpendicular(nf)
+            v = _cross(nf, u)
+            _face_wall_rect(f, u, v)
+        except FusionScriptError:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Face-to-face thickness is ambiguous: a non-rectangular or holed/multi-loop face prevents proving a simple uninterrupted uniform solid wall",
+                details={"face_id": getattr(f, "entityToken", None)},
+            )
+        all_planes.append((f, of, nf))
+    # Conservative proof 4: an unambiguous wall pair is bounded by exactly two
     # parallel planes. A cavity/hollow part has an internal parallel face strictly
-    # between the pair, which makes the wall pair ambiguous. The signed bounds are
-    # normalized (min/max) so the check is independent of the face_a/face_b order.
+    # between the pair (all faces are now proven planar, so nothing is skipped).
+    # The signed bounds are normalized (min/max) so the check is independent of
+    # the face_a/face_b order.
     signed_a = _dot(na, oa)
     signed_b = _dot(na, ob)
     lo_signed = min(signed_a, signed_b)
@@ -968,26 +1011,17 @@ def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
             "UNSUPPORTED_GEOMETRY",
             "Face-to-face thickness requires a positive wall gap",
         )
-    faces = getattr(body_a, "faces", None)
-    if faces is not None and hasattr(faces, "count"):
-        for i in range(faces.count):
-            f = faces.item(i)
-            if f is face_a or f is face_b:
-                continue
-            try:
-                of, nf_raw = _face_plane(f)
-            except FusionScriptError:
-                continue
-            ang_f = _angle_deg(na, nf_raw)
-            if not (ang_f <= 0.01 or abs(ang_f - 180.0) <= 0.01):
-                continue
-            s_f = _dot(na, of)
-            if s_f > lo_signed + 1e-9 and s_f < hi_signed - 1e-9:
-                raise FusionScriptError(
-                    "UNSUPPORTED_GEOMETRY",
-                    "Face-to-face thickness is ambiguous: an internal parallel face lies between the pair (cavity or partitioned wall)",
-                    details={"face_id": getattr(f, "entityToken", None)},
-                )
+    for f, of, nf in all_planes:
+        ang_f = _angle_deg(na, nf)
+        if not (ang_f <= 0.01 or abs(ang_f - 180.0) <= 0.01):
+            continue
+        s_f = _dot(na, of)
+        if s_f > lo_signed + 1e-9 and s_f < hi_signed - 1e-9:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Face-to-face thickness is ambiguous: an internal parallel face lies between the pair (cavity or partitioned wall)",
+                details={"face_id": getattr(f, "entityToken", None)},
+            )
     thickness = _mm(abs(_dot(na, _sub(ob, oa))))
     return {
         "quantity": "thickness",

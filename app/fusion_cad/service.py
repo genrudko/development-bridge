@@ -196,33 +196,109 @@ class FusionCadService:
             return False
 
 
-    def _inject_inspect_target_hints(self, payload: dict[str, Any]) -> None:
-        """Resolve registry-known inspection targets into native resolution hints.
+    def _snapshot_selector_candidates(self, snapshot: Any) -> list[Any]:
+        """Collect the current/latest Task5 semantic snapshot candidate records
+        (components, occurrences, bodies, sketches, features, faces, edges)."""
+        candidates: list[Any] = []
+        for group in ("components", "occurrences", "bodies", "sketches", "features"):
+            candidates.extend(getattr(snapshot, group, ()))
+        for group in ("faces", "edges"):
+            items = getattr(snapshot, group, None)
+            if items:
+                candidates.extend(items)
+        return candidates
 
-        Inspection targets that were issued by this service are translated into
+    def _resolve_inspect_selector(
+        self, selector: Any, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Resolve an inspect EntitySelector target through the Task5 SelectorEngine
+        with EXACT-ONE cardinality and inject the resulting opaque ref / native
+        resolution hint. Fails closed with SELECTOR_EMPTY or SELECTOR_AMBIGUOUS
+        when exact-one cannot be proven."""
+        doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+        if not doc_ref:
+            raise FusionCadError(
+                ErrorCode.SELECTOR_EMPTY,
+                "Inspection selector could not be resolved without a document context",
+                details={"document_ref": doc_ref},
+            )
+        snap = self._snapshot_store.get_latest(doc_ref)
+        if snap is None:
+            raise FusionCadError(
+                ErrorCode.SELECTOR_EMPTY,
+                "Inspection selector matched nothing: no current semantic snapshot for the document",
+                details={"document_ref": doc_ref},
+            )
+        candidates = self._snapshot_selector_candidates(snap)
+        matched = self._selector_engine.resolve_one(selector, candidates)
+        if isinstance(matched, Mapping):
+            ref = matched.get("ref")
+            kind = matched.get("kind")
+            name = matched.get("name")
+            comp_path = matched.get("component_path") or ()
+        else:
+            ref = getattr(matched, "ref", None)
+            kind = getattr(matched, "kind", None)
+            name = getattr(matched, "name", None)
+            comp_path = getattr(matched, "component_path", None) or ()
+        if not isinstance(ref, str) or not re.match(ENTITY_REF_PATTERN, ref):
+            raise FusionCadError(
+                ErrorCode.SELECTOR_EMPTY,
+                "Inspection selector resolved a candidate without a usable opaque ref",
+                details={"document_ref": doc_ref},
+            )
+        record = self._ref_registry.get_internal_record(ref, doc_ref)
+        if record is None or not record.native_token:
+            raise FusionCadError(
+                ErrorCode.SELECTOR_EMPTY,
+                "Inspection selector resolved a target with no native resolution hint; cannot prove exact resolution",
+                details={"document_ref": doc_ref, "ref": ref},
+            )
+        hint: dict[str, Any] = {
+            "ref": ref,
+            "kind": kind or "entity",
+            "name": name,
+            "component_path": list(comp_path) if comp_path else None,
+            "native_token": record.native_token,
+        }
+        if record.geometry_signature:
+            hint["geometry_signature"] = dict(record.geometry_signature)
+        return hint
+
+    def _inject_inspect_target_hints(self, payload: dict[str, Any]) -> None:
+        """Resolve inspection targets (opaque refs OR EntitySelectors) into native hints.
+
+        Opaque EntityRef targets issued by this service are translated into
         {ref, kind, native_token, name, component_path, geometry_signature} hints
         so the static Fusion script can resolve them exactly via findEntityByToken.
-        Unregistered refs fall through to contextual resolution in the script.
+
+        EntitySelector (dict) targets are resolved first through the Task5
+        SelectorEngine with EXACT-ONE cardinality against the current semantic
+        snapshot, then the resulting opaque ref / native hint is injected. The
+        selector never falls through to the script's kind/name-only fallback.
+
+        Unregistered opaque refs fall through to contextual resolution in the script.
         """
         for key in ("target", "target_a", "target_b", "face_a", "face_b"):
             raw = payload.get(key)
-            if not isinstance(raw, str) or not re.match(ENTITY_REF_PATTERN, raw):
-                continue
-            record = self._ref_registry.get_internal_record(raw)
-            if record is None:
-                continue
-            payload[key] = {
-                "ref": record.ref,
-                "kind": record.kind,
-                "native_token": record.native_token,
-                "name": record.name,
-                "component_path": list(record.component_path),
-                "geometry_signature": (
-                    dict(record.geometry_signature)
-                    if record.geometry_signature
-                    else None
-                ),
-            }
+            if isinstance(raw, str) and re.match(ENTITY_REF_PATTERN, raw):
+                record = self._ref_registry.get_internal_record(raw)
+                if record is None:
+                    continue
+                payload[key] = {
+                    "ref": record.ref,
+                    "kind": record.kind,
+                    "native_token": record.native_token,
+                    "name": record.name,
+                    "component_path": list(record.component_path),
+                    "geometry_signature": (
+                        dict(record.geometry_signature)
+                        if record.geometry_signature
+                        else None
+                    ),
+                }
+            elif isinstance(raw, Mapping):
+                payload[key] = self._resolve_inspect_selector(raw, payload)
 
     def assert_fresh_for_mutation(
         self,
