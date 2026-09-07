@@ -3,12 +3,429 @@ def run():
     if op == "test_op":
         return make_result(data={"operation": op}, summary=f"Executed mutate:{op}")
 
+    _RESERVED_GROUP = "bridge.cad/v1"
+    _PROVENANCE_NAME = "provenance"
+    _MUTATION_OPS = ("set", "remove", "tag", "untag", "set_role", "clear_role")
+    _READ_OPS = ("get", "query", "provenance")
+
+    def _open_runtime():
+        import re as _re
+
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        doc = getattr(app, "activeDocument", None) if app else None
+        design = None
+        if doc is not None and hasattr(doc, "products"):
+            try:
+                design = doc.products.itemByClass("adsk::fusion::Design")
+            except Exception:
+                design = None
+        if not doc or not design:
+            raise FusionScriptError(
+                "NO_ACTIVE_DESIGN",
+                "Active document and design required for metadata operation",
+                details={"has_doc": bool(doc), "has_design": bool(design)},
+            )
+        doc_id = (
+            getattr(doc, "dataId", None)
+            or getattr(doc, "creationId", None)
+            or getattr(getattr(doc, "dataFile", None), "id", None)
+        )
+        if not doc_id or not str(doc_id).strip():
+            raise FusionScriptError(
+                "NO_ACTIVE_DESIGN",
+                "Document lacks stable runtime identity; mutable document name cannot be used as authoritative identity",
+                details={"name": getattr(doc, "name", None)},
+            )
+        clean = _re.sub(r"[^A-Za-z0-9._-]", "_", str(doc_id).strip())
+        safe_doc = clean if clean.startswith("doc_") else f"doc_{clean}"
+        req_doc = PAYLOAD.get("document_ref")
+        if req_doc and req_doc != safe_doc:
+            raise FusionScriptError(
+                "WRONG_DOCUMENT",
+                f"Requested document_ref '{req_doc}' does not match active document runtime identity '{safe_doc}'",
+                details={"requested": req_doc, "active": safe_doc},
+            )
+        return app, doc, design, safe_doc
+
+    def _doc_state(safe_doc, doc):
+        return {
+            "document_ref": safe_doc,
+            "model_revision": PAYLOAD.get("expected_revision") or "rev_1",
+            "name": getattr(doc, "name", "active"),
+            "units": "mm",
+        }
+
+    def _owner_attributes(owner):
+        attrs = getattr(owner, "attributes", None)
+        if attrs is None or not hasattr(attrs, "count") or not hasattr(attrs, "item"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Owner attribute collection is unreadable; metadata cannot be accessed safely",
+                details={},
+            )
+        items = []
+        for idx in range(attrs.count):
+            a = attrs.item(idx)
+            if a is None:
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    f"Attribute {idx} on metadata owner is unreadable (None)",
+                )
+            items.append(a)
+        return attrs, items
+
+    def _read_records(owner, owner_type, group_filter=None, name_filter=None, value_filter=None):
+        _, items = _owner_attributes(owner)
+        records = []
+        for a in items:
+            grp = str(getattr(a, "groupName", "") or "")
+            nm = str(getattr(a, "name", "") or "")
+            if group_filter and grp != group_filter:
+                continue
+            if name_filter and nm != name_filter:
+                continue
+            val = str(getattr(a, "value", "") or "")
+            if value_filter is not None and val != value_filter:
+                continue
+            records.append(
+                {"group": grp, "name": nm, "value": val, "owner_type": owner_type}
+            )
+        return records
+
+    def _resolve_owner(doc, design, target):
+        """Resolve the metadata owner: exact native-token targets only, else the document."""
+        if isinstance(target, dict):
+            token = target.get("native_token")
+            if token:
+                if not hasattr(design, "findEntityByToken"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Entity-token resolver unavailable; cannot resolve metadata target exactly",
+                        details={"ref": target.get("ref")},
+                    )
+                try:
+                    resolved = design.findEntityByToken(token)
+                except Exception:
+                    resolved = None
+                matches = []
+                if resolved is not None:
+                    if hasattr(resolved, "count"):
+                        matches = [resolved.item(i) for i in range(resolved.count)]
+                    else:
+                        matches = [resolved]
+                if len(matches) == 1:
+                    return matches[0], target.get("ref")
+                if len(matches) > 1:
+                    raise FusionScriptError(
+                        "REF_AMBIGUOUS",
+                        "Metadata target resolves to multiple current entities; refusing to pick one",
+                        details={"ref": target.get("ref")},
+                    )
+                raise FusionScriptError(
+                    "REF_STALE",
+                    "Metadata target no longer resolves to a current entity",
+                    details={"ref": target.get("ref")},
+                )
+            return doc, target.get("ref")
+        return doc, None
+
+    def _public_target(target, target_ref):
+        if target_ref:
+            return target_ref
+        if isinstance(target, str):
+            return target
+        return None
+
+    if op in _MUTATION_OPS:
+        # Authoritative Fusion-side freshness guard runs in this SAME command
+        # execution, with no return to UI between guard and apply.
+        expected_fp = PAYLOAD.get("expected_fingerprint")
+        current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
+        if expected_fp is None or expected_fp != current_fp:
+            return make_error(
+                "REVISION_CONFLICT",
+                "Authoritative Fusion-side guard: model fingerprint diverged from baseline",
+                details={
+                    "document_ref": doc_ref,
+                    "expected_revision": PAYLOAD.get("expected_revision"),
+                    "expected_fingerprint": expected_fp,
+                    "current_fingerprint": current_fp,
+                    "applied": False,
+                },
+            )
+
+        # The complete metadata side of this ONE command is planned by the Bridge:
+        # explicit requested writes/removals PLUS the provenance write. Geometry or
+        # metadata change and provenance are applied by this single execution; no
+        # hidden post-commit metadata command exists.
+        writes = PAYLOAD.get("metadata_writes")
+        removals = PAYLOAD.get("metadata_removals")
+        if not isinstance(writes, list) or not isinstance(removals, list):
+            raise FusionScriptError(
+                "INVALID_ARGUMENT",
+                "Metadata mutation payload lacks the one-command metadata plan (metadata_writes/metadata_removals)",
+                details={"operation": op},
+            )
+
+        _app, doc, design, safe_doc = _open_runtime()
+        owner, target_ref = _resolve_owner(doc, design, PAYLOAD.get("target"))
+
+        applied_writes = []
+        applied_removals = []
+
+        for removal in removals:
+            if not isinstance(removal, dict):
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata removal plan contains a non-object entry",
+                    details={"operation": op},
+                )
+            rm_name = str(removal.get("name", "") or "")
+            if not rm_name:
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata removal plan contains an empty attribute name",
+                    details={"operation": op},
+                )
+            expected_val = removal.get("value")
+            attrs, items = _owner_attributes(owner)
+            for a in items:
+                if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                    continue
+                if str(getattr(a, "name", "") or "") != rm_name:
+                    continue
+                if expected_val is not None and str(
+                    getattr(a, "value", "") or ""
+                ) != str(expected_val):
+                    continue
+                if not hasattr(a, "deleteMe"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Attribute does not support deleteMe; failing closed instead of leaving stale Bridge metadata",
+                        details={"operation": op},
+                    )
+                a.deleteMe()
+                applied_removals.append(
+                    {
+                        "name": rm_name,
+                        "value": str(expected_val) if expected_val is not None else None,
+                    }
+                )
+
+        for write in writes:
+            if not isinstance(write, dict):
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata write plan contains a non-object entry",
+                    details={"operation": op},
+                )
+            wr_name = str(write.get("name", "") or "")
+            wr_value = write.get("value")
+            if not wr_name or wr_value is None:
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata write plan contains an empty attribute name or missing value",
+                    details={"operation": op},
+                )
+            attrs, _items = _owner_attributes(owner)
+            if not hasattr(attrs, "add"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Attribute collection does not support writes; failing closed",
+                    details={"operation": op},
+                )
+            attrs.add(_RESERVED_GROUP, wr_name, str(wr_value))
+            applied_writes.append({"name": wr_name, "value": str(wr_value)})
+
+        if not applied_writes:
+            raise FusionScriptError(
+                "INVALID_ARGUMENT",
+                "Metadata mutation plan produced no attribute writes; provenance cannot be recorded transactionally",
+                details={"operation": op},
+            )
+
+        # Geometry primitive (when present) is part of THIS same command execution
+        primitive_hook = globals().get("_mutation_primitive")
+        if callable(primitive_hook):
+            primitive_hook(PAYLOAD)
+
+        # Freshly collect real post-apply fingerprint of actual model state
+        post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+        if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
+            return make_error(
+                "FINGERPRINT_FAILED",
+                "Authoritative post-apply model fingerprint collection failed or returned empty",
+                details={"document_ref": post_doc_ref or doc_ref, "applied": False},
+            )
+        if post_fp == current_fp:
+            return make_error(
+                "MUTATION_FAILED",
+                "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
+                details={
+                    "document_ref": post_doc_ref or doc_ref,
+                    "initial_fingerprint": current_fp,
+                    "post_fingerprint": post_fp,
+                    "applied": False,
+                },
+            )
+
+        result_data = {
+            "operation": op,
+            "applied": True,
+            "fingerprint": post_fp,
+            "document_ref": post_doc_ref or doc_ref,
+            "target": _public_target(PAYLOAD.get("target"), target_ref),
+            "attributes": applied_writes,
+            "removed": applied_removals,
+            "provenance": PAYLOAD.get("provenance"),
+        }
+        return make_result(
+            data=result_data,
+            summary=f"Executed mutate:{op}",
+            document=_doc_state(safe_doc, doc),
+            changed_refs=[target_ref] if target_ref else [],
+        )
+
+    if op in _READ_OPS:
+        # Read-only metadata: no expected_revision, no mutation, no fingerprint write.
+        _app, doc, design, safe_doc = _open_runtime()
+        group_filter = PAYLOAD.get("group") or _RESERVED_GROUP
+        name_filter = PAYLOAD.get("name")
+        value_filter = PAYLOAD.get("value")
+        if value_filter is not None:
+            value_filter = str(value_filter)
+
+        if op == "get":
+            owner, target_ref = _resolve_owner(doc, design, PAYLOAD.get("target"))
+            records = _read_records(
+                owner, "document" if owner is doc else "entity", group_filter, name_filter
+            )
+            return make_result(
+                data={
+                    "target": _public_target(PAYLOAD.get("target"), target_ref),
+                    "group": group_filter,
+                    "records": records,
+                    "count": len(records),
+                },
+                summary=f"Executed mutate:{op}",
+                document=_doc_state(safe_doc, doc),
+            )
+
+        if op == "provenance":
+            owner, target_ref = _resolve_owner(doc, design, PAYLOAD.get("target"))
+            records = _read_records(
+                owner,
+                "document" if owner is doc else "entity",
+                _RESERVED_GROUP,
+                _PROVENANCE_NAME,
+            )
+            return make_result(
+                data={
+                    "target": _public_target(PAYLOAD.get("target"), target_ref),
+                    "group": _RESERVED_GROUP,
+                    "records": records,
+                    "count": len(records),
+                },
+                summary=f"Executed mutate:{op}",
+                document=_doc_state(safe_doc, doc),
+            )
+
+        # query: scan all metadata owners and surface records plus selector-ready
+        # candidates carrying their persisted model attributes.
+        records = []
+        candidates = []
+
+        def _collect(owner, owner_type, name_hint, token):
+            owner_records = _read_records(
+                owner, owner_type, group_filter, name_filter, value_filter
+            )
+            records.extend(owner_records)
+            if owner_records and token:
+                candidates.append(
+                    {
+                        "entityToken": token,
+                        "name": name_hint,
+                        "kind": owner_type,
+                        "attributes": owner_records,
+                    }
+                )
+
+        def _owner_token(owner):
+            token = getattr(owner, "entityToken", None) or getattr(owner, "id", None)
+            return str(token).strip() if token else None
+
+        _collect(doc, "document", getattr(doc, "name", None), None)
+
+        comps = getattr(design, "allComponents", None)
+        if comps is not None and hasattr(comps, "count"):
+            for i in range(comps.count):
+                c = comps.item(i)
+                if c is not None:
+                    _collect(c, "component", getattr(c, "name", None), _owner_token(c))
+
+        root = getattr(design, "rootComponent", None)
+        if root is not None:
+            occs = getattr(root, "allOccurrences", None)
+            if occs is not None and hasattr(occs, "count"):
+                for i in range(occs.count):
+                    o = occs.item(i)
+                    if o is not None:
+                        _collect(
+                            o, "occurrence", getattr(o, "name", None), _owner_token(o)
+                        )
+
+        if comps is not None and hasattr(comps, "count"):
+            for i in range(comps.count):
+                c = comps.item(i)
+                if c is None:
+                    continue
+                bodies = getattr(c, "bRepBodies", None)
+                if bodies is not None and hasattr(bodies, "count"):
+                    for bi in range(bodies.count):
+                        b = bodies.item(bi)
+                        if b is not None:
+                            _collect(
+                                b, "body", getattr(b, "name", None), _owner_token(b)
+                            )
+                sketches = getattr(c, "sketches", None)
+                if sketches is not None and hasattr(sketches, "count"):
+                    for si in range(sketches.count):
+                        s = sketches.item(si)
+                        if s is not None:
+                            _collect(
+                                s, "sketch", getattr(s, "name", None), _owner_token(s)
+                            )
+
+        timeline = getattr(design, "timeline", None)
+        if timeline is not None and hasattr(timeline, "count"):
+            for ti in range(timeline.count):
+                t = timeline.item(ti)
+                if t is None:
+                    continue
+                _collect(t, "feature", getattr(t, "name", None), _owner_token(t))
+                feat = getattr(t, "entity", None)
+                if feat is not None:
+                    _collect(
+                        feat, "feature", getattr(feat, "name", None), _owner_token(feat)
+                    )
+
+        return make_result(
+            data={
+                "group": group_filter,
+                "records": records,
+                "count": len(records),
+                "candidates": candidates,
+            },
+            summary=f"Executed mutate:{op}",
+            document=_doc_state(safe_doc, doc),
+        )
+
+    # Fallback for other mutate-group operations (style/text, Task 11): keep the
+    # authoritative guard + primitive + post-fingerprint structure unchanged.
     expected_fp = PAYLOAD.get("expected_fingerprint")
-
-    # Authoritative Fusion-side freshness guard:
-    # Freshly collect current fingerprint before any apply
-    current_fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
-
+    current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
     if expected_fp is None or expected_fp != current_fp:
         return make_error(
             "REVISION_CONFLICT",
@@ -22,33 +439,19 @@ def run():
             },
         )
 
-    # Guard passed: execute mutation primitive
+    _app, doc, design, safe_doc = _open_runtime()
+
     primitive_hook = globals().get("_mutation_primitive")
     if callable(primitive_hook):
         primitive_hook(PAYLOAD)
 
-    try:
-        import adsk.core
-        app = adsk.core.Application.get()
-        if app and getattr(app, "activeDocument", None):
-            doc = app.activeDocument
-            if hasattr(doc, "attributes") and op in ("set", "tag"):
-                target = PAYLOAD.get("target") or "document"
-                name = PAYLOAD.get("tag_name") or PAYLOAD.get("name") or "marker"
-                val = PAYLOAD.get("value") or "true"
-                doc.attributes.add("bridge.cad/v1", f"{target}:{name}", str(val))
-    except Exception as exc:
-        raise RuntimeError(f"Mutation primitive failed: {exc}") from exc
-
-    # Freshly collect real post-apply fingerprint of actual model state
-    post_fp, post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+    post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
     if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
         return make_error(
             "FINGERPRINT_FAILED",
             "Authoritative post-apply model fingerprint collection failed or returned empty",
             details={"document_ref": post_doc_ref or doc_ref, "applied": False},
         )
-
     if post_fp == current_fp:
         return make_error(
             "MUTATION_FAILED",
@@ -61,14 +464,14 @@ def run():
             },
         )
 
-    result_data = {
-        "operation": op,
-        "applied": True,
-        "fingerprint": post_fp,
-        "document_ref": post_doc_ref or doc_ref,
-    }
     return make_result(
-        data=result_data,
+        data={
+            "operation": op,
+            "applied": True,
+            "fingerprint": post_fp,
+            "document_ref": post_doc_ref or doc_ref,
+        },
         summary=f"Executed mutate:{op}",
+        document=_doc_state(safe_doc, doc),
         changed_refs=[PAYLOAD.get("target")] if PAYLOAD.get("target") else [],
     )

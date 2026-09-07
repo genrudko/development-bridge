@@ -26,6 +26,11 @@ from app.fusion_cad.errors import (
     trusted_detail,
 )
 from app.fusion_cad.inspect import normalize_inspect_result
+from app.fusion_cad.metadata import (
+    apply_metadata_mutation_plan,
+    assert_reserved_metadata_group,
+    parse_provenance_attribute,
+)
 from app.fusion_cad.models import (
     ENTITY_REF_PATTERN,
     CadResult,
@@ -150,6 +155,13 @@ class _CachedNodeCapabilities:
 
 
 CAD_RESULT_INLINE_LIMIT_BYTES: int = 1_048_576
+
+# Task 10: reserved-namespace metadata operations (fusion_metadata family)
+_METADATA_READ_OPS = frozenset({"get", "query", "provenance"})
+_METADATA_MUTATION_OPS = frozenset(
+    {"set", "remove", "tag", "untag", "set_role", "clear_role"}
+)
+_METADATA_OPS = _METADATA_READ_OPS | _METADATA_MUTATION_OPS
 
 _VIEW_FINALIZE_OPS = frozenset(
     {
@@ -415,6 +427,134 @@ class FusionCadService:
                 }
             elif isinstance(raw, Mapping):
                 payload[key] = self._resolve_inspect_selector(raw, payload)
+
+    def _inject_metadata_target_hint(self, payload: dict[str, Any]) -> None:
+        """Resolve a metadata target into an exact native hint when registered.
+
+        Registered opaque refs become {ref, kind, native_token, ...} hints bound
+        to the effective document context. Unregistered refs pass through so the
+        script falls back to the document owner (metadata applied at document
+        scope) instead of fabricating an entity resolution.
+        """
+        raw = payload.get("target")
+        if isinstance(raw, Mapping):
+            payload["target"] = self._resolve_inspect_selector(raw, payload)
+            return
+        if isinstance(raw, str) and re.match(ENTITY_REF_PATTERN, raw):
+            doc_ref = (
+                payload.get("document_ref")
+                or self._revision_tracker.active_document_ref
+            )
+            record = (
+                self._ref_registry.get_internal_record(raw, doc_ref)
+                if doc_ref
+                else self._ref_registry.get_internal_record(raw)
+            )
+            if record is not None and record.native_token:
+                hint: dict[str, Any] = {
+                    "ref": record.ref,
+                    "kind": record.kind,
+                    "name": record.name,
+                    "native_token": record.native_token,
+                    "component_path": list(record.component_path),
+                }
+                if record.geometry_signature:
+                    hint["geometry_signature"] = dict(record.geometry_signature)
+                payload["target"] = hint
+
+    def _prepare_metadata_payload(self, payload: dict[str, Any], op: str) -> None:
+        """Task 10 payload preparation for reserved-namespace metadata operations.
+
+        Mutations get the one-command plan (explicit writes/removals plus the
+        provenance write) executed by the same script execution as any geometry
+        change; reads are normalized to the reserved namespace. Foreign groups
+        fail closed before any dispatch.
+        """
+        if op == "set" and "name" not in payload:
+            # fusion_style visibility set: not a metadata operation
+            return
+        if op in _METADATA_MUTATION_OPS:
+            apply_metadata_mutation_plan(payload)
+        elif op in _METADATA_READ_OPS:
+            payload["group"] = assert_reserved_metadata_group(payload.get("group"))
+        else:
+            return
+        if "target" in payload:
+            self._inject_metadata_target_hint(payload)
+
+    def _finalize_metadata_execution(
+        self,
+        cad_result: CadResult,
+        *,
+        op: str,
+        payload: dict[str, Any],
+        target_doc: str | None,
+    ) -> CadResult:
+        """Normalize Task 10 metadata results without exposing native owner tokens."""
+        data = dict(cad_result.data) if isinstance(cad_result.data, Mapping) else {}
+        if op == "set" and "name" not in payload:
+            # fusion_style visibility set: not a metadata operation
+            return cad_result
+        if op in _METADATA_MUTATION_OPS:
+            if data.get("applied") is not True:
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Metadata mutation completed without applied=True; failing closed",
+                    details={"operation": op},
+                )
+            provenance = data.get("provenance")
+            if not isinstance(provenance, Mapping):
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Metadata mutation result lacks the transactional provenance record; failing closed",
+                    details={"operation": op},
+                )
+            summary = f"Metadata {op} applied with provenance"
+        else:
+            if op == "provenance":
+                records = data.get("records") or []
+                first = records[0] if records else None
+                value = first.get("value") if isinstance(first, Mapping) else None
+                data["provenance"] = (
+                    parse_provenance_attribute(value).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                    if value is not None
+                    else None
+                )
+                data.pop("records", None)
+            if op == "query":
+                cleaned: list[Any] = []
+                for idx, cand in enumerate(data.get("candidates") or []):
+                    if not isinstance(cand, Mapping):
+                        continue
+                    d = dict(cand)
+                    native_token = (
+                        d.get("entityToken") or d.get("native_token") or d.get("token")
+                    )
+                    d.pop("entityToken", None)
+                    d.pop("native_token", None)
+                    d.pop("token", None)
+                    if native_token and target_doc:
+                        issued = self._ref_registry.issue(
+                            document_ref=target_doc,
+                            kind=str(d.get("kind") or "entity"),
+                            name=d.get("name"),
+                            native_token=str(native_token),
+                        )
+                        d["ref"] = issued.ref
+                    else:
+                        d["ref"] = d.get("ref") or f"ent_meta_{idx}"
+                    cleaned.append(d)
+                data["candidates"] = cleaned
+                data["candidate_count"] = len(cleaned)
+            summary = f"Metadata {op} read from persisted model attributes"
+        return cad_result.model_copy(
+            update={
+                "data": ImmutableMapping(sanitize_public_payload(data)),
+                "summary": summary,
+            }
+        )
 
     def assert_fresh_for_mutation(
         self,
@@ -1475,6 +1615,19 @@ class FusionCadService:
                     update={"data": ImmutableMapping(norm_inspect)}
                 )
 
+            # 5b. Task 10 metadata result normalization (reserved namespace only)
+            if (
+                effective_bundle_group == "mutate"
+                and op in _METADATA_OPS
+                and isinstance(cad_result.data, (dict, Mapping))
+            ):
+                cad_result = self._finalize_metadata_execution(
+                    cad_result,
+                    op=op,
+                    payload=payload,
+                    target_doc=target_doc if isinstance(target_doc, str) else None,
+                )
+
             # 6. Semantic view normalization: camera/visibility/section + immutable ViewRef
             if effective_bundle_group == "view" and op in _VIEW_FINALIZE_OPS:
                 cad_result = self._finalize_view_operation(
@@ -1996,6 +2149,13 @@ class FusionCadService:
 
         # Remove caller-supplied synthetic authority
         payload.pop("mock_model_state", None)
+
+        # Task 10: reserved-namespace metadata preparation. Metadata writes get
+        # the one-command plan (explicit writes/removals plus provenance) applied
+        # by the SAME script execution as any geometry change; foreign groups
+        # fail closed before dispatch.
+        if effective_bundle_group == "mutate" and op in _METADATA_OPS:
+            self._prepare_metadata_payload(payload, op)
 
         # Inspection targets known to this service get exact native resolution hints;
         # view zoom/orient target operations reuse the exact Task5/Task7 ref machinery.

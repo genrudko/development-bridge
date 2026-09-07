@@ -6435,3 +6435,492 @@ async def test_fusion_inspect_face_oriented_bbox_straight_edges_exact_curved_edg
                 group="inspect",
             )
         assert exc_curved.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+# =========================================================================
+# Task 10: transactional metadata, roles, tags, provenance
+# =========================================================================
+
+from app.fusion_cad.metadata import (
+    PROVENANCE_ATTRIBUTE_NAME,
+    PROVENANCE_CREATOR_TOOL,
+    RESERVED_METADATA_GROUP,
+    parse_provenance_attribute,
+)
+
+_METADATA_MUTATION_OPS = frozenset(
+    {"set", "remove", "tag", "untag", "set_role", "clear_role"}
+)
+
+
+def _payload_operation(script: str):
+    for line in script.splitlines():
+        if line.startswith("PAYLOAD_RAW = "):
+            raw = line[len("PAYLOAD_RAW = "):]
+            return json.loads(json.loads(raw) if raw.startswith('"') else raw).get(
+                "operation"
+            )
+    return None
+
+
+class FakeFusionDesktop:
+    """fake_desktop: executes rendered production scripts against a fake Fusion
+    runtime and counts mutation dispatches separately from read dispatches so the
+    one-command geometry+provenance invariant can be proven."""
+
+    def __init__(self, fake_adsk):
+        self._fake_adsk = fake_adsk
+        self.mutation_calls = 0
+        self.read_calls = 0
+        self.mutation_primitive = None
+
+    def _dispatch(self, arguments):
+        script = arguments["script"]
+        op = _payload_operation(script)
+        if op in _METADATA_MUTATION_OPS:
+            self.mutation_calls += 1
+        else:
+            self.read_calls += 1
+        scope = {"__name__": "__main__"}
+        if self.mutation_primitive is not None:
+            scope["_mutation_primitive"] = self.mutation_primitive
+        exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+
+    def get_session_generation(self, node_id):
+        return 1
+    async def call(self, node_id, tool_name, arguments, journal=None):
+        return self._dispatch(arguments)
+
+    async def submit(self, node_id, tool_name, arguments, journal=None):
+        return self._dispatch(arguments)
+
+
+def _enable_fake_attribute_removal(fake_adsk):
+    """Teach the fake attribute collections the real Fusion removal API
+    (Attribute.deleteMe) so metadata removals are exercised offline."""
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs_cls = type(doc.attributes)
+    if getattr(attrs_cls, "_bridge_remove_patched", False):
+        return
+    original_add = attrs_cls.add
+
+    def add_with_delete(self, group_name, name, value):
+        attr = original_add(self, group_name, name, value)
+        items = self._items
+        attr.deleteMe = lambda: items.remove(attr)
+        return attr
+
+    def remove(self, attr):
+        self._items.remove(attr)
+
+    attrs_cls.add = add_with_delete
+    attrs_cls.remove = remove
+    attrs_cls._bridge_remove_patched = True
+
+
+@pytest.fixture
+def fake_desktop():
+    """Yields {"adsk": fake_adsk, "desktop": FakeFusionDesktop} inside a fake Fusion runtime."""
+    with AdskFakeContext("doc_1", initial_volume=100.0) as fake_adsk:
+        _enable_fake_attribute_removal(fake_adsk)
+        yield {"adsk": fake_adsk, "desktop": FakeFusionDesktop(fake_adsk)}
+
+
+def _metadata_matrix():
+    return CapabilityMatrix.from_records(
+        [
+            CapabilityRecord(name="metadata.attributes", state="supported"),
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(
+                name="revision.external_change_detection", state="supported"
+            ),
+        ]
+    )
+
+
+def _register_body_ref(cad_service, doc="doc_1"):
+    return cad_service.ref_registry.issue(
+        document_ref=doc,
+        kind="body",
+        name="Body1",
+        native_token="body_token_1",
+    ).ref
+
+
+def _document_attributes():
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs = doc.attributes
+    return {
+        (attrs.item(i).groupName, attrs.item(i).name): attrs.item(i).value
+        for i in range(attrs.count)
+    }
+
+
+def _body_attributes():
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    design = doc.products.itemByClass("adsk::fusion::Design")
+    body = design.rootComponent.bRepBodies.item(0)
+    attrs = body.attributes
+    return {
+        (attrs.item(i).groupName, attrs.item(i).name): attrs.item(i).value
+        for i in range(attrs.count)
+    }
+
+
+def _seed_unrelated_attributes(fake_adsk):
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    doc.attributes.add("vendor.custom", "color", "blue")
+    doc.attributes.add("bridge.cad/v1", "user_note", "keepme")
+
+
+async def _seed_baseline(cad_service, desktop):
+    """Seed the revision baseline from a real semantic read (never a synthetic fingerprint)."""
+    snap = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "model_snapshot"}, group="read"
+    )
+    assert isinstance(snap, CadResult)
+    return cad_service.revision_tracker.current("doc_1").revision
+
+
+@pytest.mark.asyncio
+async def test_geometry_and_provenance_use_one_mutation_command(fake_desktop):
+    """Geometry change + provenance + tag metadata are applied by exactly ONE
+    mutation command; no hidden post-commit metadata command may follow."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    desktop.mutation_primitive = lambda payload: setattr(
+        fake_adsk, "volume", float(fake_adsk.volume) + 25.0
+    )
+
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+
+    # Semantic read seeds the revision baseline (a read dispatch, not a mutation)
+    snap = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "model_snapshot"}, group="read"
+    )
+    assert isinstance(snap, CadResult)
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+    assert desktop.mutation_calls == 0
+    assert desktop.read_calls == 1
+
+    # ONE command must apply the geometry change AND provenance + tag metadata
+    res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "tag",
+            "target": "ent_body_layout",
+            "tag_name": "layout",
+            "tag_value": "schedule",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    res_data = res.data if isinstance(res, CadResult) else res["data"]
+
+    assert desktop.mutation_calls == 1, (
+        "geometry + provenance must be applied by one mutation command"
+    )
+    assert desktop.read_calls == 1, "no hidden post-commit metadata command may follow"
+    # Geometry changed inside that same single command
+    assert fake_adsk.volume == 125.0
+
+    attrs = _document_attributes()
+    assert attrs.get(("bridge.cad/v1", "tag:layout")) == "schedule"
+    provenance_value = attrs.get(("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME))
+    assert provenance_value
+    provenance = parse_provenance_attribute(provenance_value)
+    assert provenance.creator_tool == PROVENANCE_CREATOR_TOOL
+    assert provenance.creator_operation == "fusion_metadata:tag"
+    assert provenance.operation_id.startswith("op_")
+    assert provenance.created_revision == "rev_1"
+    assert [(t.name, t.value) for t in provenance.tags] == [("layout", "schedule")]
+
+    # Result echoes the transactional provenance and advances the revision
+    assert res_data.get("applied") is True
+    assert res_data.get("provenance", {}).get("creator_operation") == "fusion_metadata:tag"
+    doc_state = res.document if isinstance(res, CadResult) else res["document"]
+    assert doc_state.model_revision == "rev_2"
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+
+@pytest.mark.asyncio
+async def test_metadata_set_remove_preserves_unrelated_fusion_attributes(fake_desktop):
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    _seed_unrelated_attributes(fake_adsk)
+
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+
+    body_ref = _register_body_ref(cad_service)
+
+    res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set",
+            "target": body_ref,
+            "name": "finish",
+            "value": {"roughness": 0.4, "coating": "anodized"},
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    res_data = res.data if isinstance(res, CadResult) else res["data"]
+    assert res_data.get("applied") is True
+    body_attrs = _body_attributes()
+    assert json.loads(body_attrs.get(("bridge.cad/v1", "finish"))) == {
+        "roughness": 0.4,
+        "coating": "anodized",
+    }
+    # Provenance persisted on the same target inside the same command
+    assert body_attrs.get(("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME))
+    # Unrelated Fusion attributes preserved untouched
+    assert _document_attributes().get(("vendor.custom", "color")) == "blue"
+    assert _document_attributes().get(("bridge.cad/v1", "user_note")) == "keepme"
+
+    # remove removes only the named reserved-namespace key on that owner
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "remove",
+            "target": body_ref,
+            "name": "finish",
+            "expected_revision": "rev_2",
+        },
+        group="metadata",
+    )
+    body_attrs = _body_attributes()
+    assert ("bridge.cad/v1", "finish") not in body_attrs
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) in body_attrs
+    assert _document_attributes().get(("vendor.custom", "color")) == "blue"
+    assert _document_attributes().get(("bridge.cad/v1", "user_note")) == "keepme"
+    assert desktop.mutation_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_metadata_get_query_provenance_roundtrip_readonly(fake_desktop):
+    desktop = fake_desktop["desktop"]
+
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "tag",
+            "target": body_ref,
+            "tag_name": "layout",
+            "tag_value": "schedule",
+            "transaction_id": "tx_layout_9",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    mutations_so_far = desktop.mutation_calls
+
+    # get is read-only and never requires expected_revision
+    res_get = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "get", "target": body_ref},
+        group="metadata",
+    )
+    data_get = res_get.data if isinstance(res_get, CadResult) else res_get["data"]
+    by_name = {r["name"]: r["value"] for r in data_get.get("records", [])}
+    assert by_name.get("tag:layout") == "schedule"
+    assert data_get.get("count") == len(data_get.get("records", []))
+    assert desktop.mutation_calls == mutations_so_far
+
+    # query filters persisted records by name/value
+    res_query = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "query",
+            "name": "tag:layout",
+            "value": "schedule",
+        },
+        group="metadata",
+    )
+    data_query = (
+        res_query.data if isinstance(res_query, CadResult) else res_query["data"]
+    )
+    assert data_query.get("count") == 1
+
+    res_miss = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "query", "name": "tag:missing"},
+        group="metadata",
+    )
+    data_miss = res_miss.data if isinstance(res_miss, CadResult) else res_miss["data"]
+    assert data_miss.get("count") == 0
+    assert desktop.mutation_calls == mutations_so_far
+
+    # provenance op returns the persisted provenance record
+    res_prov = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "provenance", "target": body_ref},
+        group="metadata",
+    )
+    data_prov = res_prov.data if isinstance(res_prov, CadResult) else res_prov["data"]
+    prov = data_prov.get("provenance")
+    assert prov["creator_operation"] == "fusion_metadata:tag"
+    assert prov["transaction_id"] == "tx_layout_9"
+    assert prov["created_revision"] == "rev_1"
+    assert desktop.mutation_calls == mutations_so_far
+
+    # Foreign groups are rejected for reads too: Bridge reads only its namespace
+    with pytest.raises(FusionCadError) as exc_foreign:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "get",
+                "target": body_ref,
+                "group": "vendor.custom",
+            },
+            group="metadata",
+        )
+    assert exc_foreign.value.code == ErrorCode.INVALID_ARGUMENT
+    assert desktop.mutation_calls == mutations_so_far
+
+
+@pytest.mark.asyncio
+async def test_metadata_role_set_clear_and_stale_conflict_preserves_attributes(
+    fake_desktop,
+):
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set_role",
+            "target": body_ref,
+            "role": "mounting_bracket",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    assert _body_attributes().get(("bridge.cad/v1", "role")) == "mounting_bracket"
+
+    # clear_role with a non-matching role value must not clear the existing role
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "clear_role",
+            "target": body_ref,
+            "role": "decorative_text",
+            "expected_revision": "rev_2",
+        },
+        group="metadata",
+    )
+    assert _body_attributes().get(("bridge.cad/v1", "role")) == "mounting_bracket"
+
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "clear_role",
+            "target": body_ref,
+            "expected_revision": "rev_3",
+        },
+        group="metadata",
+    )
+    assert ("bridge.cad/v1", "role") not in _body_attributes()
+
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "tag",
+            "target": body_ref,
+            "tag_name": "layout",
+            "tag_value": "schedule",
+            "expected_revision": "rev_4",
+        },
+        group="metadata",
+    )
+    mutations_so_far = desktop.mutation_calls
+
+    # External model change advances the observed revision; stale untag is blocked
+    cad_service.revision_tracker.observe("doc_1", "diverged-fp")
+    with pytest.raises(FusionCadError) as exc_stale:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "untag",
+                "target": body_ref,
+                "tag_name": "layout",
+                "expected_revision": "rev_4",
+            },
+            group="metadata",
+        )
+    assert exc_stale.value.code == ErrorCode.REVISION_CONFLICT
+    assert _body_attributes().get(("bridge.cad/v1", "tag:layout")) == "schedule"
+    assert desktop.mutation_calls == mutations_so_far
+
+
+@pytest.mark.asyncio
+async def test_role_tag_provenance_selectors_read_persisted_model_attributes(
+    fake_desktop,
+):
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "tag",
+            "target": body_ref,
+            "tag_name": "layout",
+            "tag_value": "schedule",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set_role",
+            "target": body_ref,
+            "role": "mounting_bracket",
+            "expected_revision": "rev_2",
+        },
+        group="metadata",
+    )
+
+    # Metadata query returns candidates carrying PERSISTED model attributes
+    res = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "query"}, group="metadata"
+    )
+    data = res.data if isinstance(res, CadResult) else res["data"]
+    candidates = data.get("candidates", [])
+    assert data.get("candidate_count") == 1
+    assert candidates[0]["ref"] == body_ref
+    attr_names = {r["name"] for r in candidates[0]["attributes"]}
+    assert {"tag:layout", "role", PROVENANCE_ATTRIBUTE_NAME}.issubset(attr_names)
+
+    # Selector engine resolves role/tag/provenance from those persisted attributes
+    engine = cad_service.selector_engine
+    assert engine.query(
+        {"tag": {"group": RESERVED_METADATA_GROUP, "name": "layout", "value": "schedule"}},
+        candidates,
+    ).refs == (body_ref,)
+    assert engine.query({"role": "mounting_bracket"}, candidates).refs == (body_ref,)
+    assert engine.query(
+        {"created_by": {"tool": PROVENANCE_CREATOR_TOOL}}, candidates
+    ).refs == (body_ref,)
+    assert engine.query({"tag": {"name": "missing"}}, candidates).matched_count == 0
