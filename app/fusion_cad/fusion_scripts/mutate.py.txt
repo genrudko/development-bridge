@@ -225,29 +225,46 @@ def run():
 
         Uses ONLY the verified primitives this script already uses for metadata
         (Attribute.deleteMe and Attributes.add); no transaction/undo APIs are
-        invented. Raises when the restored state does not match the pre-mutation
+        invented. The undo log distinguishes attributes this plan CREATED
+        (undone via deleteMe) from pre-existing attributes this plan OVERWROTE
+        or REMOVED (undone by re-adding the captured old value): real Fusion
+        Attributes.add(groupName, name, value) updates and returns the existing
+        same-group/same-name attribute instead of creating a new one, so a
+        returned Attribute is NOT proof of creation and deleteMe-ing it would
+        destroy pre-existing provenance/metadata instead of restoring its old
+        value. Raises when the restored state does not match the pre-mutation
         snapshot so a partially applied plan can never be reported as success.
         """
         if undo is None:
             return
-        added_attrs, removed_records, snapshot = undo
-        for attr in reversed(added_attrs):
-            if not hasattr(attr, "deleteMe"):
-                raise FusionScriptError(
-                    "CAPABILITY_UNAVAILABLE",
-                    "Added attribute does not support deleteMe; metadata compensation is unavailable and partial metadata may remain",
-                    details={"operation": op, "compensated": False},
-                )
-            attr.deleteMe()
+        undo_actions, snapshot = undo
         restore_attrs = getattr(owner, "attributes", None)
-        for name, value in reversed(removed_records):
-            if restore_attrs is None or not hasattr(restore_attrs, "add"):
+        for action in reversed(undo_actions):
+            kind = action[0]
+            if kind == "created":
+                attr = action[1]
+                if not hasattr(attr, "deleteMe"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Created attribute does not support deleteMe; metadata compensation is unavailable and partial metadata may remain",
+                        details={"operation": op, "compensated": False},
+                    )
+                attr.deleteMe()
+            elif kind == "restored":
+                name, value = action[1], action[2]
+                if restore_attrs is None or not hasattr(restore_attrs, "add"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Attribute collection does not support writes; metadata compensation is unavailable and partial metadata may remain",
+                        details={"operation": op, "compensated": False},
+                    )
+                restore_attrs.add(_RESERVED_GROUP, name, value)
+            else:
                 raise FusionScriptError(
-                    "CAPABILITY_UNAVAILABLE",
-                    "Attribute collection does not support writes; metadata compensation is unavailable and partial metadata may remain",
+                    "FUSION_API_ERROR",
+                    "Unknown undo action; metadata compensation is unavailable and partial metadata may remain",
                     details={"operation": op, "compensated": False},
                 )
-            restore_attrs.add(_RESERVED_GROUP, name, value)
         current = sorted(_reserved_records(owner))
         if current != sorted(snapshot):
             raise FusionScriptError(
@@ -265,8 +282,8 @@ def run():
         command never leaves partial metadata/provenance behind.
         """
         snapshot = _reserved_records(owner)
-        undo = ([], [], snapshot)
-        added_attrs, removed_records, _snap = undo
+        undo_actions = []
+        undo = (undo_actions, snapshot)
         applied_writes = []
         applied_removals = []
         try:
@@ -303,7 +320,7 @@ def run():
                         )
                     removed_value = str(getattr(a, "value", "") or "")
                     a.deleteMe()
-                    removed_records.append((rm_name, removed_value))
+                    undo_actions.append(("restored", rm_name, removed_value))
                     applied_removals.append(
                         {
                             "name": rm_name,
@@ -328,15 +345,34 @@ def run():
                         "Metadata write plan contains an empty attribute name or missing value",
                         details={"operation": op},
                     )
-                attrs, _items = _owner_attributes(owner)
+                attrs, items = _owner_attributes(owner)
                 if not hasattr(attrs, "add"):
                     raise FusionScriptError(
                         "CAPABILITY_UNAVAILABLE",
                         "Attribute collection does not support writes; failing closed",
                         details={"operation": op},
                     )
+                # Real Fusion semantics: Attributes.add UPDATES and returns the
+                # EXISTING same-group/same-name attribute when the owner already
+                # has one. Capture the pre-add state so the undo log can
+                # distinguish a newly created attribute (undone via deleteMe)
+                # from an overwritten pre-existing attribute (undone by
+                # re-adding its captured old value).
+                existing_value = None
+                existed = False
+                for a in items:
+                    if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                        continue
+                    if str(getattr(a, "name", "") or "") != wr_name:
+                        continue
+                    existed = True
+                    existing_value = str(getattr(a, "value", "") or "")
+                    break
                 new_attr = attrs.add(_RESERVED_GROUP, wr_name, str(wr_value))
-                added_attrs.append(new_attr)
+                if existed:
+                    undo_actions.append(("restored", wr_name, existing_value))
+                else:
+                    undo_actions.append(("created", new_attr))
                 applied_writes.append({"name": wr_name, "value": str(wr_value)})
         except FusionScriptError:
             _rollback_metadata(owner, undo)

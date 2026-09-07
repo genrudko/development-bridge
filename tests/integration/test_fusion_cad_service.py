@@ -6555,6 +6555,36 @@ def _enable_fake_attribute_removal(fake_adsk):
     attrs_cls._bridge_remove_patched = True
 
 
+def _enable_fake_fusion_add_overwrite(fake_adsk):
+    """Teach the fake attribute collections the OFFICIAL Fusion semantics for
+    Attributes.add(groupName, name, value): when the owner already has an
+    attribute with the same group and name, add UPDATES that existing attribute
+    in place and returns the SAME object (no new object is appended). Used only
+    by the Fusion-like overwrite rollback regression; the base fake keeps its
+    append behavior for the other Task 10 tests."""
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs_cls = type(doc.attributes)
+    if getattr(attrs_cls, "_bridge_fusion_overwrite_patched", False):
+        return
+    base_add = attrs_cls.add
+
+    def add_with_fusion_overwrite(self, group_name, name, value):
+        for i in range(self.count):
+            existing = self.item(i)
+            if (
+                getattr(existing, "groupName", None) == group_name
+                and getattr(existing, "name", None) == name
+            ):
+                existing.value = value
+                return existing
+        return base_add(self, group_name, name, value)
+
+    attrs_cls.add = add_with_fusion_overwrite
+    attrs_cls._bridge_fusion_overwrite_patched = True
+
+
 @pytest.fixture
 def fake_desktop():
     """Yields {"adsk": fake_adsk, "desktop": FakeFusionDesktop} inside a fake Fusion runtime."""
@@ -7149,6 +7179,120 @@ async def test_metadata_mutation_compensates_partial_metadata_after_late_failure
     assert _body_attr_count() == baseline_body_attr_count
     # Document owner never received the metadata either
     assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _document_attributes()
+
+
+@pytest.mark.asyncio
+async def test_metadata_rollback_restores_overwritten_existing_attributes(
+    fake_desktop,
+):
+    """Critical (job_a050be6afa584741a63e739b5f29e4cb): under real Autodesk
+    Fusion semantics, Attributes.add(groupName, name, value) UPDATES and returns
+    the EXISTING same-group/same-name attribute instead of creating a new one.
+    The undo log must therefore distinguish a newly-created write (undone via
+    deleteMe) from an overwritten-existing write (undone by restoring the old
+    value) so a late failure restores the exact original reserved-namespace
+    state instead of deleting pre-existing provenance/metadata."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    # 1. First successful set creates "finish" + provenance on the body owner.
+    res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set",
+            "target": body_ref,
+            "name": "finish",
+            "value": "old-finish",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    res_data = res.data if isinstance(res, CadResult) else res["data"]
+    assert res_data.get("applied") is True
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+    # 2. Model the OFFICIAL Fusion add semantics from here on: a same
+    # group+name add updates the existing attribute object in place.
+    _enable_fake_fusion_add_overwrite(fake_adsk)
+
+    baseline_body_attrs = _body_attributes()
+    baseline_body_attr_count = _body_attr_count()
+    assert baseline_body_attrs[("bridge.cad/v1", "finish")] == "old-finish"
+    baseline_provenance = baseline_body_attrs[
+        ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME)
+    ]
+    assert baseline_provenance
+
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+
+    class _ExplodesOnSecondFingerprint:
+        """First fingerprint read (pre-guard) succeeds; the post-apply read
+        explodes, so the failure lands AFTER the plan overwrote the existing
+        attributes."""
+
+        def __init__(self):
+            self._reads = 0
+
+        def __bool__(self):
+            self._reads += 1
+            if self._reads >= 2:
+                raise RuntimeError("post-apply fingerprint collection exploded")
+            return False
+
+    doc.isModified = _ExplodesOnSecondFingerprint()
+
+    # 3. Re-set the SAME attribute name: the plan OVERWRITES the existing
+    # "finish" and provenance attributes (Fusion add semantics), then the
+    # post-apply fingerprint failure must compensate the whole plan.
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": body_ref,
+                "name": "finish",
+                "value": "anodized",
+                "expected_revision": "rev_2",
+            },
+            group="metadata",
+        )
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+
+    # 4. The exact original reserved-namespace state is restored: old values
+    # back, no pre-existing attribute deleted, no phantom duplicates.
+    assert _body_attributes() == baseline_body_attrs
+    assert _body_attr_count() == baseline_body_attr_count
+
+    # 5. A healthy retry of the same overwrite succeeds, updates the existing
+    # attributes in place (never duplicating), and records fresh provenance.
+    doc.isModified = False
+    retry = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set",
+            "target": body_ref,
+            "name": "finish",
+            "value": "anodized",
+            "expected_revision": "rev_2",
+        },
+        group="metadata",
+    )
+    retry_data = retry.data if isinstance(retry, CadResult) else retry["data"]
+    assert retry_data.get("applied") is True
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_3"
+    attrs_after = _body_attributes()
+    assert attrs_after[("bridge.cad/v1", "finish")] == "anodized"
+    assert (
+        attrs_after[("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME)]
+        != baseline_provenance
+    )
+    assert _body_attr_count() == baseline_body_attr_count
 
 
 @pytest.mark.asyncio
