@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -50,6 +51,12 @@ from app.fusion_cad.snapshots import (
     normalize_feature,
     normalize_sketch_read,
     normalize_snapshot,
+)
+from app.fusion_cad.views import (
+    ViewRefStore,
+    canonicalize_section_payload,
+    canonicalize_visibility_payload,
+    normalize_camera_context,
 )
 
 _GROUP_REQUEST_ADAPTERS: dict[str, TypeAdapter[Any]] = {
@@ -144,6 +151,18 @@ class _CachedNodeCapabilities:
 
 CAD_RESULT_INLINE_LIMIT_BYTES: int = 1_048_576
 
+_VIEW_FINALIZE_OPS = frozenset(
+    {
+        "camera_read",
+        "camera_set",
+        "fit",
+        "zoom_entity",
+        "orient_to_face",
+        "standard_view",
+        "screenshot",
+    }
+)
+
 
 class FusionCadService:
     """Domain service for Fusion CAD workstation operations.
@@ -160,6 +179,7 @@ class FusionCadService:
         revision_tracker: RevisionTracker | None = None,
         ref_registry: EntityRefRegistry | None = None,
         snapshot_store: SnapshotStore | None = None,
+        view_store: ViewRefStore | None = None,
         inline_limit_bytes: int = CAD_RESULT_INLINE_LIMIT_BYTES,
     ) -> None:
         self._desktop_nodes = desktop_nodes
@@ -167,6 +187,7 @@ class FusionCadService:
         self._revision_tracker = revision_tracker or RevisionTracker()
         self._ref_registry = ref_registry or EntityRefRegistry()
         self._snapshot_store = snapshot_store or SnapshotStore()
+        self._view_store = view_store or ViewRefStore()
         self._selector_engine = SelectorEngine()
         self.inline_limit_bytes = inline_limit_bytes
         self._node_capabilities: dict[str, _CachedNodeCapabilities] = {}
@@ -184,8 +205,59 @@ class FusionCadService:
         return self._snapshot_store
 
     @property
+    def view_store(self) -> ViewRefStore:
+        return self._view_store
+
+    @property
     def selector_engine(self) -> SelectorEngine:
         return self._selector_engine
+
+    def build_current_view_context(
+        self,
+        node_id: str,
+        document_ref: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Build the current immutable-view freshness context for a node/document.
+
+        Combines the latest observed camera/visibility/section state with the
+        current observed model revision. Returns None when no view context has
+        been observed for the node yet (Task 9 pick then fails closed).
+        """
+        state = self._view_store.current(node_id)
+        if state is None:
+            return None
+        doc_ref = document_ref or state.document_ref
+        rec = self._revision_tracker.current(doc_ref)
+        model_revision = rec.revision if rec is not None else None
+        return {
+            "model_revision": model_revision,
+            "camera_revision": state.camera_revision,
+            "visibility_revision": state.visibility_revision,
+            "section_revision": state.section_revision,
+            "viewport_width": state.camera.viewport_width,
+            "viewport_height": state.camera.viewport_height,
+        }
+
+    def assert_view_fresh(
+        self,
+        view_ref: str,
+        node_id: str,
+        document_ref: str | None = None,
+    ) -> Any:
+        """Assert a screenshot ViewRef is still fresh against current view context.
+
+        Implements the immutable view invariant before any screenshot coordinate
+        is ever reinterpreted. Exposed for Task 9 (screen-space pick) to consume;
+        this task only wires the freshness path.
+        """
+        current = self.build_current_view_context(node_id, document_ref)
+        if current is None:
+            raise FusionCadError(
+                ErrorCode.VIEW_STALE,
+                "Current view context is unknown for node; capture a camera or screenshot operation first",
+                details={"node_id": node_id, "view_ref": view_ref},
+            )
+        return self._view_store.assert_fresh(view_ref, current_context=current)
 
     def _is_oversized(self, payload: dict[str, Any]) -> bool:
         try:
@@ -667,6 +739,151 @@ class FusionCadService:
             "Unrecognized domain output format from native Fusion script: missing or invalid api_version 'fusion.cad/v1'",
             details={"content_type": "unknown"},
         )
+
+    def _finalize_view_operation(
+        self,
+        cad_result: CadResult,
+        *,
+        op: str,
+        payload: dict[str, Any],
+        node_id: str | None,
+    ) -> CadResult:
+        """Normalize a view operation result into canonical camera/visibility/section
+        state and bind immutable screenshot ViewRefs.
+
+        Camera operations update the node's current view context (invalidating
+        old ViewRefs) and never touch document save or model revision. Screenshots
+        bind an immutable ViewRef keyed to the current model revision; missing
+        model revision fails closed rather than guessing.
+        """
+        data = dict(cad_result.data) if isinstance(cad_result.data, Mapping) else {}
+        raw_camera = data.get("camera")
+        if not isinstance(raw_camera, Mapping):
+            raise FusionCadError(
+                ErrorCode.PRECONDITION_FAILED,
+                "View operation result is missing deterministic camera context; failing closed for exact view freshness",
+                details={"operation": op},
+            )
+        raw_viewport = data.get("viewport")
+        if isinstance(raw_viewport, Mapping):
+            raw_camera = dict(raw_camera)
+            raw_camera.setdefault("viewport_width", raw_viewport.get("width"))
+            raw_camera.setdefault("viewport_height", raw_viewport.get("height"))
+        camera = normalize_camera_context(raw_camera)
+        visibility_state = canonicalize_visibility_payload(data.get("visibility"))
+        section_state = canonicalize_section_payload(data.get("section"))
+
+        doc_ref = (
+            (cad_result.document.document_ref if cad_result.document else None)
+            or payload.get("document_ref")
+            or self._revision_tracker.active_document_ref
+        )
+        if not doc_ref:
+            raise FusionCadError(
+                ErrorCode.NO_ACTIVE_DESIGN,
+                "View operation requires an active document context; failing closed",
+                details={"operation": op},
+            )
+        if not node_id:
+            raise FusionCadError(
+                ErrorCode.INVALID_ARGUMENT,
+                "View operation requires a desktop node context",
+                details={"operation": op},
+            )
+
+        current = self._view_store.observe_camera(
+            node_id, doc_ref, camera, visibility_state, section_state
+        )
+
+        if op == "screenshot":
+            rec = self._revision_tracker.current(doc_ref)
+            if rec is None:
+                raise FusionCadError(
+                    ErrorCode.NO_ACTIVE_DESIGN,
+                    "Screenshot requires an observed model revision (capture a semantic read first); failing closed so the view can bind exact model freshness",
+                    details={"document_ref": doc_ref},
+                )
+            view_ref = f"view_{uuid.uuid4().hex[:12]}"
+            image_uri = f"resource://views/{view_ref}/image"
+            record = self._view_store.bind(
+                view_ref=view_ref,
+                document_ref=doc_ref,
+                model_revision=rec.revision,
+                camera=camera,
+                visibility_state=visibility_state,
+                section_state=section_state,
+                image=image_uri,
+                width=camera.viewport_width,
+                height=camera.viewport_height,
+            )
+            view_meta = {
+                "view_ref": record.view_ref,
+                "model_revision": record.model_revision,
+                "camera_revision": record.camera_revision,
+                "visibility_revision": record.visibility_revision,
+                "width": record.viewport_width,
+                "height": record.viewport_height,
+                "image": record.image,
+            }
+            artifacts: list[Any] = []
+            screenshot_b64 = data.get("screenshot_b64") or data.get("image_b64")
+            if isinstance(screenshot_b64, str) and screenshot_b64:
+                artifacts.append(
+                    ImmutableMapping(
+                        {
+                            "type": "image",
+                            "mime_type": "image/png",
+                            "encoding": "base64",
+                            "file_name": "fusion-cad-screenshot.png",
+                            "data": screenshot_b64,
+                        }
+                    )
+                )
+            return cad_result.model_copy(
+                update={
+                    "data": ImmutableMapping(view_meta),
+                    "artifacts": tuple(artifacts),
+                    "document": DocumentState(
+                        document_ref=doc_ref,
+                        model_revision=record.model_revision,
+                        name=cad_result.document.name if cad_result.document else None,
+                        units="mm",
+                    ),
+                    "summary": f"Screenshot bound to immutable view {record.view_ref}",
+                }
+            )
+
+        current_rec = self._revision_tracker.current(doc_ref)
+        read_payload = {
+            "camera": {
+                "eye": list(camera.eye),
+                "target": list(camera.target),
+                "up": list(camera.up),
+                "projection": camera.projection,
+                "fov_deg": camera.fov_deg,
+            },
+            "viewport": {
+                "width": camera.viewport_width,
+                "height": camera.viewport_height,
+            },
+            "camera_revision": current.camera_revision,
+            "visibility_revision": current.visibility_revision,
+            "section_revision": current.section_revision,
+            "visibility": visibility_state.get("entries", []),
+            "section": dict(section_state),
+        }
+        update: dict[str, Any] = {
+            "data": ImmutableMapping(read_payload),
+            "summary": f"View operation {op} captured camera context",
+        }
+        if current_rec is not None:
+            update["document"] = DocumentState(
+                document_ref=doc_ref,
+                model_revision=current_rec.revision,
+                name=cad_result.document.name if cad_result.document else None,
+                units="mm",
+            )
+        return cad_result.model_copy(update=update)
 
     def _finalize_completed_execution(
         self,
@@ -1191,6 +1408,12 @@ class FusionCadService:
                     update={"data": ImmutableMapping(norm_inspect)}
                 )
 
+            # 6. Semantic view normalization: camera/visibility/section + immutable ViewRef
+            if effective_bundle_group == "view" and op in _VIEW_FINALIZE_OPS:
+                cad_result = self._finalize_view_operation(
+                    cad_result, op=op, payload=payload, node_id=node_id
+                )
+
             domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
             if node_id and (
                 has_binary_data(domain_payload) or self._is_oversized(domain_payload)
@@ -1678,8 +1901,6 @@ class FusionCadService:
         if is_transaction_begin:
             _begin_tx_id = payload.get("transaction_id")
             if not _begin_tx_id:
-                import uuid
-
                 _begin_tx_id = f"tx_{uuid.uuid4().hex[:12]}"
                 payload["transaction_id"] = _begin_tx_id
             _begin_doc_ref = (
@@ -1702,8 +1923,12 @@ class FusionCadService:
         # Remove caller-supplied synthetic authority
         payload.pop("mock_model_state", None)
 
-        # Inspection targets known to this service get exact native resolution hints
-        if effective_bundle_group == "inspect":
+        # Inspection targets known to this service get exact native resolution hints;
+        # view zoom/orient target operations reuse the exact Task5/Task7 ref machinery.
+        if effective_bundle_group == "inspect" or (
+            effective_bundle_group == "view"
+            and op in ("zoom_entity", "orient_to_face")
+        ):
             self._inject_inspect_target_hints(payload)
 
         script = self._script_bundle.build(effective_bundle_group, payload)

@@ -1,3 +1,529 @@
+# fusion.cad/v1 view operations: camera, screenshot, immutable ViewRef capture.
+#
+# View operations mutate view state only; they never save the document and never
+# alter model revision. zoom_entity/orient_to_face resolve targets through the
+# exact Task5/Task7 ref machinery (resolve_fusion_entity) and fail closed unless
+# the resolution outcome is exact.
+
+import re
+
+_VIEW_OUTCOME_CODE = {
+    "exact": None,
+    "split": "REF_SPLIT",
+    "stale": "REF_STALE",
+    "ambiguous": "REF_AMBIGUOUS",
+    "wrong_document": "WRONG_DOCUMENT",
+}
+
+
+def _doc_identity():
+    import adsk.core
+
+    app = adsk.core.Application.get()
+    doc = getattr(app, "activeDocument", None)
+    if doc is None:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Active document required for view operations",
+        )
+    data_file = getattr(doc, "dataFile", None)
+    doc_id = (
+        getattr(doc, "dataId", None)
+        or getattr(doc, "creationId", None)
+        or (data_file and getattr(data_file, "id", None))
+    )
+    if not doc_id:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Document lacks stable runtime identity (dataId/creationId/dataFile.id); "
+            "mutable document name cannot be used for view identity",
+        )
+    clean_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(doc_id).strip())
+    return {"document_ref": f"doc_{clean_id}", "name": getattr(doc, "name", None)}
+
+
+def _verify_doc_identity(payload):
+    ident = _doc_identity()
+    req_doc = payload.get("document_ref") if isinstance(payload, dict) else None
+    if req_doc and req_doc != ident["document_ref"]:
+        raise FusionScriptError(
+            "WRONG_DOCUMENT",
+            f"Requested document_ref '{req_doc}' does not match active document runtime identity '{ident['document_ref']}'",
+            details={"requested_document_ref": req_doc, "active_document_ref": ident["document_ref"]},
+        )
+    return ident
+
+
+def _active_viewport():
+    import adsk.core
+
+    app = adsk.core.Application.get()
+    viewport = getattr(app, "activeViewport", None)
+    if viewport is None:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "Active viewport required for view operations",
+        )
+    return app, viewport
+
+
+def _capture_camera():
+    app, viewport = _active_viewport()
+    camera = getattr(viewport, "camera", None)
+    if camera is None:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "Active viewport camera required for view operations",
+        )
+    eye = getattr(camera, "eye", None)
+    target = getattr(camera, "target", None)
+    up = getattr(camera, "upVector", None)
+    if eye is None or target is None or up is None:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "Camera eye/target/upVector are unreadable; exact view capture fails closed",
+        )
+    is_persp = getattr(camera, "isPerspective", None)
+    if is_persp is None:
+        is_ortho = getattr(camera, "isOrthographic", None)
+        is_persp = is_ortho is False
+    projection = "perspective" if bool(is_persp) else "orthographic"
+    fov = getattr(camera, "fov", None)
+    fov_deg = None
+    if fov is not None:
+        try:
+            fov_deg = canonicalize_value(float(fov))
+        except (TypeError, ValueError):
+            raise FusionScriptError(
+                "PRECONDITION_FAILED",
+                "Camera fov is unreadable; exact view capture fails closed",
+            )
+    width = getattr(viewport, "width", None)
+    height = getattr(viewport, "height", None)
+    if width is None or height is None:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "Viewport width/height are unreadable; exact view capture fails closed",
+        )
+    camera_raw = {
+        "eye": [
+            canonicalize_value(float(eye.x)),
+            canonicalize_value(float(eye.y)),
+            canonicalize_value(float(eye.z)),
+        ],
+        "target": [
+            canonicalize_value(float(target.x)),
+            canonicalize_value(float(target.y)),
+            canonicalize_value(float(target.z)),
+        ],
+        "up": [
+            canonicalize_value(float(up.x)),
+            canonicalize_value(float(up.y)),
+            canonicalize_value(float(up.z)),
+        ],
+        "projection": projection,
+        "fov_deg": fov_deg,
+    }
+    viewport_raw = {"width": int(width), "height": int(height)}
+    return camera_raw, viewport_raw
+
+
+def _capture_visibility():
+    import adsk.core
+    import adsk.fusion
+
+    app = adsk.core.Application.get()
+    doc = getattr(app, "activeDocument", None)
+    design = None
+    if doc is not None and hasattr(doc, "products"):
+        design = doc.products.itemByClass("adsk::fusion::Design")
+    if design is None:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Active design required to capture effective visibility",
+        )
+    root = getattr(design, "rootComponent", None)
+    if root is None:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "Root component required to capture effective visibility",
+        )
+
+    items = []
+
+    occs = getattr(root, "allOccurrences", None)
+    if occs is None or not hasattr(occs, "count"):
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "allOccurrences collection unreadable for effective visibility capture",
+        )
+    for i in range(occs.count):
+        try:
+            occ = occs.item(i)
+            path = getattr(occ, "fullPathName", None) or getattr(occ, "name", None)
+            local = getattr(occ, "isLightBulbOn", None)
+            eff = getattr(occ, "isVisible", None)
+            if local is None and eff is None:
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    "Occurrence visibility unreadable for effective visibility capture",
+                )
+            items.append({
+                "kind": "occurrence",
+                "full_path_name": str(path) if path is not None else None,
+                "is_visible": bool(local if local is not None else eff),
+                "effective_visibility": bool(eff if eff is not None else local),
+            })
+        except FusionScriptError:
+            raise
+        except Exception as exc:
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                f"Failed to read occurrence visibility {i}: {exc}",
+            ) from exc
+
+    comps = []
+    all_comps = getattr(design, "allComponents", None)
+    if all_comps is not None and hasattr(all_comps, "count"):
+        for i in range(all_comps.count):
+            comps.append(all_comps.item(i))
+    if root not in comps:
+        comps.insert(0, root)
+
+    for c in comps:
+        c_name = str(getattr(c, "name", ""))
+        bodies = getattr(c, "bRepBodies", None)
+        if bodies is not None and hasattr(bodies, "count"):
+            for j in range(bodies.count):
+                try:
+                    b = bodies.item(j)
+                    b_name = str(getattr(b, "name", ""))
+                    local = getattr(b, "isLightBulbOn", None)
+                    eff = getattr(b, "isVisible", None)
+                    if local is None and eff is None:
+                        raise FusionScriptError(
+                            "FUSION_API_ERROR",
+                            f"Body '{b_name}' visibility unreadable for effective visibility capture",
+                        )
+                    items.append({
+                        "kind": "body",
+                        "full_path_name": f"{c_name}:{b_name}",
+                        "is_visible": bool(local if local is not None else eff),
+                        "effective_visibility": bool(eff if eff is not None else local),
+                    })
+                except FusionScriptError:
+                    raise
+                except Exception as exc:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        f"Failed to read body visibility {j} in '{c_name}': {exc}",
+                    ) from exc
+        sketches = getattr(c, "sketches", None)
+        if sketches is not None and hasattr(sketches, "count"):
+            for j in range(sketches.count):
+                try:
+                    s = sketches.item(j)
+                    s_name = str(getattr(s, "name", ""))
+                    local = getattr(s, "isLightBulbOn", None)
+                    eff = getattr(s, "isVisible", None)
+                    if local is None and eff is None:
+                        raise FusionScriptError(
+                            "FUSION_API_ERROR",
+                            f"Sketch '{s_name}' visibility unreadable for effective visibility capture",
+                        )
+                    items.append({
+                        "kind": "sketch",
+                        "full_path_name": f"{c_name}:{s_name}",
+                        "is_visible": bool(local if local is not None else eff),
+                        "effective_visibility": bool(eff if eff is not None else local),
+                    })
+                except FusionScriptError:
+                    raise
+                except Exception as exc:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        f"Failed to read sketch visibility {j} in '{c_name}': {exc}",
+                    ) from exc
+    return items
+
+
+def _capture_section():
+    # P0 supports only explicit disabled/default section state; active section
+    # state cannot be captured exactly and would fail closed at the boundary.
+    return {"active": False, "type": None}
+
+
+def _collect_view_context(op):
+    camera_raw, viewport_raw = _capture_camera()
+    visibility_raw = _capture_visibility()
+    section_raw = _capture_section()
+    return {
+        "operation": op,
+        "camera": camera_raw,
+        "viewport": viewport_raw,
+        "visibility": visibility_raw,
+        "section": section_raw,
+    }
+
+
+def _apply_camera_set(payload):
+    import adsk.core
+
+    _, viewport = _active_viewport()
+    camera = getattr(viewport, "camera", None)
+    if camera is None:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "Active viewport camera required for camera_set",
+        )
+    if payload.get("eye") is not None:
+        e = payload["eye"]
+        camera.eye = adsk.core.Point3D.create(float(e["x"]), float(e["y"]), float(e["z"]))
+    if payload.get("target") is not None:
+        t = payload["target"]
+        camera.target = adsk.core.Point3D.create(float(t["x"]), float(t["y"]), float(t["z"]))
+    if payload.get("up") is not None:
+        u = payload["up"]
+        camera.upVector = adsk.core.Vector3D.create(float(u["x"]), float(u["y"]), float(u["z"]))
+    if payload.get("fov") is not None:
+        camera.fov = float(payload["fov"])
+    apply_fn = getattr(camera, "apply", None)
+    if apply_fn is None:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "Camera.apply unavailable on this Fusion runtime",
+        )
+    apply_fn()
+
+
+def _resolved_native_entity(payload):
+    """Resolve a view target through the exact Task5/Task7 ref machinery.
+
+    Only an exact resolution is accepted; split/stale/ambiguous/wrong_document
+    fail closed with the corresponding error code and never fall through to a
+    name-only or raw-Python escape hatch.
+    """
+    import adsk.core
+    import adsk.fusion
+
+    target = payload.get("target")
+    if target is None:
+        raise FusionScriptError(
+            "INVALID_ARGUMENT",
+            "target is required for view entity operations",
+        )
+    hint = target if isinstance(target, dict) else {"ref": str(target), "kind": "entity"}
+    resolved = resolve_fusion_entity(hint)
+    outcome = resolved.get("outcome")
+    if outcome != "exact":
+        err_code = _VIEW_OUTCOME_CODE.get(outcome, "REF_STALE")
+        raise FusionScriptError(
+            err_code,
+            f"View target resolution failed with outcome '{outcome}'",
+            details={
+                "ref": resolved.get("ref"),
+                "outcome": outcome,
+                "candidate_count": len(resolved.get("candidates", [])),
+            },
+        )
+    app = adsk.core.Application.get()
+    doc = getattr(app, "activeDocument", None)
+    design = None
+    if doc is not None and hasattr(doc, "products"):
+        design = doc.products.itemByClass("adsk::fusion::Design")
+    if design is None:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Active design required to resolve view target",
+        )
+    token = hint.get("native_token")
+    entity = None
+    if token and hasattr(design, "findEntityByToken"):
+        try:
+            entity = design.findEntityByToken(token)
+        except Exception:
+            entity = None
+    if entity is None:
+        raise FusionScriptError(
+            "REF_STALE",
+            "View target resolved exact but its native entity is no longer resolvable",
+            details={"ref": resolved.get("ref")},
+        )
+    return entity
+
+
+def _orient_camera_to_face(entity):
+    import math
+
+    import adsk.core
+
+    _, viewport = _active_viewport()
+    camera = getattr(viewport, "camera", None)
+    if camera is None:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "Active viewport camera required for orient_to_face",
+        )
+    normal = getattr(entity, "normal", None)
+    centroid = getattr(entity, "centroid", None)
+    if normal is None or centroid is None:
+        raise FusionScriptError(
+            "TYPE_MISMATCH",
+            "orient_to_face target must be a face exposing a normal and centroid",
+        )
+    nx, ny, nz = float(normal.x), float(normal.y), float(normal.z)
+    length = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if length == 0.0:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "orient_to_face target face normal is degenerate",
+        )
+    nx, ny, nz = nx / length, ny / length, nz / length
+    cx, cy, cz = float(centroid.x), float(centroid.y), float(centroid.z)
+
+    bb = getattr(entity, "boundingBox", None)
+    diag = 1.0
+    if bb is not None and getattr(bb, "minPoint", None) is not None and getattr(bb, "maxPoint", None) is not None:
+        dx = float(bb.maxPoint.x) - float(bb.minPoint.x)
+        dy = float(bb.maxPoint.y) - float(bb.minPoint.y)
+        dz = float(bb.maxPoint.z) - float(bb.minPoint.z)
+        computed = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if computed > 0.0:
+            diag = computed
+    distance = diag * 2.0
+
+    camera.target = adsk.core.Point3D.create(cx, cy, cz)
+    camera.eye = adsk.core.Point3D.create(
+        cx + nx * distance, cy + ny * distance, cz + nz * distance
+    )
+    up = (0.0, 0.0, 1.0)
+    if abs(nx * up[0] + ny * up[1] + nz * up[2]) > 0.999:
+        up = (0.0, 1.0, 0.0)
+    camera.upVector = adsk.core.Vector3D.create(up[0], up[1], up[2])
+    apply_fn = getattr(camera, "apply", None)
+    if apply_fn is None:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "Camera.apply unavailable on this Fusion runtime",
+        )
+    apply_fn()
+
+
+def _capture_screenshot(viewport):
+    import base64
+    import os
+    import tempfile
+
+    capture_fn = getattr(viewport, "capturePngFile", None)
+    if capture_fn is None:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "Viewport PNG capture API unavailable on this Fusion runtime",
+        )
+    fd, path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        capture_fn(path)
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    if not raw:
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            "Viewport PNG capture returned an empty image",
+        )
+    return base64.b64encode(raw).decode("ascii")
+
+
 def run():
     op = PAYLOAD.get("operation", "")
+
+    if op == "camera_read":
+        _verify_doc_identity(PAYLOAD)
+        return make_result(
+            data=_collect_view_context(op),
+            summary="Camera context captured for camera_read",
+        )
+
+    if op == "camera_set":
+        _verify_doc_identity(PAYLOAD)
+        _apply_camera_set(PAYLOAD)
+        return make_result(
+            data=_collect_view_context(op),
+            summary="Camera updated via camera_set",
+        )
+
+    if op == "fit":
+        _verify_doc_identity(PAYLOAD)
+        _, viewport = _active_viewport()
+        zoom_to_fit = getattr(viewport, "zoomToFit", None)
+        if zoom_to_fit is None:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Viewport.zoomToFit unavailable on this Fusion runtime",
+            )
+        zoom_to_fit()
+        return make_result(
+            data=_collect_view_context(op),
+            summary="Camera fit completed",
+        )
+
+    if op == "standard_view":
+        _verify_doc_identity(PAYLOAD)
+        view_type = PAYLOAD.get("view_type", "home")
+        _, viewport = _active_viewport()
+        set_view_type = getattr(viewport, "setViewType", None)
+        if set_view_type is None:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Viewport.setViewType unavailable on this Fusion runtime",
+            )
+        set_view_type(view_type)
+        return make_result(
+            data=_collect_view_context(op),
+            summary=f"Standard view {view_type} applied",
+        )
+
+    if op == "zoom_entity":
+        _verify_doc_identity(PAYLOAD)
+        entity = _resolved_native_entity(PAYLOAD)
+        _, viewport = _active_viewport()
+        zoom_to = getattr(viewport, "zoomTo", None)
+        if zoom_to is None:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Viewport.zoomTo unavailable on this Fusion runtime",
+            )
+        zoom_to(entity)
+        return make_result(
+            data=_collect_view_context(op),
+            summary="Camera zoomed to resolved entity",
+        )
+
+    if op == "orient_to_face":
+        _verify_doc_identity(PAYLOAD)
+        entity = _resolved_native_entity(PAYLOAD)
+        _orient_camera_to_face(entity)
+        return make_result(
+            data=_collect_view_context(op),
+            summary="Camera oriented to resolved face",
+        )
+
+    if op == "screenshot":
+        _verify_doc_identity(PAYLOAD)
+        _, viewport = _active_viewport()
+        screenshot_b64 = _capture_screenshot(viewport)
+        context = _collect_view_context(op)
+        context["screenshot_b64"] = screenshot_b64
+        context["width"] = int(viewport.width)
+        context["height"] = int(viewport.height)
+        return make_result(
+            data=context,
+            summary="Screenshot captured for immutable view binding",
+        )
+
     return make_result(data={"operation": op}, summary=f"Executed view:{op}")

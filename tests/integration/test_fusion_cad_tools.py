@@ -60,6 +60,15 @@ def setup_desk1_capabilities(container: ApplicationContainer) -> None:
         native_token="face_token_1",
         opaque_ref="ent_face_1",
     )
+    # Task 8 exact view target resolution: zoom_entity/orient_to_face favorites
+    # resolve ent_1 through the ref registry before dispatch.
+    container.fusion_cad.ref_registry.issue(
+        document_ref="doc_1",
+        kind="body",
+        name="Body1",
+        native_token="body_token_1",
+        opaque_ref="ent_1",
+    )
 
 
 @pytest.fixture
@@ -150,9 +159,10 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
     assert tool is not None
 
     # Task 7: inspect operations carry real semantic normalization, so the
-    # describe case returns a valid normalized describe result; other fast reads
-    # keep the generic echo payload.
+    # describe case returns a valid normalized describe result.
+    # Task 8: camera_read carries a real deterministic camera context.
     is_describe = valid_payload["operation"] == "describe"
+    is_camera_read = valid_payload["operation"] == "camera_read"
     if is_describe:
         result_data = {
             "operation": "describe",
@@ -166,6 +176,26 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
             "measures": {
                 "area": {"quantity": "area", "value": 42.0, "unit": "mm^2"}
             },
+        }
+    elif is_camera_read:
+        result_data = {
+            "camera": {
+                "eye": [10.0, 20.0, 30.0],
+                "target": [0.0, 0.0, 0.0],
+                "up": [0.0, 0.0, 1.0],
+                "projection": "perspective",
+                "fov_deg": 45.0,
+            },
+            "viewport": {"width": 1920, "height": 1080},
+            "visibility": [
+                {
+                    "kind": "occurrence",
+                    "full_path_name": "Root:Left",
+                    "is_visible": True,
+                    "effective_visibility": True,
+                }
+            ],
+            "section": {"active": False, "type": None},
         }
     else:
         result_data = {"result_key": "РАСПИСАНИЕ ПЫТОК 😈"}
@@ -200,6 +230,13 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
         assert parsed["data"]["data"]["kind"] == "face"
         assert parsed["data"]["data"]["frame"]["space"] == "world"
         assert parsed["data"]["data"]["measures"]["area"]["unit"] == "mm^2"
+    elif is_camera_read:
+        assert parsed["data"]["data"]["camera_revision"].startswith("cam_")
+        assert parsed["data"]["data"]["visibility_revision"].startswith("vis_")
+        assert parsed["data"]["data"]["section_revision"].startswith("sec_")
+        assert parsed["data"]["data"]["camera"]["eye"] == [10.0, 20.0, 30.0]
+        assert parsed["data"]["data"]["viewport"]["width"] == 1920
+        assert parsed["data"]["data"]["viewport"]["height"] == 1080
     else:
         assert parsed["data"]["data"]["result_key"] == "РАСПИСАНИЕ ПЫТОК 😈"
 
@@ -1531,7 +1568,7 @@ async def test_service_execute_direct_sync_is_error_matrix(
         "isError": is_error_val if isinstance(is_error_val, bool) else False,
     })
 
-    req = {"node_id": "desk-1", "operation": "camera_read"}
+    req = {"node_id": "desk-1", "operation": "entity", "ref": "ent_1234"}
     if should_succeed:
         res = await service.execute(req)
         assert res.summary == "Sync matrix test"
@@ -1609,3 +1646,289 @@ async def test_retained_async_domain_operation_result_is_error_matrix(
     else:
         with pytest.raises((FusionCadError, BridgeError)):
             await op_result_tool.handler(None, params, req_ctx)
+
+
+# =========================================================================
+# Task 8: Camera, screenshot, immutable ViewRef
+# =========================================================================
+
+
+def _view_camera_payload(**overrides):
+    payload = {
+        "camera": {
+            "eye": [10.0, 20.0, 30.0],
+            "target": [0.0, 0.0, 0.0],
+            "up": [0.0, 0.0, 1.0],
+            "projection": "perspective",
+            "fov_deg": 45.0,
+        },
+        "viewport": {"width": 1920, "height": 1080},
+        "visibility": [
+            {
+                "kind": "occurrence",
+                "full_path_name": "Root:Left",
+                "is_visible": True,
+                "effective_visibility": True,
+            }
+        ],
+        "section": {"active": False, "type": None},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _screenshot_desktop_result(width=1920, height=1080, **overrides):
+    data = dict(_view_camera_payload())
+    data.update(overrides)
+    data.update(
+        {
+            "operation": "screenshot",
+            "width": width,
+            "height": height,
+            "screenshot_b64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        }
+    )
+    return {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Screenshot captured",
+        "data": data,
+    }
+
+
+def _camera_desktop_result(op, camera_overrides=None):
+    camera = dict(_view_camera_payload())
+    if camera_overrides:
+        camera["camera"] = {**camera["camera"], **camera_overrides}
+    camera["operation"] = op
+    return {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Camera context captured",
+        "data": camera,
+    }
+
+
+def _build_view_container(tmp_path) -> ApplicationContainer:
+    """New-container helper registering desk-1 so capability caches resolve."""
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(tmp_path / "artifacts"),
+        },
+    }))
+    setup_desk1_capabilities(container)
+    container.desktop_nodes._nodes["desk-1"] = NodeState(
+        node_id="desk-1",
+        last_seen=time.monotonic(),
+        last_seen_wall=time.time(),
+        tools=[{"name": "fusion_mcp_execute"}],
+        fusion_available=True,
+        session_generation=1,
+    )
+    return container
+
+
+def _extract_script_payload(script: str) -> dict:
+    """Decode the JSON-injected PAYLOAD_RAW literal from a rendered script."""
+    import re
+
+    match = re.search(r'^PAYLOAD_RAW = (".*")$', script, re.MULTILINE)
+    assert match is not None, "PAYLOAD_RAW literal not found in rendered script"
+    return json.loads(json.loads(match.group(1)))
+
+
+@pytest.mark.asyncio
+async def test_view_screenshot_binds_immutable_viewref_and_externalizes_image(tmp_path):
+    container = _build_view_container(tmp_path)
+
+    container.desktop_nodes.submit = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps(_screenshot_desktop_result())}],
+        "isError": False,
+    })
+
+    result = await container.fusion_cad.execute({"node_id": "desk-1", "operation": "screenshot"})
+    assert isinstance(result, dict)
+    assert "external_result" in result
+    ref = result["external_result"]
+
+    full, metadata = container.desktop_nodes.external_result(ref)
+    data = full["data"]
+    # Immutable ViewRef public metadata shape
+    assert data["view_ref"].startswith("view_")
+    assert data["model_revision"] == "rev_1"
+    assert data["camera_revision"].startswith("cam_")
+    assert data["visibility_revision"].startswith("vis_")
+    assert data["width"] == 1920
+    assert data["height"] == 1080
+    assert data["image"].startswith("resource://")
+    # No inline base64 screenshot payload in the public view metadata
+    assert "iVBORw0KGgo" not in json.dumps(data)
+
+    # Bound record exists in the immutable store
+    record = container.fusion_cad.view_store.get(data["view_ref"])
+    assert record is not None
+    assert record.model_revision == "rev_1"
+    from app.fusion_cad.models import ViewRefSummary
+
+    restored_summary = ViewRefSummary.model_validate(record.to_summary().model_dump())
+    assert restored_summary.view_ref == data["view_ref"]
+    assert restored_summary.image.startswith("resource://")
+
+    # Image resource link rendered through the proven artifact path
+    assert any(r.get("mime_type", "").startswith("image/") for r in metadata["resources"])
+
+
+@pytest.mark.asyncio
+async def test_view_camera_change_invalidates_old_viewref_but_not_model_revision(tmp_path):
+    container = _build_view_container(tmp_path)
+
+    # 1. Screenshot binds view_1
+    container.desktop_nodes.submit = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps(_screenshot_desktop_result())}],
+        "isError": False,
+    })
+    shot = await container.fusion_cad.execute({"node_id": "desk-1", "operation": "screenshot"})
+    ref = shot["external_result"]
+    full, _ = container.desktop_nodes.external_result(ref)
+    view_ref = full["data"]["view_ref"]
+    assert container.fusion_cad.view_store.get(view_ref) is not None
+
+    # Fresh immediately after screenshot
+    container.fusion_cad.assert_view_fresh(view_ref, "desk-1", "doc_1")
+
+    # 2. Camera mutation with a changed camera context (eye changed)
+    container.desktop_nodes.submit = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps(_camera_desktop_result("camera_set", camera_overrides={"eye": [11.0, 20.0, 30.0]})),
+        }],
+        "isError": False,
+    })
+    cam_res = await container.fusion_cad.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "camera_set",
+            "eye": {"x": 11.0, "y": 20.0, "z": 30.0, "frame": {"space": "world"}},
+        }
+    )
+    # Camera mutation finalizes to view-state only (CadResult, no external artifact)
+    assert not (isinstance(cam_res, dict) and "external_result" in cam_res)
+
+    # Camera mutation never advances model revision
+    assert container.fusion_cad.revision_tracker.current("doc_1").revision == "rev_1"
+
+    # Old view_ref is now stale (camera revision changed)
+    with pytest.raises(FusionCadError) as exc:
+        container.fusion_cad.assert_view_fresh(view_ref, "desk-1", "doc_1")
+    assert exc.value.code == ErrorCode.VIEW_STALE
+
+
+@pytest.mark.asyncio
+async def test_fusion_view_screenshot_tool_returns_resource_link_without_inline_base64(tmp_path):
+    container = _build_view_container(tmp_path)
+    registry = build_tool_registry(container)
+    tool = registry.get("fusion_view")
+    assert tool is not None
+
+    container.desktop_nodes.submit = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps(_screenshot_desktop_result())}],
+        "isError": False,
+    })
+
+    req_ctx = RequestContext(request_id="req_view_shot")
+    params = types.CallToolRequestParams(
+        name="fusion_view",
+        arguments={"node_id": "desk-1", "operation": "screenshot"},
+    )
+    result = await tool.handler(None, params, req_ctx)
+    assert isinstance(result, types.CallToolResult)
+    assert not result.is_error
+
+    text_blocks = [b for b in result.content if isinstance(b, types.TextContent)]
+    assert len(text_blocks) == 1
+    parsed = json.loads(text_blocks[0].text)
+    assert parsed["ok"] is True
+    assert "iVBORw0KGgo" not in text_blocks[0].text
+    assert "screenshot_b64" not in text_blocks[0].text
+
+    resource_links = [b for b in result.content if isinstance(b, types.ResourceLink)]
+    assert len(resource_links) >= 1
+    assert any(
+        getattr(link, "mime_type", None) or getattr(link, "mimeType", "").startswith("image/png")
+        or str(getattr(link, "description", "")) == "Fusion image artifact"
+        for link in resource_links
+    )
+
+
+@pytest.mark.asyncio
+async def test_view_operation_missing_camera_context_fails_closed(mock_container: ApplicationContainer):
+    # A view result without deterministic camera context must fail closed
+    mock_container.desktop_nodes.call = AsyncMock(return_value={
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "Camera read without context",
+                "data": {"result_key": "no camera"},
+            }),
+        }],
+        "isError": False,
+    })
+    with pytest.raises(FusionCadError) as exc:
+        await mock_container.fusion_cad.execute(
+            {"node_id": "desk-1", "operation": "camera_read"}
+        )
+    assert exc.value.code == ErrorCode.PRECONDITION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_view_zoom_entity_injects_exact_resolution_hint(tmp_path):
+    container = _build_view_container(tmp_path)
+    container.fusion_cad.ref_registry.issue(
+        document_ref="doc_1",
+        kind="body",
+        name="Bracket",
+        native_token="native_body_1",
+        opaque_ref="ent_zoom_1",
+    )
+
+    captured_script = {}
+
+    async def capture_submit(node_id, tool_name, arguments, journal=None):
+        captured_script["script"] = arguments["script"]
+        return _camera_desktop_result("zoom_entity")
+
+    container.desktop_nodes.submit = capture_submit  # type: ignore[assignment]
+
+    await container.fusion_cad.execute(
+        {"node_id": "desk-1", "operation": "zoom_entity", "target": "ent_zoom_1"}
+    )
+    payload = _extract_script_payload(captured_script.get("script", ""))
+    # Exact Task5/Task7 hint (native token) injected into the static script payload:
+    # no name-only/raw Python escape hatch.
+    assert payload["target"]["native_token"] == "native_body_1"
+    assert payload["target"]["ref"] == "ent_zoom_1"
+    assert payload["target"]["name"] == "Bracket"
+
+
+@pytest.mark.asyncio
+async def test_view_zoom_entity_unknown_ref_fails_closed(tmp_path):
+    container = _build_view_container(tmp_path)
+    container.desktop_nodes.submit = AsyncMock()
+
+    with pytest.raises(FusionCadError) as exc:
+        await container.fusion_cad.execute(
+            {"node_id": "desk-1", "operation": "zoom_entity", "target": "ent_unknown"}
+        )
+    assert exc.value.code in (ErrorCode.REF_STALE, ErrorCode.REF_AMBIGUOUS)
+    # Failed closed before dispatch: no raw Python/native token escape hatch
+    assert container.desktop_nodes.submit.call_count == 0
+    assert fake_submit_not_dispatched(container) is True
+
+
+def fake_submit_not_dispatched(container):
+    return container.desktop_nodes.submit.call_count == 0
