@@ -40,10 +40,11 @@ def _make_point(x, y, z):
 def _point_dict(pt, frame=None):
     if pt is None:
         return None
+    # Fusion native geometry is cm-based; public output is mm.
     return {
-        "x": round(float(getattr(pt, "x", 0.0)), 6),
-        "y": round(float(getattr(pt, "y", 0.0)), 6),
-        "z": round(float(getattr(pt, "z", 0.0)), 6),
+        "x": round(_mm(getattr(pt, "x", 0.0)), 6),
+        "y": round(_mm(getattr(pt, "y", 0.0)), 6),
+        "z": round(_mm(getattr(pt, "z", 0.0)), 6),
         "frame": frame or {"space": "world", "ref": None},
     }
 
@@ -104,6 +105,15 @@ def _normalize(a):
         return [0.0, 0.0, 0.0]
     return [a[0] / n, a[1] / n, a[2] / n]
 
+
+def _mm(v):
+    return float(v) * 10.0
+
+def _mm2(v):
+    return float(v) * 100.0
+
+def _mm3(v):
+    return float(v) * 1000.0
 
 def _perpendicular(n):
     if abs(n[2]) < 0.9:
@@ -296,9 +306,10 @@ def _bbox_dict(bb, frame=None):
             "UNSUPPORTED_GEOMETRY",
             "Bounding box requires exact minPoint/maxPoint",
         )
+    # Fusion native bounding boxes are cm-based; public output is mm.
     return {
-        "min": [round(float(min_pt.x), 6), round(float(min_pt.y), 6), round(float(min_pt.z), 6)],
-        "max": [round(float(max_pt.x), 6), round(float(max_pt.y), 6), round(float(max_pt.z), 6)],
+        "min": [round(_mm(min_pt.x), 6), round(_mm(min_pt.y), 6), round(_mm(min_pt.z), 6)],
+        "max": [round(_mm(max_pt.x), 6), round(_mm(max_pt.y), 6), round(_mm(max_pt.z), 6)],
         "frame": frame or {"space": "world", "ref": None},
     }
 
@@ -313,12 +324,10 @@ def _entity_centroid(entity):
                 phys = get_phys()
         if phys is not None and getattr(phys, "centerOfMass", None) is not None:
             return phys.centerOfMass
-        bb = getattr(entity, "boundingBox", None)
-        if bb is not None:
-            return _bbox_center(bb)
+        # No heuristic bbox-center fallback for an exact centroid.
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
-            "Body centroid requires physicalProperties centerOfMass",
+            "Body centroid requires exact physicalProperties centerOfMass",
         )
     if kind == "face":
         c = getattr(entity, "centroid", None)
@@ -329,6 +338,18 @@ def _entity_centroid(entity):
             "Face centroid requires exact centroid property",
         )
     if kind == "edge":
+        # A centroid is exact only for a straight line edge (midpoint);
+        # curved-edge centroids are never the endpoint midpoint.
+        geom = getattr(entity, "geometry", None)
+        curve_type = (
+            getattr(geom, "curveType", None)
+            or getattr(geom, "objectType", None)
+        )
+        if curve_type not in ("Line3D", "Line"):
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Edge centroid requires a straight line edge; curved edges unsupported",
+            )
         sv = getattr(entity, "startVertex", None)
         ev = getattr(entity, "endVertex", None)
         if sv is not None and ev is not None:
@@ -345,12 +366,9 @@ def _entity_centroid(entity):
             "Edge centroid requires exact start/end vertex geometry",
         )
     if kind == "sketch":
-        bb = getattr(entity, "boundingBox", None)
-        if bb is not None:
-            return _bbox_center(bb)
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
-            "Sketch centroid requires exact bounding box",
+            "Sketch centroid has no exact Fusion centroid API; unsupported",
         )
     raise FusionScriptError(
         "UNSUPPORTED_GEOMETRY",
@@ -384,7 +402,7 @@ def _face_perimeter(face):
                     "Face perimeter requires exact edge length",
                 )
             total += float(length)
-    return total
+    return float(_mm(total))
 
 
 def _describe_entity(entity, ref, kind, name, native_type):
@@ -396,14 +414,14 @@ def _describe_entity(entity, ref, kind, name, native_type):
         if vol is not None:
             measures["volume"] = {
                 "quantity": "volume",
-                "value": float(vol),
+                "value": float(_mm3(vol)),
                 "unit": "mm^3",
             }
         area = getattr(entity, "area", None)
         if area is not None:
             measures["area"] = {
                 "quantity": "area",
-                "value": float(area),
+                "value": float(_mm2(area)),
                 "unit": "mm^2",
             }
         bb = getattr(entity, "boundingBox", None)
@@ -414,7 +432,7 @@ def _describe_entity(entity, ref, kind, name, native_type):
         if area is not None:
             measures["area"] = {
                 "quantity": "area",
-                "value": float(area),
+                "value": float(_mm2(area)),
                 "unit": "mm^2",
             }
         measures["perimeter"] = {
@@ -430,7 +448,7 @@ def _describe_entity(entity, ref, kind, name, native_type):
         if length is not None:
             measures["length"] = {
                 "quantity": "perimeter",
-                "value": float(length),
+                "value": float(_mm(length)),
                 "unit": "mm",
             }
     elif ekind == "sketch":
@@ -506,7 +524,7 @@ def _face_oriented_bbox(face):
     return {
         "center": _point_dict(_make_point(*center)),
         "axes": [[round(float(a), 6) for a in u], [round(float(a), 6) for a in v], [round(float(a), 6) for a in n]],
-        "extents": [round(float(e), 6) for e in extents],
+        "extents": [round(_mm(e), 6) for e in extents],
         "frame": {"space": "world", "ref": None},
     }
 
@@ -534,7 +552,7 @@ def _body_oriented_bbox(body):
     return {
         "center": _point_dict(center),
         "axes": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        "extents": [round(float(e), 6) for e in extents],
+        "extents": [round(_mm(e), 6) for e in extents],
         "frame": {"space": "world", "ref": None},
     }
 
@@ -553,32 +571,35 @@ def _oriented_bbox(entity):
 
 
 def _measure_distance(app, op, entity_a, entity_b):
-    mm = getattr(app, "measureManager", None)
-    if mm is not None:
-        try:
-            if op == "minimum_distance" and hasattr(mm, "measureMinimumDistance"):
-                res = mm.measureMinimumDistance(entity_a, entity_b)
-            elif hasattr(mm, "measureDistance"):
-                res = mm.measureDistance(entity_a, entity_b)
-            else:
-                res = None
-        except Exception:
+    mm_mgr = getattr(app, "measureManager", None)
+    if mm_mgr is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Distance requires an available measureManager; no centroid fallback",
+        )
+    try:
+        if op == "minimum_distance" and hasattr(mm_mgr, "measureMinimumDistance"):
+            res = mm_mgr.measureMinimumDistance(entity_a, entity_b)
+        elif hasattr(mm_mgr, "measureDistance"):
+            res = mm_mgr.measureDistance(entity_a, entity_b)
+        else:
             res = None
-        if res is not None and getattr(res, "value", None) is not None:
-            from_pt = (
-                getattr(res, "pointOne", None)
-                or getattr(res, "startPoint", None)
-                or _entity_centroid(entity_a)
-            )
-            to_pt = (
-                getattr(res, "pointTwo", None)
-                or getattr(res, "endPoint", None)
-                or _entity_centroid(entity_b)
-            )
-            return float(res.value), from_pt, to_pt
-    pa = _entity_centroid(entity_a)
-    pb = _entity_centroid(entity_b)
-    return _norm(_sub(_vec3(pb), _vec3(pa))), pa, pb
+    except Exception:
+        res = None
+    if res is None or getattr(res, "value", None) is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Distance requires an exact measureManager result",
+        )
+    from_pt = getattr(res, "pointOne", None) or getattr(res, "startPoint", None)
+    to_pt = getattr(res, "pointTwo", None) or getattr(res, "endPoint", None)
+    if from_pt is None or to_pt is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Distance requires exact witness points; no centroid fallback",
+        )
+    # measureManager value is native cm; public output is mm.
+    return _mm(float(res.value)), from_pt, to_pt
 
 
 def _face_plane(face):
@@ -717,7 +738,7 @@ def _relation(operation, entity_a, entity_b, ref_a, ref_b, payload):
         ob, nb = _face_plane(entity_b)
         angle = _angle_deg(na, nb)
         angle_dev = angle if angle <= 90.0 else 180.0 - angle
-        distance = abs(_dot(nb, _sub(ob, oa)))
+        distance = _mm(abs(_dot(nb, _sub(ob, oa))))
         matches = angle_dev <= 0.01 and distance <= tol_mm
         return {
             "relation": operation,
@@ -732,16 +753,24 @@ def _relation(operation, entity_a, entity_b, ref_a, ref_b, payload):
         }
 
     if operation == "concentric":
+        tol_deg = float(payload.get("tolerance_deg", 0.01))
         tol_mm = float(payload.get("tolerance_mm", 0.001))
         tol = {"value": tol_mm, "unit": "mm"}
         axis_a = _circular_axis(entity_a)
         axis_b = _circular_axis(entity_b)
-        deviation = _axis_distance(axis_a, axis_b)
+        angle = _angle_deg(axis_a[1], axis_b[1])
+        angle_dev = angle if angle <= 90.0 else 180.0 - angle
+        offset_mm = _mm(_axis_distance(axis_a, axis_b))
+        matches = angle_dev <= tol_deg and offset_mm <= tol_mm
         return {
             "relation": operation,
-            "matches": deviation <= tol_mm,
-            "measured": {"distance_mm": round(deviation, 6)},
+            "matches": matches,
+            "measured": {
+                "angle_deg": round(angle_dev, 6),
+                "offset_mm": round(offset_mm, 6),
+            },
             "tolerance": tol,
+            "tolerances": {"angle_deg": tol_deg, "offset_mm": tol_mm},
             "target_a": ref_a,
             "target_b": ref_b,
         }
@@ -752,6 +781,43 @@ def _relation(operation, entity_a, entity_b, ref_a, ref_b, payload):
         details={"operation": operation},
     )
 
+
+def _face_bounds_in_plane(face, u, v):
+    verts = getattr(face, "vertices", None)
+    if verts is None or not hasattr(verts, "count") or verts.count == 0:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires readable face vertices",
+        )
+    mins = [None, None]
+    maxs = [None, None]
+    for i in range(verts.count):
+        g = getattr(verts.item(i), "geometry", None)
+        if g is None:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Face-to-face thickness requires exact vertex geometry",
+            )
+        gv = _vec3(g)
+        cu = _dot(gv, u)
+        cv = _dot(gv, v)
+        for k, c in ((0, cu), (1, cv)):
+            if mins[k] is None or c < mins[k]:
+                mins[k] = c
+            if maxs[k] is None or c > maxs[k]:
+                maxs[k] = c
+    return mins, maxs
+
+def _faces_projected_overlap(face_a, face_b, normal):
+    n = _normalize(normal)
+    u = _perpendicular(n)
+    v = _cross(n, u)
+    (min_ua, min_va), (max_ua, max_va) = _face_bounds_in_plane(face_a, u, v)
+    (min_ub, min_vb), (max_ub, max_vb) = _face_bounds_in_plane(face_b, u, v)
+    ov_u = min(max_ua, max_ub) - max(min_ua, min_ub)
+    ov_v = min(max_va, max_vb) - max(min_va, min_vb)
+    eps = 1e-9
+    return ov_u > eps and ov_v > eps
 
 def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
     kind_a = _entity_kind(face_a)
@@ -766,13 +832,27 @@ def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
     ob, nb = _face_plane(face_b)
     angle = _angle_deg(na, nb)
     # Exact thickness requires anti-parallel (opposite-facing) planar faces.
-    # Same-direction or skewed faces do not unambiguously define wall thickness.
     if abs(angle - 180.0) > 0.01:
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
             "Face-to-face thickness requires parallel opposing planar faces; no whole-body min-wall heuristic",
         )
-    thickness = abs(_dot(na, _sub(ob, oa)))
+    # Conservative proof 1: faces must belong to the same solid/body.
+    body_a = getattr(face_a, "body", None)
+    body_b = getattr(face_b, "body", None)
+    if body_a is None or body_b is None or body_a is not body_b:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires faces on the same solid (provable body relationship)",
+        )
+    # Conservative proof 2: projected overlap on the wall plane proves a material path
+    # that excludes unrelated or disjoint faces.
+    if not _faces_projected_overlap(face_a, face_b, na):
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires projected overlap proving an unambiguous pair; disjoint or unrelated faces unsupported",
+        )
+    thickness = _mm(abs(_dot(na, _sub(ob, oa))))
     return {
         "quantity": "thickness",
         "value": round(float(thickness), 6),
@@ -845,7 +925,7 @@ def run():
                     "UNSUPPORTED_GEOMETRY",
                     "Area requires exact BRep area property",
                 )
-            data = {"operation": op, "quantity": "area", "value": float(value), "unit": "mm^2"}
+            data = {"operation": op, "quantity": "area", "value": float(_mm2(value)), "unit": "mm^2"}
         elif op == "perimeter":
             if ekind == "face":
                 value = _face_perimeter(entity)
@@ -856,6 +936,7 @@ def run():
                         "UNSUPPORTED_GEOMETRY",
                         "Perimeter requires exact edge length",
                     )
+                value = _mm(float(value))
             else:
                 raise FusionScriptError(
                     "TYPE_MISMATCH",
@@ -876,7 +957,7 @@ def run():
                     "UNSUPPORTED_GEOMETRY",
                     "Volume requires exact BRep volume property",
                 )
-            data = {"operation": op, "quantity": "volume", "value": float(value), "unit": "mm^3"}
+            data = {"operation": op, "quantity": "volume", "value": float(_mm3(value)), "unit": "mm^3"}
         return make_result(data=data, summary=f"{op} measured")
 
     if op in ("distance", "minimum_distance"):

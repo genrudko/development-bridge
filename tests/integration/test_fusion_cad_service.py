@@ -914,6 +914,7 @@ class AdskFakeContext:
         self.tx_committed = False
         self.tx_previewed = False
         self.attributes = []
+        self.missing_witness = False
 
     def __enter__(self):
         ctx = self
@@ -1023,10 +1024,11 @@ class AdskFakeContext:
                 )
 
         class FakeFace:
-            def __init__(self, idx=0, area=10.0, centroid=None):
+            def __init__(self, idx=0, area=10.0, centroid=None, body=None):
                 self.entityToken = f"face_token_{idx}"
                 self.area = area
                 self.centroid = centroid or FakePoint(5.0, 5.0, 5.0)
+                self.body = body
                 self.geometry = type(
                     "FaceGeom",
                     (),
@@ -1049,7 +1051,14 @@ class AdskFakeContext:
                 self.edges = FakeCollection(
                     [FakeEdge(idx=idx * 4 + j, length=10.0) for j in range(4)]
                 )
-                self.vertices = FakeCollection([FakeVertex() for _ in range(4)])
+                self.vertices = FakeCollection(
+                    [
+                        FakeVertex(0.0, 0.0, 0.0),
+                        FakeVertex(10.0, 0.0, 0.0),
+                        FakeVertex(10.0, 10.0, 0.0),
+                        FakeVertex(0.0, 10.0, 0.0),
+                    ]
+                )
                 self.isParamReversed = False
                 self.boundingBox = FakeBoundingBox(
                     FakePoint(0, 0, 0), FakePoint(10, 10, 0)
@@ -1100,6 +1109,8 @@ class AdskFakeContext:
                         for i in range(6)
                     ]
                 )
+                for _fi in range(self.faces.count):
+                    self.faces.item(_fi).body = self
                 self.edges = FakeCollection(
                     [FakeEdge(idx=i, length=10.0) for i in range(12)]
                 )
@@ -1318,6 +1329,8 @@ class AdskFakeContext:
             def measureDistance(self, e1, e2):
                 p1 = self._centroid(e1)
                 p2 = self._centroid(e2)
+                if getattr(self._ctx, "missing_witness", False):
+                    return FakeMeasureResult(self._dist(p1, p2), None, None)
                 return FakeMeasureResult(self._dist(p1, p2), p1, p2)
 
             def measureMinimumDistance(self, e1, e2):
@@ -5607,7 +5620,7 @@ async def test_fusion_inspect_describe_area_volume_perimeter_centroid(
         assert res.data["kind"] == "body"
         assert res.data["frame"]["space"] == "world"
         assert res.data["measures"]["volume"]["unit"] == "mm^3"
-        assert res.data["measures"]["volume"]["value"] == pytest.approx(1000.0)
+        assert res.data["measures"]["volume"]["value"] == pytest.approx(1_000_000.0)
         assert res.data["measures"]["area"]["unit"] == "mm^2"
 
         # area (body surface area)
@@ -5617,7 +5630,7 @@ async def test_fusion_inspect_describe_area_volume_perimeter_centroid(
         )
         assert res_area.data["quantity"] == "area"
         assert res_area.data["unit"] == "mm^2"
-        assert res_area.data["value"] == pytest.approx(50.0)
+        assert res_area.data["value"] == pytest.approx(5000.0)
 
         # volume (body)
         res_vol = await cad_service.execute(
@@ -5626,7 +5639,7 @@ async def test_fusion_inspect_describe_area_volume_perimeter_centroid(
         )
         assert res_vol.data["quantity"] == "volume"
         assert res_vol.data["unit"] == "mm^3"
-        assert res_vol.data["value"] == pytest.approx(1000.0)
+        assert res_vol.data["value"] == pytest.approx(1_000_000.0)
 
         # perimeter (face) = 4 edges x 10 mm
         res_per = await cad_service.execute(
@@ -5635,7 +5648,7 @@ async def test_fusion_inspect_describe_area_volume_perimeter_centroid(
         )
         assert res_per.data["quantity"] == "perimeter"
         assert res_per.data["unit"] == "mm"
-        assert res_per.data["value"] == pytest.approx(40.0)
+        assert res_per.data["value"] == pytest.approx(400.0)
 
         # centroid (body) with explicit frame
         res_cen = await cad_service.execute(
@@ -5648,7 +5661,7 @@ async def test_fusion_inspect_describe_area_volume_perimeter_centroid(
             group="inspect",
         )
         assert res_cen.data["point"]["frame"]["space"] == "world"
-        assert res_cen.data["point"]["x"] == pytest.approx(5.0)
+        assert res_cen.data["point"]["x"] == pytest.approx(50.0)
 
 
 @pytest.mark.asyncio
@@ -5682,7 +5695,7 @@ async def test_fusion_inspect_bounding_box_oriented_bbox_and_edge(
         )
         assert res_bb.data["bounding_box"]["frame"]["space"] == "world"
         assert res_bb.data["bounding_box"]["min_point"]["x"] == 0.0
-        assert res_bb.data["bounding_box"]["max_point"]["z"] == 10.0
+        assert res_bb.data["bounding_box"]["max_point"]["z"] == 100.0
 
         # oriented_bbox has center, axes, extents, frame
         res_obb = await cad_service.execute(
@@ -5691,7 +5704,7 @@ async def test_fusion_inspect_bounding_box_oriented_bbox_and_edge(
         )
         obb = res_obb.data["oriented_bbox"]
         assert len(obb["axes"]) == 3
-        assert obb["extents"] == (5.0, 5.0, 5.0)
+        assert obb["extents"] == (50.0, 50.0, 50.0)
         assert obb["frame"]["space"] == "world"
         assert obb["center"]["frame"]["space"] == "world"
 
@@ -5701,7 +5714,7 @@ async def test_fusion_inspect_bounding_box_oriented_bbox_and_edge(
             group="inspect",
         )
         assert res_edge.data["unit"] == "mm"
-        assert res_edge.data["value"] == pytest.approx(10.0)
+        assert res_edge.data["value"] == pytest.approx(100.0)
 
 
 @pytest.mark.asyncio
@@ -5735,7 +5748,7 @@ async def test_fusion_inspect_distance_minimum_distance_and_angle(
         )
         assert res_dist.data["quantity"] == "distance"
         assert res_dist.data["unit"] == "mm"
-        assert res_dist.data["value"] == pytest.approx(math.sqrt(75.0))
+        assert res_dist.data["value"] == pytest.approx(10.0 * math.sqrt(75.0))
         assert res_dist.data["from_point"]["frame"]["space"] == "world"
         assert res_dist.data["to_point"]["frame"]["space"] == "world"
 
@@ -5863,8 +5876,11 @@ async def test_fusion_inspect_relation_contracts(
         )
         assert res_conc.data["relation"] == "concentric"
         assert res_conc.data["matches"] is True
-        assert res_conc.data["measured"]["distance_mm"] == 0.0
+        assert res_conc.data["measured"]["angle_deg"] == 0.0
+        assert res_conc.data["measured"]["offset_mm"] == 0.0
         assert res_conc.data["tolerance"]["unit"] == "mm"
+        assert res_conc.data["tolerances"]["angle_deg"] == 0.01
+        assert res_conc.data["tolerances"]["offset_mm"] == 0.001
 
 
 @pytest.mark.asyncio
@@ -5909,7 +5925,7 @@ async def test_fusion_inspect_face_to_face_thickness_exact_only(
             group="inspect",
         )
         assert res_thick.data["quantity"] == "thickness"
-        assert res_thick.data["value"] == pytest.approx(5.0)
+        assert res_thick.data["value"] == pytest.approx(50.0)
         assert res_thick.data["unit"] == "mm"
         assert res_thick.data["unambiguous"] is True
 
@@ -5986,3 +6002,375 @@ async def test_fusion_inspect_unsupported_targets_fail_closed(
             group="inspect",
         )
     assert exc_no_doc.value.code == ErrorCode.NO_ACTIVE_DESIGN
+
+
+# =========================================================================
+# Task 7 review findings: native cm -> mm, no heuristic fallbacks,
+# conservative thickness, concentric angular+offset
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_centroid_no_bbox_fallback(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 2: body centroid must NOT fall back to bounding-box center."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+        body.physicalProperties = None  # exact centroid unavailable
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "centroid",
+                    "target": refs["body"],
+                    "frame": {"space": "world"},
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_sketch_centroid_unsupported(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 2: sketch centroid must NOT fall back to bounding-box center."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "centroid",
+                    "target": refs["sketch"],
+                    "frame": {"space": "world"},
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_curved_edge_centroid_unsupported(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 2: curved-edge centroid must not use endpoint midpoint."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+        edge = body.edges.item(0)
+        edge.geometry.objectType = "Arc3D"
+        edge.geometry.curveType = "Arc3D"
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "centroid",
+                    "target": refs["edge"],
+                    "frame": {"space": "world"},
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_distance_missing_witness_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 2: distance must not fall back to centroids when witness points are missing."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0) as fake_adsk:
+        fake_adsk.missing_witness = True
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "distance",
+                    "target_a": refs["body"],
+                    "target_b": refs["face"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_distance_no_measure_manager_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 2: distance must not fall back to centroid math when measureManager is unavailable."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        app.measureManager = None
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "minimum_distance",
+                    "target_a": refs["body"],
+                    "target_b": refs["face"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_thickness_different_bodies_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 3: thickness requires provably same-solid faces."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+        face_a = body.faces.item(0)
+        face_b = body.faces.item(1)
+        face_a.geometry.origin = _FakePoint(0.0, 0.0, 0.0)
+        face_a.geometry.normal = _FakePoint(0.0, 0.0, 1.0)
+        face_b.geometry.origin = _FakePoint(0.0, 0.0, 5.0)
+        face_b.geometry.normal = _FakePoint(0.0, 0.0, -1.0)
+        # Different solid -> cannot prove wall thickness
+        face_b.body = object()
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "face_to_face_thickness",
+                    "face_a": refs["face"],
+                    "face_b": refs["face1"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_thickness_disjoint_faces_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 3: thickness requires projected overlap proving a material path."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+        face_a = body.faces.item(0)
+        face_b = body.faces.item(1)
+        face_a.geometry.origin = _FakePoint(0.0, 0.0, 0.0)
+        face_a.geometry.normal = _FakePoint(0.0, 0.0, 1.0)
+        face_b.geometry.origin = _FakePoint(0.0, 0.0, 5.0)
+        face_b.geometry.normal = _FakePoint(0.0, 0.0, -1.0)
+        # Move face_b vertices far away -> no projected overlap -> disjoint
+        for vi in range(face_b.vertices.count):
+            face_b.vertices.item(vi).geometry = _FakePoint(100.0, 100.0, 5.0)
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "face_to_face_thickness",
+                    "face_a": refs["face"],
+                    "face_b": refs["face1"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_concentric_non_parallel_axes_reports_angle(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 4: concentric requires angular parallelism within tolerance."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+        face_a = body.faces.item(0)
+        face_b = body.faces.item(1)
+        face_a.geometry.axis = _FakePoint(0.0, 0.0, 1.0)
+        face_a.geometry.center = _FakePoint(5.0, 5.0, 0.0)
+        face_a.geometry.radius = 5.0
+        face_b.geometry.axis = _FakePoint(1.0, 0.0, 0.0)
+        face_b.geometry.center = _FakePoint(5.0, 5.0, 5.0)
+        face_b.geometry.radius = 7.0
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        res = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "concentric",
+                "target_a": refs["face"],
+                "target_b": refs["face1"],
+                "tolerance_deg": 0.01,
+                "tolerance_mm": 1.0,
+            },
+            group="inspect",
+        )
+        assert res.data["matches"] is False
+        assert res.data["measured"]["angle_deg"] == pytest.approx(90.0)
+        assert res.data["measured"]["offset_mm"] == pytest.approx(0.0)
+        assert res.data["tolerances"]["angle_deg"] == 0.01
+        assert res.data["tolerances"]["offset_mm"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_concentric_offset_exceeds_tolerance(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Falsify Finding 4: parallel but offset axes are not concentric."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+        face_a = body.faces.item(0)
+        face_b = body.faces.item(1)
+        face_a.geometry.axis = _FakePoint(0.0, 0.0, 1.0)
+        face_a.geometry.center = _FakePoint(5.0, 5.0, 0.0)
+        face_a.geometry.radius = 5.0
+        face_b.geometry.axis = _FakePoint(0.0, 0.0, 1.0)
+        face_b.geometry.center = _FakePoint(5.0, 6.0, 0.0)
+        face_b.geometry.radius = 7.0
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+        res = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "concentric",
+                "target_a": refs["face"],
+                "target_b": refs["face1"],
+                "tolerance_deg": 0.01,
+                "tolerance_mm": 0.001,
+            },
+            group="inspect",
+        )
+        assert res.data["matches"] is False
+        assert res.data["measured"]["angle_deg"] == pytest.approx(0.0)
+        assert res.data["measured"]["offset_mm"] == pytest.approx(10.0)

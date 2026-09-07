@@ -111,6 +111,7 @@ class RelationResult(BaseModel):
     matches: bool
     measured: ImmutableMapping
     tolerance: ToleranceSpec
+    tolerances: ImmutableMapping | None = None
     target_a: str
     target_b: str
 
@@ -423,11 +424,38 @@ def normalize_relation(
             ErrorCode.UNSUPPORTED_GEOMETRY,
             f"Inspection '{operation}' relation result has negative tolerance",
         )
+    tolerances: ImmutableMapping | None = None
+    tolerances_raw = raw.get("tolerances")
+    if tolerances_raw is not None:
+        if not isinstance(tolerances_raw, Mapping) or not tolerances_raw:
+            raise FusionCadError(
+                ErrorCode.UNSUPPORTED_GEOMETRY,
+                f"Inspection '{operation}' relation result tolerances must be a non-empty mapping",
+            )
+        tol_map: dict[str, Any] = {}
+        for tol_key, tol_val in tolerances_raw.items():
+            if (
+                tol_val is None
+                or not isinstance(tol_val, (int, float))
+                or isinstance(tol_val, bool)
+            ):
+                raise FusionCadError(
+                    ErrorCode.UNSUPPORTED_GEOMETRY,
+                    f"Inspection '{operation}' relation result tolerance '{tol_key}' must be a non-negative number",
+                )
+            if float(tol_val) < 0:
+                raise FusionCadError(
+                    ErrorCode.UNSUPPORTED_GEOMETRY,
+                    f"Inspection '{operation}' relation result tolerance '{tol_key}' is negative",
+                )
+            tol_map[str(tol_key)] = float(tol_val)
+        tolerances = ImmutableMapping(tol_map)
     return RelationResult(
         relation=relation,
         matches=matches_raw,
         measured=ImmutableMapping(dict(measured_raw)),
         tolerance=ToleranceSpec(value=float(tol_value), unit=str(tol_unit)),
+        tolerances=tolerances,
         target_a=_require_ref(raw.get("target_a"), "target_a"),
         target_b=_require_ref(raw.get("target_b"), "target_b"),
     )

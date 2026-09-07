@@ -318,16 +318,19 @@ def test_concentric_relation_contract():
             "operation": "concentric",
             "relation": "concentric",
             "matches": True,
-            "measured": {"distance_mm": 0.0},
+            "measured": {"angle_deg": 0.0, "offset_mm": 0.0},
             "tolerance": {"value": 0.001, "unit": "mm"},
+            "tolerances": {"angle_deg": 0.01, "offset_mm": 0.001},
             "target_a": "ent_ea",
             "target_b": "ent_eb",
         },
         operation="concentric",
     )
     assert res.matches is True
-    assert res.measured["distance_mm"] == 0.0
+    assert res.measured["angle_deg"] == 0.0
+    assert res.measured["offset_mm"] == 0.0
     assert res.tolerance.value == 0.001
+    assert res.tolerances == {"angle_deg": 0.01, "offset_mm": 0.001}
 
 
 def test_relation_missing_matches_bool_fails_closed():
@@ -411,3 +414,64 @@ def test_measure_normalizer_requires_exact_quantity_and_unit():
     assert res.value == 10.0
     assert res.quantity == "volume"
     assert res.unit == "mm^3"
+
+
+
+# =========================================================================
+# Task 7 review findings: concentric tolerances reporting
+# =========================================================================
+
+
+def test_concentric_relation_reports_explicit_tolerances():
+    res = normalize_relation(
+        {
+            "operation": "concentric",
+            "relation": "concentric",
+            "matches": False,
+            "measured": {"angle_deg": 0.5, "offset_mm": 2.0},
+            "tolerance": {"value": 0.001, "unit": "mm"},
+            "tolerances": {"angle_deg": 0.01, "offset_mm": 0.001},
+            "target_a": "ent_ea",
+            "target_b": "ent_eb",
+        },
+        operation="concentric",
+    )
+    assert res.matches is False
+    assert res.measured["angle_deg"] == 0.5
+    assert res.measured["offset_mm"] == 2.0
+    assert res.tolerances["angle_deg"] == 0.01
+    assert res.tolerances["offset_mm"] == 0.001
+
+
+def test_relation_tolerances_optional_for_other_relations():
+    res = normalize_relation(
+        {
+            "operation": "parallel",
+            "relation": "parallel",
+            "matches": True,
+            "measured": {"angle_deg": 0.0},
+            "tolerance": {"value": 0.01, "unit": "deg"},
+            "target_a": "ent_fa",
+            "target_b": "ent_fb",
+        },
+        operation="parallel",
+    )
+    assert res.tolerances is None
+
+
+def test_relation_negative_tolerance_value_fails_closed():
+    with pytest.raises(FusionCadError) as exc:
+        normalize_relation(
+            {
+                "operation": "concentric",
+                "relation": "concentric",
+                "matches": True,
+                "measured": {"angle_deg": 0.0, "offset_mm": 0.0},
+                "tolerance": {"value": 0.001, "unit": "mm"},
+                "tolerances": {"angle_deg": -0.01, "offset_mm": 0.001},
+                "target_a": "ent_ea",
+                "target_b": "ent_eb",
+            },
+            operation="concentric",
+        )
+    assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY

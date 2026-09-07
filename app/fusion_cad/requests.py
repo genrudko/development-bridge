@@ -182,6 +182,7 @@ class ConcentricInspectRequest(_StrictCadBase):
     operation: Literal["concentric"]
     target_a: TargetRef
     target_b: TargetRef
+    tolerance_deg: float = 0.01
     tolerance_mm: float = 0.001
 
 
