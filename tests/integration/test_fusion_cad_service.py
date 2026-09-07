@@ -8146,3 +8146,440 @@ async def test_metadata_removal_deleteMe_true_but_still_present_fails_closed(
     assert desktop.mutation_calls == 1
     assert desktop.read_calls == 1
     assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+
+# =========================================================================
+# Task 10 final narrow repair D (Codex re-review job_749af... follow-up):
+# rollback-side delete-result verification + no raw deleteMe-result
+# stringification in forward removal error details
+# =========================================================================
+
+
+_HOSTILE_DELETEME_MARKER = "HOSTILE_NATIVE_DELETEME_STR_MARKER_zz9x"
+
+
+class _HostileDeleteResult:
+    """A malformed/misbehaving Attribute.deleteMe return object (not a bool).
+
+    Its __str__/__repr__ carry a marker that must NEVER be stringified or
+    copied into any raw error detail: only safe constant metadata
+    (operation/attribute_name/compensated) may be attached."""
+
+    def __str__(self):
+        return _HOSTILE_DELETEME_MARKER
+
+    def __repr__(self):
+        return _HOSTILE_DELETEME_MARKER
+
+
+def _arm_post_apply_fingerprint_explosion():
+    """First fingerprint read (pre-guard) succeeds; the post-apply read
+    explodes so the plan's created writes must be compensated by rollback."""
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+
+    class _ExplodesOnSecondRead:
+        def __init__(self):
+            self._reads = 0
+
+        def __bool__(self):
+            self._reads += 1
+            if self._reads >= 2:
+                raise RuntimeError("post-apply fingerprint collection exploded")
+            return False
+
+    doc.isModified = _ExplodesOnSecondRead()
+
+
+def _arm_hostile_created_delete(fake_adsk, target_name, hostile_mode):
+    """Wrap the currently installed Attributes.add so the FIRST created
+    reserved attribute with target_name gets a misbehaving deleteMe:
+
+    - "false_after_delete": deleteMe actually removes the attribute but
+      returns False (bad Boolean result that nevertheless mutated state);
+    - "true_noop": deleteMe returns True while leaving the attribute in
+      place (reported success without observable removal).
+
+    Returns (attrs_cls, healthy_add, hostile_add) so tests can restore the
+    healthy add afterwards."""
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs_cls = type(doc.attributes)
+    healthy_add = attrs_cls.add
+    armed = {"used": False}
+
+    def add_with_hostile_created_delete(self, group_name, name, value):
+        attr = healthy_add(self, group_name, name, value)
+        if (
+            not armed["used"]
+            and group_name == RESERVED_METADATA_GROUP
+            and name == target_name
+            and attr is not None
+        ):
+            armed["used"] = True
+            original_delete = attr.deleteMe
+
+            if hostile_mode == "false_after_delete":
+
+                def hostile_delete():
+                    original_delete()
+                    return False
+
+            else:
+
+                def hostile_delete():
+                    return True
+
+            attr.deleteMe = hostile_delete
+        return attr
+
+    return attrs_cls, healthy_add, add_with_hostile_created_delete
+
+
+def _arm_null_add_with_hostile_persisted_delete(fake_adsk, target_name, hostile_mode):
+    """One-shot failed current write: the add for target_name PERSISTS the
+    attribute (real create semantics) and then returns null, attaching a
+    misbehaving deleteMe to the persisted attribute. Returns
+    (attrs_cls, healthy_add, hostile_add)."""
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs_cls = type(doc.attributes)
+    healthy_add = attrs_cls.add
+    armed = {"pending": True}
+
+    def add_persist_then_null_with_hostile_delete(self, group_name, name, value):
+        attr = healthy_add(self, group_name, name, value)
+        if (
+            armed["pending"]
+            and group_name == RESERVED_METADATA_GROUP
+            and name == target_name
+        ):
+            armed["pending"] = False
+            original_delete = attr.deleteMe
+
+            if hostile_mode == "false_after_delete":
+
+                def hostile_delete():
+                    original_delete()
+                    return False
+
+            else:
+
+                def hostile_delete():
+                    return True
+
+            attr.deleteMe = hostile_delete
+            return None
+        return attr
+
+    return attrs_cls, healthy_add, add_persist_then_null_with_hostile_delete
+
+
+def _raw_removal_payload(cad_service, body_ref, rec):
+    payload = {
+        "operation": "remove",
+        "target": {
+            "ref": body_ref,
+            "kind": "body",
+            "name": "Body1",
+            "native_token": "body_token_1",
+            "component_path": [],
+        },
+        "name": "finish",
+        "expected_revision": rec.revision,
+        "expected_fingerprint": rec.fingerprint,
+        "document_ref": "doc_1",
+    }
+    apply_metadata_mutation_plan(
+        payload,
+        operation_id="op_raw_removal_conf_1",
+        created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+    )
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_forward_removal_raw_error_never_stringifies_hostile_deleteMe_result(
+    fake_desktop,
+):
+    """Finding 1 (raw-script confidentiality): the RAW rendered script error for
+    a failed forward metadata removal must never stringify or copy the
+    arbitrary deleteMe result object into error details — the object can carry
+    untrusted native runtime text. Only safe constant metadata
+    (operation/attribute_name) may be attached. The service sanitizer is
+    deliberately bypassed by executing the rendered production script
+    directly, so this regression cannot be masked by the diagnostics
+    allowlist."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+
+    attr = _seed_body_reserved_attribute("finish", "matte")
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    tracker = cad_service.revision_tracker
+    rec = tracker.current("doc_1")
+
+    # Misbehaving runtime: the removal deleteMe returns a hostile non-Boolean
+    # object instead of the documented Boolean result.
+    attr.deleteMe = lambda: _HostileDeleteResult()
+
+    payload = _raw_removal_payload(cad_service, body_ref, rec)
+    script = FusionCadScriptBundle().build("mutate", payload)
+    output = _exec_rendered_mutate(script)
+
+    assert output["status"] == "failed"
+    assert output["error"]["code"] == "FUSION_API_ERROR"
+    details = output["error"]["details"]
+    # The raw deleteMe result object is never stringified or copied into the
+    # raw error details ...
+    assert "deleteMe_result" not in details
+    raw_dump = json.dumps(output, ensure_ascii=False, default=repr)
+    assert _HOSTILE_DELETEME_MARKER not in raw_dump
+    # ... only safe constant metadata is attached.
+    assert details.get("operation") == "remove"
+    assert details.get("attribute_name") == "finish"
+    # The failed removal is still compensated back to the exact pre-command
+    # reserved state.
+    assert _body_attributes().get((RESERVED_METADATA_GROUP, "finish")) == "matte"
+
+
+@pytest.mark.parametrize("hostile_mode", ["false_after_delete", "true_noop"])
+@pytest.mark.asyncio
+async def test_rollback_created_delete_result_must_be_verified_fail_closed(
+    fake_desktop, hostile_mode
+):
+    """Finding 2 (rollback 'created' shape): compensation deletes registered
+    for attributes this plan CREATED must require the documented True
+    Attribute.deleteMe result AND post-delete re-enumeration proving the
+    created reserved (name, value) record is observably absent. A False
+    result that nevertheless mutated state, or a reported-True no-op, must
+    fail the compensation closed with FUSION_API_ERROR / compensated=False —
+    compensation success is never inferred from the final snapshot equality
+    alone."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    tracker = cad_service.revision_tracker
+    rec = tracker.current("doc_1")
+
+    baseline_body_attrs = _body_attributes()
+
+    attrs_cls, healthy_add, hostile_add = _arm_hostile_created_delete(
+        fake_adsk, "finish", hostile_mode
+    )
+    attrs_cls.add = hostile_add
+    try:
+        _arm_post_apply_fingerprint_explosion()
+        payload = {
+            "operation": "set",
+            "target": {
+                "ref": body_ref,
+                "kind": "body",
+                "name": "Body1",
+                "native_token": "body_token_1",
+                "component_path": [],
+            },
+            "name": "finish",
+            "value": "anodized",
+            "expected_revision": rec.revision,
+            "expected_fingerprint": rec.fingerprint,
+            "document_ref": "doc_1",
+        }
+        apply_metadata_mutation_plan(
+            payload,
+            operation_id="op_rollback_created_1",
+            created_revision=tracker.next_revision("doc_1"),
+        )
+        script = FusionCadScriptBundle().build("mutate", payload)
+        output = _exec_rendered_mutate(script)
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert output["status"] == "failed"
+    assert output["error"]["code"] == "FUSION_API_ERROR"
+    details = output["error"]["details"]
+    # The rollback delete failure must be reported as a compensation failure.
+    assert details.get("compensated") is False
+    assert details.get("attribute_name") == "finish"
+    assert "Compensation Attribute.deleteMe" in output["error"]["message"]
+    # The hostile deleteMe result object is never stringified into details.
+    raw_dump = json.dumps(output, ensure_ascii=False, default=repr)
+    assert _HOSTILE_DELETEME_MARKER not in raw_dump
+    if hostile_mode == "false_after_delete":
+        # The delete DID mutate persisted state (both created records are
+        # gone), yet the bad Boolean result must still fail the compensation
+        # closed instead of being accepted from snapshot equality.
+        assert _body_attributes() == baseline_body_attrs
+
+
+@pytest.mark.parametrize("hostile_mode", ["false_after_delete", "true_noop"])
+@pytest.mark.asyncio
+async def test_rollback_delete_created_by_name_result_must_be_verified_fail_closed(
+    fake_desktop, hostile_mode
+):
+    """Finding 2 (rollback 'delete_created_by_name' shape): compensation
+    deletes re-derived by enumeration after a failed/persisting add must
+    require the documented True Attribute.deleteMe result AND post-delete
+    re-enumeration proving matching reserved name(s) are observably absent.
+    Either failure must fail the compensation closed with FUSION_API_ERROR /
+    compensated=False."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    tracker = cad_service.revision_tracker
+    rec = tracker.current("doc_1")
+
+    baseline_body_attrs = _body_attributes()
+
+    attrs_cls, healthy_add, hostile_add = _arm_null_add_with_hostile_persisted_delete(
+        fake_adsk, "finish", hostile_mode
+    )
+    attrs_cls.add = hostile_add
+    try:
+        payload = {
+            "operation": "set",
+            "target": {
+                "ref": body_ref,
+                "kind": "body",
+                "name": "Body1",
+                "native_token": "body_token_1",
+                "component_path": [],
+            },
+            "name": "finish",
+            "value": "anodized",
+            "expected_revision": rec.revision,
+            "expected_fingerprint": rec.fingerprint,
+            "document_ref": "doc_1",
+        }
+        apply_metadata_mutation_plan(
+            payload,
+            operation_id="op_rollback_delname_1",
+            created_revision=tracker.next_revision("doc_1"),
+        )
+        script = FusionCadScriptBundle().build("mutate", payload)
+        output = _exec_rendered_mutate(script)
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert output["status"] == "failed"
+    assert output["error"]["code"] == "FUSION_API_ERROR"
+    details = output["error"]["details"]
+    # The rollback delete failure must be reported as a compensation failure.
+    assert details.get("compensated") is False
+    assert details.get("attribute_name") == "finish"
+    assert "Compensation Attribute.deleteMe" in output["error"]["message"]
+    if hostile_mode == "false_after_delete":
+        # The delete DID mutate persisted state, yet the bad Boolean result
+        # must still fail the compensation closed.
+        assert _body_attributes() == baseline_body_attrs
+        assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _body_attributes()
+
+
+@pytest.mark.asyncio
+async def test_service_rollback_created_delete_failure_fails_closed_rendered_pipeline(
+    fake_desktop,
+):
+    """Rendered pipeline through the service: a rollback 'created' delete with
+    a bad Boolean result (False after actual deletion) must fail the whole
+    command closed with FUSION_API_ERROR; the failed command never advances
+    the revision authority and never reports applied success."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    baseline_body_attrs = _body_attributes()
+    baseline_doc_attrs = _document_attributes()
+
+    attrs_cls, healthy_add, hostile_add = _arm_hostile_created_delete(
+        fake_adsk, "finish", "false_after_delete"
+    )
+    attrs_cls.add = hostile_add
+    try:
+        _arm_post_apply_fingerprint_explosion()
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert desktop.mutation_calls == 1
+    assert desktop.read_calls == 1
+    # The compensation delete actually restored the pre-command reserved
+    # state mechanically, yet the bad deleteMe Boolean still failed the
+    # command closed (never accepted from snapshot equality).
+    assert _body_attributes() == baseline_body_attrs
+    assert _document_attributes() == baseline_doc_attrs
+    # The failed command never advanced the revision authority.
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+
+@pytest.mark.asyncio
+async def test_service_rollback_delete_created_by_name_failure_fails_closed(
+    fake_desktop,
+):
+    """Rendered pipeline through the service: a rollback
+    'delete_created_by_name' delete with a bad Boolean result (False after
+    actual deletion) must fail the whole command closed with
+    FUSION_API_ERROR; the failed command never advances the revision
+    authority and never reports applied success."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    baseline_body_attrs = _body_attributes()
+
+    attrs_cls, healthy_add, hostile_add = _arm_null_add_with_hostile_persisted_delete(
+        fake_adsk, "finish", "false_after_delete"
+    )
+    attrs_cls.add = hostile_add
+    try:
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert desktop.mutation_calls == 1
+    assert desktop.read_calls == 1
+    # The delete actually mutated persisted state, yet the bad Boolean result
+    # must still fail the command closed.
+    assert _body_attributes() == baseline_body_attrs
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _body_attributes()
+    # The failed command never advanced the revision authority.
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"

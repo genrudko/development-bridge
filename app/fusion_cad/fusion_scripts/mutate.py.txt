@@ -239,6 +239,62 @@ def run():
                         details={"operation": op},
                     )
 
+    def _rollback_delete_reserved(owner, delete_targets, name, value=None):
+        """Delete reserved attribute(s) during compensation with full proof.
+
+        Documented Autodesk semantics: Attribute.deleteMe returns True iff the
+        deletion succeeded. A misbehaving runtime may also report success
+        without removing anything, so the owner is re-enumerated after the
+        deletes and the targeted reserved record (name, or name+value when the
+        value is known) must be observably ABSENT. Either failure raises
+        FUSION_API_ERROR with compensated=False: a bad Boolean result that
+        nevertheless mutated state is still a compensation failure, and success
+        is never inferred from the final snapshot equality alone. Only safe
+        constant metadata (operation/attribute_name/compensated) is attached to
+        the error; the raw deleteMe result object is never stringified or
+        copied into details."""
+        for delete_attr in delete_targets:
+            if not hasattr(delete_attr, "deleteMe"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Attribute does not support deleteMe; metadata compensation is unavailable and partial metadata may remain",
+                    details={
+                        "operation": op,
+                        "attribute_name": name,
+                        "compensated": False,
+                    },
+                )
+            delete_result = delete_attr.deleteMe()
+            if delete_result is not True:
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    "Compensation Attribute.deleteMe did not report success; metadata compensation is unavailable and partial metadata may remain",
+                    details={
+                        "operation": op,
+                        "attribute_name": name,
+                        "compensated": False,
+                    },
+                )
+        _verify_attrs, verify_items = _owner_attributes(owner)
+        for post_attr in verify_items:
+            if str(getattr(post_attr, "groupName", "") or "") != _RESERVED_GROUP:
+                continue
+            if str(getattr(post_attr, "name", "") or "") != name:
+                continue
+            if value is not None and str(
+                getattr(post_attr, "value", "") or ""
+            ) != str(value):
+                continue
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Compensation Attribute.deleteMe reported success but the targeted reserved attribute is still present; metadata compensation is unavailable and partial metadata may remain",
+                details={
+                    "operation": op,
+                    "attribute_name": name,
+                    "compensated": False,
+                },
+            )
+
     def _rollback_metadata(owner, undo):
         """Restore the exact pre-mutation reserved-namespace state (all-or-nothing).
 
@@ -256,9 +312,13 @@ def run():
         old_value) when it overwrote a pre-existing attribute, or through
         ("delete_created_by_name", name) when it may have created one; the
         persisted state is re-derived by enumeration and the bad returned
-        object is never trusted as proof of what was created. Raises when the
-        restored state does not match the pre-mutation snapshot so a partially
-        applied plan can never be reported as success.
+        object is never trusted as proof of what was created. Every rollback
+        delete (created attribute or re-derived failed-write record) must
+        return the documented True deleteMe result AND re-enumeration must
+        prove the targeted reserved record is observably absent; a False/bad
+        result — even one that mutated state — fails the compensation closed.
+        Raises when the restored state does not match the pre-mutation snapshot
+        so a partially applied plan can never be reported as success.
         """
         if undo is None:
             return
@@ -267,14 +327,16 @@ def run():
         for action in reversed(undo_actions):
             kind = action[0]
             if kind == "created":
-                attr = action[1]
-                if not hasattr(attr, "deleteMe"):
-                    raise FusionScriptError(
-                        "CAPABILITY_UNAVAILABLE",
-                        "Created attribute does not support deleteMe; metadata compensation is unavailable and partial metadata may remain",
-                        details={"operation": op, "compensated": False},
-                    )
-                attr.deleteMe()
+                # The undo entry captures the created attribute together with
+                # its verified reserved name/value (captured when the write was
+                # validated, never re-read from the possibly misbehaving
+                # runtime object later). The compensation delete must report
+                # the documented True result AND the created record must be
+                # observably absent afterwards.
+                attr, created_name, created_value = action[1], action[2], action[3]
+                _rollback_delete_reserved(
+                    owner, [attr], created_name, created_value
+                )
             elif kind == "restored":
                 name, value = action[1], action[2]
                 if restore_attrs is None or not hasattr(restore_attrs, "add"):
@@ -308,21 +370,19 @@ def run():
                 # persisted created state under this reserved name. Re-derive
                 # the actual persisted attributes by enumeration and delete
                 # exactly what the failed write created; the null/mismatched
-                # result object is never trusted as proof of creation.
+                # result object is never trusted as proof of creation. Every
+                # delete must report the documented True result AND matching
+                # reserved name(s) must be observably absent afterwards.
                 name = action[1]
                 _del_attrs, del_items = _owner_attributes(owner)
-                for del_attr in del_items:
-                    if str(getattr(del_attr, "groupName", "") or "") != _RESERVED_GROUP:
-                        continue
-                    if str(getattr(del_attr, "name", "") or "") != name:
-                        continue
-                    if not hasattr(del_attr, "deleteMe"):
-                        raise FusionScriptError(
-                            "CAPABILITY_UNAVAILABLE",
-                            "Persisted attribute does not support deleteMe; metadata compensation is unavailable and partial metadata may remain",
-                            details={"operation": op, "compensated": False},
-                        )
-                    del_attr.deleteMe()
+                delete_targets = [
+                    del_attr
+                    for del_attr in del_items
+                    if str(getattr(del_attr, "groupName", "") or "")
+                    == _RESERVED_GROUP
+                    and str(getattr(del_attr, "name", "") or "") == name
+                ]
+                _rollback_delete_reserved(owner, delete_targets, name)
             else:
                 raise FusionScriptError(
                     "FUSION_API_ERROR",
@@ -406,10 +466,12 @@ def run():
                         raise FusionScriptError(
                             "FUSION_API_ERROR",
                             "Attribute.deleteMe did not report success for the metadata removal; failing closed so stale metadata is never reported as applied",
+                            # Confidentiality: only safe constant metadata is
+                            # attached; the arbitrary raw deleteMe result
+                            # object is never stringified or copied here.
                             details={
                                 "operation": op,
                                 "attribute_name": rm_name,
-                                "deleteMe_result": str(delete_result),
                             },
                         )
                     _verify_attrs, verify_items = _owner_attributes(owner)
@@ -526,7 +588,9 @@ def run():
                 if existed:
                     undo_actions.append(("restored", wr_name, existing_value))
                 else:
-                    undo_actions.append(("created", new_attr))
+                    undo_actions.append(
+                        ("created", new_attr, wr_name, str(wr_value))
+                    )
                 applied_writes.append({"name": wr_name, "value": str(wr_value)})
         except FusionScriptError:
             _rollback_metadata(owner, undo)
