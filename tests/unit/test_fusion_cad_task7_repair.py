@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from app.fusion_cad.inspect import normalize_relation
 
-
 # =========================================================================
 # Task 7 bounded repair: coplanar must report explicit angular + linear
 # tolerances for every measured deviation used in matches.

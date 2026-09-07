@@ -14,7 +14,6 @@ from app.fusion_cad.models import CapabilityRecord
 from app.fusion_cad.service import FusionCadService
 from app.fusion_cad.snapshots import BodySummary, ModelSnapshot, SnapshotCounts
 
-
 # =========================================================================
 # Minimal representative Adsk Fusion fake for Task 7 final review repair.
 #
@@ -249,14 +248,14 @@ def _seed_snapshot_and_registry(cad_service, *, include_faces=False):
             is_solid=True,
         ),
     )
-    snap_kwargs = dict(
-        snapshot_id="snap_inspect_final_1",
-        document_ref="doc_1",
-        model_revision="rev_1",
-        structural_hash="hash_inspect_final_1",
-        counts=SnapshotCounts(bodies=2),
-        bodies=bodies,
-    )
+    snap_kwargs = {
+        "snapshot_id": "snap_inspect_final_1",
+        "document_ref": "doc_1",
+        "model_revision": "rev_1",
+        "structural_hash": "hash_inspect_final_1",
+        "counts": SnapshotCounts(bodies=2),
+        "bodies": bodies,
+    }
     if include_faces:
         from app.fusion_cad.models import ImmutableMapping
 

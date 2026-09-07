@@ -13,7 +13,6 @@ from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.models import CapabilityRecord
 from app.fusion_cad.service import FusionCadService
 
-
 # =========================================================================
 # Minimal but representative Adsk Fusion fake for Task 7 bounded-repair tests.
 #
@@ -580,6 +579,345 @@ async def test_fusion_inspect_thickness_partial_overlap_rejected(mock_desktop_se
                     "operation": "face_to_face_thickness",
                     "face_a": refs["face_a"],
                     "face_b": refs["face_b"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+# =========================================================================
+# Task 7 P0 findings: line-angle/relation and circular-concentric proofs
+#
+# Falsify the two remaining P0 findings:
+#   * angle/parallel/perpendicular on edge/sketch_curve inputs must proceed
+#     ONLY for positively proven straight-line (Line3D) curves; Arc3D/Spline
+#     geometry must fail closed UNSUPPORTED_GEOMETRY instead of a chord-based
+#     plausible angle/relation result.
+#   * concentricity on edge/sketch_curve inputs must proceed ONLY for
+#     positively proven circle/arc (Circle3D/Arc3D) geometry; ellipse-like
+#     geometry exposing center+normal must fail closed UNSUPPORTED_GEOMETRY.
+# =========================================================================
+
+
+class _LineGeom:
+    def __init__(self, sp=(0.0, 0.0, 0.0), ep=(10.0, 0.0, 0.0)):
+        self.curveType = "Line3D"
+        self.objectType = "Line3D"
+        self.startPoint = sp if isinstance(sp, _P) else _P(*sp)
+        self.endPoint = ep if isinstance(ep, _P) else _P(*ep)
+
+
+class _ArcGeom:
+    def __init__(
+        self,
+        sp=(0.0, 0.0, 0.0),
+        ep=(10.0, 0.0, 0.0),
+        center=(5.0, 0.0, 0.0),
+        normal=(0.0, 0.0, 1.0),
+        radius=5.0,
+    ):
+        self.curveType = "Arc3D"
+        self.objectType = "Arc3D"
+        self.startPoint = sp if isinstance(sp, _P) else _P(*sp)
+        self.endPoint = ep if isinstance(ep, _P) else _P(*ep)
+        self.center = center if isinstance(center, _P) else _P(*center)
+        self.normal = normal if isinstance(normal, _P) else _P(*normal)
+        self.radius = radius
+
+
+class _SplineGeom:
+    def __init__(self, sp=(0.0, 0.0, 0.0), ep=(10.0, 0.0, 0.0)):
+        self.curveType = "Spline3D"
+        self.objectType = "Spline3D"
+        self.startPoint = sp if isinstance(sp, _P) else _P(*sp)
+        self.endPoint = ep if isinstance(ep, _P) else _P(*ep)
+
+
+class _EllipseGeom:
+    def __init__(
+        self,
+        center=(5.0, 5.0, 0.0),
+        normal=(0.0, 0.0, 1.0),
+        major=5.0,
+        minor=3.0,
+    ):
+        self.curveType = "Ellipse3D"
+        self.objectType = "Ellipse3D"
+        self.center = center if isinstance(center, _P) else _P(*center)
+        self.normal = normal if isinstance(normal, _P) else _P(*normal)
+        self.majorRadius = major
+        self.minorRadius = minor
+
+
+class _EllipticalArcGeom:
+    def __init__(
+        self,
+        center=(5.0, 5.0, 0.0),
+        normal=(0.0, 0.0, 1.0),
+        major=5.0,
+        minor=3.0,
+    ):
+        self.curveType = "EllipticalArc3D"
+        self.objectType = "EllipticalArc3D"
+        self.center = center if isinstance(center, _P) else _P(*center)
+        self.normal = normal if isinstance(normal, _P) else _P(*normal)
+        self.majorRadius = major
+        self.minorRadius = minor
+
+
+class _UnknownGeom:
+    """Unverifiable curve type that still exposes start/end points and center+normal."""
+
+    def __init__(self, sp=(0.0, 0.0, 0.0), ep=(10.0, 0.0, 0.0)):
+        self.curveType = "FooCurve3D"
+        self.objectType = "FooCurve3D"
+        self.startPoint = sp if isinstance(sp, _P) else _P(*sp)
+        self.endPoint = ep if isinstance(ep, _P) else _P(*ep)
+        self.center = _P(5.0, 0.0, 0.0)
+        self.normal = _P(0.0, 0.0, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_angle_curved_edge_rejected(mock_desktop_service):
+    """Falsify P0 finding: angle on curved Arc3D/Spline edges must fail closed
+    UNSUPPORTED_GEOMETRY instead of reporting a plausible chord-based angle."""
+    with InspectFusionFake() as fake:
+        cad_service = _make_service(mock_desktop_service)
+        refs = _register_refs(cad_service)
+
+        fake.body._edges[0].geometry = _LineGeom((0, 0, 0), (10, 0, 0))
+        for curved in (
+            _ArcGeom((0, 0, 0), (10, 0, 0)),
+            _SplineGeom((0, 0, 0), (10, 0, 0)),
+        ):
+            fake.body._edges[1].geometry = curved
+            with pytest.raises(FusionCadError) as exc:
+                await cad_service.execute(
+                    {
+                        "node_id": "desk-1",
+                        "operation": "angle",
+                        "target_a": refs["edge_a"],
+                        "target_b": refs["edge_b"],
+                    },
+                    group="inspect",
+                )
+            assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["parallel", "perpendicular"])
+async def test_fusion_inspect_curved_edge_relation_rejected(
+    mock_desktop_service, operation
+):
+    """Falsify P0 finding: parallel/perpendicular on a curved edge must fail closed
+    UNSUPPORTED_GEOMETRY instead of a chord-based relation result."""
+    with InspectFusionFake() as fake:
+        cad_service = _make_service(mock_desktop_service)
+        refs = _register_refs(cad_service)
+
+        fake.body._edges[0].geometry = _LineGeom((0, 0, 0), (10, 0, 0))
+        fake.body._edges[1].geometry = _ArcGeom((0, 0, 0), (10, 0, 0))
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": operation,
+                    "target_a": refs["edge_a"],
+                    "target_b": refs["edge_b"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_concentric_ellipse_like_edge_center_normal_rejected(
+    mock_desktop_service,
+):
+    """Falsify P0 finding: ellipse-like geometry exposing center+normal must not be
+    misclassified as circular for concentricity."""
+    with InspectFusionFake() as fake:
+        cad_service = _make_service(mock_desktop_service)
+        refs = _register_refs(cad_service)
+
+        fake.body._edges[0].geometry = _EllipseGeom(center=(5, 5, 0), normal=(0, 0, 1))
+        fake.body._edges[1].geometry = _EllipseGeom(center=(5, 5, 0), normal=(0, 0, 1))
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "concentric",
+                    "target_a": refs["edge_a"],
+                    "target_b": refs["edge_b"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_straight_line_angle_and_relation_controls(
+    mock_desktop_service,
+):
+    """Control: positively proven straight Line3D edges still resolve angle,
+    parallel, and perpendicular exactly."""
+    with InspectFusionFake() as fake:
+        cad_service = _make_service(mock_desktop_service)
+        refs = _register_refs(cad_service)
+
+        fake.body._edges[0].geometry = _LineGeom((0, 0, 0), (10, 0, 0))
+        fake.body._edges[1].geometry = _LineGeom((0, 0, 0), (0, 10, 0))
+
+        res_angle = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "angle",
+                "target_a": refs["edge_a"],
+                "target_b": refs["edge_b"],
+            },
+            group="inspect",
+        )
+        assert res_angle.data["unit"] == "deg"
+        assert res_angle.data["value"] == pytest.approx(90.0)
+
+        res_par = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "parallel",
+                "target_a": refs["edge_a"],
+                "target_b": refs["edge_b"],
+                "tolerance_deg": 0.01,
+            },
+            group="inspect",
+        )
+        assert res_par.data["relation"] == "parallel"
+        assert res_par.data["matches"] is False
+        assert res_par.data["measured"]["angle_deg"] == pytest.approx(90.0)
+
+        res_perp = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "perpendicular",
+                "target_a": refs["edge_a"],
+                "target_b": refs["edge_b"],
+                "tolerance_deg": 0.01,
+            },
+            group="inspect",
+        )
+        assert res_perp.data["relation"] == "perpendicular"
+        assert res_perp.data["matches"] is True
+
+        fake.body._edges[1].geometry = _LineGeom((0, 0, 0), (10, 0, 0))
+        res_par2 = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "parallel",
+                "target_a": refs["edge_a"],
+                "target_b": refs["edge_b"],
+                "tolerance_deg": 0.01,
+            },
+            group="inspect",
+        )
+        assert res_par2.data["matches"] is True
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_circle_and_arc_concentric_controls(
+    mock_desktop_service,
+):
+    """Control: positively proven Circle3D and Arc3D edges remain concentric-supported."""
+    with InspectFusionFake() as fake:
+        cad_service = _make_service(mock_desktop_service)
+        refs = _register_refs(cad_service)
+
+        fake.body._edges[0].geometry = _CircleGeom(
+            center=(5, 5, 0), normal=(0, 0, 1), radius=5
+        )
+        fake.body._edges[1].geometry = _ArcGeom(
+            (0, 0, 0), (10, 0, 0), center=(5, 5, 0), normal=(0, 0, 1), radius=5
+        )
+        res = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "concentric",
+                "target_a": refs["edge_a"],
+                "target_b": refs["edge_b"],
+                "tolerance_deg": 0.01,
+                "tolerance_mm": 0.001,
+            },
+            group="inspect",
+        )
+        assert res.data["relation"] == "concentric"
+        assert res.data["matches"] is True
+        assert res.data["measured"]["angle_deg"] == 0.0
+        assert res.data["measured"]["offset_mm"] == 0.0
+
+
+# =========================================================================
+# Debug sweep: falsify the repair with unknown / elliptical-arc geometry
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_unknown_curve_type_fails_closed(mock_desktop_service):
+    """Debug sweep: an unknown/unverifiable curve type exposing start/end points and
+    center+normal must fail closed for both angle (straight-line proof) and
+    concentricity (circular proof)."""
+    with InspectFusionFake() as fake:
+        cad_service = _make_service(mock_desktop_service)
+        refs = _register_refs(cad_service)
+
+        fake.body._edges[0].geometry = _UnknownGeom((0, 0, 0), (10, 0, 0))
+        fake.body._edges[1].geometry = _UnknownGeom((0, 0, 0), (10, 0, 0))
+
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "angle",
+                    "target_a": refs["edge_a"],
+                    "target_b": refs["edge_b"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "concentric",
+                    "target_a": refs["edge_a"],
+                    "target_b": refs["edge_b"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_elliptical_arc_center_normal_rejected(
+    mock_desktop_service,
+):
+    """Debug sweep: EllipticalArc3D exposing center+normal must fail closed for
+    concentricity (only Circle3D/Arc3D are positively proven circular)."""
+    with InspectFusionFake() as fake:
+        cad_service = _make_service(mock_desktop_service)
+        refs = _register_refs(cad_service)
+
+        fake.body._edges[0].geometry = _EllipticalArcGeom(
+            center=(5, 5, 0), normal=(0, 0, 1)
+        )
+        fake.body._edges[1].geometry = _EllipticalArcGeom(
+            center=(5, 5, 0), normal=(0, 0, 1)
+        )
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "concentric",
+                    "target_a": refs["edge_a"],
+                    "target_b": refs["edge_b"],
                 },
                 group="inspect",
             )

@@ -16,7 +16,6 @@ from app.fusion_cad.inspect import (
     normalize_thickness,
 )
 
-
 # =========================================================================
 # Task 7 Step 1: unit/coordinate normalization (lengths mm, angle deg,
 # area mm^2, volume mm^3, geometric points carry explicit frames)

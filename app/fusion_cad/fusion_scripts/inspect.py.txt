@@ -538,6 +538,25 @@ def _is_straight_line_curve(geom):
     return ct.endswith(".Line3D") or ct.endswith(".Line")
 
 
+def _is_circular_curve(geom):
+    """Positively prove a boundary curve is a circle or circular arc.
+
+    Fusion legitimately exposes full circles as Circle3D and circular arcs as
+    Arc3D (namespaced variants such as 'adsk.core.Circle3D' are accepted).
+    Ellipse, elliptical-arc, spline, or unknown curve types are never proven
+    circular here, so a center+normal alone is never enough.
+    """
+    ct = _curve_type_of(geom)
+    if ct in ("Circle3D", "Arc3D", "Circle", "Arc"):
+        return True
+    return (
+        ct.endswith(".Circle3D")
+        or ct.endswith(".Arc3D")
+        or ct.endswith(".Circle")
+        or ct.endswith(".Arc")
+    )
+
+
 def _face_boundary_straight_edges(face):
     """Positively verify every boundary edge of the face is a straight line.
 
@@ -726,7 +745,13 @@ def _edge_direction(entity):
     if geom is None:
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
-            "Relation requires edge curve geometry",
+            "Angle and line relations require edge curve geometry",
+        )
+    if not _is_straight_line_curve(geom):
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Angle and line relations require a positively proven straight-line edge curve; curved or unknown curves cannot be measured exactly from chord endpoints",
+            details={"curve_type": _curve_type_of(geom)},
         )
     sp = getattr(geom, "startPoint", None)
     ep = getattr(geom, "endPoint", None)
@@ -753,6 +778,12 @@ def _circular_axis(entity):
             "Concentric relation requires circular geometry",
         )
     if kind in ("edge", "sketch_curve"):
+        if not _is_circular_curve(geom):
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Concentric relation requires a positively proven circular edge (Circle3D/Arc3D); ellipse, elliptical-arc, spline, or unknown curves cannot be concentric circles",
+                details={"kind": kind, "curve_type": _curve_type_of(geom)},
+            )
         center = getattr(geom, "center", None)
         normal = getattr(geom, "normal", None)
         if center is None or normal is None:

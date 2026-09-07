@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import types
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,7 +17,6 @@ from app.fusion_cad.inspect import (
 from app.fusion_cad.requests import FusionInspectRequest
 from app.fusion_cad.scripts import FusionCadScriptBundle
 from app.fusion_cad.service import FusionCadService
-
 
 # =========================================================================
 # Rendered inspect script scope used by the script-level regression tests.

@@ -20,18 +20,17 @@ from app.fusion_cad.errors import (
     filter_trusted_diagnostics,
     format_safe_validation_message,
     get_safe_error_message,
-    sanitize_error_message,
     sanitize_public_payload,
     sanitize_validation_errors,
     trusted_detail,
 )
+from app.fusion_cad.inspect import normalize_inspect_result
 from app.fusion_cad.models import (
     ENTITY_REF_PATTERN,
     CadResult,
     DocumentState,
     ImmutableMapping,
 )
-from app.fusion_cad.inspect import normalize_inspect_result
 from app.fusion_cad.refs import EntityRefRegistry, InternalEntityRecord
 from app.fusion_cad.requests import (
     FusionInspectRequest,
@@ -1179,17 +1178,18 @@ class FusionCadService:
                         )
 
             # 5. Semantic inspect normalization
-            if effective_bundle_group == "inspect":
-                if isinstance(cad_result.data, (dict, Mapping)):
-                    norm_inspect = normalize_inspect_result(
-                        cad_result.data,
-                        operation=op,
-                        ref_registry=self._ref_registry,
-                        document_ref=target_doc or "doc_active",
-                    )
-                    cad_result = cad_result.model_copy(
-                        update={"data": ImmutableMapping(norm_inspect)}
-                    )
+            if effective_bundle_group == "inspect" and isinstance(
+                cad_result.data, (dict, Mapping)
+            ):
+                norm_inspect = normalize_inspect_result(
+                    cad_result.data,
+                    operation=op,
+                    ref_registry=self._ref_registry,
+                    document_ref=target_doc or "doc_active",
+                )
+                cad_result = cad_result.model_copy(
+                    update={"data": ImmutableMapping(norm_inspect)}
+                )
 
             domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
             if node_id and (

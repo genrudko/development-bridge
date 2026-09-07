@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from collections.abc import Mapping
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
