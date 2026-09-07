@@ -862,6 +862,8 @@ class FusionCadService:
                 "up": list(camera.up),
                 "projection": camera.projection,
                 "fov_deg": camera.fov_deg,
+                "ortho_extent_width_cm": camera.ortho_extent_width_cm,
+                "ortho_extent_height_cm": camera.ortho_extent_height_cm,
             },
             "viewport": {
                 "width": camera.viewport_width,

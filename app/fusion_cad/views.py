@@ -138,6 +138,8 @@ class CameraContext(BaseModel):
     up: tuple[float, float, float]
     projection: ProjectionType
     fov_deg: float | None = None
+    ortho_extent_width_cm: float | None = None
+    ortho_extent_height_cm: float | None = None
     viewport_width: int = Field(..., gt=0)
     viewport_height: int = Field(..., gt=0)
 
@@ -211,12 +213,45 @@ def normalize_camera_context(raw: Any) -> CameraContext:
             details={"field": "fov_deg"},
         )
 
+    ortho_extent_width_cm: float | None = None
+    ortho_extent_height_cm: float | None = None
+    if projection == "orthographic":
+        for field in ("ortho_extent_width_cm", "ortho_extent_height_cm"):
+            if raw.get(field) is None:
+                raise FusionCadError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"Orthographic camera requires {field}; exact view hashing fails closed",
+                    details={"field": field},
+                )
+        try:
+            extent_width = float(raw["ortho_extent_width_cm"])
+            extent_height = float(raw["ortho_extent_height_cm"])
+        except (TypeError, ValueError, OverflowError):
+            raise FusionCadError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Orthographic camera extents must be finite positive numbers",
+            ) from None
+        if (
+            not math.isfinite(extent_width)
+            or not math.isfinite(extent_height)
+            or extent_width <= 0
+            or extent_height <= 0
+        ):
+            raise FusionCadError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Orthographic camera extents must be finite positive numbers; exact view hashing fails closed",
+            )
+        ortho_extent_width_cm = _round3(extent_width)
+        ortho_extent_height_cm = _round3(extent_height)
+
     camera = CameraContext(
         eye=_as_point_tuple(raw.get("eye"), "eye"),
         target=_as_point_tuple(raw.get("target"), "target"),
         up=_as_point_tuple(raw.get("up"), "up"),
         projection=projection,
         fov_deg=fov_deg,
+        ortho_extent_width_cm=ortho_extent_width_cm,
+        ortho_extent_height_cm=ortho_extent_height_cm,
         viewport_width=viewport_width,
         viewport_height=viewport_height,
     )
@@ -238,6 +273,8 @@ def camera_hash(camera: CameraContext) -> str:
         "up": list(camera.up),
         "projection": camera.projection,
         "fov_deg": camera.fov_deg,
+        "ortho_extent_width_cm": camera.ortho_extent_width_cm,
+        "ortho_extent_height_cm": camera.ortho_extent_height_cm,
         "viewport_width": camera.viewport_width,
         "viewport_height": camera.viewport_height,
     }

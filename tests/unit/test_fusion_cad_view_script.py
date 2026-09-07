@@ -146,3 +146,25 @@ def test_view_script_captures_object_visibility_global_state_and_fails_closed():
     assert "constructionPlanes" in script
     assert "constructionAxes" in script
     assert "constructionPoints" in script
+# ---------------------------------------------------------------------------
+# Task 8 Codex re-review: four verified API/freshness findings
+# ---------------------------------------------------------------------------
+
+
+def test_view_script_orient_to_face_uses_brep_face_surface_evaluator_normal():
+    script = _view_script("orient_to_face", target="ent_1")
+    assert 'getattr(entity, "evaluator", None)' in script
+    assert "getNormalAtPoint" in script
+    assert "normal_ok" in script
+    assert 'getattr(entity, "normal", None)' not in script
+
+
+def test_view_script_always_captures_all_boolean_object_visibility_flags():
+    script = _view_script("camera_read")
+    assert "for name in sorted(dir(ov))" in script
+    assert 'name.endswith("Visible")' in script
+    # Dynamic discovery must augment the known list, not run only as a fallback
+    # when the fixed whitelist happened to produce no flags.
+    dynamic = script.index("for name in sorted(dir(ov))")
+    fallback = script.rfind("if not flags:", 0, dynamic)
+    assert fallback == -1

@@ -141,6 +141,8 @@ def _capture_camera():
     is_persp = _camera_is_perspective(camera, adsk.core)
     projection = "perspective" if bool(is_persp) else "orthographic"
     fov_deg = None
+    ortho_extent_width_cm = None
+    ortho_extent_height_cm = None
     if is_persp:
         perspective_angle = getattr(camera, "perspectiveAngle", None)
         if perspective_angle is None:
@@ -155,6 +157,35 @@ def _capture_camera():
                 "PRECONDITION_FAILED",
                 "Perspective camera perspectiveAngle is unreadable; exact view capture fails closed",
             ) from None
+    else:
+        get_extents = getattr(camera, "getExtents", None)
+        if get_extents is None:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Camera.getExtents unavailable; orthographic camera freshness cannot be proven",
+            )
+        try:
+            extents_ok, extent_width, extent_height = get_extents()
+            extent_width = float(extent_width)
+            extent_height = float(extent_height)
+        except Exception as exc:
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Camera.getExtents failed; orthographic camera freshness cannot be proven",
+            ) from exc
+        if (
+            extents_ok is not True
+            or not math.isfinite(extent_width)
+            or not math.isfinite(extent_height)
+            or extent_width <= 0.0
+            or extent_height <= 0.0
+        ):
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Camera.getExtents returned invalid extents; orthographic camera freshness cannot be proven",
+            )
+        ortho_extent_width_cm = canonicalize_value(extent_width)
+        ortho_extent_height_cm = canonicalize_value(extent_height)
     width = getattr(viewport, "width", None)
     height = getattr(viewport, "height", None)
     if width is None or height is None:
@@ -180,6 +211,8 @@ def _capture_camera():
         ],
         "projection": projection,
         "fov_deg": fov_deg,
+        "ortho_extent_width_cm": ortho_extent_width_cm,
+        "ortho_extent_height_cm": ortho_extent_height_cm,
     }
     viewport_raw = {"width": int(width), "height": int(height)}
     return camera_raw, viewport_raw
@@ -254,26 +287,26 @@ def _capture_object_visibility(design):
             "authoritative global visibility cannot be captured and must fail closed",
         )
     flags = {}
-    for name in _OBJECT_VISIBILITY_FLAG_NAMES:
-        if hasattr(ov, name):
-            try:
-                flags[name] = bool(getattr(ov, name))
-            except Exception as exc:
-                raise FusionScriptError(
-                    "FUSION_API_ERROR",
-                    f"Object visibility flag '{name}' is unreadable; global visibility capture fails closed",
-                ) from exc
-    if not flags:
-        # Defensive determinism: any boolean display flag actually present counts.
-        for name in sorted(dir(ov)):
-            if not name.startswith("is") or name in flags:
-                continue
-            try:
-                val = getattr(ov, name)
-            except Exception:
-                continue
-            if isinstance(val, bool):
-                flags[name] = val
+    candidate_names = set(_OBJECT_VISIBILITY_FLAG_NAMES)
+    # Autodesk can add ObjectVisibility switches over time. Always augment the
+    # known set with every boolean display property following the documented
+    # *Visible naming convention, rather than only discovering when the known
+    # whitelist happens to be empty.
+    for name in sorted(dir(ov)):
+        if name == "isAllObjectsVisible" or name.endswith("Visible"):
+            candidate_names.add(name)
+    for name in sorted(candidate_names):
+        if not hasattr(ov, name):
+            continue
+        try:
+            val = getattr(ov, name)
+        except Exception as exc:
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                f"Object visibility flag '{name}' is unreadable; global visibility capture fails closed",
+            ) from exc
+        if isinstance(val, bool):
+            flags[name] = val
     if not flags:
         raise FusionScriptError(
             "CAPABILITY_UNAVAILABLE",
@@ -642,12 +675,25 @@ def _orient_camera_to_face(entity):
             "PRECONDITION_FAILED",
             "Active viewport camera required for orient_to_face",
         )
-    normal = getattr(entity, "normal", None)
     centroid = getattr(entity, "centroid", None)
-    if normal is None or centroid is None:
+    evaluator = getattr(entity, "evaluator", None)
+    get_normal = getattr(evaluator, "getNormalAtPoint", None) if evaluator is not None else None
+    if centroid is None or get_normal is None:
         raise FusionScriptError(
             "TYPE_MISMATCH",
-            "orient_to_face target must be a face exposing a normal and centroid",
+            "orient_to_face target must be a BRepFace exposing centroid and evaluator.getNormalAtPoint",
+        )
+    try:
+        normal_ok, normal = get_normal(centroid)
+    except Exception as exc:
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            "orient_to_face failed to evaluate the BRepFace normal at its centroid",
+        ) from exc
+    if normal_ok is not True or normal is None:
+        raise FusionScriptError(
+            "PRECONDITION_FAILED",
+            "orient_to_face could not evaluate the BRepFace normal at its centroid",
         )
     nx, ny, nz = float(normal.x), float(normal.y), float(normal.z)
     length = math.sqrt(nx * nx + ny * ny + nz * nz)

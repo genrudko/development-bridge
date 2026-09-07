@@ -141,7 +141,12 @@ def test_perspective_requires_fov_fail_closed():
 
 def test_orthographic_allows_null_fov():
     camera = normalize_camera_context(
-        _camera_raw(projection="orthographic", fov_deg=None)
+        _camera_raw(
+            projection="orthographic",
+            fov_deg=None,
+            ortho_extent_width_cm=20.0,
+            ortho_extent_height_cm=10.0,
+        )
     )
     assert camera.projection == "orthographic"
     assert camera.fov_deg is None
@@ -517,3 +522,18 @@ def test_viewref_summary_public_metadata_matches_summary_shape():
     # resource://views/... placeholder may ever surface.
     assert public["image"] == "https://example.test/desktop-results/exports/emitted-real-uri"
     assert not public["image"].startswith("resource://")
+
+def test_orthographic_camera_extent_changes_camera_revision():
+    base = {
+        "eye": [1.0, 2.0, 3.0],
+        "target": [0.0, 0.0, 0.0],
+        "up": [0.0, 0.0, 1.0],
+        "projection": "orthographic",
+        "viewport_width": 1200,
+        "viewport_height": 800,
+        "ortho_extent_width_cm": 20.0,
+        "ortho_extent_height_cm": 10.0,
+    }
+    first = normalize_camera_context(base)
+    changed = normalize_camera_context({**base, "ortho_extent_width_cm": 21.0})
+    assert camera_revision(first) != camera_revision(changed)

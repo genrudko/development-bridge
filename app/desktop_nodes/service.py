@@ -8,8 +8,9 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from secrets import token_urlsafe
+from secrets import compare_digest, token_urlsafe
 from typing import Any, ClassVar
 from urllib.parse import quote
 
@@ -863,6 +864,8 @@ class DesktopNodeService:
         }
         self._external_results[result_id] = item
         self._extract_image_resources(result_id, value, created_at)
+        if item["resource_ids"]:
+            self._write_resource_sidecar(result_id)
         if sanitize_binary:
             clean_value = _sanitize_binary_payload(value)
             clean_raw = json.dumps(
@@ -876,7 +879,6 @@ class DesktopNodeService:
                 path.write_bytes(clean_raw)
                 item["size_bytes"] = len(clean_raw)
                 item["sha256"] = hashlib.sha256(clean_raw).hexdigest()
-            self._write_resource_sidecar(result_id)
         return result_id
 
 
@@ -927,6 +929,7 @@ class DesktopNodeService:
                 "created_at": created_at,
                 "mime_type": item.mime_type,
                 "file_name": file_name,
+                "stable_capability": token_urlsafe(32),
             }
             parent["resource_ids"].append(resource_id)
 
@@ -949,11 +952,12 @@ class DesktopNodeService:
                 "size_bytes": res["size_bytes"],
                 "sha256": res["sha256"],
                 "created_at": res["created_at"],
+                "stable_capability": res["stable_capability"],
             })
         sidecar = self._artifact_dir() / f"{result_id}.resources.json"
         sidecar.write_text(
             json.dumps(
-                {"version": 1, "resources": descriptors},
+                {"version": 2, "resources": descriptors},
                 ensure_ascii=False,
                 sort_keys=True,
             ),
@@ -1100,6 +1104,8 @@ class DesktopNodeService:
             "mime_type": "application/json", "resource_ids": [],
         }
         self._extract_image_resources(result_id, value, created_at)
+        if self._external_results[result_id]["resource_ids"]:
+            self._write_resource_sidecar(result_id)
         return {
             "external_result": {
                 "result_id": result_id,
@@ -1158,7 +1164,14 @@ class DesktopNodeService:
                         "created_at": desc.get("created_at", stat.st_mtime),
                         "mime_type": desc["mime_type"],
                         "file_name": desc["file_name"],
+                        "stable_capability": (
+                            desc.get("stable_capability")
+                            if isinstance(desc.get("stable_capability"), str)
+                            and re.fullmatch(r"[A-Za-z0-9_-]{32,128}", desc["stable_capability"])
+                            else token_urlsafe(32)
+                        ),
                     }
+                self._write_resource_sidecar(result_id)
             except (ValueError, OSError, KeyError, TypeError):
                 pass
         else:
@@ -1201,22 +1214,49 @@ class DesktopNodeService:
                 resource = self._external_resources.get(resource_id)
                 if resource is None:
                     continue
-                resource_token, resource_grant = self._stable_export_grant(
-                    resource, "_export_token", f"resource:{resource_id}"
-                )
+                stable_capability = resource.get("stable_capability")
+                if not isinstance(stable_capability, str) or re.fullmatch(
+                    r"[A-Za-z0-9_-]{32,128}", stable_capability
+                ) is None:
+                    raise BridgeError(
+                        ErrorCode.INTERNAL_ERROR,
+                        "External binary resource lacks its stable capability",
+                    )
+                resource_token = f"r1.{result_id}.{stable_capability}"
+                expires_at = datetime.fromtimestamp(
+                    float(resource["created_at"]) + self.settings.result_artifact_ttl_seconds,
+                    UTC,
+                ).isoformat()
                 metadata["resources"].append({
                     "uri": f"{self._public_base_url}{self._export_path}/{quote(resource_token, safe='')}",
                     "file_name": resource["file_name"], "mime_type": resource["mime_type"],
                     "size_bytes": resource["size_bytes"], "sha256": resource["sha256"],
-                    "expires_at": resource_grant.expires_at.isoformat(),
+                    "expires_at": expires_at,
                 })
         return value, metadata
 
     def resolve_external_export(self, token: str) -> tuple[Path, dict[str, Any]] | None:
+        self._cleanup_external_results()
+        stable = re.fullmatch(
+            r"r1\.([A-Za-z0-9_-]{16,64})\.([A-Za-z0-9_-]{32,128})", token
+        )
+        if stable is not None:
+            result_id, capability = stable.groups()
+            parent = self._external_results.get(result_id) or self._recover_external_result(
+                result_id
+            )
+            if parent is None:
+                return None
+            for resource_id in parent.get("resource_ids", []):
+                resource = self._external_resources.get(resource_id)
+                stored = resource.get("stable_capability") if resource is not None else None
+                if isinstance(stored, str) and compare_digest(stored, capability):
+                    return resource["path"], resource
+            return None
+
         grant = self._exports.lookup(token)
         if grant is None:
             return None
-        self._cleanup_external_results()
         if grant.subject.startswith("resource:"):
             item = self._external_resources.get(grant.subject.removeprefix("resource:"))
         else:

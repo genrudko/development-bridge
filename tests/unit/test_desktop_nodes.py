@@ -381,3 +381,45 @@ def test_extract_binary_resources_unambiguous_keys_without_magic():
     }
     assert extract_binary_resources(generic_non_binary) == []
     assert has_binary_data(generic_non_binary) is False
+
+
+def test_sanitized_image_resource_uri_is_stable_and_resolvable_after_restart(tmp_path):
+    settings = configured(
+        result_artifact_directory=tmp_path,
+        result_artifact_ttl_seconds=3600,
+    )
+    service = DesktopNodeService(
+        settings,
+        public_base_url="https://bridge.example",
+        endpoint="/mcp",
+    )
+    png = b"\x89PNG\r\n\x1a\nstable-view-resource"
+    value = {
+        "content": [{
+            "type": "image",
+            "data": base64.b64encode(png).decode("ascii"),
+            "mimeType": "image/png",
+        }],
+        "isError": False,
+    }
+    reference = service.store_external_result(
+        "desk-1", value, sanitize_binary=True
+    )["external_result"]
+    _, first_meta = service.external_result(reference)
+    first_uri = first_meta["resources"][0]["uri"]
+
+    restarted = DesktopNodeService(
+        settings,
+        public_base_url="https://bridge.example",
+        endpoint="/mcp",
+    )
+    _, restarted_meta = restarted.external_result(reference)
+    restarted_uri = restarted_meta["resources"][0]["uri"]
+    assert restarted_uri == first_uri
+
+    stable_token = first_uri.rsplit("/", 1)[-1]
+    resolved = restarted.resolve_external_export(stable_token)
+    assert resolved is not None
+    path, item = resolved
+    assert path.read_bytes() == png
+    assert item["mime_type"] == "image/png"
