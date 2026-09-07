@@ -122,6 +122,11 @@ def search_files(repo_root: Path, query: str, path: str = ".") -> str:
 
 
 BWRAP_PATH: str = "/bin/bwrap"
+UV_PYTHON_ROOT: Path = Path.home() / ".local" / "share" / "uv" / "python"
+SYSTEM_RUNTIME_ROOTS: tuple[Path, ...] = tuple(
+    root.resolve() for root in (Path("/usr"), Path("/bin"), Path("/lib"), Path("/lib64"), Path("/sbin")) if root.exists()
+)
+SYSTEM_ENV_INTERPRETERS: frozenset[Path] = frozenset({Path("/usr/bin/env"), Path("/bin/env")})
 
 SAFE_ETC_ALLOWLIST: tuple[str, ...] = (
     "/etc/passwd",
@@ -247,6 +252,344 @@ def resolve_runtime_venv(repo_root: Path) -> tuple[Path | None, bool]:
         return prefix, False
     return None, False
 
+
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_repo_venv_python_interpreter(repo_root: Path, interpreter_path: Path) -> Path | None:
+    try:
+        target = interpreter_path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("repo-local .venv python interpreter target is unavailable") from exc
+    if _path_is_within(target, repo_root):
+        return None
+    if any(_path_is_within(target, root) for root in SYSTEM_RUNTIME_ROOTS):
+        return None
+    try:
+        uv_root = UV_PYTHON_ROOT.expanduser().resolve(strict=True)
+        relative = target.relative_to(uv_root)
+    except (OSError, ValueError) as exc:
+        raise ValueError("repo-local .venv python resolves to an unsupported external interpreter") from exc
+    if len(relative.parts) != 3 or relative.parts[1] != "bin" or not relative.parts[2].startswith("python"):
+        raise ValueError("repo-local .venv python resolves to an unsupported external interpreter")
+    prefix = uv_root / relative.parts[0]
+    try:
+        if prefix.resolve(strict=True) != prefix or target.parent != prefix / "bin":
+            raise ValueError
+    except (OSError, ValueError) as exc:
+        raise ValueError("repo-local .venv python resolves to an unsupported external interpreter") from exc
+    if not target.is_file() or not os.access(target, os.X_OK):
+        raise ValueError("repo-local .venv python resolves to an unsupported external interpreter")
+    return prefix
+
+
+def _split_kernel_shebang(shebang: str) -> tuple[str, str | None]:
+    # Linux binfmt_script treats only ASCII space/tab as separators and does not
+    # interpret shell quoting or backslash escapes in the interpreter path.
+    text = shebang.strip(" \t")
+    if not text:
+        return "", None
+    for index, char in enumerate(text):
+        if char in " \t":
+            interpreter = text[:index]
+            argument = text[index:].lstrip(" \t")
+            return interpreter, argument or None
+    return text, None
+
+
+def _resolve_sandbox_command(command: str, sandbox_path: str) -> Path:
+    resolved = shutil.which(command, path=sandbox_path)
+    if not resolved:
+        raise ValueError("repo-local venv console script Python interpreter is unavailable in sandbox PATH")
+    return Path(resolved)
+
+
+def _python_from_env_shebang_argument(argument: str | None, sandbox_path: str) -> Path | None:
+    if argument is None or not argument:
+        return None
+
+    if argument == "-S":
+        raise ValueError("repo-local venv console script has an unsupported Python shebang")
+    if argument.startswith("-S "):
+        payload = argument[3:].strip(" ")
+        if not payload:
+            raise ValueError("repo-local venv console script has an unsupported Python shebang")
+        # GNU env -S has richer parsing than Python. Keep the accepted subset
+        # deliberately narrow so interpreter selection is identical: printable
+        # ASCII only, ordinary spaces only, no escapes/quotes/expansion/comments.
+        if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in payload):
+            raise ValueError("repo-local venv console script has an unsupported Python shebang")
+        if any(ch in payload for ch in ("\\", "'", '"', "$", "#", "\t")):
+            raise ValueError("repo-local venv console script has an unsupported Python shebang")
+        parts = [part for part in payload.split(" ") if part]
+        if not parts:
+            raise ValueError("repo-local venv console script has an unsupported Python shebang")
+        command = parts[0]
+        if command.startswith("-") or "=" in command:
+            raise ValueError("repo-local venv console script has an unsupported Python shebang")
+    else:
+        # Without -S, Linux passes the whole optional shebang argument as one
+        # argv element to env. Only one simple command token is supported.
+        if any(ord(ch) < 0x21 or ord(ch) > 0x7E for ch in argument):
+            raise ValueError("repo-local venv console script has an unsupported Python shebang")
+        if argument.startswith("-") or "=" in argument:
+            raise ValueError("repo-local venv console script has an unsupported Python shebang")
+        if any(ch in argument for ch in ("\\", "'", '"', "$", "#")):
+            raise ValueError("repo-local venv console script has an unsupported Python shebang")
+        command = argument
+
+    if "/" in command or "\\" in command:
+        raise ValueError("repo-local venv console script has an unsupported Python shebang")
+    if not command.startswith("python"):
+        return None
+    return _resolve_sandbox_command(command, sandbox_path)
+
+
+def _selected_repo_venv_interpreters(
+    resolved_executable: str, venv_path: Path, sandbox_path: str
+) -> tuple[Path, ...]:
+    executable_path = Path(resolved_executable)
+    venv_bin = venv_path / "bin"
+    if executable_path.parent != venv_bin:
+        return ()
+    if executable_path.name in {"python", "python3"}:
+        return (executable_path,)
+    try:
+        with executable_path.open("rb") as handle:
+            first_line = handle.readline(4096)
+    except OSError:
+        return ()
+    if not first_line.startswith(b"#!"):
+        return ()
+    try:
+        shebang = first_line[2:].decode("utf-8", errors="strict").rstrip("\n")
+    except UnicodeDecodeError as exc:
+        raise ValueError("repo-local venv console script has an unsupported Python shebang") from exc
+    interpreter_text, argument = _split_kernel_shebang(shebang)
+    if not interpreter_text:
+        return ()
+    interpreter = Path(interpreter_text)
+
+    if interpreter in SYSTEM_ENV_INTERPRETERS:
+        selected = _python_from_env_shebang_argument(argument, sandbox_path)
+        return (selected,) if selected is not None else ()
+
+    # For normal shebangs, use the literal kernel interpreter path. Quotes and
+    # backslashes are path characters, not shell syntax.
+    if not interpreter.name.startswith("python"):
+        return ()
+    if not interpreter.is_absolute():
+        raise ValueError("repo-local venv console script has an unsupported Python shebang")
+    return (interpreter,)
+
+def _validate_repo_venv_python_chain(repo_root: Path, interpreter_path: Path) -> None:
+    """Reject unapproved external hops while preserving kernel path-walk order."""
+    repo_root = repo_root.resolve()
+    uv_root = Path(os.path.abspath(str(UV_PYTHON_ROOT.expanduser())))
+    lexical_system_roots = tuple(
+        Path(raw) for raw in ("/usr", "/bin", "/lib", "/lib64", "/sbin")
+    )
+    trusted_roots = tuple(dict.fromkeys((repo_root, uv_root, *SYSTEM_RUNTIME_ROOTS, *lexical_system_roots)))
+
+    if not interpreter_path.is_absolute():
+        raise ValueError("repo-local .venv python interpreter path must be absolute")
+
+    def within_trusted(path: Path) -> bool:
+        return any(_path_is_within(path, root) for root in trusted_roots)
+
+    def authorized_walk_component(path: Path) -> bool:
+        return any(
+            _path_is_within(path, root) or _path_is_within(root, path)
+            for root in trusted_roots
+        )
+
+    def has_symlink_component(path: Path) -> bool:
+        cursor = Path(path.anchor)
+        for component in path.parts[1:]:
+            if component in ("", "."):
+                continue
+            if component == "..":
+                return True
+            cursor = cursor / component
+            if cursor.is_symlink():
+                return True
+        return False
+
+    # A direct untrusted regular interpreter is still classified by the
+    # existing final-target validator so its diagnostic contract stays stable.
+    # Alias/traversal paths are handled here because their intermediate hops
+    # matter even if their final target later re-enters a trusted root.
+    if not within_trusted(interpreter_path):
+        if has_symlink_component(interpreter_path) or ".." in interpreter_path.parts:
+            raise ValueError("repo-local .venv python uses an unsupported external uv alias path")
+        return
+
+    pending = list(interpreter_path.parts[1:])
+    resolved_parts: list[str] = []
+    seen_states: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    symlink_count = 0
+
+    def current_path() -> Path:
+        return Path("/", *resolved_parts)
+
+    while pending:
+        state = (tuple(resolved_parts), tuple(pending))
+        if state in seen_states:
+            raise ValueError("repo-local .venv python symlink chain is cyclic")
+        seen_states.add(state)
+
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if resolved_parts:
+                resolved_parts.pop()
+            if not authorized_walk_component(current_path()):
+                raise ValueError("repo-local .venv python uses an unsupported external uv alias path")
+            continue
+
+        candidate = current_path() / part
+        if not authorized_walk_component(candidate):
+            raise ValueError("repo-local .venv python uses an unsupported external uv alias path")
+
+        if candidate.is_symlink():
+            symlink_count += 1
+            if symlink_count > 40:
+                raise ValueError("repo-local .venv python symlink chain is cyclic")
+            raw_target = Path(os.readlink(candidate))
+
+            if raw_target.is_absolute():
+                target_is_trusted = within_trusted(raw_target)
+                target_is_ancestor = authorized_walk_component(raw_target)
+                if not target_is_trusted and not target_is_ancestor:
+                    # Preserve the established direct-external-interpreter
+                    # diagnostic only for one final regular target. Any
+                    # intermediate alias/traversal must fail here.
+                    if pending or has_symlink_component(raw_target) or ".." in raw_target.parts:
+                        raise ValueError("repo-local .venv python uses an unsupported external uv alias path")
+                    return
+                resolved_parts.clear()
+                pending = list(raw_target.parts[1:]) + pending
+            else:
+                pending = list(raw_target.parts) + pending
+            continue
+
+        resolved_parts.append(part)
+
+    final_path = current_path()
+    if not within_trusted(final_path):
+        # A plain direct external interpreter is rejected by the final-target
+        # validator, not by this chain validator.
+        return
+
+def _verified_uv_alias_prefix(repo_root: Path, interpreter_path: Path, resolved_prefix: Path) -> Path:
+    # Reproduce kernel path-walk ordering closely enough to enforce our policy:
+    # resolve one component at a time, splice symlink targets into the pending
+    # component stream, and apply `..` only after any preceding symlink target.
+    # This prevents a repo-local parent-directory symlink from hiding an
+    # unauthorized external hop before the path eventually reaches uv.
+    repo_root = repo_root.resolve()
+    uv_root = Path(os.path.abspath(str(UV_PYTHON_ROOT.expanduser())))
+    if not interpreter_path.is_absolute():
+        raise ValueError("repo-local .venv python interpreter path must be absolute")
+
+    pending = list(interpreter_path.parts[1:])
+    resolved_parts: list[str] = []
+    seen_states: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    symlink_count = 0
+    alias_prefix: Path | None = None
+
+    def walk_path() -> Path:
+        return Path("/", *resolved_parts)
+
+    def authorized_component(path: Path) -> bool:
+        return (
+            _path_is_within(path, repo_root)
+            or _path_is_within(repo_root, path)
+            or _path_is_within(path, uv_root)
+            or _path_is_within(uv_root, path)
+        )
+
+    while pending:
+        state = (tuple(resolved_parts), tuple(pending))
+        if state in seen_states:
+            raise ValueError("repo-local .venv python symlink chain is cyclic")
+        seen_states.add(state)
+
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if resolved_parts:
+                resolved_parts.pop()
+            continue
+
+        candidate = walk_path() / part
+        if not authorized_component(candidate):
+            raise ValueError("repo-local .venv python uses an unsupported external uv alias path")
+
+        if candidate.is_symlink():
+            symlink_count += 1
+            if symlink_count > 40:
+                raise ValueError("repo-local .venv python symlink chain is cyclic")
+
+            if candidate.parent == uv_root:
+                try:
+                    if candidate.resolve(strict=True) != resolved_prefix:
+                        raise ValueError
+                except (OSError, ValueError) as exc:
+                    raise ValueError("repo-local .venv python uv alias does not match verified interpreter") from exc
+                if alias_prefix is None:
+                    alias_prefix = candidate
+
+            raw_target = Path(os.readlink(candidate))
+            target_parts = list(raw_target.parts[1:] if raw_target.is_absolute() else raw_target.parts)
+            pending = target_parts + pending
+            if raw_target.is_absolute():
+                resolved_parts.clear()
+            continue
+
+        resolved_parts.append(part)
+
+    final_path = walk_path()
+    try:
+        final_relative = final_path.relative_to(resolved_prefix)
+    except ValueError as exc:
+        raise ValueError("repo-local .venv python uv alias does not match verified interpreter") from exc
+    if len(final_relative.parts) != 2 or final_relative.parts[0] != "bin" or not final_relative.parts[1].startswith("python"):
+        raise ValueError("repo-local .venv python resolves through an unsupported uv path")
+
+    return alias_prefix or resolved_prefix
+
+
+def resolve_repo_venv_external_python_mounts(
+    repo_root: Path,
+    venv_path: Path | None,
+    is_repo_local: bool,
+    resolved_executable: str,
+    sandbox_path: str,
+) -> tuple[tuple[Path, Path], ...]:
+    if not is_repo_local or venv_path is None:
+        return ()
+    mounts: list[tuple[Path, Path]] = []
+    for interpreter in _selected_repo_venv_interpreters(resolved_executable, venv_path, sandbox_path):
+        _validate_repo_venv_python_chain(repo_root, interpreter)
+        prefix = _validate_repo_venv_python_interpreter(repo_root, interpreter)
+        if prefix is None:
+            continue
+        destinations = (prefix, _verified_uv_alias_prefix(repo_root, interpreter, prefix))
+        for destination in destinations:
+            mount = (prefix, destination)
+            if mount not in mounts:
+                mounts.append(mount)
+    return tuple(mounts)
 
 def resolve_executable(executable: str, venv_path: Path | None, env_path: str) -> str | None:
     if venv_path:
@@ -492,6 +835,12 @@ def run_process(
     resolved = resolve_executable(clean_exec, venv_path, sandbox_path)
     if not resolved:
         return f"Error: executable '{clean_exec}' is not available or not found in PATH."
+    try:
+        external_python_mounts = resolve_repo_venv_external_python_mounts(
+            repo_resolved, venv_path, is_repo_local, resolved, sandbox_path
+        )
+    except ValueError as exc:
+        return f"Error: {exc}."
 
     sandbox_home = "/tmp/sandbox-home"
     bwrap_cmd: list[str] = [
@@ -523,6 +872,12 @@ def run_process(
     # If runtime venv is outside repo, mount it read-only
     if venv_path and not is_repo_local and venv_path.exists():
         bwrap_cmd.extend(["--ro-bind", str(venv_path), str(venv_path)])
+
+    # A selected repo-local venv interpreter may point through a uv-managed
+    # alias to a versioned CPython installation. Expose only the verified
+    # installation contents, at both its real prefix and the verified alias path.
+    for source_prefix, destination_prefix in external_python_mounts:
+        bwrap_cmd.extend(["--ro-bind", str(source_prefix), str(destination_prefix)])
 
     # Protect .git metadata read-only
     if (repo_resolved / ".git").exists():

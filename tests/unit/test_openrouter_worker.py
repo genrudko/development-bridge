@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import app.executors.openrouter_worker as worker
+
 from app.executors.openrouter_worker import (
     OpenRouterWorker,
     main,
@@ -625,6 +627,464 @@ def test_run_process_protects_git_and_venv_from_writes(repo):
     assert "REPO_WRITE:True" in res
 
 
+def test_run_process_ro_binds_allowed_external_uv_python_prefix(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    prefix = uv_root / "cpython-test"
+    interpreter = prefix / "bin" / "python3.14"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(interpreter)
+    (repo / "smoke.py").write_text("print('UV_VENV_OK')\n", encoding="utf-8")
+
+    calls = []
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="UV_VENV_OK\n", stderr="")
+
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    res = run_process(repo, "python", ["smoke.py"])
+    assert "UV_VENV_OK" in res
+    cmd = calls[-1]
+    bind = ["--ro-bind", str(prefix), str(prefix)]
+    assert any(cmd[i:i+3] == bind for i in range(len(cmd) - 2))
+
+
+def test_run_process_rejects_repo_venv_python_symlink_to_unapproved_host_prefix(repo, monkeypatch):
+    allowed_uv_root = repo.parent / "allowed-uv-python"
+    outside_prefix = repo.parent / "outside-python"
+    interpreter = outside_prefix / "bin" / "python3.14"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(interpreter)
+    (repo / "smoke.py").write_text("print('MUST_NOT_RUN')\n", encoding="utf-8")
+
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", allowed_uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    calls = []
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr="")
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    res = run_process(repo, "python", ["smoke.py"])
+    assert calls == []
+    assert "unsupported external interpreter" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_allows_repo_venv_python_symlink_to_already_mounted_system_root(repo, monkeypatch):
+    system_root = repo.parent / "system-root"
+    interpreter = system_root / "bin" / "python3"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(interpreter)
+    (repo / "smoke.py").write_text("print('SYSTEM_OK')\n", encoding="utf-8")
+
+    calls = []
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="SYSTEM_OK\n", stderr="")
+
+    monkeypatch.setattr(worker, "SYSTEM_RUNTIME_ROOTS", (system_root.resolve(),), raising=False)
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", repo.parent / "missing-uv", raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+
+    res = run_process(repo, "python", ["smoke.py"])
+    assert "SYSTEM_OK" in res
+    assert calls
+    assert str(system_root) not in [item for i, item in enumerate(calls[-1]) if i and calls[-1][i-1] == "--ro-bind"]
+
+
+def test_run_process_rejects_unapproved_python3_even_when_python_points_to_uv(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    prefix = uv_root / "cpython-test"
+    uv_python = prefix / "bin" / "python3.14"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_python.chmod(0o755)
+    outside = repo.parent / "outside-python" / "bin" / "python3"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(uv_python)
+    (venv_bin / "python3").symlink_to(outside)
+    (repo / "smoke.py").write_text("print('MUST_NOT_RUN')\n", encoding="utf-8")
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""),
+    )
+
+    res = run_process(repo, "python3", ["smoke.py"])
+    assert calls == []
+    assert "unsupported external interpreter" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_validates_pytest_shebang_interpreter(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    prefix = uv_root / "cpython-test"
+    uv_python = prefix / "bin" / "python3.14"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_python.chmod(0o755)
+    outside = repo.parent / "outside-python" / "bin" / "python3"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(uv_python)
+    (venv_bin / "python3").symlink_to(outside)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{venv_bin / 'python3'}\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""),
+    )
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported external interpreter" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_rejects_pytest_absolute_external_python_shebang(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    outside = repo.parent / "outside-python" / "bin" / "python3"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{outside}\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported external interpreter" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_parses_env_split_pytest_shebang_and_rejects_unapproved_python3(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    outside = repo.parent / "outside-python" / "bin" / "python3"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").symlink_to(outside)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text("#!/usr/bin/env -S python3 -I\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported external interpreter" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_ro_binds_absolute_uv_python_from_pytest_shebang(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    prefix = uv_root / "cpython-test"
+    uv_python = prefix / "bin" / "python3.14"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_python.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{uv_python}\nprint('UV_PYTEST_OK')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="UV_PYTEST_OK\n", stderr=""))
+    res = run_process(repo, "pytest", ["tests"])
+    assert "UV_PYTEST_OK" in res
+    bind = ["--ro-bind", str(prefix), str(prefix)]
+    assert any(calls[-1][i:i+3] == bind for i in range(len(calls[-1]) - 2))
+
+
+
+def test_run_process_rejects_env_split_escape_semantics_before_bwrap(repo, monkeypatch):
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text("#!/usr/bin/env -S python3\\_-I\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported python shebang" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_env_python_uses_sandbox_path_system_fallback(repo, monkeypatch):
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text("#!/usr/bin/env python3\nprint('SYSTEM_FALLBACK_OK')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="SYSTEM_FALLBACK_OK\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert "SYSTEM_FALLBACK_OK" in res
+    assert calls
+
+
+def test_run_process_preserves_non_python_repo_venv_wrapper(repo, monkeypatch):
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    git_script = venv_bin / "git"
+    git_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    git_script.chmod(0o755)
+    calls = []
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="NON_PYTHON_OK\n", stderr=""))
+
+    res = run_process(repo, "git", ["status"])
+    assert "NON_PYTHON_OK" in res
+    assert calls
+
+
+def test_run_process_rejects_env_split_leading_options_before_python(repo, monkeypatch):
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text("#!/usr/bin/env -S -- python3 -I\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported python shebang" in res.lower()
+
+
+def test_run_process_rejects_env_split_string_long_option_before_python(repo, monkeypatch):
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text("#!/usr/bin/env --split-string=python3\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported python shebang" in res.lower()
+
+
+def test_run_process_rejects_env_split_assignment_before_python(repo, monkeypatch):
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text("#!/usr/bin/env -S MODE=test python3 -I\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported python shebang" in res.lower()
+
+
+def test_run_process_rejects_env_split_non_ascii_whitespace(repo, monkeypatch):
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text("#!/usr/bin/env -S python3\u00a0-I\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported python shebang" in res.lower()
+
+
+def test_run_process_treats_absolute_shebang_backslash_literally(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    safe_prefix = uv_root / "cpython-test"
+    safe_python = safe_prefix / "bin" / "python3"
+    safe_python.parent.mkdir(parents=True)
+    safe_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    safe_python.chmod(0o755)
+
+    actual_root = repo.parent / "uv\\-python"
+    actual_python = actual_root / "cpython-test" / "bin" / "python3"
+    actual_python.parent.mkdir(parents=True)
+    actual_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    actual_python.chmod(0o755)
+
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{actual_python}\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported external interpreter" in res.lower()
+
+
+def test_run_process_preserves_cr_in_env_shebang_argument(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    prefix = uv_root / "cpython-test"
+    uv_python = prefix / "bin" / "python3"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_python.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").symlink_to(uv_python)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_bytes(b"#!/usr/bin/env python3\r\nprint('MUST_NOT_RUN')\n")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported python shebang" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_preserves_cr_in_absolute_python_shebang(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    prefix = uv_root / "cpython-test"
+    uv_python = prefix / "bin" / "python3"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_python.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_bytes(("#!" + str(uv_python) + "\r\nprint('MUST_NOT_RUN')\n").encode())
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "interpreter target is unavailable" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_validates_bin_env_python_interpreter(repo, monkeypatch):
+    allowed_uv_root = repo.parent / "allowed-uv-python"
+    outside = repo.parent / "outside-python" / "bin" / "python3"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    outside.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").symlink_to(outside)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text("#!/bin/env python3\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", allowed_uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported external interpreter" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_preserves_cr_for_bin_env_shebang(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    prefix = uv_root / "cpython-test"
+    uv_python = prefix / "bin" / "python3"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv_python.chmod(0o755)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python3").symlink_to(uv_python)
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_bytes(b"#!/bin/env python3\r\nprint('MUST_NOT_RUN')\n")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "pytest", ["tests"])
+    assert calls == []
+    assert "unsupported python shebang" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
 def test_run_process_fails_closed_when_bwrap_unavailable(repo, monkeypatch):
     monkeypatch.setattr("app.executors.openrouter_worker.BWRAP_PATH", "/nonexistent/bwrap")
     (repo / "dummy.py").write_text("print('hello')", encoding="utf-8")
@@ -691,3 +1151,329 @@ def test_bwrap_proc_fallback_includes_kernel_overflow_ids(monkeypatch):
     assert "--dir /proc/sys/kernel" in joined
     assert "/proc/sys/kernel/overflowuid" in joined
     assert "/proc/sys/kernel/overflowgid" in joined
+
+
+def test_run_process_binds_verified_uv_alias_destination_for_repo_venv_python(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    versioned_prefix = uv_root / "cpython-3.14.7-test"
+    alias_prefix = uv_root / "cpython-3.14-test"
+    interpreter = versioned_prefix / "bin" / "python3.14"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    alias_prefix.symlink_to(versioned_prefix, target_is_directory=True)
+
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(alias_prefix / "bin" / "python3.14")
+    (venv_bin / "python3").symlink_to("python")
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{venv_bin / 'python3'}\nprint('UV_ALIAS_OK')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, stdout="UV_ALIAS_OK\n", stderr=""),
+    )
+
+    res = run_process(repo, "pytest", ["-q", "tests"])
+    assert "UV_ALIAS_OK" in res
+    cmd = calls[-1]
+    resolved_bind = ["--ro-bind", str(versioned_prefix), str(versioned_prefix)]
+    alias_bind = ["--ro-bind", str(versioned_prefix), str(alias_prefix)]
+    assert any(cmd[i:i+3] == resolved_bind for i in range(len(cmd) - 2))
+    assert any(cmd[i:i+3] == alias_bind for i in range(len(cmd) - 2))
+
+
+def test_run_process_rejects_external_alias_chain_into_allowed_uv_prefix(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    versioned_prefix = uv_root / "cpython-3.14.7-test"
+    interpreter = versioned_prefix / "bin" / "python3.14"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+
+    outside_alias = repo.parent / "outside-alias"
+    outside_alias.symlink_to(versioned_prefix, target_is_directory=True)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(outside_alias / "bin" / "python3.14")
+    (venv_bin / "python3").symlink_to("python")
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{venv_bin / 'python3'}\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""),
+    )
+
+    res = run_process(repo, "pytest", ["-q", "tests"])
+    assert calls == []
+    assert "unsupported external uv alias path" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_rejects_external_file_alias_chain_into_allowed_uv_prefix(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    versioned_prefix = uv_root / "cpython-3.14.7-test"
+    interpreter = versioned_prefix / "bin" / "python3.14"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+
+    outside_alias = repo.parent / "outside-python-alias"
+    outside_alias.symlink_to(interpreter)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(outside_alias)
+    (venv_bin / "python3").symlink_to("python")
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{venv_bin / 'python3'}\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""),
+    )
+
+    res = run_process(repo, "pytest", ["-q", "tests"])
+    assert calls == []
+    assert "unsupported external uv alias path" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_rejects_repo_parent_symlink_hiding_external_uv_alias(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    versioned_prefix = uv_root / "cpython-3.14.7-test"
+    interpreter = versioned_prefix / "bin" / "python3.14"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+
+    outside = repo.parent / "outside-dir"
+    outside.mkdir()
+    (outside / "file").symlink_to(interpreter)
+    (repo / "alias").symlink_to(outside, target_is_directory=True)
+
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(repo / "alias" / "file")
+    (venv_bin / "python3").symlink_to("python")
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{venv_bin / 'python3'}\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""),
+    )
+
+    res = run_process(repo, "pytest", ["-q", "tests"])
+    assert calls == []
+    assert "unsupported external uv alias path" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_preserves_symlink_then_parent_semantics(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    versioned_prefix = uv_root / "cpython-3.14.7-test"
+    interpreter = versioned_prefix / "bin" / "python3.14"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+
+    outside = repo.parent / "outside-root"
+    outside_dir = outside / "dir"
+    outside_dir.mkdir(parents=True)
+    (outside / "local-python").symlink_to(interpreter)
+    (repo / "local-python").symlink_to(interpreter)  # lexical decoy
+    (repo / "alias").symlink_to(outside_dir, target_is_directory=True)
+
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(str(repo / "alias" / ".." / "local-python"))
+    (venv_bin / "python3").symlink_to("python")
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{venv_bin / 'python3'}\nprint('MUST_NOT_RUN')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""),
+    )
+
+    res = run_process(repo, "pytest", ["-q", "tests"])
+    assert calls == []
+    assert "unsupported external uv alias path" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_binds_first_verified_uv_alias_in_chained_aliases(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    versioned_prefix = uv_root / "cpython-3.14.7-test"
+    first_alias = uv_root / "cpython-3.14-test"
+    second_alias = uv_root / "cpython-3-test"
+    interpreter = versioned_prefix / "bin" / "python3.14"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    second_alias.symlink_to(versioned_prefix, target_is_directory=True)
+    first_alias.symlink_to(second_alias, target_is_directory=True)
+
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(first_alias / "bin" / "python3.14")
+    (venv_bin / "python3").symlink_to("python")
+    pytest_script = venv_bin / "pytest"
+    pytest_script.write_text(f"#!{venv_bin / 'python3'}\nprint('UV_CHAIN_OK')\n", encoding="utf-8")
+    pytest_script.chmod(0o755)
+    (repo / "tests").mkdir()
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args)
+        or subprocess.CompletedProcess(args, 0, stdout="UV_CHAIN_OK\n", stderr=""),
+    )
+
+    res = run_process(repo, "pytest", ["-q", "tests"])
+    assert "UV_CHAIN_OK" in res
+    cmd = calls[-1]
+    first_bind = ["--ro-bind", str(versioned_prefix), str(first_alias)]
+    second_bind = ["--ro-bind", str(versioned_prefix), str(second_alias)]
+    assert any(cmd[i:i+3] == first_bind for i in range(len(cmd) - 2))
+    assert not any(cmd[i:i+3] == second_bind for i in range(len(cmd) - 2))
+
+
+def test_run_process_rejects_external_alias_returning_to_repo_python(repo, monkeypatch):
+    repo_python = repo / "repo-python"
+    repo_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    repo_python.chmod(0o755)
+    outside_alias = repo.parent / "outside-python-alias"
+    outside_alias.symlink_to(repo_python)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(outside_alias)
+    (repo / "smoke.py").write_text("print('MUST_NOT_RUN')\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+    res = run_process(repo, "python", ["smoke.py"])
+    assert calls == []
+    assert "unsupported external" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_rejects_external_alias_returning_to_system_python(repo, monkeypatch):
+    system_root = repo.parent / "system-root"
+    system_python = system_root / "bin" / "python3"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    system_python.chmod(0o755)
+    outside_alias = repo.parent / "outside-python-alias"
+    outside_alias.symlink_to(system_python)
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(outside_alias)
+    (repo / "smoke.py").write_text("print('MUST_NOT_RUN')\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(worker, "SYSTEM_RUNTIME_ROOTS", (system_root.resolve(),), raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+    res = run_process(repo, "python", ["smoke.py"])
+    assert calls == []
+    assert "unsupported external" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+
+def test_run_process_rejects_uv_alias_leaving_uv_for_system(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    alias = uv_root / "current"
+    outside = repo.parent / "outside-alias"
+    system_root = repo.parent / "system-root"
+    system_python = system_root / "bin" / "python3"
+    system_python.parent.mkdir(parents=True)
+    system_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    system_python.chmod(0o755)
+    outside.symlink_to(system_root, target_is_directory=True)
+    uv_root.mkdir()
+    alias.symlink_to(outside, target_is_directory=True)
+
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(alias / "bin" / "python3")
+    (repo / "smoke.py").write_text("print('MUST_NOT_RUN')\n", encoding="utf-8")
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "SYSTEM_RUNTIME_ROOTS", (system_root.resolve(),), raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "python", ["smoke.py"])
+    assert calls == []
+    assert "unsupported external" in res.lower()
+    assert "MUST_NOT_RUN" not in res
+
+
+def test_run_process_rejects_uv_alias_leaving_uv_for_repo(repo, monkeypatch):
+    uv_root = repo.parent / "uv-python"
+    alias = uv_root / "current"
+    outside = repo.parent / "outside-alias"
+    repo_python = repo / "bin" / "python3"
+    repo_python.parent.mkdir(parents=True)
+    repo_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    repo_python.chmod(0o755)
+    outside.symlink_to(repo, target_is_directory=True)
+    uv_root.mkdir()
+    alias.symlink_to(outside, target_is_directory=True)
+
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(alias / "bin" / "python3")
+    (repo / "smoke.py").write_text("print('MUST_NOT_RUN')\n", encoding="utf-8")
+
+    calls = []
+    monkeypatch.setattr(worker, "UV_PYTHON_ROOT", uv_root, raising=False)
+    monkeypatch.setattr(worker, "_BWRAP_PROC_FLAGS", ["--proc", "/proc"])
+    monkeypatch.setattr(worker.subprocess, "run", lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="MUST_NOT_RUN\n", stderr=""))
+
+    res = run_process(repo, "python", ["smoke.py"])
+    assert calls == []
+    assert "unsupported external" in res.lower()
+    assert "MUST_NOT_RUN" not in res
