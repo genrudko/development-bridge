@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 IDENTIFIER_PATTERN = r"^[a-z][a-z0-9-]{0,62}$"
+OPENROUTER_MODEL_PATTERN = r"^[A-Za-z0-9._-]+/[A-Za-z0-9._:/-]+$"
 
 
 class ServerSettings(BaseModel):
@@ -113,24 +114,15 @@ class OpenRouterExecutorSettings(BaseModel):
     enabled: bool = False
     api_key: SecretStr | None = Field(default=None, repr=False, exclude=True)
     api_base_url: str = "https://openrouter.ai/api/v1"
-    model: str = "deepseek/deepseek-v4-flash-0731"
-    allowed_models: tuple[str, ...] = (
-        "deepseek/deepseek-v4-flash-0731",
-        "qwen/qwen3-coder-next",
+    model: str = Field(
+        default="deepseek/deepseek-v4-flash-0731",
+        min_length=3,
+        max_length=128,
+        pattern=OPENROUTER_MODEL_PATTERN,
     )
     task_timeout_seconds: float = Field(default=900, gt=0, le=3600)
     max_turns: int = Field(default=120, ge=1, le=500)
     output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
-
-    @model_validator(mode="after")
-    def validate_openrouter_model(self) -> OpenRouterExecutorSettings:
-        if not self.allowed_models:
-            raise ValueError("openrouter allowed_models must not be empty")
-        if self.model not in self.allowed_models:
-            raise ValueError(
-                f"openrouter model '{self.model}' must be in allowed_models: {self.allowed_models}"
-            )
-        return self
 
 
 class ExecutorSettings(BaseModel):

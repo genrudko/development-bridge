@@ -161,8 +161,6 @@ class FakeOpenRouter:
         if not status.available or not status.authenticated:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "blocked", details={"reason": status.last_error})
         model = request.model or "deepseek/deepseek-v4-flash-0731"
-        if model not in {"deepseek/deepseek-v4-flash-0731", "qwen/qwen3-coder-next"}:
-            raise BridgeError(ErrorCode.POLICY_VIOLATION, "model not allowlisted", details={"reason": "model_not_allowlisted"})
         return ExecutorLaunch(
             "python3",
             ("worker.py", "--model", model),
@@ -238,7 +236,7 @@ async def test_model_on_non_openrouter_rejected(repository):
 
 
 @pytest.mark.asyncio
-async def test_model_not_allowlisted_fails_closed_before_job_creation(repository):
+async def test_explicit_openrouter_accepts_non_hardcoded_model(repository):
     jobs = Jobs()
     antigravity = Antigravity(status())
     openrouter = FakeOpenRouter()
@@ -249,15 +247,13 @@ async def test_model_not_allowlisted_fails_closed_before_job_creation(repository
         100,
         2048,
         "same",
-        model="forbidden/model",
+        model="qwen/qwen3.5-flash-02-23",
     )
-    with pytest.raises(BridgeError) as exc_info:
-        await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
-            repository, req, "req_1"
-        )
-    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
-    assert exc_info.value.details.get("reason") == "model_not_allowlisted"
-    assert jobs.calls == []
+    job = await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
+        repository, req, "req_1"
+    )
+    assert job.job_id == "job_1"
+    assert jobs.calls[0][1]["executor_model"] == "qwen/qwen3.5-flash-02-23"
 
 
 @pytest.mark.asyncio

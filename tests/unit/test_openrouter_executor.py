@@ -75,7 +75,7 @@ def test_openrouter_launch_default_model_and_env(repository):
     assert "Task:\nimplement feature X" in launch.stdin
 
 
-def test_openrouter_launch_custom_allowlisted_model(repository):
+def test_openrouter_launch_custom_explicit_model(repository):
     settings = OpenRouterExecutorSettings(enabled=True, api_key=SecretStr("sk-test"))
     executor = OpenRouterExecutor(settings)
     status = executor.probe(busy=False)
@@ -86,15 +86,15 @@ def test_openrouter_launch_custom_allowlisted_model(repository):
         300,
         262144,
         None,
-        model="qwen/qwen3-coder-next",
+        model="qwen/qwen3.5-flash-02-23",
     )
     launch = executor.launch(repository, request, status)
-    assert launch.model == "qwen/qwen3-coder-next"
+    assert launch.model == "qwen/qwen3.5-flash-02-23"
     model_idx = launch.arguments.index("--model")
-    assert launch.arguments[model_idx + 1] == "qwen/qwen3-coder-next"
+    assert launch.arguments[model_idx + 1] == "qwen/qwen3.5-flash-02-23"
 
 
-def test_openrouter_launch_rejects_non_allowlisted_model(repository):
+def test_openrouter_launch_rejects_malformed_model_slug(repository):
     settings = OpenRouterExecutorSettings(enabled=True, api_key=SecretStr("sk-test"))
     executor = OpenRouterExecutor(settings)
     status = executor.probe(busy=False)
@@ -105,12 +105,12 @@ def test_openrouter_launch_rejects_non_allowlisted_model(repository):
         300,
         262144,
         None,
-        model="untrusted/model",
+        model="bad slug",
     )
     with pytest.raises(BridgeError) as exc_info:
         executor.launch(repository, request, status)
-    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
-    assert exc_info.value.details.get("reason") == "model_not_allowlisted"
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+    assert exc_info.value.details.get("reason") == "invalid_model_slug"
 
 
 def test_openrouter_launch_rejects_when_disabled(repository):

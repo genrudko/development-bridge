@@ -132,16 +132,16 @@ async def test_openrouter_mcp_executor_lifecycle(tmp_path, overrides, expected_l
                     assert openrouter_status["available"] is True
                     assert openrouter_status["authenticated"] is True
 
-                    # Verify model not allowlisted fails closed before job creation
+                    # Malformed model slugs still fail closed before job creation.
                     rejected = json.loads((await session.call_tool("bridge_call", {"tool_name": "executor_start", "arguments": {
-                        **scope, "task": "review", "task_kind": "review", "executor": "openrouter", "model": "forbidden/model"}})).content[0].text)
+                        **scope, "task": "review", "task_kind": "review", "executor": "openrouter", "model": "bad slug"}})).content[0].text)
                     assert rejected.get("isError") is True or "error" in rejected
 
-                    # Verify successful start with allowlisted model persists model and attribution
+                    # Any syntactically valid explicit OpenRouter model is passed through exactly and attributed.
                     started = json.loads((await session.call_tool("bridge_call", {"tool_name": "executor_start", "arguments": {
-                        **scope, "task": "review", "task_kind": "review", "executor": "openrouter", "model": "qwen/qwen3-coder-next", **overrides}})).content[0].text)["data"]
+                        **scope, "task": "review", "task_kind": "review", "executor": "openrouter", "model": "qwen/qwen3.5-flash-02-23", **overrides}})).content[0].text)["data"]
                     final = await terminal(session, scope, started["job_id"])
                     assert final["executor"] == "openrouter"
-                    assert final["executor_model"] == "qwen/qwen3-coder-next"
+                    assert final["executor_model"] == "qwen/qwen3.5-flash-02-23"
                     profile = container.jobs.store.execution_profile(started["job_id"])
                     assert (profile.timeout_seconds, profile.output_limit_bytes) == expected_limits

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from app.executors.models import (
 )
 from app.executors.prompts import build_task_prompt
 from app.projects.models import Repository
-from app.settings import OpenRouterExecutorSettings
+from app.settings import OPENROUTER_MODEL_PATTERN, OpenRouterExecutorSettings
 
 
 class OpenRouterExecutor:
@@ -91,11 +92,11 @@ class OpenRouterExecutor:
                 "Task must contain between 1 and 65536 UTF-8 bytes",
             )
         selected_model = request.model or self._settings.model
-        if selected_model not in self._settings.allowed_models:
+        if not re.fullmatch(OPENROUTER_MODEL_PATTERN, selected_model):
             raise BridgeError(
-                ErrorCode.POLICY_VIOLATION,
-                f"Model '{selected_model}' is not allowlisted for openrouter",
-                details={"reason": "model_not_allowlisted"},
+                ErrorCode.INVALID_ARGUMENT,
+                f"Invalid OpenRouter model slug: {selected_model!r}",
+                details={"reason": "invalid_model_slug"},
             )
         prompt = build_task_prompt(request.task, request.task_kind)
         arguments = (

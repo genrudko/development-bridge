@@ -25,10 +25,6 @@ def test_openrouter_executor_is_disabled_by_default():
     settings = BridgeSettings()
     assert settings.executors.openrouter.enabled is False
     assert settings.executors.openrouter.api_key is None
-    assert settings.executors.openrouter.allowed_models == (
-        "deepseek/deepseek-v4-flash-0731",
-        "qwen/qwen3-coder-next",
-    )
     assert settings.executors.openrouter.model == "deepseek/deepseek-v4-flash-0731"
     assert settings.executors.openrouter.max_turns == 120
 
@@ -56,10 +52,17 @@ def test_openrouter_executor_settings_custom_valid():
     assert settings.executors.openrouter.model == "qwen/qwen3-coder-next"
 
 
-def test_openrouter_executor_settings_model_must_be_in_allowlist():
+def test_openrouter_executor_settings_accepts_arbitrary_provider_model_slug():
+    settings = BridgeSettings.model_validate(
+        {"executors": {"openrouter": {"model": "qwen/qwen3.5-flash-02-23"}}}
+    )
+    assert settings.executors.openrouter.model == "qwen/qwen3.5-flash-02-23"
+
+
+def test_openrouter_executor_settings_rejects_malformed_model_slug():
     with pytest.raises(ValidationError):
         BridgeSettings.model_validate(
-            {"executors": {"openrouter": {"model": "unsupported/model"}}}
+            {"executors": {"openrouter": {"model": "bad slug"}}}
         )
 
 
