@@ -83,6 +83,10 @@ def _sub(a, b):
     return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 
 
+def _sub2(a, b):
+    return [a[0] - b[0], a[1] - b[1]]
+
+
 def _dot(a, b):
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
@@ -637,21 +641,54 @@ def _edge_direction(entity):
 
 
 def _circular_axis(entity):
+    """Derive a concentric axis line (point, direction) from representative Fusion geometry.
+
+    Circular edges expose a circle/arc with center+normal; cylindrical faces expose
+    a cylinder with axis origin+axis direction. Radius is not required to establish
+    concentricity and is never guessed. Unsupported shapes fail closed.
+    """
+    kind = _entity_kind(entity)
     geom = getattr(entity, "geometry", None)
     if geom is None:
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
             "Concentric relation requires circular geometry",
         )
-    axis = getattr(geom, "axis", None)
-    center = getattr(geom, "center", None)
-    radius = getattr(geom, "radius", None)
-    if axis is None or center is None or radius is None:
-        raise FusionScriptError(
-            "UNSUPPORTED_GEOMETRY",
-            "Concentric relation requires exact axis, center, and radius",
-        )
-    return _vec3(center), _normalize(_vec3(axis)), float(radius)
+    if kind in ("edge", "sketch_curve"):
+        center = getattr(geom, "center", None)
+        normal = getattr(geom, "normal", None)
+        if center is None or normal is None:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Concentric relation requires a circular edge with exact center and normal",
+                details={"kind": kind},
+            )
+        return _vec3(center), _normalize(_vec3(normal)), None
+    if kind == "face":
+        axis = getattr(geom, "axis", None)
+        if axis is None:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Concentric relation requires a cylindrical face with an exact axis direction",
+                details={"kind": kind},
+            )
+        # A cylindrical face's axis passes through its axis origin; a circular
+        # planar face exposes an explicit center instead.
+        origin = getattr(geom, "center", None)
+        if origin is None:
+            origin = getattr(geom, "origin", None)
+        if origin is None:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Concentric relation requires a cylindrical face with an exact axis origin",
+                details={"kind": kind},
+            )
+        return _vec3(origin), _normalize(_vec3(axis)), getattr(geom, "radius", None)
+    raise FusionScriptError(
+        "UNSUPPORTED_GEOMETRY",
+        "Concentric relation requires two circular edges or cylindrical faces",
+        details={"kind": kind},
+    )
 
 
 def _axis_distance(axis_a, axis_b):
@@ -726,6 +763,7 @@ def _relation(operation, entity_a, entity_b, ref_a, ref_b, payload):
         }
 
     if operation == "coplanar":
+        tol_deg = float(payload.get("tolerance_deg", 0.01))
         tol_mm = float(payload.get("tolerance_mm", 0.001))
         tol = {"value": tol_mm, "unit": "mm"}
         if kind_a != "face" or kind_b != "face":
@@ -739,7 +777,7 @@ def _relation(operation, entity_a, entity_b, ref_a, ref_b, payload):
         angle = _angle_deg(na, nb)
         angle_dev = angle if angle <= 90.0 else 180.0 - angle
         distance = _mm(abs(_dot(nb, _sub(ob, oa))))
-        matches = angle_dev <= 0.01 and distance <= tol_mm
+        matches = angle_dev <= tol_deg and distance <= tol_mm
         return {
             "relation": operation,
             "matches": matches,
@@ -748,6 +786,7 @@ def _relation(operation, entity_a, entity_b, ref_a, ref_b, payload):
                 "distance_mm": round(distance, 6),
             },
             "tolerance": tol,
+            "tolerances": {"angle_deg": tol_deg, "distance_mm": tol_mm},
             "target_a": ref_a,
             "target_b": ref_b,
         }
@@ -782,42 +821,104 @@ def _relation(operation, entity_a, entity_b, ref_a, ref_b, payload):
     )
 
 
-def _face_bounds_in_plane(face, u, v):
+def _face_wall_rect(face, u, v):
+    """Return the projected rectangle spec (center_u, center_v, half_u, half_v) of a
+    simple wall face, or raise UNSUPPORTED_GEOMETRY.
+
+    Conservative proof: a provable wall face must be a simple quadrilateral with
+    exactly one outer loop (no holes) and four distinct corners that project to an
+    exact rectangle. Bounding-rectangle overlap alone is NOT conservative because
+    concave, holed, or disconnected faces can share a bounding box.
+    """
+    loops = getattr(face, "loops", None)
+    if loops is None or not hasattr(loops, "count") or loops.count != 1:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires a single outer loop; holed or multi-loop wall faces are ambiguous",
+            details={"face_id": getattr(face, "entityToken", None)},
+        )
     verts = getattr(face, "vertices", None)
-    if verts is None or not hasattr(verts, "count") or verts.count == 0:
+    if verts is None or not hasattr(verts, "count"):
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
             "Face-to-face thickness requires readable face vertices",
+            details={"face_id": getattr(face, "entityToken", None)},
         )
-    mins = [None, None]
-    maxs = [None, None]
-    for i in range(verts.count):
+    if verts.count != 4:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires quadrilateral wall faces; concave or multi-vertex faces are ambiguous",
+            details={
+                "face_id": getattr(face, "entityToken", None),
+                "vertex_count": verts.count,
+            },
+        )
+    pts = []
+    for i in range(4):
         g = getattr(verts.item(i), "geometry", None)
         if g is None:
             raise FusionScriptError(
                 "UNSUPPORTED_GEOMETRY",
                 "Face-to-face thickness requires exact vertex geometry",
+                details={"face_id": getattr(face, "entityToken", None)},
             )
         gv = _vec3(g)
-        cu = _dot(gv, u)
-        cv = _dot(gv, v)
-        for k, c in ((0, cu), (1, cv)):
-            if mins[k] is None or c < mins[k]:
-                mins[k] = c
-            if maxs[k] is None or c > maxs[k]:
-                maxs[k] = c
-    return mins, maxs
+        pts.append([_dot(gv, u), _dot(gv, v)])
+    for i in range(4):
+        for j in range(i + 1, 4):
+            if abs(pts[i][0] - pts[j][0]) < 1e-9 and abs(pts[i][1] - pts[j][1]) < 1e-9:
+                raise FusionScriptError(
+                    "UNSUPPORTED_GEOMETRY",
+                    "Face-to-face thickness requires four distinct wall-face corners",
+                )
+    p0, p1, p2, p3 = pts
+    e01 = _sub2(p1, p0)
+    e12 = _sub2(p2, p1)
+    e23 = _sub2(p3, p2)
+    e30 = _sub2(p0, p3)
+    tol = 1e-6
+    if (
+        abs(e01[0] + e23[0]) > tol
+        or abs(e01[1] + e23[1]) > tol
+        or abs(e12[0] + e30[0]) > tol
+        or abs(e12[1] + e30[1]) > tol
+    ):
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires a rectangular wall face with parallel opposite edges",
+        )
+    if abs(e01[0] * e12[0] + e01[1] * e12[1]) > tol:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires a rectangular wall face with perpendicular adjacent edges",
+        )
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (
+        (min(xs) + max(xs)) / 2.0,
+        (min(ys) + max(ys)) / 2.0,
+        (max(xs) - min(xs)) / 2.0,
+        (max(ys) - min(ys)) / 2.0,
+    )
 
-def _faces_projected_overlap(face_a, face_b, normal):
+
+def _faces_exact_rectangle_coincident(face_a, face_b, normal):
+    """Require the two wall faces to project to exactly coincident rectangles.
+
+    Bounding-box overlap alone is not conservative; only exact coincidence of the
+    full rectangular footprints proves an unambiguous wall pair.
+    """
     n = _normalize(normal)
     u = _perpendicular(n)
     v = _cross(n, u)
-    (min_ua, min_va), (max_ua, max_va) = _face_bounds_in_plane(face_a, u, v)
-    (min_ub, min_vb), (max_ub, max_vb) = _face_bounds_in_plane(face_b, u, v)
-    ov_u = min(max_ua, max_ub) - max(min_ua, min_ub)
-    ov_v = min(max_va, max_vb) - max(min_va, min_vb)
-    eps = 1e-9
-    return ov_u > eps and ov_v > eps
+    spec_a = _face_wall_rect(face_a, u, v)
+    spec_b = _face_wall_rect(face_b, u, v)
+    tol = 1e-6  # native cm tolerance for exact correspondence
+    for a, b in zip(spec_a, spec_b):
+        if abs(a - b) > tol:
+            return False
+    return True
+
 
 def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
     kind_a = _entity_kind(face_a)
@@ -845,13 +946,45 @@ def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
             "UNSUPPORTED_GEOMETRY",
             "Face-to-face thickness requires faces on the same solid (provable body relationship)",
         )
-    # Conservative proof 2: projected overlap on the wall plane proves a material path
-    # that excludes unrelated or disjoint faces.
-    if not _faces_projected_overlap(face_a, face_b, na):
+    # Conservative proof 2: the wall faces must be simple rectangles that coincide
+    # exactly in projection. Concave/holed/partial overlap can pass a loose
+    # bounding-rectangle test, so only exact coincidence is accepted.
+    if not _faces_exact_rectangle_coincident(face_a, face_b, na):
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
-            "Face-to-face thickness requires projected overlap proving an unambiguous pair; disjoint or unrelated faces unsupported",
+            "Face-to-face thickness requires exact coincident rectangular wall faces; concave, holed, or disjoint faces are ambiguous",
         )
+    # Conservative proof 3: an unambiguous wall pair is bounded by exactly two
+    # parallel planes. A cavity/hollow part has an internal parallel face strictly
+    # between the pair, which makes the wall pair ambiguous.
+    lo_signed = _dot(na, oa)
+    hi_signed = _dot(na, ob)
+    gap_native = abs(hi_signed - lo_signed)
+    if gap_native <= 1e-9:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires a positive wall gap",
+        )
+    faces = getattr(body_a, "faces", None)
+    if faces is not None and hasattr(faces, "count"):
+        for i in range(faces.count):
+            f = faces.item(i)
+            if f is face_a or f is face_b:
+                continue
+            try:
+                of, nf_raw = _face_plane(f)
+            except FusionScriptError:
+                continue
+            ang_f = _angle_deg(na, nf_raw)
+            if not (ang_f <= 0.01 or abs(ang_f - 180.0) <= 0.01):
+                continue
+            s_f = _dot(na, of)
+            if s_f > lo_signed + 1e-9 and s_f < hi_signed - 1e-9:
+                raise FusionScriptError(
+                    "UNSUPPORTED_GEOMETRY",
+                    "Face-to-face thickness is ambiguous: an internal parallel face lies between the pair (cavity or partitioned wall)",
+                    details={"face_id": getattr(f, "entityToken", None)},
+                )
     thickness = _mm(abs(_dot(na, _sub(ob, oa))))
     return {
         "quantity": "thickness",
