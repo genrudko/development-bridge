@@ -37,14 +37,32 @@ def _make_point(x, y, z):
         return _P(float(x), float(y), float(z))
 
 
+def _coord_value(pt, name):
+    v = getattr(pt, name, None)
+    if v is None or isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            f"Inspection requires exact finite '{name}' coordinate; missing or non-numeric geometry cannot be measured",
+            details={"missing": name},
+        )
+    f = float(v)
+    if not math.isfinite(f):
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            f"Inspection requires exact finite '{name}' coordinate; NaN/infinite geometry cannot be measured",
+            details={"missing": name},
+        )
+    return f
+
+
 def _point_dict(pt, frame=None):
     if pt is None:
         return None
     # Fusion native geometry is cm-based; public output is mm.
     return {
-        "x": round(_mm(getattr(pt, "x", 0.0)), 6),
-        "y": round(_mm(getattr(pt, "y", 0.0)), 6),
-        "z": round(_mm(getattr(pt, "z", 0.0)), 6),
+        "x": round(_mm(_coord_value(pt, "x")), 6),
+        "y": round(_mm(_coord_value(pt, "y")), 6),
+        "z": round(_mm(_coord_value(pt, "z")), 6),
         "frame": frame or {"space": "world", "ref": None},
     }
 
@@ -76,7 +94,7 @@ def _world_frame_or_fail(payload):
 
 
 def _vec3(pt):
-    return [float(getattr(pt, "x", 0.0)), float(getattr(pt, "y", 0.0)), float(getattr(pt, "z", 0.0))]
+    return [_coord_value(pt, "x"), _coord_value(pt, "y"), _coord_value(pt, "z")]
 
 
 def _sub(a, b):
@@ -945,6 +963,13 @@ def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
             "Face-to-face thickness requires faces on the same solid (provable body relationship)",
+        )
+    # Positive proof: thickness requires the owning body to be a solid. A
+    # surface (non-solid) body has no provable interior material path.
+    if getattr(body_a, "isSolid", None) is not True:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires a solid body (body.isSolid must be True); surface bodies have no provable interior material path",
         )
     # Conservative proof 2: the wall faces must be simple rectangles that coincide
     # exactly in projection. Concave/holed/partial overlap can pass a loose

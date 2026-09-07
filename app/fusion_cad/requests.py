@@ -19,6 +19,13 @@ from app.fusion_cad.models import (
 
 TargetRef = Annotated[str, Field(pattern=ENTITY_REF_PATTERN)] | EntitySelector
 
+# Relation tolerances are non-negative finite values; NaN, +/-inf and negative
+# tolerances are rejected at request validation so exact-measure semantics never
+# accept fabricated or unbounded comparison windows.
+NonNegativeFiniteTolerance = Annotated[
+    float, Field(ge=0, allow_inf_nan=False)
+]
+
 
 # Base request model with strict validation
 class _StrictCadBase(BaseModel):
@@ -161,30 +168,30 @@ class ParallelInspectRequest(_StrictCadBase):
     operation: Literal["parallel"]
     target_a: TargetRef
     target_b: TargetRef
-    tolerance_deg: float = 0.01
+    tolerance_deg: NonNegativeFiniteTolerance = 0.01
 
 
 class PerpendicularInspectRequest(_StrictCadBase):
     operation: Literal["perpendicular"]
     target_a: TargetRef
     target_b: TargetRef
-    tolerance_deg: float = 0.01
+    tolerance_deg: NonNegativeFiniteTolerance = 0.01
 
 
 class CoplanarInspectRequest(_StrictCadBase):
     operation: Literal["coplanar"]
     target_a: TargetRef
     target_b: TargetRef
-    tolerance_deg: float = 0.01
-    tolerance_mm: float = 0.001
+    tolerance_deg: NonNegativeFiniteTolerance = 0.01
+    tolerance_mm: NonNegativeFiniteTolerance = 0.001
 
 
 class ConcentricInspectRequest(_StrictCadBase):
     operation: Literal["concentric"]
     target_a: TargetRef
     target_b: TargetRef
-    tolerance_deg: float = 0.01
-    tolerance_mm: float = 0.001
+    tolerance_deg: NonNegativeFiniteTolerance = 0.01
+    tolerance_mm: NonNegativeFiniteTolerance = 0.001
 
 
 class FaceToFaceThicknessInspectRequest(_StrictCadBase):

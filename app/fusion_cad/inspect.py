@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
@@ -31,6 +32,34 @@ _UNIT_BY_QUANTITY: dict[str, str] = {
     "minimum_distance": LENGTH_UNIT,
     "angle": ANGLE_UNIT,
     "thickness": LENGTH_UNIT,
+}
+
+# Exact expected public quantity for every scalar-measure operation. A requested
+# operation must never accept a mismatched quantity (e.g. area reporting a
+# volume). face_to_face_thickness exposes quantity 'thickness'.
+_EXPECTED_QUANTITY: dict[str, str] = {
+    "area": "area",
+    "perimeter": "perimeter",
+    "volume": "volume",
+    "distance": "distance",
+    "minimum_distance": "minimum_distance",
+    "angle": "angle",
+    "face_to_face_thickness": "thickness",
+}
+
+# Exact measured-deviation key contract per relation operation.
+_RELATION_MEASURED_KEYS: dict[str, frozenset[str]] = {
+    "parallel": frozenset({"angle_deg"}),
+    "perpendicular": frozenset({"angle_deg"}),
+    "coplanar": frozenset({"angle_deg", "distance_mm"}),
+    "concentric": frozenset({"angle_deg", "offset_mm"}),
+}
+
+_RELATION_TOLERANCE_UNIT: dict[str, str] = {
+    "parallel": ANGLE_UNIT,
+    "perpendicular": ANGLE_UNIT,
+    "coplanar": LENGTH_UNIT,
+    "concentric": LENGTH_UNIT,
 }
 
 
@@ -233,19 +262,38 @@ def _require_ref(value: Any, field: str) -> str:
 def normalize_measure(
     raw: Mapping[str, Any], *, operation: str
 ) -> MeasureResult:
-    """Normalize an exact scalar measure, failing closed on missing/guessed values."""
+    """Normalize an exact scalar measure, failing closed on missing/guessed values.
+
+    The quantity must exactly match the operation's public contract and every
+    numeric measurement must be finite.
+    """
     value = raw.get("value")
     if value is None or not isinstance(value, (int, float)) or isinstance(value, bool):
         raise FusionCadError(
             ErrorCode.UNSUPPORTED_GEOMETRY,
             f"Inspection '{operation}' result missing exact measured value",
         )
-    quantity = str(raw.get("quantity") or operation or "")
-    if not quantity:
+    value_float = float(value)
+    if not math.isfinite(value_float):
         raise FusionCadError(
             ErrorCode.UNSUPPORTED_GEOMETRY,
-            f"Inspection '{operation}' result missing exact quantity",
+            f"Inspection '{operation}' result measured value must be finite",
         )
+    quantity = raw.get("quantity")
+    expected_quantity = _EXPECTED_QUANTITY.get(operation)
+    if expected_quantity is not None:
+        if not isinstance(quantity, str) or quantity != expected_quantity:
+            raise FusionCadError(
+                ErrorCode.UNSUPPORTED_GEOMETRY,
+                f"Inspection '{operation}' result quantity '{quantity}' does not match expected '{expected_quantity}'",
+            )
+    else:
+        quantity = str(quantity or operation or "")
+        if not quantity:
+            raise FusionCadError(
+                ErrorCode.UNSUPPORTED_GEOMETRY,
+                f"Inspection '{operation}' result missing exact quantity",
+            )
     unit = raw.get("unit")
     if not isinstance(unit, str) or not unit.strip():
         raise FusionCadError(
@@ -258,7 +306,7 @@ def normalize_measure(
             ErrorCode.UNSUPPORTED_GEOMETRY,
             f"Inspection '{operation}' result unit '{unit}' does not match expected '{expected_unit}'",
         )
-    return MeasureResult(quantity=quantity, value=float(value), unit=unit)
+    return MeasureResult(quantity=quantity, value=value_float, unit=unit)
 
 
 def normalize_bounding_box(raw: Mapping[str, Any]) -> BoundingBoxResult:
@@ -324,6 +372,8 @@ def normalize_oriented_bbox(raw: Mapping[str, Any]) -> OrientedBoundingBox:
         if not isinstance(extents_raw, (list, tuple)) or len(extents_raw) != 3:
             raise TypeError("missing extents")
         extents = tuple(float(e) for e in extents_raw)
+        if not all(math.isfinite(e) for e in extents):
+            raise TypeError("non-finite extents")
         frame = _coerce_frame(obb_raw.get("frame"), center.frame.space)
     except (TypeError, ValueError):
         raise FusionCadError(
@@ -378,12 +428,22 @@ def normalize_angle(raw: Mapping[str, Any]) -> AngleResult:
 def normalize_relation(
     raw: Mapping[str, Any], *, operation: str
 ) -> RelationResult:
-    """Normalize a relation result with matches, measured deviation, and explicit tolerance."""
+    """Normalize a relation result with matches, measured deviation, and explicit tolerance.
+
+    The relation name must equal the requested operation, the measured-deviation
+    keys and tolerance unit must match the operation's public contract, and every
+    numeric measurement/tolerance must be finite.
+    """
     relation = str(raw.get("relation") or operation or "")
     if not relation:
         raise FusionCadError(
             ErrorCode.UNSUPPORTED_GEOMETRY,
             f"Inspection '{operation}' relation result missing exact relation name",
+        )
+    if relation != operation:
+        raise FusionCadError(
+            ErrorCode.UNSUPPORTED_GEOMETRY,
+            f"Inspection '{operation}' relation result relation '{relation}' does not match requested operation",
         )
     matches_raw = raw.get("matches")
     if not isinstance(matches_raw, bool):
@@ -397,6 +457,23 @@ def normalize_relation(
             ErrorCode.UNSUPPORTED_GEOMETRY,
             f"Inspection '{operation}' relation result missing measured deviation",
         )
+    expected_keys = _RELATION_MEASURED_KEYS.get(operation)
+    if expected_keys is not None and set(measured_raw.keys()) != expected_keys:
+        raise FusionCadError(
+            ErrorCode.UNSUPPORTED_GEOMETRY,
+            f"Inspection '{operation}' relation result measured keys must be {sorted(expected_keys)}",
+        )
+    for key, val in measured_raw.items():
+        if (
+            val is None
+            or isinstance(val, bool)
+            or not isinstance(val, (int, float))
+            or not math.isfinite(float(val))
+        ):
+            raise FusionCadError(
+                ErrorCode.UNSUPPORTED_GEOMETRY,
+                f"Inspection '{operation}' relation result measured '{key}' must be a finite number",
+            )
     tol_raw = raw.get("tolerance")
     if not isinstance(tol_raw, Mapping):
         raise FusionCadError(
@@ -419,10 +496,22 @@ def normalize_relation(
             ErrorCode.UNSUPPORTED_GEOMETRY,
             f"Inspection '{operation}' relation result missing explicit tolerance unit",
         )
-    if float(tol_value) < 0:
+    tol_float = float(tol_value)
+    if not math.isfinite(tol_float):
+        raise FusionCadError(
+            ErrorCode.UNSUPPORTED_GEOMETRY,
+            f"Inspection '{operation}' relation result tolerance must be finite",
+        )
+    if tol_float < 0:
         raise FusionCadError(
             ErrorCode.UNSUPPORTED_GEOMETRY,
             f"Inspection '{operation}' relation result has negative tolerance",
+        )
+    expected_tol_unit = _RELATION_TOLERANCE_UNIT.get(operation)
+    if expected_tol_unit is not None and tol_unit != expected_tol_unit:
+        raise FusionCadError(
+            ErrorCode.UNSUPPORTED_GEOMETRY,
+            f"Inspection '{operation}' relation result tolerance unit '{tol_unit}' does not match expected '{expected_tol_unit}'",
         )
     tolerances: ImmutableMapping | None = None
     tolerances_raw = raw.get("tolerances")
@@ -443,18 +532,24 @@ def normalize_relation(
                     ErrorCode.UNSUPPORTED_GEOMETRY,
                     f"Inspection '{operation}' relation result tolerance '{tol_key}' must be a non-negative number",
                 )
-            if float(tol_val) < 0:
+            tol_val_float = float(tol_val)
+            if not math.isfinite(tol_val_float):
+                raise FusionCadError(
+                    ErrorCode.UNSUPPORTED_GEOMETRY,
+                    f"Inspection '{operation}' relation result tolerance '{tol_key}' must be finite",
+                )
+            if tol_val_float < 0:
                 raise FusionCadError(
                     ErrorCode.UNSUPPORTED_GEOMETRY,
                     f"Inspection '{operation}' relation result tolerance '{tol_key}' is negative",
                 )
-            tol_map[str(tol_key)] = float(tol_val)
+            tol_map[str(tol_key)] = tol_val_float
         tolerances = ImmutableMapping(tol_map)
     return RelationResult(
         relation=relation,
         matches=matches_raw,
         measured=ImmutableMapping(dict(measured_raw)),
-        tolerance=ToleranceSpec(value=float(tol_value), unit=str(tol_unit)),
+        tolerance=ToleranceSpec(value=tol_float, unit=str(tol_unit)),
         tolerances=tolerances,
         target_a=_require_ref(raw.get("target_a"), "target_a"),
         target_b=_require_ref(raw.get("target_b"), "target_b"),
