@@ -6544,7 +6544,17 @@ def _enable_fake_attribute_removal(fake_adsk):
     def add_with_delete(self, group_name, name, value):
         attr = original_add(self, group_name, name, value)
         items = self._items
-        attr.deleteMe = lambda: items.remove(attr)
+
+        def delete_me():
+            """Documented Autodesk Attribute.deleteMe: returns True iff the
+            deletion succeeded and False otherwise."""
+            try:
+                items.remove(attr)
+            except ValueError:
+                return False
+            return True
+
+        attr.deleteMe = delete_me
         return attr
 
     def remove(self, attr):
@@ -8025,3 +8035,114 @@ async def test_metadata_duplicate_reserved_names_fail_closed_before_any_mutation
     assert _body_reserved_multiset() == baseline_multiset
     # The unrelated group remains untouched either way.
     assert ("vendor.custom", "color", "blue") in _body_reserved_multiset()
+
+
+# =========================================================================
+# Task 10 final narrow repair C: Attribute.deleteMe result is verified and
+# post-delete enumeration proves the targeted reserved record disappeared
+# =========================================================================
+
+
+def _seed_body_reserved_attribute(name, value):
+    """Seed a reserved attribute on the body owner via the Fusion-like fake
+    Attributes.add and return the live Attribute object so a test can model a
+    misbehaving deleteMe on it."""
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    design = doc.products.itemByClass("adsk::fusion::Design")
+    body = design.rootComponent.bRepBodies.item(0)
+    return body.attributes.add(RESERVED_METADATA_GROUP, name, value)
+
+
+@pytest.mark.asyncio
+async def test_metadata_removal_deleteMe_false_noop_fails_closed_and_compensates(
+    fake_desktop,
+):
+    """Documented Autodesk semantics: Attribute.deleteMe returns True iff the
+    deletion succeeded; False means the requested attribute was NOT removed.
+    A False/no-op deleteMe must never be reported as an applied removal: the
+    command fails closed, the exact pre-command reserved state (including the
+    still-present requested attribute) is preserved, and no provenance is left
+    behind."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+
+    attr = _seed_body_reserved_attribute("finish", "matte")
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    baseline_body_attrs = _body_attributes()
+    assert baseline_body_attrs.get((RESERVED_METADATA_GROUP, "finish")) == "matte"
+
+    # Misbehaving runtime: deleteMe reports the documented FAILURE result
+    # (False) while leaving the attribute in place.
+    attr.deleteMe = lambda: False
+
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "remove",
+                "target": body_ref,
+                "name": "finish",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    # The requested attribute remains; the failed command is never reported as
+    # applied and the exact pre-command state (incl. no provenance) is kept.
+    assert _body_attributes() == baseline_body_attrs
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _body_attributes()
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _document_attributes()
+    # Exactly one failed mutation dispatch; no hidden follow-up command.
+    assert desktop.mutation_calls == 1
+    assert desktop.read_calls == 1
+    # The failed command never advanced the revision authority.
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+
+@pytest.mark.asyncio
+async def test_metadata_removal_deleteMe_true_but_still_present_fails_closed(
+    fake_desktop,
+):
+    """Defensive no-op detection: a deleteMe that reports the documented
+    success result (True) while the observable post-delete enumeration still
+    shows the targeted reserved record is a no-op. The return value alone can
+    never prove removal: the command fails closed and the exact pre-command
+    state is preserved."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+
+    attr = _seed_body_reserved_attribute("finish", "matte")
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    baseline_body_attrs = _body_attributes()
+    assert baseline_body_attrs.get((RESERVED_METADATA_GROUP, "finish")) == "matte"
+
+    # Misbehaving runtime: deleteMe reports success (True) but the targeted
+    # attribute is still observable in the owner enumeration afterwards.
+    attr.deleteMe = lambda: True
+
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "remove",
+                "target": body_ref,
+                "name": "finish",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert _body_attributes() == baseline_body_attrs
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _body_attributes()
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _document_attributes()
+    assert desktop.mutation_calls == 1
+    assert desktop.read_calls == 1
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"

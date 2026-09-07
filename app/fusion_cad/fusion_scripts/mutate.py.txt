@@ -388,8 +388,46 @@ def run():
                             details={"operation": op},
                         )
                     removed_value = str(getattr(a, "value", "") or "")
-                    a.deleteMe()
+                    # Register the CURRENT removal undo BEFORE deleting so a
+                    # deleteMe that mutates persisted state but reports a bad
+                    # result is still compensable back to the exact record.
                     undo_actions.append(("restored", rm_name, removed_value))
+                    # Documented Autodesk semantics: Attribute.deleteMe returns
+                    # True iff the deletion succeeded; False means the attribute
+                    # was NOT removed. The return value alone is never trusted
+                    # (a misbehaving runtime may report success without removing
+                    # anything), so the owner is re-enumerated and the exact
+                    # targeted reserved (group, name, value) record must have
+                    # disappeared before the removal is treated as applied.
+                    # False/no-op/mismatch fails closed; the except handler then
+                    # restores the exact pre-mutation snapshot.
+                    delete_result = a.deleteMe()
+                    if delete_result is not True:
+                        raise FusionScriptError(
+                            "FUSION_API_ERROR",
+                            "Attribute.deleteMe did not report success for the metadata removal; failing closed so stale metadata is never reported as applied",
+                            details={
+                                "operation": op,
+                                "attribute_name": rm_name,
+                                "deleteMe_result": str(delete_result),
+                            },
+                        )
+                    _verify_attrs, verify_items = _owner_attributes(owner)
+                    for post_attr in verify_items:
+                        post_group = str(getattr(post_attr, "groupName", "") or "")
+                        if post_group != _RESERVED_GROUP:
+                            continue
+                        post_name = str(getattr(post_attr, "name", "") or "")
+                        if post_name != rm_name:
+                            continue
+                        post_value = str(getattr(post_attr, "value", "") or "")
+                        if post_value != removed_value:
+                            continue
+                        raise FusionScriptError(
+                            "FUSION_API_ERROR",
+                            "Attribute.deleteMe reported success but the targeted reserved attribute is still present; failing closed so stale metadata is never reported as applied",
+                            details={"operation": op, "attribute_name": rm_name},
+                        )
                     applied_removals.append(
                         {
                             "name": rm_name,
