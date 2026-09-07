@@ -179,6 +179,13 @@ def run():
         the compensation primitives (Attribute.deleteMe / Attributes.add) are
         unavailable, so a plan that could not be rolled back never starts
         applying. Read-only: applies nothing.
+
+        Corrupted-state preflight: Autodesk documents attribute names as unique
+        within a group, so duplicate same-(group, name) records inside the
+        reserved namespace are outside the normal API contract. Their multiset
+        cannot be reconstructed by Attributes.add, so the plan is rejected
+        BEFORE the geometry hook or any reserved attribute side effect instead
+        of attempting impossible compensation. Unrelated groups are untouched.
         """
         attrs, items = _owner_attributes(owner)
         if writes and not hasattr(attrs, "add"):
@@ -187,6 +194,18 @@ def run():
                 "Attribute collection does not support writes; failing closed before any mutation",
                 details={"operation": op},
             )
+        seen_reserved_names = set()
+        for a in items:
+            if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                continue
+            nm = str(getattr(a, "name", "") or "")
+            if nm in seen_reserved_names:
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Owner reserved metadata contains duplicate attribute names; the corrupted state cannot be safely mutated or compensated, so the plan fails closed before any mutation",
+                    details={"operation": op},
+                )
+            seen_reserved_names.add(nm)
         removal_requests = []
         for removal in removals:
             if not isinstance(removal, dict):
@@ -232,8 +251,14 @@ def run():
         same-group/same-name attribute instead of creating a new one, so a
         returned Attribute is NOT proof of creation and deleteMe-ing it would
         destroy pre-existing provenance/metadata instead of restoring its old
-        value. Raises when the restored state does not match the pre-mutation
-        snapshot so a partially applied plan can never be reported as success.
+        value. A failed CURRENT write whose Attributes.add returned null or a
+        mismatched Attribute is compensated through ("restored", name,
+        old_value) when it overwrote a pre-existing attribute, or through
+        ("delete_created_by_name", name) when it may have created one; the
+        persisted state is re-derived by enumeration and the bad returned
+        object is never trusted as proof of what was created. Raises when the
+        restored state does not match the pre-mutation snapshot so a partially
+        applied plan can never be reported as success.
         """
         if undo is None:
             return
@@ -278,6 +303,26 @@ def run():
                         "Compensation Attributes.add returned an Attribute that does not match the restore write; metadata compensation is unavailable and partial metadata may remain",
                         details={"operation": op, "compensated": False},
                     )
+            elif kind == "delete_created_by_name":
+                # A failed/untrusted Attributes.add result can still have
+                # persisted created state under this reserved name. Re-derive
+                # the actual persisted attributes by enumeration and delete
+                # exactly what the failed write created; the null/mismatched
+                # result object is never trusted as proof of creation.
+                name = action[1]
+                _del_attrs, del_items = _owner_attributes(owner)
+                for del_attr in del_items:
+                    if str(getattr(del_attr, "groupName", "") or "") != _RESERVED_GROUP:
+                        continue
+                    if str(getattr(del_attr, "name", "") or "") != name:
+                        continue
+                    if not hasattr(del_attr, "deleteMe"):
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "Persisted attribute does not support deleteMe; metadata compensation is unavailable and partial metadata may remain",
+                            details={"operation": op, "compensated": False},
+                        )
+                    del_attr.deleteMe()
             else:
                 raise FusionScriptError(
                     "FUSION_API_ERROR",
@@ -298,7 +343,12 @@ def run():
         Returns (applied_writes, applied_removals, undo). On any application
         failure the reserved-namespace state is restored to the exact
         pre-mutation snapshot before the failure is re-raised, so a failed
-        command never leaves partial metadata/provenance behind.
+        command never leaves partial metadata/provenance behind. Each write
+        captures its pre-add reserved state BEFORE calling Attributes.add, so a
+        failed current write with a null/mismatched add result is itself
+        compensated (restored by re-adding the old value, or deleted by
+        enumerated name) instead of remaining applied while only earlier
+        actions are rolled back.
         """
         snapshot = _reserved_records(owner)
         undo_actions = []
@@ -393,12 +443,25 @@ def run():
                 # creation fails. The returned Attribute is validated BEFORE the
                 # write is marked applied or enters the undo log, so a null or
                 # mismatched result can never be reported as an applied write
-                # (nor deleted as a fake "created" attribute). On null/mismatch
-                # this raises, the except handler below compensates every PRIOR
-                # plan write/removal via the undo log, and the post-rollback
-                # snapshot check in _rollback_metadata fails closed if the
-                # failed write persisted anything unverifiable.
+                # (nor deleted as a fake "created" attribute). A misbehaving
+                # runtime may ALREADY have mutated/created persisted state
+                # before returning null/mismatch, so the failed CURRENT write
+                # itself is registered for compensation from the pre-add state
+                # captured above: an overwritten attribute is restored via
+                # Attributes.add(group, name, old_value); a possibly created one
+                # is re-derived by enumeration and deleted via
+                # Attribute.deleteMe ("delete_created_by_name"). The bad
+                # returned object is never trusted as proof of creation. The
+                # except handler below then compensates every PRIOR plan
+                # write/removal via the undo log, and the post-rollback exact
+                # snapshot check in _rollback_metadata fails closed
+                # (compensated=False) if exact restoration cannot be proven.
                 if new_attr is None:
+                    undo_actions.append(
+                        ("restored", wr_name, existing_value)
+                        if existed
+                        else ("delete_created_by_name", wr_name)
+                    )
                     raise FusionScriptError(
                         "FUSION_API_ERROR",
                         "Attributes.add returned null for a metadata write; the write cannot be verified as applied",
@@ -412,6 +475,11 @@ def run():
                     or added_name != wr_name
                     or added_value != str(wr_value)
                 ):
+                    undo_actions.append(
+                        ("restored", wr_name, existing_value)
+                        if existed
+                        else ("delete_created_by_name", wr_name)
+                    )
                     raise FusionScriptError(
                         "FUSION_API_ERROR",
                         "Attributes.add returned an Attribute that does not match the requested metadata write; the write cannot be verified as applied",
@@ -469,7 +537,9 @@ def run():
         owner, target_ref = _resolve_owner(doc, design, PAYLOAD.get("target"))
 
         # Preflight verifies every capability the plan needs (including the
-        # compensation primitives) BEFORE anything is mutated.
+        # compensation primitives) BEFORE anything is mutated, and rejects
+        # corrupted duplicate reserved (group, name) state before the geometry
+        # hook or any reserved attribute side effect.
         _preflight_metadata_plan(owner, writes, removals)
 
         # Geometry primitive (when present) runs BEFORE any metadata write so a

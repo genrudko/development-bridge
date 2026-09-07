@@ -6587,9 +6587,15 @@ def _enable_fake_fusion_add_overwrite(fake_adsk):
 
 @pytest.fixture
 def fake_desktop():
-    """Yields {"adsk": fake_adsk, "desktop": FakeFusionDesktop} inside a fake Fusion runtime."""
+    """Yields {"adsk": fake_adsk, "desktop": FakeFusionDesktop} inside a fake Fusion runtime.
+
+    The fake attribute collections implement the documented Autodesk Fusion
+    Attributes.add semantics: an add UPDATES and returns the EXISTING
+    same-group/same-name attribute instead of appending a duplicate, matching
+    the real runtime the mutate script targets."""
     with AdskFakeContext("doc_1", initial_volume=100.0) as fake_adsk:
         _enable_fake_attribute_removal(fake_adsk)
+        _enable_fake_fusion_add_overwrite(fake_adsk)
         yield {"adsk": fake_adsk, "desktop": FakeFusionDesktop(fake_adsk)}
 
 
@@ -7689,3 +7695,333 @@ async def test_metadata_provenance_add_mismatched_attribute_fails_closed_and_res
     # "finish" value was compensated and the stale provenance is untouched.
     assert _body_attributes() == baseline_body_attrs
     assert _body_attr_count() == baseline_body_attr_count
+
+
+# =========================================================================
+# Task 10 final bounded repair A: current-write add-result failure after
+# observable mutation must be compensated from pre-write state
+# =========================================================================
+
+
+class _MismatchedAttribute:
+    """An Attribute object that does NOT match the requested metadata write.
+
+    Used only to simulate a misbehaving/corrupt Fusion runtime whose
+    Attributes.add applies the requested state mutation and then returns a
+    mismatched Attribute instead of the verified one."""
+
+    def __init__(self, group_name, name, value):
+        self.groupName = group_name
+        self.name = name
+        self.value = value
+
+
+def _arm_one_shot_bad_add(fake_adsk, target_name, mode):
+    """Corrupt the fake Attributes.add for exactly ONE call on target_name.
+
+    The requested state mutation IS applied first (real Fusion create/overwrite
+    semantics through the currently installed add), then the call returns null
+    ("null" mode) or a mismatched Attribute ("mismatch" mode) instead of the
+    verified Attribute. Returns (attrs_cls, healthy_add) so tests can restore
+    the healthy add afterwards."""
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs_cls = type(doc.attributes)
+    healthy_add = attrs_cls.add
+    armed = {"pending": True}
+
+    def add_mutating_then_bad(self, group_name, name, value):
+        result = healthy_add(self, group_name, name, value)
+        if (
+            armed["pending"]
+            and group_name == RESERVED_METADATA_GROUP
+            and name == target_name
+        ):
+            armed["pending"] = False
+            if mode == "null":
+                return None
+            return _MismatchedAttribute(group_name, name, "corrupt-mismatch-value")
+        return result
+
+    attrs_cls.add = add_mutating_then_bad
+    return attrs_cls, healthy_add
+
+
+@pytest.mark.parametrize("mode", ["null", "mismatch"])
+@pytest.mark.asyncio
+async def test_metadata_overwrite_add_bad_result_after_mutation_restores_exact_state(
+    fake_desktop, mode
+):
+    """Finding A (overwritten pre-existing key): a misbehaving runtime can apply
+    the requested overwrite and THEN return null or a mismatched Attribute. The
+    current write must itself be compensated from the pre-add state so the
+    command fails closed AND the exact pre-command reserved namespace
+    state/count is restored (never just the earlier undo-log actions)."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    # 1. A successful set creates "finish" + provenance on the body owner.
+    res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set",
+            "target": body_ref,
+            "name": "finish",
+            "value": "old-finish",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    res_data = res.data if isinstance(res, CadResult) else res["data"]
+    assert res_data.get("applied") is True
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+
+    # 2. Official Fusion overwrite semantics, then ONE corrupt add on the
+    # explicit "finish" write: mutate in place, then return null/mismatch.
+    _enable_fake_fusion_add_overwrite(fake_adsk)
+    attrs_cls, healthy_add = _arm_one_shot_bad_add(fake_adsk, "finish", mode)
+    try:
+        baseline_body_attrs = _body_attributes()
+        baseline_body_attr_count = _body_attr_count()
+        assert baseline_body_attrs[("bridge.cad/v1", "finish")] == "old-finish"
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_2",
+                },
+                group="metadata",
+            )
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    # Command fails closed AND the exact pre-command reserved namespace
+    # state/count is restored: the failed current write is compensated too.
+    assert _body_attributes() == baseline_body_attrs
+    assert _body_attr_count() == baseline_body_attr_count
+
+    # 3. A healthy retry with the same expected revision applies cleanly.
+    retry = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "set",
+            "target": body_ref,
+            "name": "finish",
+            "value": "anodized",
+            "expected_revision": "rev_2",
+        },
+        group="metadata",
+    )
+    retry_data = retry.data if isinstance(retry, CadResult) else retry["data"]
+    assert retry_data.get("applied") is True
+    assert _body_attributes()[("bridge.cad/v1", "finish")] == "anodized"
+
+
+@pytest.mark.parametrize("mode", ["null", "mismatch"])
+@pytest.mark.asyncio
+async def test_metadata_create_add_bad_result_after_persist_restores_exact_state(
+    fake_desktop, mode
+):
+    """Finding A (newly-created key actually persisted): the add call persists
+    the new reserved attribute but returns null/mismatch. The persisted
+    attribute must be re-derived by enumeration and deleted via the verified
+    deleteMe primitive — never trusted from the bad returned object — so the
+    exact pre-command reserved namespace state/count is restored."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    attrs_cls, healthy_add = _arm_one_shot_bad_add(fake_adsk, "finish", mode)
+    try:
+        baseline_body_attrs = _body_attributes()
+        baseline_body_attr_count = _body_attr_count()
+        assert ("bridge.cad/v1", "finish") not in baseline_body_attrs
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    # Exact pre-command reserved namespace state/count restored: the persisted
+    # creation of the failed current write was compensated.
+    assert _body_attributes() == baseline_body_attrs
+    assert _body_attr_count() == baseline_body_attr_count
+    assert ("bridge.cad/v1", "finish") not in _body_attributes()
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _body_attributes()
+
+
+@pytest.mark.asyncio
+async def test_metadata_current_write_persist_null_after_prior_write_restores_exact_state(
+    fake_desktop,
+):
+    """Finding A end-to-end: an earlier explicit write succeeds (undo entry),
+    then the CURRENT provenance write is actually persisted but returns null.
+    Rollback must compensate BOTH the earlier undo-log actions and the failed
+    current write so the exact pre-command reserved state/count is restored."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    attrs_cls, healthy_add = _arm_one_shot_bad_add(
+        fake_adsk, PROVENANCE_ATTRIBUTE_NAME, "null"
+    )
+    try:
+        baseline_body_attrs = _body_attributes()
+        baseline_body_attr_count = _body_attr_count()
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert _body_attributes() == baseline_body_attrs
+    assert _body_attr_count() == baseline_body_attr_count
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _body_attributes()
+
+
+# =========================================================================
+# Task 10 final bounded repair B: duplicate same (group, name) reserved
+# records are corrupted state; mutation must fail closed BEFORE any mutation
+# =========================================================================
+
+
+def _body_reserved_multiset():
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    design = doc.products.itemByClass("adsk::fusion::Design")
+    body = design.rootComponent.bRepBodies.item(0)
+    attrs = body.attributes
+    return [
+        (attrs.item(i).groupName, attrs.item(i).name, attrs.item(i).value)
+        for i in range(attrs.count)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_metadata_duplicate_reserved_names_fail_closed_before_any_mutation(
+    fake_desktop,
+):
+    """Finding B: duplicate same (bridge.cad/v1, name) records inside the
+    reserved namespace are corrupted state outside the Autodesk uniqueness
+    contract. Their multiset cannot be reconstructed via Attributes.add, so
+    mutation/removal must fail closed BEFORE the geometry hook or any reserved
+    attribute side effect and preserve the exact duplicate multiset/state."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    design = doc.products.itemByClass("adsk::fusion::Design")
+    body = design.rootComponent.bRepBodies.item(0)
+
+    class _CorruptReservedAttr:
+        def __init__(self, group_name, name, value):
+            self.groupName = group_name
+            self.name = name
+            self.value = value
+
+    # Corrupted reserved state INJECTED directly (real Fusion Attributes.add
+    # can never create same-(group, name) duplicates): two records sharing
+    # (group, name), plus an unrelated group that must remain untouched.
+    body_attrs = body.attributes
+    body_attrs.add("vendor.custom", "color", "blue")
+    for _dup_value in ("value-one", "value-two"):
+        body_attrs._items.append(
+            _CorruptReservedAttr(RESERVED_METADATA_GROUP, "finish", _dup_value)
+        )
+
+    # Baseline is seeded from a real semantic read AFTER the corruption so the
+    # authoritative freshness guard passes and the duplicate preflight is what
+    # rejects the command.
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    baseline_multiset = _body_reserved_multiset()
+    assert baseline_multiset.count(
+        (RESERVED_METADATA_GROUP, "finish", "value-one")
+    ) == 1
+    assert baseline_multiset.count(
+        (RESERVED_METADATA_GROUP, "finish", "value-two")
+    ) == 1
+    assert ("vendor.custom", "color", "blue") in baseline_multiset
+
+    primitive_calls = {"count": 0}
+
+    def _primitive(payload):
+        primitive_calls["count"] += 1
+
+    desktop.mutation_primitive = _primitive
+
+    # 1. Duplicate-aware mutation must fail closed before any mutation.
+    with pytest.raises(FusionCadError) as exc_set:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": body_ref,
+                "name": "finish",
+                "value": "replaced",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    assert exc_set.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert primitive_calls["count"] == 0
+    assert _body_reserved_multiset() == baseline_multiset
+
+    # 2. Duplicate-aware removal must fail closed before any mutation too.
+    with pytest.raises(FusionCadError) as exc_remove:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "remove",
+                "target": body_ref,
+                "name": "finish",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    assert exc_remove.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert primitive_calls["count"] == 0
+    assert _body_reserved_multiset() == baseline_multiset
+    # The unrelated group remains untouched either way.
+    assert ("vendor.custom", "color", "blue") in _body_reserved_multiset()
