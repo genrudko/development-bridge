@@ -522,6 +522,39 @@ async def test_fusion_inspect_thickness_cavity_internal_wall_rejected(
 
 
 @pytest.mark.asyncio
+async def test_fusion_inspect_thickness_cavity_internal_wall_rejected_reversed(
+    mock_desktop_service,
+):
+    """Falsifies order-dependent between-planes bounds: the same cavity/partition
+    case with the wall faces reversed (outward-facing normals) must still be
+    rejected, not silently accepted as an unambiguous wall pair."""
+    with InspectFusionFake() as fake:
+        cad_service = _make_service(mock_desktop_service)
+        refs = _register_refs(cad_service)
+
+        # Same coincident rectangular opposing pair as the cavity test, but with
+        # face_a's signed plane position NOT below face_b's along face_a's normal
+        # (the order the old code silently assumed). face_a normal points outward
+        # away from face_b, so dot(na, oa) > dot(na, ob).
+        fake.body._faces[0].geometry = _PlaneGeom((0, 0, 0), (0, 0, -1))
+        fake.body._faces[1].geometry = _PlaneGeom((0, 0, 10), (0, 0, 1))
+        # Internal parallel face strictly between the pair -> hollow/cavity partition.
+        fake.body._faces[2].geometry = _PlaneGeom((0, 0, 5), (0, 0, 1))
+
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "face_to_face_thickness",
+                    "face_a": refs["face_a"],
+                    "face_b": refs["face_b"],
+                },
+                group="inspect",
+            )
+        assert exc.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
 async def test_fusion_inspect_thickness_partial_overlap_rejected(mock_desktop_service):
     """Falsifies: partial-overlap rectangles are not coincident -> ambiguous/disconnected."""
     with InspectFusionFake() as fake:

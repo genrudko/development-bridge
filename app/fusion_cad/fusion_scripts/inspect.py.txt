@@ -956,10 +956,13 @@ def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
         )
     # Conservative proof 3: an unambiguous wall pair is bounded by exactly two
     # parallel planes. A cavity/hollow part has an internal parallel face strictly
-    # between the pair, which makes the wall pair ambiguous.
-    lo_signed = _dot(na, oa)
-    hi_signed = _dot(na, ob)
-    gap_native = abs(hi_signed - lo_signed)
+    # between the pair, which makes the wall pair ambiguous. The signed bounds are
+    # normalized (min/max) so the check is independent of the face_a/face_b order.
+    signed_a = _dot(na, oa)
+    signed_b = _dot(na, ob)
+    lo_signed = min(signed_a, signed_b)
+    hi_signed = max(signed_a, signed_b)
+    gap_native = hi_signed - lo_signed
     if gap_native <= 1e-9:
         raise FusionScriptError(
             "UNSUPPORTED_GEOMETRY",
