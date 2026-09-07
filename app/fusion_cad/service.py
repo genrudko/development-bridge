@@ -32,7 +32,7 @@ from app.fusion_cad.models import (
     ImmutableMapping,
 )
 from app.fusion_cad.inspect import normalize_inspect_result
-from app.fusion_cad.refs import EntityRefRegistry
+from app.fusion_cad.refs import EntityRefRegistry, InternalEntityRecord
 from app.fusion_cad.requests import (
     FusionInspectRequest,
     FusionMetadataRequest,
@@ -265,24 +265,68 @@ class FusionCadService:
             hint["geometry_signature"] = dict(record.geometry_signature)
         return hint
 
+    def _resolve_opaque_inspect_ref(
+        self, raw: str, doc_ref: str | None
+    ) -> InternalEntityRecord | None:
+        """Resolve an opaque inspect target ref within the effective document context.
+
+        Task5 document-bounded semantics are preserved:
+          - a ref registered to a different document than the effective context
+            fails closed with WRONG_DOCUMENT (a foreign native token is never
+            injected);
+          - an unknown / no-longer-resolvable ref in the effective context fails
+            closed with REF_STALE;
+          - a ref registered in the effective context returns its record for
+            native-hint injection.
+
+        When no effective document context exists (neither a request document_ref
+        nor an active document), resolution falls back to the registry's
+        any-document lookup solely for backward-compatible single-document
+        requests; it never injects a token proven to belong to another document.
+        """
+        if doc_ref is not None:
+            record = self._ref_registry.get_internal_record(raw, doc_ref)
+            if record is not None:
+                return record
+            other = self._ref_registry.get_internal_record(raw)
+            if other is not None and other.document_ref != doc_ref:
+                raise FusionCadError(
+                    ErrorCode.WRONG_DOCUMENT,
+                    "Inspection target ref belongs to a different document than the effective document context; refusing to inject a foreign native entity token",
+                    details={"ref": raw, "active_document_ref": doc_ref},
+                )
+            raise FusionCadError(
+                ErrorCode.REF_STALE,
+                "Inspection target ref is unknown or stale in the effective document context",
+                details={"ref": raw, "active_document_ref": doc_ref},
+            )
+        return self._ref_registry.get_internal_record(raw)
+
     def _inject_inspect_target_hints(self, payload: dict[str, Any]) -> None:
         """Resolve inspection targets (opaque refs OR EntitySelectors) into native hints.
 
         Opaque EntityRef targets issued by this service are translated into
         {ref, kind, native_token, name, component_path, geometry_signature} hints
         so the static Fusion script can resolve them exactly via findEntityByToken.
+        Resolution is bound to the EFFECTIVE document context (the request
+        document_ref, else the active document) so a ref from another document can
+        never inject its foreign native token. Cross-document opaque refs fail
+        closed with WRONG_DOCUMENT and unknown/stale active-doc refs fail closed
+        with REF_STALE.
 
         EntitySelector (dict) targets are resolved first through the Task5
         SelectorEngine with EXACT-ONE cardinality against the current semantic
         snapshot, then the resulting opaque ref / native hint is injected. The
         selector never falls through to the script's kind/name-only fallback.
 
-        Unregistered opaque refs fall through to contextual resolution in the script.
+        Unregistered opaque refs with no effective document context fall through
+        to contextual resolution in the script.
         """
+        doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
         for key in ("target", "target_a", "target_b", "face_a", "face_b"):
             raw = payload.get(key)
             if isinstance(raw, str) and re.match(ENTITY_REF_PATTERN, raw):
-                record = self._ref_registry.get_internal_record(raw)
+                record = self._resolve_opaque_inspect_ref(raw, doc_ref)
                 if record is None:
                     continue
                 payload[key] = {

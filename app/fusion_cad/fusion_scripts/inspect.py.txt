@@ -261,9 +261,28 @@ def _resolve_entity(target):
     app, doc, design = _get_app_design()
 
     native_token = t.get("native_token")
-    if native_token and hasattr(design, "findEntityByToken"):
-        try:
-            resolved = design.findEntityByToken(native_token)
+    # A target carrying an authoritative native native_token hint (injected by the
+    # service for a document-bounded opaque ref / resolved selector) must NEVER
+    # fall back to kind/name substitution: a stale registered ref must fail closed
+    # (REF_STALE) instead of silently resolving to an unrelated entity.
+    has_authoritative_hint = "native_token" in t and t.get("ref") is not None
+
+    if native_token:
+        if not hasattr(design, "findEntityByToken"):
+            if has_authoritative_hint:
+                raise FusionScriptError(
+                    "REF_STALE",
+                    "Inspection target carried an authoritative native token but the active design cannot resolve native tokens; kind/name fallback is not permitted",
+                    details={"ref": t.get("ref")},
+                )
+        else:
+            resolved = None
+            try:
+                resolved = design.findEntityByToken(native_token)
+            except FusionScriptError:
+                raise
+            except Exception:
+                resolved = None
             if resolved is not None:
                 if hasattr(resolved, "count"):
                     if resolved.count == 1:
@@ -274,12 +293,18 @@ def _resolve_entity(target):
                             "Inspection target resolved to multiple split entities",
                             details={"ref": t.get("ref")},
                         )
-                    return None
-                return resolved
-        except FusionScriptError:
-            raise
-        except Exception:
-            pass
+                    # count == 0 -> zero native lookup; fail closed below.
+                else:
+                    return resolved
+            # resolved is None or an empty native collection: native lookup failed
+            # or returned zero candidates.
+
+    if has_authoritative_hint:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Inspection target native token could not be resolved in the active document; kind/name fallback is not permitted for an authoritative native-hint target",
+            details={"ref": t.get("ref")},
+        )
 
     kind = t.get("kind")
     if not kind:

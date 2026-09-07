@@ -51,6 +51,15 @@ def setup_desk1_capabilities(container: ApplicationContainer) -> None:
     container.fusion_cad.revision_tracker.observe("doc_1", "hash-desk1-seed")
     container.fusion_cad.revision_tracker.begin_transaction("tx_1", "doc_1")
     container.fusion_cad.revision_tracker.begin_transaction("tx_1234", "doc_1")
+    # Document-bounded inspect resolution: the fast-read describe case targets a
+    # face registered in the active document so its opaque ref resolves exactly.
+    container.fusion_cad.ref_registry.issue(
+        document_ref="doc_1",
+        kind="face",
+        name="Face1",
+        native_token="face_token_1",
+        opaque_ref="ent_face_1",
+    )
 
 
 @pytest.fixture

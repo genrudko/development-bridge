@@ -171,12 +171,23 @@ class DescribeResult(BaseModel):
     measures: ImmutableMapping = Field(default_factory=ImmutableMapping)
 
 
-def _coerce_frame(raw: Any, default_space: str = "world") -> CoordinateFrame:
-    """Build an explicit CoordinateFrame from raw data, never guessing a frame."""
+def _coerce_frame(raw: Any, default_space: str | None = None) -> CoordinateFrame:
+    """Build an explicit CoordinateFrame from raw data, never guessing a frame.
+
+    A raw frame must carry an explicit non-empty 'space'. When a default_space is
+    provided (used only for dimensionless direction vectors inside an enclosing
+    frame), a missing raw frame may inherit that space; otherwise a missing frame
+    fails closed with UNSUPPORTED_GEOMETRY. 'world' is never silently synthesized.
+    """
     if isinstance(raw, CoordinateFrame):
         return raw
     if isinstance(raw, Mapping):
-        space = raw.get("space", default_space)
+        space = raw.get("space")
+        if not isinstance(space, str) or not space.strip():
+            raise FusionCadError(
+                ErrorCode.UNSUPPORTED_GEOMETRY,
+                "Inspection result carries an invalid or missing coordinate frame space",
+            )
         try:
             return CoordinateFrame(space=space, ref=raw.get("ref"))
         except (ValueError, TypeError):
@@ -184,11 +195,17 @@ def _coerce_frame(raw: Any, default_space: str = "world") -> CoordinateFrame:
                 ErrorCode.UNSUPPORTED_GEOMETRY,
                 "Inspection result contains an invalid coordinate frame",
             ) from None
-    return CoordinateFrame(space=default_space, ref=None)
+    if default_space is not None:
+        return CoordinateFrame(space=default_space, ref=None)
+    raise FusionCadError(
+        ErrorCode.UNSUPPORTED_GEOMETRY,
+        "Inspection result is missing an explicit coordinate frame",
+    )
 
 
-def _coerce_point(raw: Any, frame: CoordinateFrame | None = None) -> Point3:
-    """Build an explicit Point3 carrying an explicit frame; missing geometry never guessed."""
+def _coerce_point(raw: Any) -> Point3:
+    """Build an explicit Point3 carrying an explicit frame; a missing/invalid
+    frame fails closed (world is never synthesized)."""
     if isinstance(raw, Point3):
         return raw
     if not isinstance(raw, Mapping):
@@ -201,7 +218,7 @@ def _coerce_point(raw: Any, frame: CoordinateFrame | None = None) -> Point3:
             x=float(raw["x"]),
             y=float(raw["y"]),
             z=float(raw["z"]),
-            frame=_coerce_frame(raw.get("frame"), frame.space if frame else "world"),
+            frame=_coerce_frame(raw.get("frame")),
         )
     except (KeyError, TypeError, ValueError):
         raise FusionCadError(
@@ -211,17 +228,25 @@ def _coerce_point(raw: Any, frame: CoordinateFrame | None = None) -> Point3:
 
 
 def _coerce_vector(raw: Any, frame: CoordinateFrame | None = None) -> Vector3:
-    """Build an explicit Vector3 carrying an explicit frame."""
+    """Build an explicit Vector3 carrying an explicit frame.
+
+    Direction vectors inherit their frame from the enclosing geometry; they must
+    never define a frame-free vector, so an enclosing frame is required.
+    """
     if isinstance(raw, Vector3):
         return raw
-    default_frame = frame or _coerce_frame(None)
+    if frame is None:
+        raise FusionCadError(
+            ErrorCode.UNSUPPORTED_GEOMETRY,
+            "Inspection result vector is missing an enclosing coordinate frame",
+        )
     if isinstance(raw, (list, tuple)) and len(raw) == 3:
         try:
             return Vector3(
                 x=float(raw[0]),
                 y=float(raw[1]),
                 z=float(raw[2]),
-                frame=default_frame,
+                frame=frame,
             )
         except (TypeError, ValueError):
             raise FusionCadError(
@@ -234,9 +259,7 @@ def _coerce_vector(raw: Any, frame: CoordinateFrame | None = None) -> Vector3:
                 x=float(raw["x"]),
                 y=float(raw["y"]),
                 z=float(raw["z"]),
-                frame=_coerce_frame(
-                    raw.get("frame"), default_frame.space
-                ),
+                frame=_coerce_frame(raw.get("frame"), frame.space),
             )
         except (KeyError, TypeError, ValueError):
             raise FusionCadError(
@@ -310,7 +333,7 @@ def normalize_measure(
 
 
 def normalize_bounding_box(raw: Mapping[str, Any]) -> BoundingBoxResult:
-    """Normalize an axis-aligned bounding box with explicit frame."""
+    """Normalize an axis-aligned bounding box with an explicit frame (missing frame fails closed)."""
     bb_raw = raw.get("bounding_box") or raw.get("bbox")
     if not isinstance(bb_raw, Mapping):
         raise FusionCadError(
@@ -343,6 +366,8 @@ def normalize_bounding_box(raw: Mapping[str, Any]) -> BoundingBoxResult:
             ),
             frame=frame,
         )
+    except FusionCadError:
+        raise
     except (TypeError, ValueError):
         raise FusionCadError(
             ErrorCode.UNSUPPORTED_GEOMETRY,
@@ -352,7 +377,8 @@ def normalize_bounding_box(raw: Mapping[str, Any]) -> BoundingBoxResult:
 
 
 def normalize_oriented_bbox(raw: Mapping[str, Any]) -> OrientedBoundingBox:
-    """Normalize an oriented bounding box with center, axes, extents, and explicit frame."""
+    """Normalize an oriented bounding box with center, axes, extents, and an
+    explicit frame (missing center/obb frames fail closed)."""
     obb_raw = raw.get("oriented_bbox") or raw.get("obb")
     if not isinstance(obb_raw, Mapping):
         raise FusionCadError(
@@ -374,7 +400,9 @@ def normalize_oriented_bbox(raw: Mapping[str, Any]) -> OrientedBoundingBox:
         extents = tuple(float(e) for e in extents_raw)
         if not all(math.isfinite(e) for e in extents):
             raise TypeError("non-finite extents")
-        frame = _coerce_frame(obb_raw.get("frame"), center.frame.space)
+        frame = _coerce_frame(obb_raw.get("frame"))
+    except FusionCadError:
+        raise
     except (TypeError, ValueError):
         raise FusionCadError(
             ErrorCode.UNSUPPORTED_GEOMETRY,
@@ -386,7 +414,7 @@ def normalize_oriented_bbox(raw: Mapping[str, Any]) -> OrientedBoundingBox:
 
 
 def normalize_centroid(raw: Mapping[str, Any]) -> CentroidResult:
-    """Normalize a centroid point with explicit frame."""
+    """Normalize a centroid point with an explicit frame (missing frame fails closed)."""
     point_raw = raw.get("point") or raw.get("centroid")
     if not isinstance(point_raw, Mapping):
         raise FusionCadError(
@@ -575,7 +603,13 @@ def normalize_thickness(raw: Mapping[str, Any]) -> ThicknessResult:
 
 
 def normalize_describe(raw: Mapping[str, Any]) -> DescribeResult:
-    """Normalize a describe record with supported exact measures."""
+    """Normalize a describe record with supported exact measures.
+
+    Every measure must be an explicit structured mapping carrying
+    quantity+unit/value (or an explicit bounding-box structure with an explicit
+    frame). Bare numeric measures and missing quantity/unit/frame fail closed with
+    UNSUPPORTED_GEOMETRY -- units/frames are never inferred.
+    """
     target = raw.get("target")
     if not isinstance(target, Mapping):
         raise FusionCadError(
@@ -598,24 +632,17 @@ def normalize_describe(raw: Mapping[str, Any]) -> DescribeResult:
             if isinstance(val, Mapping) and (
                 "min" in val or "min_point" in val
             ):
-                try:
-                    bb = normalize_bounding_box({"bounding_box": val})
-                    measures[key_str] = bb.model_dump(mode="python")
-                except FusionCadError:
-                    raise
+                bb = normalize_bounding_box({"bounding_box": val})
+                measures[key_str] = bb.model_dump(mode="python")
             elif isinstance(val, Mapping):
-                try:
-                    measures[key_str] = normalize_measure(
-                        val, operation=key_str
-                    ).model_dump(mode="python")
-                except FusionCadError:
-                    raise
-            elif isinstance(val, (int, float)) and not isinstance(val, bool):
-                quantity = key_str
-                unit = _UNIT_BY_QUANTITY.get(quantity, LENGTH_UNIT)
-                measures[key_str] = MeasureResult(
-                    quantity=quantity, value=float(val), unit=unit
+                measures[key_str] = normalize_measure(
+                    val, operation=key_str
                 ).model_dump(mode="python")
+            else:
+                raise FusionCadError(
+                    ErrorCode.UNSUPPORTED_GEOMETRY,
+                    f"Inspection describe measure '{key_str}' must be an explicit structured mapping with quantity+unit/value or an explicit bounding box with an explicit frame; bare numeric measures are rejected",
+                )
     return DescribeResult(
         ref=ref,
         kind=kind,
