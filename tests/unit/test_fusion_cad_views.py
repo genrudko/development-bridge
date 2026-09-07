@@ -75,7 +75,9 @@ def _bind_record(store: ViewRefStore, view_ref: str = "view_1", **kwargs):
         camera=camera,
         visibility_state=visibility,
         section_state=section,
-        image=f"resource://views/{view_ref}/image",
+        image=kwargs.get(
+            "image", "https://example.test/desktop-results/exports/resource1"
+        ),
         width=kwargs.get("width"),
         height=kwargs.get("height"),
     )
@@ -86,6 +88,7 @@ def _full_current_context(**tweaks):
     visibility = canonicalize_visibility_payload(_visibility_raw())
     section = canonicalize_section_payload(None)
     ctx = {
+        "document_ref": "doc_1",
         "model_revision": "rev_1",
         "camera_revision": camera_revision(camera),
         "visibility_revision": visibility_revision(visibility),
@@ -188,6 +191,143 @@ def test_visibility_change_changes_visibility_revision():
     assert visibility_revision(vis_a) != visibility_revision(vis_b)
 
 
+def test_visibility_global_object_visibility_flag_change_invalidates_revision():
+    vis_a = canonicalize_visibility_payload({
+        "global": {"object_visibility": {"isAllObjectsVisible": True}},
+        "entries": _visibility_raw(),
+    })
+    vis_b = canonicalize_visibility_payload({
+        "global": {"object_visibility": {"isAllObjectsVisible": False}},
+        "entries": _visibility_raw(),
+    })
+    assert visibility_revision(vis_a) != visibility_revision(vis_b)
+    # The global flag is part of the canonical state so identical entries with a
+    # different global display setting can never hash identically.
+    assert vis_a["global"] != vis_b["global"]
+
+
+def test_visibility_duplicate_component_names_in_different_occurrences_not_colliding():
+    # Two occurrences "Occ1"/"Occ2" reference the same component "Part1" and its
+    # body "Body1": component-name-only keys would collide. Occurrence-qualified
+    # full paths and native tokens must distinguish them.
+    entry_occ1 = [
+        {
+            "kind": "body",
+            "full_path_name": "Root:Occ1:Part1:Body1",
+            "is_visible": True,
+            "effective_visibility": True,
+            "native_token": "AQAA-occ1-body1",
+        }
+    ]
+    entry_occ2 = [
+        {
+            "kind": "body",
+            "full_path_name": "Root:Occ2:Part1:Body1",
+            "is_visible": True,
+            "effective_visibility": True,
+            "native_token": "AQAA-occ2-body1",
+        }
+    ]
+    vis_a = canonicalize_visibility_payload(entry_occ1)
+    vis_b = canonicalize_visibility_payload(entry_occ2)
+    assert visibility_revision(vis_a) != visibility_revision(vis_b)
+    # Hiding the body in only one occurrence is a distinct state.
+    vis_occ1_hidden = canonicalize_visibility_payload([
+        {
+            "kind": "body",
+            "full_path_name": "Root:Occ1:Part1:Body1",
+            "is_visible": False,
+            "effective_visibility": False,
+            "native_token": "AQAA-occ1-body1",
+        }
+    ])
+    assert visibility_revision(vis_occ1_hidden) != visibility_revision(vis_b)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic section state (Findings 4)
+# ---------------------------------------------------------------------------
+
+
+def _section_transform_base():
+    return [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+
+def _section_payload(transform, is_visible=True, ident="sec_1"):
+    return canonicalize_section_payload({
+        "active": True,
+        "type": "section",
+        "global_visible": True,
+        "sections": [
+            {
+                "id": ident,
+                "name": "Plane1",
+                "is_visible": is_visible,
+                "transform": transform,
+            }
+        ],
+    })
+
+
+def test_section_visible_state_and_moved_transform_change_section_revision():
+    base = _section_payload(_section_transform_base())
+    moved = _section_payload([
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        10.0, 20.0, 30.0, 1.0,
+    ])
+    assert section_revision(base) != section_revision(moved)
+    hidden = _section_payload(_section_transform_base(), is_visible=False)
+    assert section_revision(base) != section_revision(hidden)
+    assert base["active"] is True
+    assert hidden["active"] is False
+    assert base["count"] == 1
+    assert base["sections"][0]["id"] == "sec_1"
+    assert base["sections"][0]["transform"] == _section_transform_base()
+
+
+def test_section_canonicalize_rejects_malformed_section_item():
+    # A name-only identity is accepted as the stable identity fallback.
+    named = canonicalize_section_payload({
+        "active": True,
+        "sections": [{"name": "NamedOnly", "is_visible": True, "transform": None}],
+    })
+    assert named["sections"][0]["id"] == "NamedOnly"
+    # A section without any usable identity (no id/name/entityToken) fails closed.
+    with pytest.raises(FusionCadError) as exc:
+        canonicalize_section_payload({
+            "active": True,
+            "sections": [{"is_visible": True, "transform": None}],
+        })
+    assert exc.value.code == ErrorCode.INVALID_ARGUMENT
+    with pytest.raises(FusionCadError) as exc:
+        canonicalize_section_payload({
+            "active": True,
+            "sections": [
+                {
+                    "id": "sec_1",
+                    "is_visible": True,
+                    "transform": [1.0, 0.0, 0.0],
+                }
+            ],
+        })
+    assert exc.value.code == ErrorCode.INVALID_ARGUMENT
+    with pytest.raises(FusionCadError) as exc:
+        canonicalize_section_payload({
+            "active": True,
+            "sections": [{"id": "sec_1", "transform": None}],
+        })
+    assert exc.value.code == ErrorCode.INVALID_ARGUMENT
+
+
+def test_section_no_sections_remains_deterministic_disabled():
+    sec = canonicalize_section_payload(None)
+    assert sec["active"] is False
+    assert sec["sections"] == []
+    assert sec["count"] == 0
+
+
 # ---------------------------------------------------------------------------
 # ViewRefStore binding, immutability, and freshness
 # ---------------------------------------------------------------------------
@@ -198,6 +338,7 @@ def test_bind_stores_immutable_record_and_identical_context_is_fresh():
     record = _bind_record(store, view_ref="view_abc")
     assert store.get("view_abc") is record
     assert record.view_ref == "view_abc"
+    assert record.document_ref == "doc_1"
     assert record.model_revision == "rev_1"
     assert record.camera_revision.startswith("cam_")
     assert record.visibility_revision.startswith("vis_")
@@ -283,6 +424,38 @@ def test_assert_fresh_missing_required_dimension_fails_closed():
     assert exc.value.code == ErrorCode.VIEW_STALE
 
 
+def test_assert_fresh_rejects_wrong_document_despite_identical_hashes():
+    store = ViewRefStore()
+    _bind_record(store, view_ref="view_doc", document_ref="doc_A")
+    camera = normalize_camera_context(_camera_raw())
+    visibility = canonicalize_visibility_payload(_visibility_raw())
+    section = canonicalize_section_payload(None)
+    ctx = {
+        # Same model rev and identical camera/visibility/section hashes as the
+        # bound view, but the active/current document identity differs.
+        "document_ref": "doc_B",
+        "model_revision": "rev_1",
+        "camera_revision": camera_revision(camera),
+        "visibility_revision": visibility_revision(visibility),
+        "section_revision": section_revision(section),
+        "viewport_width": 1920,
+        "viewport_height": 1080,
+    }
+    with pytest.raises(FusionCadError) as exc:
+        store.assert_fresh("view_doc", current_context=ctx)
+    assert exc.value.code == ErrorCode.WRONG_DOCUMENT
+
+
+def test_assert_fresh_missing_document_ref_fails_closed():
+    store = ViewRefStore()
+    _bind_record(store, view_ref="view_nodoc")
+    ctx = _full_current_context()
+    del ctx["document_ref"]
+    with pytest.raises(FusionCadError) as exc:
+        store.assert_fresh("view_nodoc", current_context=ctx)
+    assert exc.value.code == ErrorCode.VIEW_STALE
+
+
 def test_stable_identical_context_freshness_shared_across_records():
     store = ViewRefStore()
     _bind_record(store, view_ref="view_a1")
@@ -297,9 +470,32 @@ def test_stable_identical_context_freshness_shared_across_records():
     assert rec1.model_revision == rec2.model_revision
 
 
+def test_set_image_promotes_placeholder_to_real_external_uri_once():
+    store = ViewRefStore()
+    record = _bind_record(store, view_ref="view_uri")
+    assert record.image == "https://example.test/desktop-results/exports/resource1"
+    promoted = store.set_image(
+        "view_uri", "https://example.test/desktop-results/exports/emitted-real-uri"
+    )
+    assert promoted is store.get("view_uri")
+    assert promoted.image == "https://example.test/desktop-results/exports/emitted-real-uri"
+    # Every other immutable field is preserved
+    assert promoted.model_revision == record.model_revision
+    assert promoted.camera_revision == record.camera_revision
+    assert promoted.visibility_revision == record.visibility_revision
+    assert promoted.section_revision == record.section_revision
+    with pytest.raises(FusionCadError) as exc:
+        store.set_image("view_missing", "https://example.test/x")
+    assert exc.value.code == ErrorCode.REF_STALE
+
+
 def test_viewref_summary_public_metadata_matches_summary_shape():
     store = ViewRefStore()
-    record = _bind_record(store, view_ref="view_summary")
+    record = _bind_record(
+        store,
+        view_ref="view_summary",
+        image="https://example.test/desktop-results/exports/emitted-real-uri",
+    )
     summary = record.to_summary()
     assert isinstance(summary, ViewRefSummary)
     # Public shape exactly matches ViewRefSummary fields
@@ -317,4 +513,7 @@ def test_viewref_summary_public_metadata_matches_summary_shape():
     assert public["model_revision"] == "rev_1"
     assert public["width"] == 1920
     assert public["height"] == 1080
-    assert public["image"].startswith("resource://")
+    # The public image equals the real emitted image URI; no fabricated
+    # resource://views/... placeholder may ever surface.
+    assert public["image"] == "https://example.test/desktop-results/exports/emitted-real-uri"
+    assert not public["image"].startswith("resource://")

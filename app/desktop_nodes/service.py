@@ -307,6 +307,70 @@ def extract_binary_resources(value: Any) -> list[ExtractedBinaryResource]:
     return results
 
 
+def _json_default(obj: Any) -> Any:
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        return base64.b64encode(bytes(obj)).decode("ascii")
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _sanitize_binary_payload(value: Any) -> Any:
+    """Deep copy of a payload with base64/binary data fields removed.
+
+    Preserves semantic structure and only removes proven binary fields, matching
+    the extraction detection so exported/model-visible JSON never duplicates
+    screenshot base64/binary after image resources have been extracted.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return None
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = [_sanitize_binary_payload(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(items)
+        if isinstance(value, set):
+            return set(items)
+        if isinstance(value, frozenset):
+            return frozenset(items)
+        return items
+    if isinstance(value, dict):
+        node_type = str(value.get("type", "")).lower()
+        node_mime = (
+            value.get("mimeType")
+            or value.get("mime_type")
+            or value.get("contentType")
+            or value.get("content_type")
+        )
+        node_encoding = str(
+            value.get("encoding") or value.get("transfer_encoding", "")
+        ).lower()
+        is_binary_container = (
+            node_type in ("image", "binary", "blob")
+            or _is_mime_binary(node_mime)
+            or node_encoding in ("base64", "binary", "hex")
+        )
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(k, str) and (
+                k in _EXPLICIT_BINARY_KEYS
+                or any(k.endswith(suffix) for suffix in _EXPLICIT_BINARY_SUFFIXES)
+            ):
+                continue
+            if is_binary_container and k in (
+                "data",
+                "content",
+                "bytes",
+                "payload",
+                "base64Data",
+                "base64_data",
+                "raw_bytes",
+            ):
+                continue
+            out[k] = _sanitize_binary_payload(v)
+        return out
+    return value
+
+
 def has_binary_data(value: Any) -> bool:
     return bool(extract_binary_resources(value))
 
@@ -774,12 +838,13 @@ class DesktopNodeService:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _store_result_value(self, node_id: str, command_id: str, value: dict[str, Any]) -> str:
-        def _json_default(obj: Any) -> Any:
-            if isinstance(obj, (bytes, bytearray, memoryview)):
-                return base64.b64encode(bytes(obj)).decode("ascii")
-            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
+    def _store_result_value(
+        self,
+        node_id: str,
+        command_id: str,
+        value: dict[str, Any],
+        sanitize_binary: bool = False,
+    ) -> str:
         raw = json.dumps(
             value,
             ensure_ascii=False,
@@ -791,22 +856,46 @@ class DesktopNodeService:
         created_at = time.time()
         path = self._artifact_dir() / f"{result_id}.json"
         path.write_bytes(raw)
-        self._external_results[result_id] = {
+        item = {
             "path": path, "node_id": node_id, "command_id": command_id,
             "size_bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
             "created_at": created_at, "mime_type": "application/json", "resource_ids": [],
         }
+        self._external_results[result_id] = item
         self._extract_image_resources(result_id, value, created_at)
+        if sanitize_binary:
+            clean_value = _sanitize_binary_payload(value)
+            clean_raw = json.dumps(
+                clean_value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+                default=_json_default,
+            ).encode("utf-8")
+            if clean_raw != raw:
+                path.write_bytes(clean_raw)
+                item["size_bytes"] = len(clean_raw)
+                item["sha256"] = hashlib.sha256(clean_raw).hexdigest()
+            self._write_resource_sidecar(result_id)
         return result_id
 
 
-    def store_external_result(self, node_id: str, value: dict[str, Any], command_id: str = "direct") -> dict[str, Any]:
+    def store_external_result(
+        self,
+        node_id: str,
+        value: dict[str, Any],
+        command_id: str = "direct",
+        *,
+        sanitize_binary: bool = False,
+    ) -> dict[str, Any]:
         self._configured()
         self._validate_node_id(node_id)
         if not isinstance(value, dict):
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion command result must be a JSON-safe object")
         self._cleanup_external_results()
-        result_id = self._store_result_value(node_id, command_id, value)
+        result_id = self._store_result_value(
+            node_id, command_id, value, sanitize_binary=sanitize_binary
+        )
         item = self._external_results[result_id]
         return {
             "external_result": {
@@ -841,6 +930,80 @@ class DesktopNodeService:
             }
             parent["resource_ids"].append(resource_id)
 
+    def _write_resource_sidecar(self, result_id: str) -> None:
+        """Persist extracted resource descriptors so a sanitized (binary-free)
+        result can still restore its image resources after a process restart."""
+        item = self._external_results.get(result_id)
+        if item is None:
+            return
+        descriptors = []
+        for resource_id in item.get("resource_ids", []):
+            res = self._external_resources.get(resource_id)
+            if res is None:
+                continue
+            descriptors.append({
+                "resource_id": resource_id,
+                "path_name": res["path"].name,
+                "mime_type": res["mime_type"],
+                "file_name": res["file_name"],
+                "size_bytes": res["size_bytes"],
+                "sha256": res["sha256"],
+                "created_at": res["created_at"],
+            })
+        sidecar = self._artifact_dir() / f"{result_id}.resources.json"
+        sidecar.write_text(
+            json.dumps(
+                {"version": 1, "resources": descriptors},
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+    def overwrite_external_result(
+        self,
+        reference: dict[str, Any],
+        value: dict[str, Any],
+    ) -> None:
+        """Replace the model-visible stored JSON of an existing external result.
+
+        Used by the fusion_cad screenshot path to bind the exported ViewRef image
+        to the real extracted image ResourceLink URI after store-time
+        sanitization. Already-extracted image resource files and their
+        registration (including process-restart recovery via the sidecar
+        metadata file) are preserved.
+        """
+        self._configured()
+        result_id = reference.get("result_id") if isinstance(reference, dict) else None
+        if not isinstance(result_id, str) or not result_id:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT, "External result reference is invalid"
+            )
+        item = self._external_results.get(result_id) or self._recover_external_result(
+            result_id
+        )
+        if item is None:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT, "External desktop result is unavailable"
+            )
+        if not isinstance(value, dict):
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Fusion command result must be a JSON-safe object",
+            )
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+            default=_json_default,
+        ).encode("utf-8")
+        if len(raw) > self.settings.max_result_bytes:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion command result is too large")
+        item["path"].write_bytes(raw)
+        item["size_bytes"] = len(raw)
+        item["sha256"] = hashlib.sha256(raw).hexdigest()
+
     def _cleanup_external_results(self) -> None:
         cutoff = time.time() - self.settings.result_artifact_ttl_seconds
         for result_id, item in list(self._external_results.items()):
@@ -862,6 +1025,11 @@ class DesktopNodeService:
                             res_path.unlink(missing_ok=True)
                         except OSError:
                             pass
+                sidecar = self._artifact_dir() / f"{result_id}.resources.json"
+                try:
+                    sidecar.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 self._external_results.pop(result_id, None)
 
     def begin_result_upload(self, node_id: str, command_id: str, size_bytes: int, sha256: str) -> dict[str, Any]:
@@ -952,6 +1120,11 @@ class DesktopNodeService:
                 for pattern in (f"{result_id}-res-*", f"{result_id}-image-*"):
                     for res_path in self._artifact_dir().glob(pattern):
                         res_path.unlink(missing_ok=True)
+                sidecar = self._artifact_dir() / f"{result_id}.resources.json"
+                try:
+                    sidecar.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return None
             raw = path.read_bytes()
             value = json.loads(raw)
@@ -965,8 +1138,50 @@ class DesktopNodeService:
             "created_at": stat.st_mtime, "mime_type": "application/json", "resource_ids": [],
         }
         self._external_results[result_id] = item
-        self._extract_image_resources(result_id, value, stat.st_mtime)
+        sidecar = self._artifact_dir() / f"{result_id}.resources.json"
+        if sidecar.exists():
+            try:
+                meta = json.loads(sidecar.read_text("utf-8"))
+                for desc in meta.get("resources", []):
+                    res_id = desc.get("resource_id")
+                    if not isinstance(res_id, str):
+                        continue
+                    res_path = self._artifact_dir() / desc["path_name"]
+                    if not res_path.exists():
+                        continue
+                    item["resource_ids"].append(res_id)
+                    self._external_resources[res_id] = {
+                        "path": res_path,
+                        "parent_result_id": result_id,
+                        "size_bytes": desc["size_bytes"],
+                        "sha256": desc["sha256"],
+                        "created_at": desc.get("created_at", stat.st_mtime),
+                        "mime_type": desc["mime_type"],
+                        "file_name": desc["file_name"],
+                    }
+            except (ValueError, OSError, KeyError, TypeError):
+                pass
+        else:
+            self._extract_image_resources(result_id, value, stat.st_mtime)
         return item
+
+    def _stable_export_grant(
+        self, holder: dict[str, Any], cache_key: str, subject: str
+    ) -> tuple[str, Any]:
+        """Reuse one live export token for an in-memory result/resource.
+
+        ViewRef.image must equal the ResourceLink URI emitted for the same image.
+        Export grants are process-local, just like ViewRefStore, so cache the token
+        on the owning in-memory result/resource and renew only after expiry.
+        """
+        cached = holder.get(cache_key)
+        if isinstance(cached, str):
+            grant = self._exports.lookup(cached)
+            if grant is not None and grant.subject == subject:
+                return cached, grant
+        token, grant = self._exports.issue(subject)
+        holder[cache_key] = token
+        return token, grant
 
     def external_result(self, reference: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         self._cleanup_external_results()
@@ -979,14 +1194,16 @@ class DesktopNodeService:
         metadata["file_name"] = f"fusion-result-{result_id}.json"
         metadata["resources"] = []
         if self._public_base_url is not None:
-            token, grant = self._exports.issue(result_id)
+            token, grant = self._stable_export_grant(item, "_export_token", result_id)
             metadata["export_url"] = f"{self._public_base_url}{self._export_path}/{quote(token, safe='')}"
             metadata["expires_at"] = grant.expires_at.isoformat()
             for resource_id in item.get("resource_ids", []):
                 resource = self._external_resources.get(resource_id)
                 if resource is None:
                     continue
-                resource_token, resource_grant = self._exports.issue(f"resource:{resource_id}")
+                resource_token, resource_grant = self._stable_export_grant(
+                    resource, "_export_token", f"resource:{resource_id}"
+                )
                 metadata["resources"].append({
                     "uri": f"{self._public_base_url}{self._export_path}/{quote(resource_token, safe='')}",
                     "file_name": resource["file_name"], "mime_type": resource["mime_type"],

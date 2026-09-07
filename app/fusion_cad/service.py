@@ -230,6 +230,7 @@ class FusionCadService:
         rec = self._revision_tracker.current(doc_ref)
         model_revision = rec.revision if rec is not None else None
         return {
+            "document_ref": doc_ref,
             "model_revision": model_revision,
             "camera_revision": state.camera_revision,
             "visibility_revision": state.visibility_revision,
@@ -813,8 +814,8 @@ class FusionCadService:
                 visibility_state=visibility_state,
                 section_state=section_state,
                 image=image_uri,
-                width=camera.viewport_width,
-                height=camera.viewport_height,
+                width=data.get("width") or camera.viewport_width,
+                height=data.get("height") or camera.viewport_height,
             )
             view_meta = {
                 "view_ref": record.view_ref,
@@ -869,7 +870,9 @@ class FusionCadService:
             "camera_revision": current.camera_revision,
             "visibility_revision": current.visibility_revision,
             "section_revision": current.section_revision,
-            "visibility": visibility_state.get("entries", []),
+            "visibility": sanitize_public_payload(
+                visibility_state.get("entries", [])
+            ),
             "section": dict(section_state),
         }
         update: dict[str, Any] = {
@@ -884,6 +887,68 @@ class FusionCadService:
                 units="mm",
             )
         return cad_result.model_copy(update=update)
+
+    def _bind_screenshot_image_uri(self, external_ref: dict[str, Any]) -> None:
+        """Bind the pending screenshot ViewRef image to the real emitted image URI.
+
+        DesktopNodeService.external_result generates the authoritative image
+        ResourceLink URI in metadata.resources[*].uri after store_external_result.
+        The ViewRef's fabricated resource://views/... placeholder is promoted to
+        that real URI exactly once, and the exported/model-visible JSON is
+        rewritten so data.image equals it (base64 was already removed from the
+        stored JSON by sanitize_binary store-time extraction).
+        """
+        reference = (
+            external_ref.get("external_result")
+            if isinstance(external_ref, dict) and "external_result" in external_ref
+            else external_ref
+        )
+        if not isinstance(reference, dict):
+            raise FusionCadError(
+                ErrorCode.INTERNAL_ERROR,
+                "Screenshot externalization returned no usable result reference",
+            )
+        full, metadata = self._desktop_nodes.external_result(reference)
+        resources = metadata.get("resources") or []
+        image_resource: dict[str, Any] | None = None
+        for res in resources:
+            if (
+                isinstance(res, dict)
+                and isinstance(res.get("uri"), str)
+                and str(res.get("mime_type", "")).startswith("image/")
+            ):
+                image_resource = res
+                break
+        if image_resource is None:
+            raise FusionCadError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Screenshot produced no external image resource URI; the immutable ViewRef image cannot bind to a fabricated placeholder",
+                details={"node_id": trusted_detail(str(external_ref.get("result_id", "")))},
+            )
+        image_uri = image_resource.get("uri")
+        if not isinstance(image_uri, str) or not image_uri.strip():
+            raise FusionCadError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Screenshot external image resource has no usable URI; the immutable ViewRef image cannot bind to a fabricated placeholder",
+            )
+        data = full.get("data") if isinstance(full, dict) else None
+        if not isinstance(data, dict):
+            raise FusionCadError(
+                ErrorCode.INTERNAL_ERROR,
+                "Screenshot external result payload is missing data",
+            )
+        view_ref = data.get("view_ref")
+        if not isinstance(view_ref, str) or not view_ref:
+            raise FusionCadError(
+                ErrorCode.INTERNAL_ERROR,
+                "Screenshot external result payload is missing view_ref",
+            )
+        self._view_store.set_image(view_ref, image_uri)
+        fixed_data = dict(data)
+        fixed_data["image"] = image_uri
+        fixed = dict(full)
+        fixed["data"] = fixed_data
+        self._desktop_nodes.overwrite_external_result(reference, fixed)
 
     def _finalize_completed_execution(
         self,
@@ -1418,10 +1483,13 @@ class FusionCadService:
             if node_id and (
                 has_binary_data(domain_payload) or self._is_oversized(domain_payload)
             ):
+                sanitize_binary = (
+                    effective_bundle_group == "view" and op == "screenshot"
+                )
                 store_err: FusionCadError | None = None
                 try:
-                    return self._desktop_nodes.store_external_result(
-                        node_id, domain_payload
+                    external_ref = self._desktop_nodes.store_external_result(
+                        node_id, domain_payload, sanitize_binary=sanitize_binary
                     )
                 except Exception:  # noqa: BLE001 - low-level storage errors stay internal only
                     store_err = FusionCadError(
@@ -1431,6 +1499,9 @@ class FusionCadService:
                     )
                 if store_err is not None:
                     raise store_err
+                if sanitize_binary:
+                    self._bind_screenshot_image_uri(external_ref)
+                return external_ref
 
             if isinstance(result, dict) and not isinstance(result, CadResult):
                 return cad_result.model_dump(mode="python", exclude_none=True)
@@ -1443,13 +1514,15 @@ class FusionCadService:
         self,
         op_status: dict[str, Any],
         full_result: Any,
-    ) -> CadResult:
+    ) -> CadResult | dict[str, Any]:
         """Finalize a terminal desktop operation from the durable operation lifecycle.
 
         Persists authoritative baseline for transaction:begin or clears baseline
         for commit/abort/rollback ONLY after proven successful terminal execution.
         Failed, uncertain, or queued operations fail closed and do not manufacture
-        or discard authoritative transaction state.
+        or discard authoritative transaction state. Returns the finalized result
+        (CadResult, or an external_result reference dict when binary payloads are
+        externalized) so the caller renders the exact emitted artifacts.
         """
         status = op_status.get("status")
         if status not in ("succeeded", "late_succeeded"):
@@ -1495,7 +1568,7 @@ class FusionCadService:
         doc_ref = checkpoint.get("document_ref")
         node_id = checkpoint.get("node_id") or op_status.get("node_id")
 
-        self._finalize_completed_execution(
+        return self._finalize_completed_execution(
             cad_result,
             effective_bundle_group=effective_bundle_group,
             op=op or "",
@@ -1506,7 +1579,6 @@ class FusionCadService:
             begin_doc_ref=doc_ref,
             node_id=node_id,
         )
-        return cad_result
 
     def _resolve_group(self, request: Any) -> str:
         if isinstance(request, FusionReadRequest.__args__):  # type: ignore[attr-defined]

@@ -13,7 +13,6 @@ from app.container import ApplicationContainer
 from app.fusion_cad.errors import (
     FusionCadError,
     format_safe_validation_message,
-    sanitize_public_payload,
     sanitize_validation_errors,
 )
 from app.fusion_cad.models import CadResult
@@ -164,7 +163,19 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             and getattr(container, "fusion_cad", None)
             and container.fusion_cad.is_domain_summary(summary)
         ):
-            container.fusion_cad.finalize_terminal_operation(op_status, full)
+            finalized = container.fusion_cad.finalize_terminal_operation(
+                op_status, full
+            )
+            if (
+                isinstance(finalized, dict)
+                and isinstance(finalized.get("external_result"), dict)
+            ):
+                # A binary domain result (e.g. screenshot) was externalized and
+                # its ViewRef image bound to the real emitted ResourceLink URI;
+                # render the sanitized finalized payload, not the raw node JSON.
+                full, metadata = container.desktop_nodes.external_result(
+                    finalized["external_result"]
+                )
         elif FusionCadService._is_error_payload(full) or op_status.get("status") in (
             "failed",
             "late_failed",

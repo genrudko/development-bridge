@@ -1763,19 +1763,31 @@ async def test_view_screenshot_binds_immutable_viewref_and_externalizes_image(tm
     assert data["visibility_revision"].startswith("vis_")
     assert data["width"] == 1920
     assert data["height"] == 1080
-    assert data["image"].startswith("resource://")
-    # No inline base64 screenshot payload in the public view metadata
+    # The ViewRef image is bound to the real emitted image ResourceLink URI from
+    # DesktopNodeService.external_result metadata.resources[*].uri; the fabricated
+    # resource://views/... placeholder may never escape.
+    image_resources = [
+        r for r in metadata["resources"] if str(r.get("mime_type", "")).startswith("image/")
+    ]
+    assert image_resources, "expected an emitted image resource"
+    emitted_uri = image_resources[0]["uri"]
+    assert data["image"] == emitted_uri
+    assert not data["image"].startswith("resource://")
+    # No inline base64 screenshot payload in the public view metadata or the
+    # full exported/model-visible JSON.
     assert "iVBORw0KGgo" not in json.dumps(data)
+    assert "iVBORw0KGgo" not in json.dumps(full)
 
-    # Bound record exists in the immutable store
+    # Bound record exists in the immutable store and carries the real URI
     record = container.fusion_cad.view_store.get(data["view_ref"])
     assert record is not None
     assert record.model_revision == "rev_1"
+    assert record.image == emitted_uri
     from app.fusion_cad.models import ViewRefSummary
 
     restored_summary = ViewRefSummary.model_validate(record.to_summary().model_dump())
     assert restored_summary.view_ref == data["view_ref"]
-    assert restored_summary.image.startswith("resource://")
+    assert restored_summary.image == emitted_uri
 
     # Image resource link rendered through the proven artifact path
     assert any(r.get("mime_type", "").startswith("image/") for r in metadata["resources"])
@@ -1932,3 +1944,100 @@ async def test_view_zoom_entity_unknown_ref_fails_closed(tmp_path):
 
 def fake_submit_not_dispatched(container):
     return container.desktop_nodes.submit.call_count == 0
+
+
+
+@pytest.mark.asyncio
+async def test_view_screenshot_tool_image_uri_matches_emitted_resource_link(tmp_path):
+    """Finding 1+2 tool-level regression: the public screenshot ViewRef image URI
+    must equal the actual emitted image ResourceLink URI (from
+    DesktopNodeService.external_result metadata.resources[*].uri), the returned
+    metadata must use the requested non-default output dimensions, and neither
+    the tool text nor the full exported/model-visible JSON may contain the
+    screenshot base64/png bytes.
+    """
+    container = _build_view_container(tmp_path)
+    registry = build_tool_registry(container)
+    tool = registry.get("fusion_view")
+    assert tool is not None
+
+    container.desktop_nodes.submit = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps(_screenshot_desktop_result(width=640, height=480))}],
+        "isError": False,
+    })
+
+    req_ctx = RequestContext(request_id="req_view_uri")
+    params = types.CallToolRequestParams(
+        name="fusion_view",
+        arguments={"node_id": "desk-1", "operation": "screenshot", "width": 640, "height": 480},
+    )
+    result = await tool.handler(None, params, req_ctx)
+    assert isinstance(result, types.CallToolResult)
+    assert not result.is_error
+
+    text_blocks = [b for b in result.content if isinstance(b, types.TextContent)]
+    assert len(text_blocks) == 1
+    parsed = json.loads(text_blocks[0].text)
+    assert parsed["ok"] is True
+    # No base64 screenshot bytes in the tool text block.
+    assert "iVBORw0KGgo" not in text_blocks[0].text
+    assert "screenshot_b64" not in text_blocks[0].text
+
+    resource_links = [
+        b
+        for b in result.content
+        if isinstance(b, types.ResourceLink)
+        and (
+            str(getattr(b, "description", "")) == "Fusion image artifact"
+            or str(getattr(b, "uri", "")).startswith("http")
+        )
+    ]
+    # There is an image ResourceLink plus the full-result export link.
+    image_links = [
+        b
+        for b in resource_links
+        if str(getattr(b, "description", "")) == "Fusion image artifact"
+        or str(getattr(b, "mime_type", None) or getattr(b, "mimeType", "") or "").startswith("image/png")
+    ]
+    assert image_links, "expected an image ResourceLink in the tool response"
+
+    # The tool text exposes the external-result metadata (resources + export_url).
+    metadata = parsed["data"]["external_result"]
+    image_resources = [
+        r for r in metadata["resources"] if str(r.get("mime_type", "")).startswith("image/")
+    ]
+    assert image_resources, "expected an emitted image resource in metadata"
+    emitted_uri = image_resources[0]["uri"]
+
+    # The ResourceLink URI exposed by the proven app/tools/fusion.py path equals
+    # the emitted image URI.
+    assert any(str(getattr(link, "uri", "")) == emitted_uri for link in image_links)
+
+    # Resolve the exported/model-visible JSON through the export_url token (the
+    # same file external_result would serve) and verify the ViewRef image equals
+    # the emitted URI and no base64/png signal exists anywhere.
+    export_url = metadata["export_url"]
+    assert isinstance(export_url, str) and "/" in export_url
+    token = export_url.rsplit("/", 1)[-1]
+    export_path, _ = container.desktop_nodes.resolve_external_export(token)
+    full = json.loads(export_path.read_text())
+    assert full["data"]["image"] == emitted_uri
+    assert not full["data"]["image"].startswith("resource://")
+    full_json = json.dumps(full)
+    assert "iVBORw0KGgo" not in full_json
+    assert "screenshot_b64" not in full_json
+
+    # Requested non-default output dimensions are bound and reported.
+    assert full["data"]["width"] == 640
+    assert full["data"]["height"] == 480
+    record = container.fusion_cad.view_store.get(full["data"]["view_ref"])
+    assert record is not None
+    assert record.image == emitted_uri
+    assert record.viewport_width == 640
+    assert record.viewport_height == 480
+    summary = record.to_summary()
+    assert summary.image == emitted_uri
+    assert summary.width == 640
+    assert summary.height == 480
+    # Freshness against the current context still holds after image promotion.
+    container.fusion_cad.assert_view_fresh(record.view_ref, "desk-1", "doc_1")

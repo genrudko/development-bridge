@@ -249,66 +249,107 @@ def camera_revision(camera: CameraContext) -> str:
     return f"cam_{camera_hash(camera)}"
 
 
+def _canonicalize_visibility_entry(item: Any) -> dict[str, Any]:
+    """Canonicalize one effective-visibility item deterministically.
+
+    The stable path must be occurrence-qualified (or otherwise collision-proof);
+    the native entity token is retained internally so duplicate component names
+    in different occurrences can never collide. Public payloads strip native
+    tokens via sanitize_public_payload before exposure.
+    """
+    if not isinstance(item, Mapping):
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Visibility state items must be mappings",
+            details={"parsed_type": type(item).__name__},
+        )
+    path = item.get("full_path_name") or item.get("full_path") or item.get("name")
+    if path is None:
+        path = item.get("ref")
+    if path is None or not isinstance(path, str) or not path.strip():
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Visibility item lacks a stable path (full_path_name/name/ref); failing closed for exact effective visibility hashing",
+        )
+    local = item.get("is_visible")
+    effective = item.get("effective_visibility")
+    if local is None and effective is None:
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Visibility item lacks is_visible/effective_visibility; failing closed for exact effective visibility hashing",
+        )
+    entry: dict[str, Any] = {
+        "path": str(path),
+        "kind": str(item.get("kind") or "entity"),
+        "is_visible": bool(local if local is not None else effective),
+        "effective_visibility": bool(effective if effective is not None else local),
+    }
+    if item.get("ref") is not None and isinstance(item["ref"], str):
+        entry["ref"] = item["ref"]
+    native_token = item.get("native_token")
+    if native_token is not None and isinstance(native_token, str) and native_token.strip():
+        entry["native_token"] = native_token
+    return entry
+
+
 def canonicalize_visibility_payload(raw: Any) -> dict[str, Any]:
     """Canonicalize effective-visibility state deterministically.
 
-    Accepts a list of visibility items or a mapping holding an
+    Accepts a list of visibility items or a mapping holding an authoritative
+    global state ('global': {'object_visibility': {...}}) plus an
     'effective_visibility'/'visibility'/'entries' list. Each item must carry a
-    stable path (full_path_name/name/ref) and visibility fields. Entries are
-    sorted by (path, kind) so identical state hashes identically regardless of
-    collection order. Items without a stable path fail closed.
+    stable occurrence-qualified path (full_path_name/name/ref) and visibility
+    fields. Entries are sorted by (path, kind, ref, native_token) so identical
+    state hashes identically regardless of collection order. Global object
+    visibility flags are hashed into the revision, so a global display-settings
+    change invalidates the effective-visibility revision.
     """
     if raw is None:
-        raw = []
+        raw = {}
+    entries_raw: Any = None
+    global_flags: dict[str, Any] = {}
     if isinstance(raw, Mapping):
+        raw_global = raw.get("global")
+        if isinstance(raw_global, Mapping):
+            ov = raw_global.get("object_visibility")
+            if isinstance(ov, Mapping):
+                for k, v in ov.items():
+                    if not isinstance(k, str):
+                        continue
+                    if isinstance(v, bool):
+                        global_flags[k] = v
+                    elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                        global_flags[k] = bool(v)
+                    elif isinstance(v, str):
+                        global_flags[k] = v
+            else:
+                raise FusionCadError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Visibility global.object_visibility must be a mapping of display flags",
+                    details={"parsed_type": type(ov).__name__},
+                )
         for key in ("effective_visibility", "visibility", "entries"):
             if key in raw and raw[key] is not None:
-                raw = raw[key]
+                entries_raw = raw[key]
                 break
-        else:
-            raw = []
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+    elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        entries_raw = raw
+
+    if entries_raw is None:
+        entries_raw = []
+    if not isinstance(entries_raw, Sequence) or isinstance(entries_raw, (str, bytes)):
         raise FusionCadError(
             ErrorCode.INVALID_ARGUMENT,
             "Visibility state must be a sequence of visibility items",
-            details={"parsed_type": type(raw).__name__},
+            details={"parsed_type": type(entries_raw).__name__},
         )
 
-    entries: list[dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, Mapping):
-            raise FusionCadError(
-                ErrorCode.INVALID_ARGUMENT,
-                "Visibility state items must be mappings",
-                details={"parsed_type": type(item).__name__},
-            )
-        path = item.get("full_path_name") or item.get("full_path") or item.get("name")
-        if path is None:
-            path = item.get("ref")
-        if path is None or not isinstance(path, str) or not path.strip():
-            raise FusionCadError(
-                ErrorCode.INVALID_ARGUMENT,
-                "Visibility item lacks a stable path (full_path_name/name/ref); failing closed for exact effective visibility hashing",
-            )
-        local = item.get("is_visible")
-        effective = item.get("effective_visibility")
-        if local is None and effective is None:
-            raise FusionCadError(
-                ErrorCode.INVALID_ARGUMENT,
-                "Visibility item lacks is_visible/effective_visibility; failing closed for exact effective visibility hashing",
-            )
-        entry: dict[str, Any] = {
-            "path": str(path),
-            "kind": str(item.get("kind") or "entity"),
-            "is_visible": bool(local if local is not None else effective),
-            "effective_visibility": bool(effective if effective is not None else local),
-        }
-        if item.get("ref") is not None and isinstance(item["ref"], str):
-            entry["ref"] = item["ref"]
-        entries.append(entry)
-
-    entries.sort(key=lambda e: (e["path"], e["kind"], str(e.get("ref", ""))))
-    return {"entries": entries, "count": len(entries)}
+    entries = [_canonicalize_visibility_entry(item) for item in entries_raw]
+    entries.sort(key=lambda e: (e["path"], e["kind"], str(e.get("ref", "")), str(e.get("native_token", ""))))
+    state: dict[str, Any] = {"entries": entries, "count": len(entries)}
+    if global_flags:
+        state["global"] = {"object_visibility": dict(sorted(global_flags.items()))}
+    return state
 
 
 def visibility_revision(state: Mapping[str, Any]) -> str:
@@ -322,11 +363,54 @@ def visibility_revision(state: Mapping[str, Any]) -> str:
     return f"vis_{_sha256_hex(state)}"
 
 
-def canonicalize_section_payload(raw: Any) -> dict[str, Any]:
-    """Canonicalize explicit section state.
+def _canonicalize_section_entry(raw: Any) -> dict[str, Any]:
+    """Canonicalize one SectionAnalysis item deterministically."""
+    if not isinstance(raw, Mapping):
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Section items must be mappings",
+            details={"parsed_type": type(raw).__name__},
+        )
+    ident = raw.get("id") or raw.get("name") or raw.get("entityToken")
+    if ident is None or not isinstance(ident, str) or not ident.strip():
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Section item lacks stable identity (id/name/entityToken); failing closed for exact section hashing",
+        )
+    is_vis = raw.get("is_visible")
+    if is_vis is None:
+        is_vis = raw.get("effective_visibility")
+    if is_vis is None:
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Section item lacks is_visible/effective_visibility; failing closed for exact section hashing",
+        )
+    entry: dict[str, Any] = {
+        "id": str(ident),
+        "name": str(raw.get("name") or ""),
+        "is_visible": bool(is_vis),
+    }
+    if raw.get("transform") is None:
+        entry["transform"] = None
+    elif (
+        isinstance(raw.get("transform"), (list, tuple))
+        and len(raw["transform"]) == 16
+    ):
+        entry["transform"] = [_round3(v) for v in raw["transform"]]
+    else:
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Section item transform must be a 16-element 4x4 array or null; failing closed for exact section hashing",
+        )
+    return entry
 
-    P0 supports only explicit disabled/default section state; an active section
-    state cannot be hashed exactly with P0 introspection and fails closed.
+
+def canonicalize_section_payload(raw: Any) -> dict[str, Any]:
+    """Canonicalize explicit section state deterministically.
+
+    Captures the collection/global visibility plus each visible/registered
+    SectionAnalysis's stable identity/name, effective isVisible, and transform,
+    so moving a section plane changes the section revision.
     """
     if raw is None:
         raw = {}
@@ -336,13 +420,6 @@ def canonicalize_section_payload(raw: Any) -> dict[str, Any]:
             "Section state must be a mapping",
             details={"parsed_type": type(raw).__name__},
         )
-    active = bool(raw.get("active", False))
-    if active:
-        raise FusionCadError(
-            ErrorCode.INVALID_ARGUMENT,
-            "P0 section state must be explicit disabled/default; active section state is not supported and cannot be hashed exactly",
-            details={"active": True},
-        )
     sec_type = raw.get("type")
     if sec_type is not None and not isinstance(sec_type, str):
         raise FusionCadError(
@@ -350,7 +427,35 @@ def canonicalize_section_payload(raw: Any) -> dict[str, Any]:
             "Section type must be a string or null",
             details={"parsed_type": type(sec_type).__name__},
         )
-    return {"active": False, "type": sec_type}
+    sections_raw = raw.get("sections")
+    sections: list[dict[str, Any]] = []
+    if sections_raw is not None:
+        if not isinstance(sections_raw, Sequence) or isinstance(sections_raw, (str, bytes)):
+            raise FusionCadError(
+                ErrorCode.INVALID_ARGUMENT,
+                "Section state 'sections' must be a sequence of section items",
+                details={"parsed_type": type(sections_raw).__name__},
+            )
+        sections = [_canonicalize_section_entry(item) for item in sections_raw]
+    sections.sort(key=lambda s: (s["id"], s["name"]))
+    # `active` is derived from the authoritative per-section effective
+    # visibility whenever sections are present. A raw "active" marker alone
+    # (legacy disabled/default shape) only applies when no sections exist.
+    if sections:
+        active = any(s["is_visible"] for s in sections)
+    else:
+        active = bool(raw.get("active", False))
+    if not active:
+        global_visible = bool(raw.get("global_visible", False))
+    else:
+        global_visible = bool(raw.get("global_visible", True))
+    return {
+        "active": active,
+        "type": sec_type,
+        "global_visible": global_visible,
+        "sections": sections,
+        "count": len(sections),
+    }
 
 
 def section_revision(state: Mapping[str, Any]) -> str:
@@ -423,10 +528,11 @@ class CurrentViewState(BaseModel):
 class ViewRefStore:
     """Bounded immutable store of screenshot ViewRefs plus per-node current view state.
 
-    assert_fresh independently verifies model revision, camera revision,
-    effective visibility revision, viewport dimensions, and section revision.
-    A changed view is never reinterpreted under an old screenshot: any bound
-    dimension mismatch returns VIEW_STALE.
+    assert_fresh independently verifies document identity, model revision,
+    camera revision, effective visibility revision, viewport dimensions, and
+    section revision. A changed view is never reinterpreted under an old
+    screenshot: any bound dimension mismatch returns VIEW_STALE, and a current
+    document differing from the bound document returns WRONG_DOCUMENT.
     """
 
     def __init__(self) -> None:
@@ -533,6 +639,31 @@ class ViewRefStore:
     def get(self, view_ref: str) -> ViewRefRecord | None:
         return self._refs.get(view_ref)
 
+    def set_image(self, view_ref: str, image: str) -> ViewRefRecord:
+        """Promote a bound ViewRef's image binding to the proven external image URI.
+
+        Each record remains immutable; the store atomically replaces the internal
+        placeholder with a new immutable record carrying the real emitted image
+        ResourceLink URI. The fabricated resource://views/... placeholder can
+        never escape to any public surface.
+        """
+        record = self._refs.get(view_ref)
+        if record is None:
+            raise FusionCadError(
+                ErrorCode.REF_STALE,
+                "View reference is not bound; cannot bind an image URI",
+                details={"view_ref": view_ref},
+            )
+        if not isinstance(image, str) or not image.strip():
+            raise FusionCadError(
+                ErrorCode.INVALID_ARGUMENT,
+                "image URI must be a non-empty string",
+                details={"view_ref": view_ref},
+            )
+        promoted = record.model_copy(update={"image": image})
+        self._refs[view_ref] = promoted
+        return promoted
+
     # -- freshness ----------------------------------------------------------
 
     def assert_fresh(
@@ -543,9 +674,10 @@ class ViewRefStore:
     ) -> ViewRefRecord:
         """Assert the immutable view still matches the current view context.
 
-        Each of model revision, camera revision, effective visibility revision,
-        viewport dimensions, and section revision is verified independently; any
-        mismatch (or any missing required current datum) raises VIEW_STALE.
+        Each of document identity, model revision, camera revision, effective
+        visibility revision, viewport dimensions, and section revision is
+        verified independently; any mismatch (or any missing required current
+        datum) fails closed. A different current document returns WRONG_DOCUMENT.
         Never reinterprets an old screenshot under a changed view.
         """
         record = self._refs.get(view_ref)
@@ -562,6 +694,7 @@ class ViewRefStore:
                 ctx.update(dict(current_context))
             elif isinstance(current_context, BaseModel):
                 for key in (
+                    "document_ref",
                     "model_revision",
                     "camera_revision",
                     "visibility_revision",
@@ -584,6 +717,24 @@ class ViewRefStore:
         for key, value in kwargs.items():
             if value is not None:
                 ctx[key] = value
+
+        current_document_ref = ctx.get("document_ref")
+        if current_document_ref is None:
+            raise FusionCadError(
+                ErrorCode.VIEW_STALE,
+                "Screenshot context cannot verify document identity (missing current document_ref)",
+                details={"view_ref": view_ref},
+            )
+        if str(current_document_ref) != record.document_ref:
+            raise FusionCadError(
+                ErrorCode.WRONG_DOCUMENT,
+                "Screenshot view belongs to a different document than the current active/current document",
+                details={
+                    "view_ref": view_ref,
+                    "expected_document": record.document_ref,
+                    "current_document": str(current_document_ref),
+                },
+            )
 
         current_model_revision = ctx.get("model_revision")
         if current_model_revision is None:
@@ -639,13 +790,17 @@ class ViewRefStore:
                 "Screenshot context cannot verify viewport dimensions (missing viewport width/height)",
                 details={"view_ref": view_ref},
             )
-        if int(current_width) != record.viewport_width:
+        # The freshness dimension check compares the LIVE viewport captured with
+        # the camera (record.camera.viewport_width/height). The record's own
+        # viewport_width/height are the screenshot OUTPUT resolution reported in
+        # public metadata and may legitimately differ from the live viewport.
+        if int(current_width) != record.camera.viewport_width:
             raise FusionCadError(
                 ErrorCode.VIEW_STALE,
                 "Screenshot view is stale: viewport width changed",
                 details={"view_ref": view_ref},
             )
-        if int(current_height) != record.viewport_height:
+        if int(current_height) != record.camera.viewport_height:
             raise FusionCadError(
                 ErrorCode.VIEW_STALE,
                 "Screenshot view is stale: viewport height changed",
