@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import re
 import time
 from collections import deque
@@ -137,6 +138,28 @@ _MIME_EXTENSIONS: dict[str, str] = {
 
 _BASE64_CHARS_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
+# Persisted resource sidecar contract. Only exactly supported documents are
+# honored on recovery; everything else fails closed (no binary resources).
+_SIDECAR_VERSION = 2
+_SIDECAR_LEGACY_VERSION = 1
+_SIDECAR_MAX_BYTES = 1_048_576
+_SIDECAR_MAX_RESOURCES = 1024
+_SIDECAR_CREATED_AT_SKEW_SECONDS = 300.0
+
+_SIDECAR_RESOURCE_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,128}")
+_SIDECAR_CAPABILITY_RE = re.compile(r"[A-Za-z0-9_-]{32,128}")
+_SIDECAR_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_SIDECAR_MIME_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}"
+)
+_SIDECAR_FILE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ ()+-]{0,127}")
+
+_V2_SIDECAR_KEYS = frozenset({
+    "resource_id", "path_name", "mime_type", "file_name",
+    "size_bytes", "sha256", "created_at", "stable_capability",
+})
+_V1_SIDECAR_KEYS = _V2_SIDECAR_KEYS - {"stable_capability"}
+
 
 @dataclass(slots=True)
 class ExtractedBinaryResource:
@@ -150,6 +173,105 @@ def _is_mime_binary(mime: Any) -> bool:
         return False
     mime_lower = mime.lower().strip()
     return mime_lower.startswith(_BINARY_MIME_PREFIXES) or mime_lower in _BINARY_MIME_EXACT
+
+
+def parse_resource_sidecar(
+    document: Any,
+    *,
+    result_id: str,
+    max_resource_bytes: int,
+    now: float,
+) -> list[dict[str, Any]] | None:
+    """Strictly validate a persisted resource sidecar document.
+
+    Returns validated descriptors for an exactly supported v2 document, or for
+    the legacy v1 shape (which is migrated explicitly by assigning a fresh
+    stable capability). Everything else - a non-object document, an unknown or
+    missing version, a wrong resources shape, or a descriptor with an invalid,
+    unbounded, or unowned field - returns None so recovery can fail closed
+    instead of trusting metadata an attacker may have crafted.
+
+    `path_name` is pinned to the extracted resource file this result owns,
+    `{result_id}-res-{index}{extension}`, so absolute paths and traversal are
+    structurally impossible and the extension must agree with `mime_type`.
+    """
+    if not isinstance(document, dict):
+        return None
+    version = document.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None
+    if version not in (_SIDECAR_VERSION, _SIDECAR_LEGACY_VERSION):
+        return None
+    resources = document.get("resources")
+    if not isinstance(resources, list) or len(resources) > _SIDECAR_MAX_RESOURCES:
+        return None
+    expected_keys = _V2_SIDECAR_KEYS if version == _SIDECAR_VERSION else _V1_SIDECAR_KEYS
+    descriptors: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, entry in enumerate(resources):
+        if not isinstance(entry, dict) or set(entry) != expected_keys:
+            return None
+        resource_id = entry["resource_id"]
+        if (
+            not isinstance(resource_id, str)
+            or resource_id in seen_ids
+            or _SIDECAR_RESOURCE_ID_RE.fullmatch(resource_id) is None
+        ):
+            return None
+        seen_ids.add(resource_id)
+        mime_type = entry["mime_type"]
+        if (
+            not isinstance(mime_type, str)
+            or _SIDECAR_MIME_RE.fullmatch(mime_type) is None
+            or not _is_mime_binary(mime_type)
+        ):
+            return None
+        extension = _MIME_EXTENSIONS.get(mime_type, ".bin")
+        path_name = entry["path_name"]
+        if path_name != f"{result_id}-res-{index}{extension}":
+            return None
+        file_name = entry["file_name"]
+        if (
+            not isinstance(file_name, str)
+            or _SIDECAR_FILE_NAME_RE.fullmatch(file_name) is None
+            or not file_name.endswith(extension)
+        ):
+            return None
+        size_bytes = entry["size_bytes"]
+        if (
+            isinstance(size_bytes, bool)
+            or not isinstance(size_bytes, int)
+            or not 1 <= size_bytes <= max_resource_bytes
+        ):
+            return None
+        sha256 = entry["sha256"]
+        if not isinstance(sha256, str) or _SIDECAR_SHA256_RE.fullmatch(sha256) is None:
+            return None
+        created_at = entry["created_at"]
+        if (
+            isinstance(created_at, bool)
+            or not isinstance(created_at, (int, float))
+            or not math.isfinite(created_at)
+            or not 0.0 < float(created_at) <= now + _SIDECAR_CREATED_AT_SKEW_SECONDS
+        ):
+            return None
+        capability = entry["stable_capability"] if version == _SIDECAR_VERSION else None
+        if capability is not None and (
+            not isinstance(capability, str)
+            or _SIDECAR_CAPABILITY_RE.fullmatch(capability) is None
+        ):
+            return None
+        descriptors.append({
+            "resource_id": resource_id,
+            "path_name": path_name,
+            "mime_type": mime_type,
+            "file_name": file_name,
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+            "created_at": float(created_at),
+            "stable_capability": capability,
+        })
+    return descriptors
 
 
 def _detect_verified_binary_magic(raw: bytes, preferred_mime: str | None = None) -> str | None:
@@ -1115,6 +1237,71 @@ class DesktopNodeService:
             "isError": (value.get("isError") is not False) if "isError" in value else False,
         }
 
+    def _load_resource_sidecar(self, result_id: str) -> list[dict[str, Any]] | None:
+        """Read and strictly validate the persisted resource sidecar.
+
+        Returns None for a missing, unreadable, oversized, or invalid sidecar so
+        recovery can fail closed instead of trusting its metadata.
+        """
+        sidecar = self._artifact_dir() / f"{result_id}.resources.json"
+        try:
+            if sidecar.stat().st_size > _SIDECAR_MAX_BYTES:
+                return None
+            document = json.loads(sidecar.read_text("utf-8"))
+        except (OSError, ValueError):
+            return None
+        return parse_resource_sidecar(
+            document,
+            result_id=result_id,
+            max_resource_bytes=self.settings.max_result_bytes,
+            now=time.time(),
+        )
+
+    def _restore_resource_descriptors(
+        self,
+        result_id: str,
+        item: dict[str, Any],
+        descriptors: list[dict[str, Any]],
+    ) -> bool:
+        """Register validated sidecar resources for this result, all-or-nothing.
+
+        Every descriptor must resolve to a regular file directly inside the
+        artifact directory whose real size and SHA-256 match the sidecar; any
+        mismatch leaves the result without binary resources.
+        """
+        artifact_dir = self._artifact_dir()
+        restored: list[tuple[str, dict[str, Any]]] = []
+        for descriptor in descriptors:
+            resource_id = descriptor["resource_id"]
+            if resource_id in self._external_resources:
+                return False
+            path = artifact_dir / descriptor["path_name"]
+            try:
+                contained = path.resolve()
+                if contained.parent != artifact_dir or not contained.is_file():
+                    return False
+                if contained.stat().st_size != descriptor["size_bytes"]:
+                    return False
+                digest = hashlib.sha256(contained.read_bytes()).hexdigest()
+            except OSError:
+                return False
+            if not compare_digest(digest, descriptor["sha256"]):
+                return False
+            restored.append((resource_id, {
+                "path": contained,
+                "parent_result_id": result_id,
+                "size_bytes": descriptor["size_bytes"],
+                "sha256": descriptor["sha256"],
+                "created_at": descriptor["created_at"],
+                "mime_type": descriptor["mime_type"],
+                "file_name": descriptor["file_name"],
+                "stable_capability": descriptor["stable_capability"] or token_urlsafe(32),
+            }))
+        for resource_id, resource in restored:
+            self._external_resources[resource_id] = resource
+            item["resource_ids"].append(resource_id)
+        return True
+
     def _recover_external_result(self, result_id: Any) -> dict[str, Any] | None:
         if not isinstance(result_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,64}", result_id) is None:
             return None
@@ -1146,34 +1333,11 @@ class DesktopNodeService:
         self._external_results[result_id] = item
         sidecar = self._artifact_dir() / f"{result_id}.resources.json"
         if sidecar.exists():
-            try:
-                meta = json.loads(sidecar.read_text("utf-8"))
-                for desc in meta.get("resources", []):
-                    res_id = desc.get("resource_id")
-                    if not isinstance(res_id, str):
-                        continue
-                    res_path = self._artifact_dir() / desc["path_name"]
-                    if not res_path.exists():
-                        continue
-                    item["resource_ids"].append(res_id)
-                    self._external_resources[res_id] = {
-                        "path": res_path,
-                        "parent_result_id": result_id,
-                        "size_bytes": desc["size_bytes"],
-                        "sha256": desc["sha256"],
-                        "created_at": desc.get("created_at", stat.st_mtime),
-                        "mime_type": desc["mime_type"],
-                        "file_name": desc["file_name"],
-                        "stable_capability": (
-                            desc.get("stable_capability")
-                            if isinstance(desc.get("stable_capability"), str)
-                            and re.fullmatch(r"[A-Za-z0-9_-]{32,128}", desc["stable_capability"])
-                            else token_urlsafe(32)
-                        ),
-                    }
+            descriptors = self._load_resource_sidecar(result_id)
+            if descriptors and self._restore_resource_descriptors(result_id, item, descriptors):
+                # Rewrite as the current schema; this is also the explicit
+                # legacy v1 -> v2 migration (fresh stable capability).
                 self._write_resource_sidecar(result_id)
-            except (ValueError, OSError, KeyError, TypeError):
-                pass
         else:
             self._extract_image_resources(result_id, value, stat.st_mtime)
         return item
