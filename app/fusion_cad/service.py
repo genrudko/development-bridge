@@ -31,6 +31,7 @@ from app.fusion_cad.models import (
     DocumentState,
     ImmutableMapping,
 )
+from app.fusion_cad.inspect import normalize_inspect_result
 from app.fusion_cad.refs import EntityRefRegistry
 from app.fusion_cad.requests import (
     FusionInspectRequest,
@@ -193,6 +194,35 @@ class FusionCadService:
             return len(raw.encode("utf-8")) > self.inline_limit_bytes
         except (TypeError, ValueError, OverflowError):
             return False
+
+
+    def _inject_inspect_target_hints(self, payload: dict[str, Any]) -> None:
+        """Resolve registry-known inspection targets into native resolution hints.
+
+        Inspection targets that were issued by this service are translated into
+        {ref, kind, native_token, name, component_path, geometry_signature} hints
+        so the static Fusion script can resolve them exactly via findEntityByToken.
+        Unregistered refs fall through to contextual resolution in the script.
+        """
+        for key in ("target", "target_a", "target_b", "face_a", "face_b"):
+            raw = payload.get(key)
+            if not isinstance(raw, str) or not re.match(ENTITY_REF_PATTERN, raw):
+                continue
+            record = self._ref_registry.get_internal_record(raw)
+            if record is None:
+                continue
+            payload[key] = {
+                "ref": record.ref,
+                "kind": record.kind,
+                "native_token": record.native_token,
+                "name": record.name,
+                "component_path": list(record.component_path),
+                "geometry_signature": (
+                    dict(record.geometry_signature)
+                    if record.geometry_signature
+                    else None
+                ),
+            }
 
     def assert_fresh_for_mutation(
         self,
@@ -1028,6 +1058,19 @@ class FusionCadService:
                             }
                         )
 
+            # 5. Semantic inspect normalization
+            if effective_bundle_group == "inspect":
+                if isinstance(cad_result.data, (dict, Mapping)):
+                    norm_inspect = normalize_inspect_result(
+                        cad_result.data,
+                        operation=op,
+                        ref_registry=self._ref_registry,
+                        document_ref=target_doc or "doc_active",
+                    )
+                    cad_result = cad_result.model_copy(
+                        update={"data": ImmutableMapping(norm_inspect)}
+                    )
+
             domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
             if node_id and (
                 has_binary_data(domain_payload) or self._is_oversized(domain_payload)
@@ -1538,6 +1581,10 @@ class FusionCadService:
 
         # Remove caller-supplied synthetic authority
         payload.pop("mock_model_state", None)
+
+        # Inspection targets known to this service get exact native resolution hints
+        if effective_bundle_group == "inspect":
+            self._inject_inspect_target_hints(payload)
 
         script = self._script_bundle.build(effective_bundle_group, payload)
         journal = {

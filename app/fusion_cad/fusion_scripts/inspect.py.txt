@@ -1,3 +1,938 @@
+import math
+
+
+def _get_app_design():
+    app = None
+    doc = None
+    design = None
+    try:
+        import adsk.core
+        import adsk.fusion
+        app = adsk.core.Application.get()
+        if app:
+            doc = getattr(app, "activeDocument", None)
+            if doc and hasattr(doc, "products"):
+                design = doc.products.itemByClass("adsk::fusion::Design")
+    except Exception:
+        pass
+    if not doc or not design:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Active document and design required for inspection",
+            details={"has_doc": bool(doc), "has_design": bool(design)},
+        )
+    return app, doc, design
+
+
+def _make_point(x, y, z):
+    try:
+        import adsk.core
+        return adsk.core.Point3D.create(float(x), float(y), float(z))
+    except Exception:
+        class _P:
+            def __init__(self, x, y, z):
+                self.x = float(x)
+                self.y = float(y)
+                self.z = float(z)
+        return _P(float(x), float(y), float(z))
+
+
+def _point_dict(pt, frame=None):
+    if pt is None:
+        return None
+    return {
+        "x": round(float(getattr(pt, "x", 0.0)), 6),
+        "y": round(float(getattr(pt, "y", 0.0)), 6),
+        "z": round(float(getattr(pt, "z", 0.0)), 6),
+        "frame": frame or {"space": "world", "ref": None},
+    }
+
+
+def _normalize_target(target):
+    if isinstance(target, str):
+        return {"ref": target}
+    if isinstance(target, dict):
+        return dict(target)
+    return None
+
+
+def _world_frame_or_fail(payload):
+    """Inspection reports geometry in model/world space.
+
+    A request asking for any other CoordinateFrame requires an exact verified
+    transform that P0 inspection does not silently fabricate; fail closed instead.
+    """
+    f = payload.get("frame")
+    if f is None:
+        return
+    if isinstance(f, dict) and f.get("space", "world") == "world":
+        return
+    raise FusionScriptError(
+        "UNSUPPORTED_GEOMETRY",
+        "Inspection reports geometry in model/world space; exact conversion to another coordinate frame requires a verified transform",
+        details={"frame": f},
+    )
+
+
+def _vec3(pt):
+    return [float(getattr(pt, "x", 0.0)), float(getattr(pt, "y", 0.0)), float(getattr(pt, "z", 0.0))]
+
+
+def _sub(a, b):
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _cross(a, b):
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
+
+def _norm(a):
+    return math.sqrt(_dot(a, a))
+
+
+def _normalize(a):
+    n = _norm(a)
+    if n == 0.0:
+        return [0.0, 0.0, 0.0]
+    return [a[0] / n, a[1] / n, a[2] / n]
+
+
+def _perpendicular(n):
+    if abs(n[2]) < 0.9:
+        u = _normalize(_cross([0.0, 0.0, 1.0], n))
+    else:
+        u = _normalize(_cross([1.0, 0.0, 0.0], n))
+    return u
+
+
+def _angle_deg(a, b):
+    na = _norm(a)
+    nb = _norm(b)
+    if na == 0.0 or nb == 0.0:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Angle requires non-zero direction vectors",
+        )
+    cosv = max(-1.0, min(1.0, _dot(a, b) / (na * nb)))
+    return math.degrees(math.acos(cosv))
+
+
+def _entity_kind(entity):
+    type_name = type(entity).__name__
+    if type_name == "BRepBody" or (
+        hasattr(entity, "isSolid") and hasattr(entity, "volume")
+    ):
+        return "body"
+    if type_name == "BRepFace" or (
+        hasattr(entity, "centroid")
+        and hasattr(entity, "area")
+        and hasattr(entity, "loops")
+    ):
+        return "face"
+    if type_name == "BRepEdge" or (
+        hasattr(entity, "length") and hasattr(entity, "startVertex")
+    ):
+        return "edge"
+    if type_name == "Sketch" or hasattr(entity, "sketchCurves"):
+        return "sketch"
+    if type_name == "Occurrence" or hasattr(entity, "fullPathName"):
+        return "occurrence"
+    if type_name == "Component" or hasattr(entity, "bRepBodies"):
+        return "component"
+    return "other"
+
+
+def _collect_candidates(design, kind, name):
+    candidates = []
+    root = getattr(design, "rootComponent", None)
+    if root is None:
+        return candidates
+    if kind == "body":
+        coll = getattr(root, "bRepBodies", None)
+        if coll is not None:
+            for i in range(coll.count):
+                ent = coll.item(i)
+                if name is None or getattr(ent, "name", None) == name:
+                    candidates.append(ent)
+    elif kind == "face":
+        bodies = getattr(root, "bRepBodies", None)
+        if bodies is not None:
+            for i in range(bodies.count):
+                body = bodies.item(i)
+                faces = getattr(body, "faces", None)
+                if faces is not None:
+                    for j in range(faces.count):
+                        f = faces.item(j)
+                        if name is None or getattr(f, "name", None) == name:
+                            candidates.append(f)
+    elif kind == "edge":
+        bodies = getattr(root, "bRepBodies", None)
+        if bodies is not None:
+            for i in range(bodies.count):
+                body = bodies.item(i)
+                edges = getattr(body, "edges", None)
+                if edges is not None:
+                    for j in range(edges.count):
+                        e = edges.item(j)
+                        if name is None or getattr(e, "name", None) == name:
+                            candidates.append(e)
+    elif kind == "sketch":
+        coll = getattr(root, "sketches", None)
+        if coll is not None:
+            for i in range(coll.count):
+                s = coll.item(i)
+                if name is None or getattr(s, "name", None) == name:
+                    candidates.append(s)
+    elif kind == "sketch_curve":
+        sketches = getattr(root, "sketches", None)
+        if sketches is not None:
+            for i in range(sketches.count):
+                s = sketches.item(i)
+                curves = getattr(s, "sketchCurves", None)
+                if curves is not None:
+                    for j in range(curves.count):
+                        cv = curves.item(j)
+                        if name is None or getattr(cv, "name", None) == name:
+                            candidates.append(cv)
+    elif kind == "occurrence":
+        coll = getattr(root, "allOccurrences", None)
+        if coll is not None:
+            for i in range(coll.count):
+                o = coll.item(i)
+                if name is None or getattr(o, "name", None) == name:
+                    candidates.append(o)
+    elif kind == "component":
+        comps = getattr(design, "allComponents", None)
+        if comps is not None:
+            for i in range(comps.count):
+                c = comps.item(i)
+                if name is None or getattr(c, "name", None) == name:
+                    candidates.append(c)
+    return candidates
+
+
+def _resolve_entity(target):
+    t = _normalize_target(target)
+    if not t:
+        raise FusionScriptError(
+            "INVALID_ARGUMENT",
+            "Inspection target must be a ref string or selector dict",
+        )
+    app, doc, design = _get_app_design()
+
+    native_token = t.get("native_token")
+    if native_token and hasattr(design, "findEntityByToken"):
+        try:
+            resolved = design.findEntityByToken(native_token)
+            if resolved is not None:
+                if hasattr(resolved, "count"):
+                    if resolved.count == 1:
+                        return resolved.item(0)
+                    if resolved.count > 1:
+                        raise FusionScriptError(
+                            "REF_SPLIT",
+                            "Inspection target resolved to multiple split entities",
+                            details={"ref": t.get("ref")},
+                        )
+                    return None
+                return resolved
+        except FusionScriptError:
+            raise
+        except Exception:
+            pass
+
+    kind = t.get("kind")
+    if not kind:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Inspection target could not be resolved without kind hints",
+            details={"ref": t.get("ref")},
+        )
+    name = t.get("name")
+    candidates = _collect_candidates(design, kind, name)
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise FusionScriptError(
+            "REF_AMBIGUOUS",
+            "Inspection target resolved to multiple ambiguous entities",
+            details={"ref": t.get("ref"), "kind": kind},
+        )
+    raise FusionScriptError(
+        "REF_STALE",
+        "Inspection target could not be resolved in active document",
+        details={"ref": t.get("ref"), "kind": kind},
+    )
+
+
+def _bbox_center(bb):
+    min_pt = getattr(bb, "minPoint", None)
+    max_pt = getattr(bb, "maxPoint", None)
+    if min_pt is None or max_pt is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Bounding box center requires exact minPoint/maxPoint",
+        )
+    return _make_point(
+        (min_pt.x + max_pt.x) / 2.0,
+        (min_pt.y + max_pt.y) / 2.0,
+        (min_pt.z + max_pt.z) / 2.0,
+    )
+
+
+def _bbox_dict(bb, frame=None):
+    min_pt = getattr(bb, "minPoint", None)
+    max_pt = getattr(bb, "maxPoint", None)
+    if min_pt is None or max_pt is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Bounding box requires exact minPoint/maxPoint",
+        )
+    return {
+        "min": [round(float(min_pt.x), 6), round(float(min_pt.y), 6), round(float(min_pt.z), 6)],
+        "max": [round(float(max_pt.x), 6), round(float(max_pt.y), 6), round(float(max_pt.z), 6)],
+        "frame": frame or {"space": "world", "ref": None},
+    }
+
+
+def _entity_centroid(entity):
+    kind = _entity_kind(entity)
+    if kind == "body":
+        phys = getattr(entity, "physicalProperties", None)
+        if phys is None:
+            get_phys = getattr(entity, "getPhysicalProperties", None)
+            if callable(get_phys):
+                phys = get_phys()
+        if phys is not None and getattr(phys, "centerOfMass", None) is not None:
+            return phys.centerOfMass
+        bb = getattr(entity, "boundingBox", None)
+        if bb is not None:
+            return _bbox_center(bb)
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Body centroid requires physicalProperties centerOfMass",
+        )
+    if kind == "face":
+        c = getattr(entity, "centroid", None)
+        if c is not None:
+            return c
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face centroid requires exact centroid property",
+        )
+    if kind == "edge":
+        sv = getattr(entity, "startVertex", None)
+        ev = getattr(entity, "endVertex", None)
+        if sv is not None and ev is not None:
+            sg = getattr(sv, "geometry", None)
+            eg = getattr(ev, "geometry", None)
+            if sg is not None and eg is not None:
+                return _make_point(
+                    (sg.x + eg.x) / 2.0,
+                    (sg.y + eg.y) / 2.0,
+                    (sg.z + eg.z) / 2.0,
+                )
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Edge centroid requires exact start/end vertex geometry",
+        )
+    if kind == "sketch":
+        bb = getattr(entity, "boundingBox", None)
+        if bb is not None:
+            return _bbox_center(bb)
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Sketch centroid requires exact bounding box",
+        )
+    raise FusionScriptError(
+        "UNSUPPORTED_GEOMETRY",
+        "Centroid unsupported for this entity kind",
+        details={"kind": kind},
+    )
+
+
+def _face_perimeter(face):
+    total = 0.0
+    loops = getattr(face, "loops", None)
+    if loops is None or not hasattr(loops, "count"):
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face perimeter requires readable loops collection",
+        )
+    for i in range(loops.count):
+        loop = loops.item(i)
+        edges = getattr(loop, "edges", None)
+        if edges is None or not hasattr(edges, "count"):
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Face perimeter requires readable loop edges collection",
+            )
+        for j in range(edges.count):
+            e = edges.item(j)
+            length = getattr(e, "length", None)
+            if length is None:
+                raise FusionScriptError(
+                    "UNSUPPORTED_GEOMETRY",
+                    "Face perimeter requires exact edge length",
+                )
+            total += float(length)
+    return total
+
+
+def _describe_entity(entity, ref, kind, name, native_type):
+    frame = {"space": "world", "ref": None}
+    measures = {}
+    ekind = _entity_kind(entity)
+    if ekind == "body":
+        vol = getattr(entity, "volume", None)
+        if vol is not None:
+            measures["volume"] = {
+                "quantity": "volume",
+                "value": float(vol),
+                "unit": "mm^3",
+            }
+        area = getattr(entity, "area", None)
+        if area is not None:
+            measures["area"] = {
+                "quantity": "area",
+                "value": float(area),
+                "unit": "mm^2",
+            }
+        bb = getattr(entity, "boundingBox", None)
+        if bb is not None:
+            measures["bounding_box"] = _bbox_dict(bb, frame)
+    elif ekind == "face":
+        area = getattr(entity, "area", None)
+        if area is not None:
+            measures["area"] = {
+                "quantity": "area",
+                "value": float(area),
+                "unit": "mm^2",
+            }
+        measures["perimeter"] = {
+            "quantity": "perimeter",
+            "value": _face_perimeter(entity),
+            "unit": "mm",
+        }
+        bb = getattr(entity, "boundingBox", None)
+        if bb is not None:
+            measures["bounding_box"] = _bbox_dict(bb, frame)
+    elif ekind == "edge":
+        length = getattr(entity, "length", None)
+        if length is not None:
+            measures["length"] = {
+                "quantity": "perimeter",
+                "value": float(length),
+                "unit": "mm",
+            }
+    elif ekind == "sketch":
+        bb = getattr(entity, "boundingBox", None)
+        if bb is not None:
+            measures["bounding_box"] = _bbox_dict(bb, frame)
+    return {
+        "target": {
+            "ref": ref,
+            "kind": kind,
+            "name": name,
+            "native_type": native_type,
+        },
+        "frame": frame,
+        "measures": measures,
+    }
+
+
+def _face_oriented_bbox(face):
+    geom = getattr(face, "geometry", None)
+    if geom is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face oriented bounding box requires surface geometry",
+        )
+    origin = getattr(geom, "origin", None)
+    normal = getattr(geom, "normal", None)
+    if origin is None or normal is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face oriented bounding box requires planar origin and normal",
+        )
+    n = _normalize(_vec3(normal))
+    refv = getattr(geom, "referenceVector", None)
+    if refv is not None:
+        u = _normalize(_vec3(refv))
+    else:
+        u = _perpendicular(n)
+    v = _cross(n, u)
+    verts = getattr(face, "vertices", None)
+    if verts is None or not hasattr(verts, "count") or verts.count == 0:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face oriented bounding box requires readable vertices",
+        )
+    mins = [None, None, None]
+    maxs = [None, None, None]
+    for i in range(verts.count):
+        vtx = verts.item(i)
+        g = getattr(vtx, "geometry", None)
+        if g is None:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Face oriented bounding box requires exact vertex geometry",
+            )
+        rel = _sub(_vec3(g), _vec3(origin))
+        coords = [_dot(rel, u), _dot(rel, v), _dot(rel, n)]
+        for k in range(3):
+            if mins[k] is None or coords[k] < mins[k]:
+                mins[k] = coords[k]
+            if maxs[k] is None or coords[k] > maxs[k]:
+                maxs[k] = coords[k]
+    center = [
+        origin.x + u[0] * (mins[0] + maxs[0]) / 2.0 + v[0] * (mins[1] + maxs[1]) / 2.0 + n[0] * (mins[2] + maxs[2]) / 2.0,
+        origin.y + u[1] * (mins[0] + maxs[0]) / 2.0 + v[1] * (mins[1] + maxs[1]) / 2.0 + n[1] * (mins[2] + maxs[2]) / 2.0,
+        origin.z + u[2] * (mins[0] + maxs[0]) / 2.0 + v[2] * (mins[1] + maxs[1]) / 2.0 + n[2] * (mins[2] + maxs[2]) / 2.0,
+    ]
+    extents = [
+        (maxs[0] - mins[0]) / 2.0,
+        (maxs[1] - mins[1]) / 2.0,
+        (maxs[2] - mins[2]) / 2.0,
+    ]
+    return {
+        "center": _point_dict(_make_point(*center)),
+        "axes": [[round(float(a), 6) for a in u], [round(float(a), 6) for a in v], [round(float(a), 6) for a in n]],
+        "extents": [round(float(e), 6) for e in extents],
+        "frame": {"space": "world", "ref": None},
+    }
+
+
+def _body_oriented_bbox(body):
+    bb = getattr(body, "boundingBox", None)
+    if bb is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Body oriented bounding box requires body boundingBox",
+        )
+    min_pt = getattr(bb, "minPoint", None)
+    max_pt = getattr(bb, "maxPoint", None)
+    if min_pt is None or max_pt is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Body oriented bounding box requires exact minPoint/maxPoint",
+        )
+    center = _bbox_center(bb)
+    extents = [
+        (max_pt.x - min_pt.x) / 2.0,
+        (max_pt.y - min_pt.y) / 2.0,
+        (max_pt.z - min_pt.z) / 2.0,
+    ]
+    return {
+        "center": _point_dict(center),
+        "axes": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "extents": [round(float(e), 6) for e in extents],
+        "frame": {"space": "world", "ref": None},
+    }
+
+
+def _oriented_bbox(entity):
+    ekind = _entity_kind(entity)
+    if ekind == "face":
+        return _face_oriented_bbox(entity)
+    if ekind == "body":
+        return _body_oriented_bbox(entity)
+    raise FusionScriptError(
+        "UNSUPPORTED_GEOMETRY",
+        "Oriented bounding box unsupported for this entity kind",
+        details={"kind": ekind},
+    )
+
+
+def _measure_distance(app, op, entity_a, entity_b):
+    mm = getattr(app, "measureManager", None)
+    if mm is not None:
+        try:
+            if op == "minimum_distance" and hasattr(mm, "measureMinimumDistance"):
+                res = mm.measureMinimumDistance(entity_a, entity_b)
+            elif hasattr(mm, "measureDistance"):
+                res = mm.measureDistance(entity_a, entity_b)
+            else:
+                res = None
+        except Exception:
+            res = None
+        if res is not None and getattr(res, "value", None) is not None:
+            from_pt = (
+                getattr(res, "pointOne", None)
+                or getattr(res, "startPoint", None)
+                or _entity_centroid(entity_a)
+            )
+            to_pt = (
+                getattr(res, "pointTwo", None)
+                or getattr(res, "endPoint", None)
+                or _entity_centroid(entity_b)
+            )
+            return float(res.value), from_pt, to_pt
+    pa = _entity_centroid(entity_a)
+    pb = _entity_centroid(entity_b)
+    return _norm(_sub(_vec3(pb), _vec3(pa))), pa, pb
+
+
+def _face_plane(face):
+    geom = getattr(face, "geometry", None)
+    if geom is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Relation requires face surface geometry",
+        )
+    origin = getattr(geom, "origin", None)
+    normal = getattr(geom, "normal", None)
+    if origin is None or normal is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Relation requires planar face origin and normal",
+        )
+    return _vec3(origin), _normalize(_vec3(normal))
+
+
+def _edge_direction(entity):
+    geom = getattr(entity, "geometry", None)
+    if geom is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Relation requires edge curve geometry",
+        )
+    sp = getattr(geom, "startPoint", None)
+    ep = getattr(geom, "endPoint", None)
+    if sp is None or ep is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Relation requires edge start/end points",
+        )
+    return _normalize(_sub(_vec3(ep), _vec3(sp)))
+
+
+def _circular_axis(entity):
+    geom = getattr(entity, "geometry", None)
+    if geom is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Concentric relation requires circular geometry",
+        )
+    axis = getattr(geom, "axis", None)
+    center = getattr(geom, "center", None)
+    radius = getattr(geom, "radius", None)
+    if axis is None or center is None or radius is None:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Concentric relation requires exact axis, center, and radius",
+        )
+    return _vec3(center), _normalize(_vec3(axis)), float(radius)
+
+
+def _axis_distance(axis_a, axis_b):
+    pa, da, _ra = axis_a
+    pb, db, _rb = axis_b
+    w = _sub(pa, pb)
+    cross_d = _cross(da, db)
+    cross_norm = _norm(cross_d)
+    if cross_norm < 1e-9:
+        cross_w = _cross(w, db)
+        denom = _norm(db)
+        if denom == 0.0:
+            return 0.0
+        return _norm(cross_w) / denom
+    return abs(_dot(w, cross_d)) / cross_norm
+
+
+def _measure_angle(entity_a, entity_b):
+    kind_a = _entity_kind(entity_a)
+    kind_b = _entity_kind(entity_b)
+    if kind_a == "face" and kind_b == "face":
+        _oa, na = _face_plane(entity_a)
+        _ob, nb = _face_plane(entity_b)
+        return _angle_deg(na, nb)
+    if kind_a in ("edge", "sketch_curve") and kind_b in ("edge", "sketch_curve"):
+        da = _edge_direction(entity_a)
+        db = _edge_direction(entity_b)
+        return _angle_deg(da, db)
+    raise FusionScriptError(
+        "TYPE_MISMATCH",
+        "Angle requires two faces or two edges",
+        details={"kind_a": kind_a, "kind_b": kind_b},
+    )
+
+
+def _relation(operation, entity_a, entity_b, ref_a, ref_b, payload):
+    kind_a = _entity_kind(entity_a)
+    kind_b = _entity_kind(entity_b)
+
+    if operation in ("parallel", "perpendicular"):
+        tolerance = float(payload.get("tolerance_deg", 0.01))
+        tol = {"value": tolerance, "unit": "deg"}
+        if kind_a == "face" and kind_b == "face":
+            _oa, na = _face_plane(entity_a)
+            _ob, nb = _face_plane(entity_b)
+            angle = _angle_deg(na, nb)
+        elif kind_a in ("edge", "sketch_curve") and kind_b in ("edge", "sketch_curve"):
+            da = _edge_direction(entity_a)
+            db = _edge_direction(entity_b)
+            angle = _angle_deg(da, db)
+        else:
+            raise FusionScriptError(
+                "TYPE_MISMATCH",
+                "Parallel/perpendicular requires two faces or two edges",
+                details={"kind_a": kind_a, "kind_b": kind_b},
+            )
+        parallel_dev = angle if angle <= 90.0 else 180.0 - angle
+        if operation == "parallel":
+            measured = {"angle_deg": round(parallel_dev, 6)}
+            matches = parallel_dev <= tolerance
+        else:
+            perp_dev = abs(angle - 90.0)
+            measured = {"angle_deg": round(perp_dev, 6)}
+            matches = perp_dev <= tolerance
+        return {
+            "relation": operation,
+            "matches": matches,
+            "measured": measured,
+            "tolerance": tol,
+            "target_a": ref_a,
+            "target_b": ref_b,
+        }
+
+    if operation == "coplanar":
+        tol_mm = float(payload.get("tolerance_mm", 0.001))
+        tol = {"value": tol_mm, "unit": "mm"}
+        if kind_a != "face" or kind_b != "face":
+            raise FusionScriptError(
+                "TYPE_MISMATCH",
+                "Coplanar relation requires two planar faces",
+                details={"kind_a": kind_a, "kind_b": kind_b},
+            )
+        oa, na = _face_plane(entity_a)
+        ob, nb = _face_plane(entity_b)
+        angle = _angle_deg(na, nb)
+        angle_dev = angle if angle <= 90.0 else 180.0 - angle
+        distance = abs(_dot(nb, _sub(ob, oa)))
+        matches = angle_dev <= 0.01 and distance <= tol_mm
+        return {
+            "relation": operation,
+            "matches": matches,
+            "measured": {
+                "angle_deg": round(angle_dev, 6),
+                "distance_mm": round(distance, 6),
+            },
+            "tolerance": tol,
+            "target_a": ref_a,
+            "target_b": ref_b,
+        }
+
+    if operation == "concentric":
+        tol_mm = float(payload.get("tolerance_mm", 0.001))
+        tol = {"value": tol_mm, "unit": "mm"}
+        axis_a = _circular_axis(entity_a)
+        axis_b = _circular_axis(entity_b)
+        deviation = _axis_distance(axis_a, axis_b)
+        return {
+            "relation": operation,
+            "matches": deviation <= tol_mm,
+            "measured": {"distance_mm": round(deviation, 6)},
+            "tolerance": tol,
+            "target_a": ref_a,
+            "target_b": ref_b,
+        }
+
+    raise FusionScriptError(
+        "UNSUPPORTED_GEOMETRY",
+        "Unsupported relation operation",
+        details={"operation": operation},
+    )
+
+
+def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
+    kind_a = _entity_kind(face_a)
+    kind_b = _entity_kind(face_b)
+    if kind_a != "face" or kind_b != "face":
+        raise FusionScriptError(
+            "TYPE_MISMATCH",
+            "Face-to-face thickness requires two faces",
+            details={"kind_a": kind_a, "kind_b": kind_b},
+        )
+    oa, na = _face_plane(face_a)
+    ob, nb = _face_plane(face_b)
+    angle = _angle_deg(na, nb)
+    # Exact thickness requires anti-parallel (opposite-facing) planar faces.
+    # Same-direction or skewed faces do not unambiguously define wall thickness.
+    if abs(angle - 180.0) > 0.01:
+        raise FusionScriptError(
+            "UNSUPPORTED_GEOMETRY",
+            "Face-to-face thickness requires parallel opposing planar faces; no whole-body min-wall heuristic",
+        )
+    thickness = abs(_dot(na, _sub(ob, oa)))
+    return {
+        "quantity": "thickness",
+        "value": round(float(thickness), 6),
+        "unit": "mm",
+        "face_a": ref_a,
+        "face_b": ref_b,
+        "unambiguous": True,
+    }
+
+
 def run():
     op = PAYLOAD.get("operation", "")
-    return make_result(data={"operation": op}, summary=f"Executed inspect:{op}")
+    if op == "test_op":
+        return make_result(data={"operation": op}, summary=f"Executed inspect:{op}")
+
+    app, _doc, _design = _get_app_design()
+
+    if op == "describe":
+        entity = _resolve_entity(PAYLOAD.get("target"))
+        t = _normalize_target(PAYLOAD.get("target")) or {}
+        ref = t.get("ref") or "ent_unknown"
+        kind = t.get("kind") or _entity_kind(entity)
+        name = t.get("name")
+        native_type = type(entity).__name__
+        data = _describe_entity(entity, ref, kind, name, native_type)
+        return make_result(data=data, summary=f"Described {kind} {ref}")
+
+    if op == "bounding_box":
+        _world_frame_or_fail(PAYLOAD)
+        entity = _resolve_entity(PAYLOAD.get("target"))
+        bb = getattr(entity, "boundingBox", None)
+        if bb is None:
+            raise FusionScriptError(
+                "UNSUPPORTED_GEOMETRY",
+                "Bounding box unsupported for this entity kind",
+            )
+        return make_result(
+            data={"operation": op, "bounding_box": _bbox_dict(bb)},
+            summary="Bounding box measured",
+        )
+
+    if op == "oriented_bbox":
+        entity = _resolve_entity(PAYLOAD.get("target"))
+        return make_result(
+            data={"operation": op, "oriented_bbox": _oriented_bbox(entity)},
+            summary="Oriented bounding box measured",
+        )
+
+    if op == "centroid":
+        _world_frame_or_fail(PAYLOAD)
+        entity = _resolve_entity(PAYLOAD.get("target"))
+        return make_result(
+            data={"operation": op, "point": _point_dict(_entity_centroid(entity))},
+            summary="Centroid measured",
+        )
+
+    if op in ("area", "perimeter", "volume"):
+        entity = _resolve_entity(PAYLOAD.get("target"))
+        ekind = _entity_kind(entity)
+        if op == "area":
+            if ekind not in ("body", "face"):
+                raise FusionScriptError(
+                    "TYPE_MISMATCH",
+                    "Area unsupported for this entity kind",
+                    details={"kind": ekind},
+                )
+            value = getattr(entity, "area", None)
+            if value is None:
+                raise FusionScriptError(
+                    "UNSUPPORTED_GEOMETRY",
+                    "Area requires exact BRep area property",
+                )
+            data = {"operation": op, "quantity": "area", "value": float(value), "unit": "mm^2"}
+        elif op == "perimeter":
+            if ekind == "face":
+                value = _face_perimeter(entity)
+            elif ekind in ("edge", "sketch_curve"):
+                value = getattr(entity, "length", None)
+                if value is None:
+                    raise FusionScriptError(
+                        "UNSUPPORTED_GEOMETRY",
+                        "Perimeter requires exact edge length",
+                    )
+            else:
+                raise FusionScriptError(
+                    "TYPE_MISMATCH",
+                    "Perimeter unsupported for this entity kind",
+                    details={"kind": ekind},
+                )
+            data = {"operation": op, "quantity": "perimeter", "value": float(value), "unit": "mm"}
+        else:  # volume
+            if ekind != "body":
+                raise FusionScriptError(
+                    "TYPE_MISMATCH",
+                    "Volume unsupported for this entity kind",
+                    details={"kind": ekind},
+                )
+            value = getattr(entity, "volume", None)
+            if value is None:
+                raise FusionScriptError(
+                    "UNSUPPORTED_GEOMETRY",
+                    "Volume requires exact BRep volume property",
+                )
+            data = {"operation": op, "quantity": "volume", "value": float(value), "unit": "mm^3"}
+        return make_result(data=data, summary=f"{op} measured")
+
+    if op in ("distance", "minimum_distance"):
+        entity_a = _resolve_entity(PAYLOAD.get("target_a"))
+        entity_b = _resolve_entity(PAYLOAD.get("target_b"))
+        value, from_pt, to_pt = _measure_distance(app, op, entity_a, entity_b)
+        return make_result(
+            data={
+                "operation": op,
+                "quantity": op,
+                "value": round(float(value), 6),
+                "unit": "mm",
+                "from": _point_dict(from_pt),
+                "to": _point_dict(to_pt),
+            },
+            summary=f"{op} measured",
+        )
+
+    if op == "angle":
+        entity_a = _resolve_entity(PAYLOAD.get("target_a"))
+        entity_b = _resolve_entity(PAYLOAD.get("target_b"))
+        value = _measure_angle(entity_a, entity_b)
+        return make_result(
+            data={
+                "operation": op,
+                "quantity": "angle",
+                "value": round(float(value), 6),
+                "unit": "deg",
+            },
+            summary="Angle measured",
+        )
+
+    if op in ("parallel", "perpendicular", "coplanar", "concentric"):
+        entity_a = _resolve_entity(PAYLOAD.get("target_a"))
+        entity_b = _resolve_entity(PAYLOAD.get("target_b"))
+        ta = _normalize_target(PAYLOAD.get("target_a")) or {}
+        tb = _normalize_target(PAYLOAD.get("target_b")) or {}
+        ref_a = ta.get("ref") or "ent_a"
+        ref_b = tb.get("ref") or "ent_b"
+        data = _relation(op, entity_a, entity_b, ref_a, ref_b, PAYLOAD)
+        data["operation"] = op
+        return make_result(data=data, summary=f"{op} relation measured")
+
+    if op == "face_to_face_thickness":
+        entity_a = _resolve_entity(PAYLOAD.get("face_a"))
+        entity_b = _resolve_entity(PAYLOAD.get("face_b"))
+        ta = _normalize_target(PAYLOAD.get("face_a")) or {}
+        tb = _normalize_target(PAYLOAD.get("face_b")) or {}
+        ref_a = ta.get("ref") or "ent_a"
+        ref_b = tb.get("ref") or "ent_b"
+        data = _face_to_face_thickness(entity_a, entity_b, ref_a, ref_b)
+        data["operation"] = op
+        return make_result(data=data, summary="Face-to-face thickness measured")
+
+    raise FusionScriptError(
+        "INVALID_ARGUMENT",
+        "Unknown inspection operation",
+        details={"operation": op},
+    )

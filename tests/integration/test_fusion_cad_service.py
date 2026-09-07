@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1014,9 +1015,12 @@ class AdskFakeContext:
                 self.geometry = FakePoint(x, y, z)
 
         class FakeLoop:
-            def __init__(self, is_outer=True, edge_count=4):
+            def __init__(self, is_outer=True, edge_count=4, edge_lengths=None):
                 self.isOuter = is_outer
-                self.edges = FakeCollection([object() for _ in range(edge_count)])
+                lengths = edge_lengths if edge_lengths is not None else [10.0] * edge_count
+                self.edges = FakeCollection(
+                    [FakeEdge(idx=i, length=lengths[i]) for i in range(edge_count)]
+                )
 
         class FakeFace:
             def __init__(self, idx=0, area=10.0, centroid=None):
@@ -1033,8 +1037,18 @@ class AdskFakeContext:
                         "normal": FakePoint(0.0, 0.0, 1.0),
                     },
                 )()
-                self.loops = FakeCollection([FakeLoop(is_outer=True, edge_count=4)])
-                self.edges = FakeCollection([object() for _ in range(4)])
+                self.loops = FakeCollection(
+                    [
+                        FakeLoop(
+                            is_outer=True,
+                            edge_count=4,
+                            edge_lengths=[10.0, 10.0, 10.0, 10.0],
+                        )
+                    ]
+                )
+                self.edges = FakeCollection(
+                    [FakeEdge(idx=idx * 4 + j, length=10.0) for j in range(4)]
+                )
                 self.vertices = FakeCollection([FakeVertex() for _ in range(4)])
                 self.isParamReversed = False
                 self.boundingBox = FakeBoundingBox(
@@ -1222,6 +1236,31 @@ class AdskFakeContext:
                 self.allComponents = FakeCollection([self.rootComponent])
                 self.timeline = FakeCollection([FakeTimelineItem()])
                 self.allParameters = FakeCollection([FakeParameter()])
+                self._token_map = {}
+                self._register_entities(self.rootComponent)
+
+            def _register_entities(self, root):
+                self._token_map[root.entityToken] = root
+                body = root.bRepBodies.item(0)
+                self._token_map[body.entityToken] = body
+                for i in range(body.faces.count):
+                    f = body.faces.item(i)
+                    self._token_map[f.entityToken] = f
+                for i in range(body.edges.count):
+                    e = body.edges.item(i)
+                    self._token_map[e.entityToken] = e
+                for i in range(root.sketches.count):
+                    s = root.sketches.item(i)
+                    self._token_map[s.entityToken] = s
+                    for j in range(s.sketchCurves.count):
+                        cv = s.sketchCurves.item(j)
+                        self._token_map[cv.entityToken] = cv
+                    for j in range(s.sketchPoints.count):
+                        pt = s.sketchPoints.item(j)
+                        self._token_map[pt.entityToken] = pt
+
+            def findEntityByToken(self, token):
+                return self._token_map.get(token)
 
         class FakeDocument:
             def __init__(self, ctx):
@@ -1244,9 +1283,50 @@ class AdskFakeContext:
 
                 self.products = Products(self._design)
 
+        class FakeMeasureResult:
+            def __init__(self, value, p1=None, p2=None):
+                self.value = value
+                self.pointOne = p1
+                self.pointTwo = p2
+
+        class FakeMeasureManager:
+            def __init__(self, ctx):
+                self._ctx = ctx
+
+            def _centroid(self, entity):
+                if hasattr(entity, "centroid") and entity.centroid is not None:
+                    return entity.centroid
+                if (
+                    hasattr(entity, "physicalProperties")
+                    and entity.physicalProperties is not None
+                ):
+                    return entity.physicalProperties.centerOfMass
+                if hasattr(entity, "boundingBox") and entity.boundingBox is not None:
+                    bb = entity.boundingBox
+                    return FakePoint(
+                        (bb.minPoint.x + bb.maxPoint.x) / 2.0,
+                        (bb.minPoint.y + bb.maxPoint.y) / 2.0,
+                        (bb.minPoint.z + bb.maxPoint.z) / 2.0,
+                    )
+                return FakePoint(0.0, 0.0, 0.0)
+
+            def _dist(self, a, b):
+                return math.sqrt(
+                    (a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2
+                )
+
+            def measureDistance(self, e1, e2):
+                p1 = self._centroid(e1)
+                p2 = self._centroid(e2)
+                return FakeMeasureResult(self._dist(p1, p2), p1, p2)
+
+            def measureMinimumDistance(self, e1, e2):
+                return self.measureDistance(e1, e2)
+
         class FakeApplication:
             def __init__(self, ctx):
                 self._doc = FakeDocument(ctx)
+                self.measureManager = FakeMeasureManager(ctx)
 
             @property
             def activeDocument(self):
@@ -5441,3 +5521,468 @@ async def test_failed_service_read_with_nested_tokens_never_leaks_secrets_in_cad
         err.details.get("nested", {}).get("diagnostic")
         == "topological_recompute_diverged"
     )
+
+
+class _FakePoint:
+    """Minimal point-like object for mutating fake Fusion geometry in inspection tests."""
+
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+
+
+# =========================================================================
+# Task 7: P0 inspection operations
+# =========================================================================
+
+
+def _register_inspect_refs(cad_service, doc="doc_1"):
+    refs = {}
+    refs["body"] = cad_service.ref_registry.issue(
+        document_ref=doc,
+        kind="body",
+        name="Body1",
+        native_token="body_token_1",
+    ).ref
+    refs["face"] = cad_service.ref_registry.issue(
+        document_ref=doc,
+        kind="face",
+        name="Face0",
+        native_token="face_token_0",
+    ).ref
+    refs["face1"] = cad_service.ref_registry.issue(
+        document_ref=doc,
+        kind="face",
+        name="Face1",
+        native_token="face_token_1",
+    ).ref
+    refs["edge"] = cad_service.ref_registry.issue(
+        document_ref=doc,
+        kind="edge",
+        name="Edge0",
+        native_token="edge_token_0",
+    ).ref
+    refs["sketch"] = cad_service.ref_registry.issue(
+        document_ref=doc,
+        kind="sketch",
+        name="Sketch1",
+        native_token="sketch_token_1",
+    ).ref
+    return refs
+
+
+def _inspect_matrix():
+    return CapabilityMatrix.from_records(
+        [CapabilityRecord(name="inspect.measure", state="supported")]
+    )
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_describe_area_volume_perimeter_centroid(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves inspect describe/scalar measures normalize exact units and frames."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+
+        # describe body
+        res = await cad_service.execute(
+            {"node_id": "desk-1", "operation": "describe", "target": refs["body"]},
+            group="inspect",
+        )
+        assert res.status == "succeeded"
+        assert res.data["ref"] == refs["body"]
+        assert res.data["kind"] == "body"
+        assert res.data["frame"]["space"] == "world"
+        assert res.data["measures"]["volume"]["unit"] == "mm^3"
+        assert res.data["measures"]["volume"]["value"] == pytest.approx(1000.0)
+        assert res.data["measures"]["area"]["unit"] == "mm^2"
+
+        # area (body surface area)
+        res_area = await cad_service.execute(
+            {"node_id": "desk-1", "operation": "area", "target": refs["body"]},
+            group="inspect",
+        )
+        assert res_area.data["quantity"] == "area"
+        assert res_area.data["unit"] == "mm^2"
+        assert res_area.data["value"] == pytest.approx(50.0)
+
+        # volume (body)
+        res_vol = await cad_service.execute(
+            {"node_id": "desk-1", "operation": "volume", "target": refs["body"]},
+            group="inspect",
+        )
+        assert res_vol.data["quantity"] == "volume"
+        assert res_vol.data["unit"] == "mm^3"
+        assert res_vol.data["value"] == pytest.approx(1000.0)
+
+        # perimeter (face) = 4 edges x 10 mm
+        res_per = await cad_service.execute(
+            {"node_id": "desk-1", "operation": "perimeter", "target": refs["face"]},
+            group="inspect",
+        )
+        assert res_per.data["quantity"] == "perimeter"
+        assert res_per.data["unit"] == "mm"
+        assert res_per.data["value"] == pytest.approx(40.0)
+
+        # centroid (body) with explicit frame
+        res_cen = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "centroid",
+                "target": refs["body"],
+                "frame": {"space": "world"},
+            },
+            group="inspect",
+        )
+        assert res_cen.data["point"]["frame"]["space"] == "world"
+        assert res_cen.data["point"]["x"] == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_bounding_box_oriented_bbox_and_edge(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves bounding_box/oriented_bbox carry explicit frames and edge length is exact."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+
+        # bounding_box with world frame
+        res_bb = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "bounding_box",
+                "target": refs["body"],
+                "frame": {"space": "world"},
+            },
+            group="inspect",
+        )
+        assert res_bb.data["bounding_box"]["frame"]["space"] == "world"
+        assert res_bb.data["bounding_box"]["min_point"]["x"] == 0.0
+        assert res_bb.data["bounding_box"]["max_point"]["z"] == 10.0
+
+        # oriented_bbox has center, axes, extents, frame
+        res_obb = await cad_service.execute(
+            {"node_id": "desk-1", "operation": "oriented_bbox", "target": refs["body"]},
+            group="inspect",
+        )
+        obb = res_obb.data["oriented_bbox"]
+        assert len(obb["axes"]) == 3
+        assert obb["extents"] == (5.0, 5.0, 5.0)
+        assert obb["frame"]["space"] == "world"
+        assert obb["center"]["frame"]["space"] == "world"
+
+        # edge perimeter/length
+        res_edge = await cad_service.execute(
+            {"node_id": "desk-1", "operation": "perimeter", "target": refs["edge"]},
+            group="inspect",
+        )
+        assert res_edge.data["unit"] == "mm"
+        assert res_edge.data["value"] == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_distance_minimum_distance_and_angle(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves distance/minimum_distance return mm with explicit points and angle is deg."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+
+        # distance body centroid (5,5,5) -> face0 centroid (0,0,0)
+        res_dist = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "distance",
+                "target_a": refs["body"],
+                "target_b": refs["face"],
+            },
+            group="inspect",
+        )
+        assert res_dist.data["quantity"] == "distance"
+        assert res_dist.data["unit"] == "mm"
+        assert res_dist.data["value"] == pytest.approx(math.sqrt(75.0))
+        assert res_dist.data["from_point"]["frame"]["space"] == "world"
+        assert res_dist.data["to_point"]["frame"]["space"] == "world"
+
+        # minimum_distance
+        res_min = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "minimum_distance",
+                "target_a": refs["body"],
+                "target_b": refs["face"],
+            },
+            group="inspect",
+        )
+        assert res_min.data["quantity"] == "minimum_distance"
+        assert res_min.data["unit"] == "mm"
+
+        # angle between two coplanar faces (normals (0,0,1) both) -> 0 deg
+        res_angle = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "angle",
+                "target_a": refs["face"],
+                "target_b": refs["face1"],
+            },
+            group="inspect",
+        )
+        assert res_angle.data["unit"] == "deg"
+        assert res_angle.data["value"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_relation_contracts(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves parallel/perpendicular/coplanar/concentric return matches, measured deviation, and explicit tolerance."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+        face_a = body.faces.item(0)
+        face_b = body.faces.item(1)
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+
+        # face_a normal (0,0,1); face_b normal (0,0,1) -> parallel
+        res_par = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "parallel",
+                "target_a": refs["face"],
+                "target_b": refs["face1"],
+                "tolerance_deg": 0.5,
+            },
+            group="inspect",
+        )
+        assert res_par.data["relation"] == "parallel"
+        assert res_par.data["matches"] is True
+        assert res_par.data["measured"]["angle_deg"] == 0.0
+        assert res_par.data["tolerance"] == {"value": 0.5, "unit": "deg"}
+
+        # Make face_b normal perpendicular for perpendicular test
+        face_b.geometry.normal = _FakePoint(1.0, 0.0, 0.0)
+        res_perp = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "perpendicular",
+                "target_a": refs["face"],
+                "target_b": refs["face1"],
+                "tolerance_deg": 0.1,
+            },
+            group="inspect",
+        )
+        assert res_perp.data["relation"] == "perpendicular"
+        assert res_perp.data["matches"] is True
+        assert res_perp.data["measured"]["angle_deg"] == pytest.approx(0.0)
+        assert res_perp.data["tolerance"]["unit"] == "deg"
+
+        # Restore face_b normal; both coplanar (same origin/normal)
+        face_b.geometry.normal = _FakePoint(0.0, 0.0, 1.0)
+        res_cop = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "coplanar",
+                "target_a": refs["face"],
+                "target_b": refs["face1"],
+                "tolerance_mm": 0.001,
+            },
+            group="inspect",
+        )
+        assert res_cop.data["relation"] == "coplanar"
+        assert res_cop.data["matches"] is True
+        assert res_cop.data["measured"]["angle_deg"] == 0.0
+        assert res_cop.data["measured"]["distance_mm"] == 0.0
+        assert res_cop.data["tolerance"]["unit"] == "mm"
+
+        # Concentric: make both faces circular with shared axis
+        face_a.geometry.axis = _FakePoint(0.0, 0.0, 1.0)
+        face_a.geometry.center = _FakePoint(5.0, 5.0, 0.0)
+        face_a.geometry.radius = 5.0
+        face_b.geometry.axis = _FakePoint(0.0, 0.0, 1.0)
+        face_b.geometry.center = _FakePoint(5.0, 5.0, 0.0)
+        face_b.geometry.radius = 7.0
+        res_conc = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "concentric",
+                "target_a": refs["face"],
+                "target_b": refs["face1"],
+                "tolerance_mm": 0.001,
+            },
+            group="inspect",
+        )
+        assert res_conc.data["relation"] == "concentric"
+        assert res_conc.data["matches"] is True
+        assert res_conc.data["measured"]["distance_mm"] == 0.0
+        assert res_conc.data["tolerance"]["unit"] == "mm"
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_face_to_face_thickness_exact_only(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves face_to_face_thickness returns exact unambiguous thickness and rejects ambiguous geometry."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        design = app.activeDocument.products.itemByClass("adsk::fusion::Design")
+        body = design.rootComponent.bRepBodies.item(0)
+        face_a = body.faces.item(0)
+        face_b = body.faces.item(1)
+
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+
+        # Exact thickness: opposing normals with a 5 mm gap
+        face_a.geometry.origin = _FakePoint(0.0, 0.0, 0.0)
+        face_a.geometry.normal = _FakePoint(0.0, 0.0, 1.0)
+        face_b.geometry.origin = _FakePoint(0.0, 0.0, 5.0)
+        face_b.geometry.normal = _FakePoint(0.0, 0.0, -1.0)
+        res_thick = await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "face_to_face_thickness",
+                "face_a": refs["face"],
+                "face_b": refs["face1"],
+            },
+            group="inspect",
+        )
+        assert res_thick.data["quantity"] == "thickness"
+        assert res_thick.data["value"] == pytest.approx(5.0)
+        assert res_thick.data["unit"] == "mm"
+        assert res_thick.data["unambiguous"] is True
+
+        # Ambiguous: parallel same-direction faces do not define wall thickness
+        face_b.geometry.normal = _FakePoint(0.0, 0.0, 1.0)
+        with pytest.raises(FusionCadError) as exc_amb:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "face_to_face_thickness",
+                    "face_a": refs["face"],
+                    "face_b": refs["face1"],
+                },
+                group="inspect",
+            )
+        assert exc_amb.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+
+@pytest.mark.asyncio
+async def test_fusion_inspect_unsupported_targets_fail_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Proves unsupported target types return TYPE_MISMATCH/UNSUPPORTED_GEOMETRY, never guessed values."""
+    async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
+        script = arguments["script"]
+        scope = {"__name__": "__main__"}
+        exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
+        return scope["_output"]
+
+    with AdskFakeContext("doc_1", initial_volume=1000.0):
+        cad_service = FusionCadService(mock_desktop_service)
+        cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+        mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+        mock_desktop_service.submit = run_rendered_inspect  # type: ignore[assignment]
+
+        refs = _register_inspect_refs(cad_service)
+
+        # volume on a face -> TYPE_MISMATCH
+        with pytest.raises(FusionCadError) as exc_vol:
+            await cad_service.execute(
+                {"node_id": "desk-1", "operation": "volume", "target": refs["face"]},
+                group="inspect",
+            )
+        assert exc_vol.value.code == ErrorCode.TYPE_MISMATCH
+
+        # perimeter on a body -> TYPE_MISMATCH
+        with pytest.raises(FusionCadError) as exc_per:
+            await cad_service.execute(
+                {"node_id": "desk-1", "operation": "perimeter", "target": refs["body"]},
+                group="inspect",
+            )
+        assert exc_per.value.code == ErrorCode.TYPE_MISMATCH
+
+        # non-world frame request -> UNSUPPORTED_GEOMETRY (exact conversion not fabricated)
+        with pytest.raises(FusionCadError) as exc_frame:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "centroid",
+                    "target": refs["body"],
+                    "frame": {"space": "occurrence", "ref": "ent_occ_1"},
+                },
+                group="inspect",
+            )
+        assert exc_frame.value.code == ErrorCode.UNSUPPORTED_GEOMETRY
+
+    # Outside any active design: NO_ACTIVE_DESIGN fail closed
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.set_node_capabilities("desk-1", _inspect_matrix())
+    mock_desktop_service.call = run_rendered_inspect  # type: ignore[assignment]
+    with pytest.raises(FusionCadError) as exc_no_doc:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "describe", "target": "ent_unknown"},
+            group="inspect",
+        )
+    assert exc_no_doc.value.code == ErrorCode.NO_ACTIVE_DESIGN

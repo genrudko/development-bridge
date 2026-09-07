@@ -140,6 +140,27 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
     tool = registry.get(tool_name)
     assert tool is not None
 
+    # Task 7: inspect operations carry real semantic normalization, so the
+    # describe case returns a valid normalized describe result; other fast reads
+    # keep the generic echo payload.
+    is_describe = valid_payload["operation"] == "describe"
+    if is_describe:
+        result_data = {
+            "operation": "describe",
+            "target": {
+                "ref": "ent_face_1",
+                "kind": "face",
+                "name": "Face1",
+                "native_type": "BRepFace",
+            },
+            "frame": {"space": "world", "ref": None},
+            "measures": {
+                "area": {"quantity": "area", "value": 42.0, "unit": "mm^2"}
+            },
+        }
+    else:
+        result_data = {"result_key": "РАСПИСАНИЕ ПЫТОК 😈"}
+
     mock_container.desktop_nodes.call = AsyncMock(return_value={
         "content": [{
             "type": "text",
@@ -147,7 +168,7 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
                 "api_version": "fusion.cad/v1",
                 "status": "succeeded",
                 "summary": f"Executed {valid_payload['operation']} successfully",
-                "data": {"result_key": "РАСПИСАНИЕ ПЫТОК 😈"},
+                "data": result_data,
             }, ensure_ascii=False),
         }],
         "isError": False,
@@ -166,7 +187,12 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
     assert isinstance(content, types.TextContent)
     parsed = json.loads(content.text)
     assert parsed["ok"] is True
-    assert parsed["data"]["data"]["result_key"] == "РАСПИСАНИЕ ПЫТОК 😈"
+    if is_describe:
+        assert parsed["data"]["data"]["kind"] == "face"
+        assert parsed["data"]["data"]["frame"]["space"] == "world"
+        assert parsed["data"]["data"]["measures"]["area"]["unit"] == "mm^2"
+    else:
+        assert parsed["data"]["data"]["result_key"] == "РАСПИСАНИЕ ПЫТОК 😈"
 
     assert mock_container.desktop_nodes.call.called
     call_args = mock_container.desktop_nodes.call.call_args
