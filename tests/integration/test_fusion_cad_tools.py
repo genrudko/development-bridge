@@ -248,8 +248,8 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
 
 
 @pytest.mark.parametrize("tool_name, valid_payload, expected_mutation", [
-    ("fusion_metadata", {"node_id": "desk-1", "operation": "tag", "target": "ent_body_1", "tag_name": "bolt", "expected_revision": "rev_1"}, True),
-    ("fusion_style", {"node_id": "desk-1", "operation": "show", "target": "ent_body_1", "expected_revision": "rev_1"}, True),
+    ("fusion_metadata", {"node_id": "desk-1", "operation": "tag", "target": "ent_1", "tag_name": "bolt", "expected_revision": "rev_1"}, True),
+    ("fusion_style", {"node_id": "desk-1", "operation": "show", "target": "ent_1", "expected_revision": "rev_1"}, True),
     ("fusion_style", {"node_id": "desk-1", "operation": "text_create", "text": "Label", "height_mm": 5.0, "position": {"x": 0, "y": 0, "z": 0, "frame": {"space": "world"}}, "expected_revision": "rev_1"}, True),
     ("fusion_validate", {"node_id": "desk-1", "operation": "run"}, False),
     ("fusion_view", {"node_id": "desk-1", "operation": "screenshot"}, False),

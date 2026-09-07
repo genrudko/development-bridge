@@ -11,6 +11,14 @@ Task 10 domain rules implemented here:
   logical object ref, created revision, role/tags) is part of the SAME mutation
   command payload as the geometry/metadata change. There is no hidden
   post-commit metadata command.
+- Provenance identity is the DURABLE COMMAND identity: the operation id shared
+  with the desktop operation journal for the same command, and a truthful
+  ``created_revision`` — the revision in which the created/changed entity
+  exists after the command applies (deterministically ``rev_{sequence + 1}``,
+  because the Fusion-side guard fails any command whose post-apply fingerprint
+  equals the pre-apply one and the RevisionTracker advances exactly one
+  sequence per distinct fingerprint). The pre-mutation expected revision is
+  never recorded as ``created_revision``.
 - Selector support: role/tag/provenance selector criteria are derived from
   persisted model attribute records carried by entities, never from transient
   Bridge-side memory.
@@ -19,6 +27,7 @@ Task 10 domain rules implemented here:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -91,11 +100,42 @@ class ProvenanceRecord(BaseModel):
     tags: tuple[ProvenanceTag, ...] = Field(default_factory=tuple)
 
 
+def _validate_operation_id(operation: str, operation_id: Any) -> str:
+    if (
+        not isinstance(operation_id, str)
+        or re.fullmatch(OPERATION_ID_PATTERN, operation_id) is None
+    ):
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Provenance operation_id must be the durable command operation id "
+            "(pattern 'op_...' shared with the desktop operation journal)",
+            details={"operation": op_key(operation)},
+        )
+    return operation_id
+
+
+def _validate_created_revision(operation: str, created_revision: Any) -> str:
+    if (
+        not isinstance(created_revision, str)
+        or re.fullmatch(MODEL_REVISION_PATTERN, created_revision) is None
+    ):
+        raise FusionCadError(
+            ErrorCode.INVALID_ARGUMENT,
+            "Provenance requires the truthful post-mutation created_revision (the "
+            "revision in which the created/changed entity exists); it must be "
+            "resolved from the revision tracker, never guessed from the "
+            "pre-mutation expected revision",
+            details={"operation": op_key(operation)},
+        )
+    return created_revision
+
+
 def build_provenance_record(
     *,
     operation: str,
-    expected_revision: str,
+    created_revision: str,
     operation_id: str | None = None,
+    creator_operation: str | None = None,
     transaction_id: str | None = None,
     tag_name: str | None = None,
     tag_value: str | None = None,
@@ -105,32 +145,35 @@ def build_provenance_record(
 ) -> ProvenanceRecord:
     """Build the provenance record for one metadata/geometry mutation command.
 
-    ``created_revision`` records the revision the mutation was applied against
-    (the caller-provided expected revision); the post-apply revision is reported
-    by the result envelope after the authoritative fingerprint observation.
+    ``operation_id`` must be the durable command operation id shared with the
+    desktop operation journal for the SAME command; when omitted a fresh id is
+    generated and the caller must use ``record.operation_id`` as the journal
+    operation id so both stay identical.
+
+    ``created_revision`` records the revision in which the created/changed
+    entity exists after this command applies. Callers must resolve it from the
+    RevisionTracker (deterministically ``rev_{sequence + 1}`` for a successful
+    mutation); the pre-mutation expected revision is not a truthful substitute
+    and a missing or malformed value fails closed.
     """
-    if not isinstance(expected_revision, str) or not expected_revision.strip():
-        raise FusionCadError(
-            ErrorCode.INVALID_ARGUMENT,
-            "Provenance requires the expected_revision the mutation is applied against",
-            details={"operation": op_key(operation)},
-        )
-    op_id = (
-        operation_id
-        if isinstance(operation_id, str) and operation_id.strip()
-        else f"op_{uuid.uuid4().hex[:12]}"
-    )
+    rev = _validate_created_revision(operation, created_revision)
+    if operation_id is None:
+        op_id = f"op_{uuid.uuid4().hex[:12]}"
+    else:
+        op_id = _validate_operation_id(operation, operation_id)
     tags: tuple[ProvenanceTag, ...] = ()
     if isinstance(tag_name, str) and tag_name.strip():
         tags = (ProvenanceTag(name=tag_name, value=tag_value or ""),)
     return ProvenanceRecord(
         creator_tool=PROVENANCE_CREATOR_TOOL,
-        creator_operation=f"fusion_metadata:{operation}",
+        creator_operation=creator_operation
+        if isinstance(creator_operation, str) and creator_operation.strip()
+        else f"fusion_metadata:{operation}",
         operation_id=op_id,
         transaction_id=transaction_id,
         recipe=recipe,
         logical_object_ref=logical_object_ref,
-        created_revision=expected_revision,
+        created_revision=rev,
         role=role,
         tags=tags,
     )
@@ -256,12 +299,55 @@ class MetadataMutationPlan(BaseModel):
     provenance: ProvenanceRecord
 
 
-def build_metadata_mutation_plan(payload: Mapping[str, Any]) -> MetadataMutationPlan:
+def _plan_provenance(
+    payload: Mapping[str, Any],
+    *,
+    operation: str,
+    operation_id: str | None,
+    created_revision: str | None,
+    tag_name: str | None = None,
+    tag_value: str | None = None,
+    role: str | None = None,
+) -> ProvenanceRecord:
+    """Build the provenance record for a plan, propagating required fields.
+
+    The durable command operation id, recipe, and logical object ref travel
+    with the SAME command payload into the persisted provenance record; the
+    post-mutation created_revision must be supplied by the caller (resolved
+    from the RevisionTracker) and is never inferred from the pre-mutation
+    expected revision.
+    """
+    return build_provenance_record(
+        operation=operation,
+        created_revision=created_revision,
+        operation_id=operation_id,
+        transaction_id=payload.get("transaction_id"),
+        recipe=payload.get("recipe"),
+        logical_object_ref=payload.get("logical_object_ref"),
+        tag_name=tag_name,
+        tag_value=tag_value,
+        role=role,
+    )
+
+
+def build_metadata_mutation_plan(
+    payload: Mapping[str, Any],
+    *,
+    operation_id: str | None = None,
+    created_revision: str | None = None,
+) -> MetadataMutationPlan:
     """Build the one-command metadata plan for an explicit metadata mutation.
 
     Validates the reserved namespace, requires ``expected_revision`` (metadata
     writes are normal revision-safe mutations), and always appends the
     provenance attribute write.
+
+    ``operation_id`` must be the durable command operation id shared with the
+    desktop operation journal; when omitted a fresh id is generated and the
+    caller must reuse ``plan.provenance.operation_id`` for the journal.
+    ``created_revision`` must be the truthful post-mutation revision resolved
+    from the RevisionTracker; a plan without it fails closed instead of
+    recording the pre-mutation expected revision.
     """
     operation = payload.get("operation")
     if operation not in _METADATA_WRITE_OPERATIONS:
@@ -339,10 +425,11 @@ def build_metadata_mutation_plan(payload: Mapping[str, Any]) -> MetadataMutation
             )
         )
 
-    provenance = build_provenance_record(
+    provenance = _plan_provenance(
+        payload,
         operation=operation,
-        expected_revision=expected_revision,
-        transaction_id=payload.get("transaction_id"),
+        operation_id=operation_id,
+        created_revision=created_revision,
         tag_name=payload.get("tag_name") if operation == "tag" else None,
         tag_value=payload.get("tag_value") if operation == "tag" else None,
         role=payload.get("role") if operation == "set_role" else None,
@@ -359,19 +446,68 @@ def build_metadata_mutation_plan(payload: Mapping[str, Any]) -> MetadataMutation
     )
 
 
-def apply_metadata_mutation_plan(payload: dict[str, Any]) -> dict[str, Any]:
+def apply_metadata_mutation_plan(
+    payload: dict[str, Any],
+    *,
+    operation_id: str | None = None,
+    created_revision: str | None = None,
+) -> dict[str, Any]:
     """Attach the one-command metadata plan to a mutate script payload.
 
     The plan is executed by the same script execution that applies the geometry
     or metadata change; no separate metadata command exists.
     """
-    plan = build_metadata_mutation_plan(payload)
+    plan = build_metadata_mutation_plan(
+        payload, operation_id=operation_id, created_revision=created_revision
+    )
     payload["group"] = RESERVED_METADATA_GROUP
     payload["metadata_writes"] = [w.model_dump(mode="json") for w in plan.writes]
     payload["metadata_removals"] = [
         r.model_dump(mode="json", exclude_none=True) for r in plan.removals
     ]
     payload["provenance"] = plan.provenance.model_dump(mode="json", exclude_none=True)
+    return payload
+
+
+def apply_geometry_provenance_plan(
+    payload: dict[str, Any],
+    *,
+    operation: str,
+    creator_operation: str,
+    operation_id: str | None = None,
+    created_revision: str | None = None,
+) -> dict[str, Any]:
+    """Attach a provenance-only metadata plan for ONE geometry mutation command.
+
+    This is the common safe path shared with later geometry features (Task 11):
+    the provenance attribute write is executed by the SAME mutate script
+    execution that creates/changes geometry — no second command, no hidden
+    post-commit metadata command, and the same atomic plan application
+    (preflight, undo-log compensation, post-fingerprint verification) as
+    explicit metadata mutations. The plan carries ONLY the provenance write;
+    explicit metadata operations keep using build_metadata_mutation_plan.
+
+    ``creator_operation`` must name the actual creating/changing operation
+    (e.g. ``fusion_style:text_create``); it is never fabricated here.
+    """
+    provenance = build_provenance_record(
+        operation=operation,
+        creator_operation=creator_operation,
+        created_revision=created_revision,
+        operation_id=operation_id,
+        transaction_id=payload.get("transaction_id"),
+        recipe=payload.get("recipe"),
+        logical_object_ref=payload.get("logical_object_ref"),
+    )
+    payload["group"] = RESERVED_METADATA_GROUP
+    payload["metadata_writes"] = [
+        MetadataWrite(
+            name=PROVENANCE_ATTRIBUTE_NAME,
+            value=provenance_attribute_value(provenance),
+        ).model_dump(mode="json")
+    ]
+    payload["metadata_removals"] = []
+    payload["provenance"] = provenance.model_dump(mode="json", exclude_none=True)
     return payload
 
 

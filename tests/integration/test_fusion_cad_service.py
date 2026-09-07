@@ -1389,6 +1389,9 @@ async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_ap
             ]
         )
         cad_service.set_node_capabilities("desk-1", matrix)
+        body_ref = cad_service.ref_registry.issue(
+            document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+        ).ref
 
         # Execute rendered script directly inside desktop node submit/call
         async def run_rendered_production_script(
@@ -1425,7 +1428,7 @@ async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_ap
                 {
                     "node_id": "desk-1",
                     "operation": "set",
-                    "target": "ent_1",
+                    "target": body_ref,
                     "name": "tag",
                     "value": "v1",
                     "expected_revision": "rev_1",
@@ -1452,7 +1455,7 @@ async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_ap
                 {
                     "node_id": "desk-1",
                     "operation": "set",
-                    "target": "ent_1",
+                    "target": body_ref,
                     "name": "tag",
                     "value": "v1",
                     "expected_revision": "rev_1",
@@ -1467,7 +1470,7 @@ async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_ap
             {
                 "node_id": "desk-1",
                 "operation": "set",
-                "target": "ent_1",
+                "target": body_ref,
                 "name": "tag",
                 "value": "v1",
                 "expected_revision": "rev_2",
@@ -2221,6 +2224,9 @@ async def test_falsify_missing_required_fingerprint_groups_fail_closed(
 
     # Seed tracker at rev_1
     cad_service.revision_tracker.observe("doc_1", "seed-fp")
+    body_ref = cad_service.ref_registry.issue(
+        document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+    ).ref
 
     # Test each mandatory group being missing/corrupted in Fusion runtime
     for missing_group in (
@@ -2260,7 +2266,7 @@ async def test_falsify_missing_required_fingerprint_groups_fail_closed(
                     {
                         "node_id": "desk-1",
                         "operation": "set",
-                        "target": "ent_1",
+                        "target": body_ref,
                         "name": "tag",
                         "value": "v1",
                         "expected_revision": "rev_1",
@@ -2312,6 +2318,15 @@ async def test_falsify_wrong_or_absent_document_identity_fails_closed(
 
     cad_service.revision_tracker.observe("doc_1", "seed-fp")
     cad_service.revision_tracker.observe("doc_wrong", "seed-fp")
+    body_ref = cad_service.ref_registry.issue(
+        document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+    ).ref
+    wrong_doc_ref = cad_service.ref_registry.issue(
+        document_ref="doc_wrong",
+        kind="body",
+        name="Body1",
+        native_token="wrong_doc_body_token",
+    ).ref
 
     # Case A: Requested document_ref="doc_wrong" does not match runtime document "doc_1"
     with AdskFakeContext("doc_1", initial_volume=100.0):
@@ -2320,7 +2335,7 @@ async def test_falsify_wrong_or_absent_document_identity_fails_closed(
                 {
                     "node_id": "desk-1",
                     "operation": "set",
-                    "target": "ent_1",
+                    "target": wrong_doc_ref,
                     "name": "tag",
                     "value": "v1",
                     "expected_revision": "rev_1",
@@ -2347,7 +2362,7 @@ async def test_falsify_wrong_or_absent_document_identity_fails_closed(
                 {
                     "node_id": "desk-1",
                     "operation": "set",
-                    "target": "ent_1",
+                    "target": body_ref,
                     "name": "tag",
                     "value": "v1",
                     "expected_revision": "rev_1",
@@ -2371,7 +2386,7 @@ async def test_falsify_wrong_or_absent_document_identity_fails_closed(
                 {
                     "node_id": "desk-1",
                     "operation": "set",
-                    "target": "ent_1",
+                    "target": body_ref,
                     "name": "tag",
                     "value": "v1",
                     "expected_revision": "rev_1",
@@ -2959,6 +2974,9 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
     mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
 
     cad_service.revision_tracker.observe("doc_1", "seed-fp")
+    body_ref = cad_service.ref_registry.issue(
+        document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+    ).ref
 
     unreadable_cases = [
         "corrupt_transform",
@@ -3098,7 +3116,7 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
                     {
                         "node_id": "desk-1",
                         "operation": "set",
-                        "target": "ent_1",
+                        "target": body_ref,
                         "name": "tag",
                         "value": "v1",
                         "expected_revision": "rev_1",
@@ -3145,6 +3163,9 @@ async def test_falsify_sketch_geometry_movement_triggers_revision_conflict_in_re
 
         mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
         mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+        body_ref = cad_service.ref_registry.issue(
+            document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+        ).ref
 
         # 1. Snapshot read establishes initial baseline
         snap_res = await cad_service.execute(
@@ -3170,7 +3191,7 @@ async def test_falsify_sketch_geometry_movement_triggers_revision_conflict_in_re
                 {
                     "node_id": "desk-1",
                     "operation": "set",
-                    "target": "ent_1",
+                    "target": body_ref,
                     "name": "tag",
                     "value": "v1",
                     "expected_revision": "rev_1",
@@ -3302,6 +3323,9 @@ async def test_falsify_rendered_mutation_returns_real_fusion_post_apply_fingerpr
 
         mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
         mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
+        body_ref = cad_service.ref_registry.issue(
+            document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+        ).ref
 
         # Initial read
         snap_res = await cad_service.execute(
@@ -3319,7 +3343,7 @@ async def test_falsify_rendered_mutation_returns_real_fusion_post_apply_fingerpr
             {
                 "node_id": "desk-1",
                 "operation": "set",
-                "target": "ent_1",
+                "target": body_ref,
                 "name": "tag",
                 "value": "v1",
                 "expected_revision": "rev_1",
@@ -3346,7 +3370,7 @@ async def test_falsify_rendered_mutation_returns_real_fusion_post_apply_fingerpr
             {
                 "node_id": "desk-1",
                 "operation": "set",
-                "target": "ent_1",
+                "target": body_ref,
                 "name": "tag2",
                 "value": "v2",
                 "expected_revision": "rev_2",
@@ -3934,6 +3958,9 @@ async def test_falsify_rendered_face_edge_unreadable_attributes_or_tokens_fail_c
     mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
     mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
     cad_service.revision_tracker.observe("doc_1", "seed-fp")
+    body_ref = cad_service.ref_registry.issue(
+        document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+    ).ref
 
     unreadable_cases = [
         "face_attributes_none",
@@ -3983,7 +4010,7 @@ async def test_falsify_rendered_face_edge_unreadable_attributes_or_tokens_fail_c
                     {
                         "node_id": "desk-1",
                         "operation": "set",
-                        "target": "ent_1",
+                        "target": body_ref,
                         "name": "tag",
                         "value": "v1",
                         "expected_revision": "rev_1",
@@ -4033,6 +4060,9 @@ async def test_falsify_face_edge_and_sketch_geometry_topology_fail_closed(
     mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
     mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
     cad_service.revision_tracker.observe("doc_1", "seed-fp")
+    body_ref = cad_service.ref_registry.issue(
+        document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+    ).ref
 
     corrupt_cases = [
         "face_loops_none",
@@ -4072,7 +4102,7 @@ async def test_falsify_face_edge_and_sketch_geometry_topology_fail_closed(
                     {
                         "node_id": "desk-1",
                         "operation": "set",
-                        "target": "ent_1",
+                        "target": body_ref,
                         "name": "tag",
                         "value": "v1",
                         "expected_revision": "rev_1",
@@ -4122,6 +4152,9 @@ async def test_falsify_mandatory_attribute_collections_fail_closed(
     mock_desktop_service.submit = run_rendered_production_script  # type: ignore[assignment]
     mock_desktop_service.call = run_rendered_production_script  # type: ignore[assignment]
     cad_service.revision_tracker.observe("doc_1", "seed-fp")
+    body_ref = cad_service.ref_registry.issue(
+        document_ref="doc_1", kind="body", name="Body1", native_token="body_token_1"
+    ).ref
 
     missing_owner_collections = [
         "missing_doc_attributes",
@@ -4169,7 +4202,7 @@ async def test_falsify_mandatory_attribute_collections_fail_closed(
                     {
                         "node_id": "desk-1",
                         "operation": "set",
-                        "target": "ent_1",
+                        "target": body_ref,
                         "name": "tag",
                         "value": "v1",
                         "expected_revision": "rev_1",
@@ -6614,12 +6647,14 @@ async def test_geometry_and_provenance_use_one_mutation_command(fake_desktop):
     assert desktop.mutation_calls == 0
     assert desktop.read_calls == 1
 
+    body_ref = _register_body_ref(cad_service)
+
     # ONE command must apply the geometry change AND provenance + tag metadata
     res = await cad_service.execute(
         {
             "node_id": "desk-1",
             "operation": "tag",
-            "target": "ent_body_layout",
+            "target": body_ref,
             "tag_name": "layout",
             "tag_value": "schedule",
             "expected_revision": "rev_1",
@@ -6635,7 +6670,9 @@ async def test_geometry_and_provenance_use_one_mutation_command(fake_desktop):
     # Geometry changed inside that same single command
     assert fake_adsk.volume == 125.0
 
-    attrs = _document_attributes()
+    # Metadata + provenance are persisted on the exactly resolved entity owner;
+    # the document owner never receives them (no document fallback).
+    attrs = _body_attributes()
     assert attrs.get(("bridge.cad/v1", "tag:layout")) == "schedule"
     provenance_value = attrs.get(("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME))
     assert provenance_value
@@ -6643,8 +6680,13 @@ async def test_geometry_and_provenance_use_one_mutation_command(fake_desktop):
     assert provenance.creator_tool == PROVENANCE_CREATOR_TOOL
     assert provenance.creator_operation == "fusion_metadata:tag"
     assert provenance.operation_id.startswith("op_")
-    assert provenance.created_revision == "rev_1"
+    # created_revision truthfully records the revision the changed entity
+    # exists in (the post-mutation revision), not the pre-mutation expected one
+    assert provenance.created_revision == "rev_2"
     assert [(t.name, t.value) for t in provenance.tags] == [("layout", "schedule")]
+    document_attrs = _document_attributes()
+    assert ("bridge.cad/v1", "tag:layout") not in document_attrs
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in document_attrs
 
     # Result echoes the transactional provenance and advances the revision
     assert res_data.get("applied") is True
@@ -6775,7 +6817,8 @@ async def test_metadata_get_query_provenance_roundtrip_readonly(fake_desktop):
     prov = data_prov.get("provenance")
     assert prov["creator_operation"] == "fusion_metadata:tag"
     assert prov["transaction_id"] == "tx_layout_9"
-    assert prov["created_revision"] == "rev_1"
+    # Truthful post-mutation revision (the tag mutation advanced rev_1 -> rev_2)
+    assert prov["created_revision"] == "rev_2"
     assert desktop.mutation_calls == mutations_so_far
 
     # Foreign groups are rejected for reads too: Bridge reads only its namespace
@@ -6924,3 +6967,436 @@ async def test_role_tag_provenance_selectors_read_persisted_model_attributes(
         {"created_by": {"tool": PROVENANCE_CREATOR_TOOL}}, candidates
     ).refs == (body_ref,)
     assert engine.query({"tag": {"name": "missing"}}, candidates).matched_count == 0
+
+
+# =========================================================================
+# Task 10 Codex-blocker repair regressions (integration, rendered scripts)
+# =========================================================================
+
+import re as _re
+
+from app.fusion_cad.metadata import (
+    apply_geometry_provenance_plan,
+    apply_metadata_mutation_plan,
+)
+from app.fusion_cad.scripts import FusionCadScriptBundle
+
+
+def _body_attr_count():
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    design = doc.products.itemByClass("adsk::fusion::Design")
+    body = design.rootComponent.bRepBodies.item(0)
+    return body.attributes.count
+
+
+def _exec_rendered_mutate(script: str, mutation_primitive=None):
+    scope = {"__name__": "__main__"}
+    if mutation_primitive is not None:
+        scope["_mutation_primitive"] = mutation_primitive
+    exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+    return scope["_output"]
+
+
+@pytest.mark.asyncio
+async def test_metadata_unknown_stale_or_foreign_target_fails_closed_before_dispatch(
+    fake_desktop,
+):
+    """Blocker 2: unknown/stale/cross-document opaque metadata targets fail
+    closed BEFORE dispatch; metadata is never silently applied to the document
+    owner while echoing an entity ref."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    assert desktop.mutation_calls == 0
+    assert desktop.read_calls == 1
+    baseline_doc_attrs = _document_attributes()
+    baseline_body_attrs = _body_attributes()
+
+    # 1. Unknown opaque ref -> REF_STALE, zero dispatches, zero writes
+    with pytest.raises(FusionCadError) as exc_unknown:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": "ent_never_registered",
+                "name": "finish",
+                "value": "anodized",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    assert exc_unknown.value.code == ErrorCode.REF_STALE
+    assert desktop.mutation_calls == 0
+    assert desktop.read_calls == 1
+    assert _document_attributes() == baseline_doc_attrs
+    assert _body_attributes() == baseline_body_attrs
+
+    # 2. Cross-document opaque ref -> WRONG_DOCUMENT (never document fallback)
+    foreign_ref = cad_service.ref_registry.issue(
+        document_ref="doc_foreign",
+        kind="body",
+        name="Body1",
+        native_token="foreign_body_token",
+    ).ref
+    with pytest.raises(FusionCadError) as exc_foreign:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": foreign_ref,
+                "name": "finish",
+                "value": "anodized",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    assert exc_foreign.value.code == ErrorCode.WRONG_DOCUMENT
+    assert desktop.mutation_calls == 0
+    assert _body_attributes() == baseline_body_attrs
+
+    # 3. Reads fail closed too: no silent document-scoped fallback for reads
+    with pytest.raises(FusionCadError) as exc_read:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "get",
+                "target": "ent_never_registered",
+            },
+            group="metadata",
+        )
+    assert exc_read.value.code == ErrorCode.REF_STALE
+    assert desktop.mutation_calls == 0
+    assert desktop.read_calls == 1
+
+    # 4. The registered ref still resolves exactly and applies normally
+    res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "tag",
+            "target": body_ref,
+            "tag_name": "layout",
+            "tag_value": "schedule",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    res_data = res.data if isinstance(res, CadResult) else res["data"]
+    assert res_data.get("applied") is True
+    assert _body_attributes().get(("bridge.cad/v1", "tag:layout")) == "schedule"
+
+
+@pytest.mark.asyncio
+async def test_metadata_mutation_compensates_partial_metadata_after_late_failure(
+    fake_desktop,
+):
+    """Blocker 1: a failure AFTER attribute writes (post-apply fingerprint
+    collection explodes) must restore the exact pre-mutation metadata state and
+    is never externally reported as success. Geometry has no verified undo
+    primitive, so the geometry change of the same failed command is retained —
+    the command still fails closed and is never reported as applied."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    desktop.mutation_primitive = lambda payload: setattr(
+        fake_adsk, "volume", float(fake_adsk.volume) + 25.0
+    )
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+
+    class _ExplodesOnSecondFingerprint:
+        """First fingerprint read (pre-guard) succeeds; the post-apply read explodes."""
+
+        def __init__(self):
+            self._reads = 0
+
+        def __bool__(self):
+            self._reads += 1
+            if self._reads >= 2:
+                raise RuntimeError("post-apply fingerprint collection exploded")
+            return False
+
+    doc.isModified = _ExplodesOnSecondFingerprint()
+
+    baseline_body_attrs = _body_attributes()
+    baseline_body_attr_count = _body_attr_count()
+
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": body_ref,
+                "name": "finish",
+                "value": "anodized",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    # Never externally reported as success
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert desktop.mutation_calls == 1
+    # Partial metadata is compensated: the owner is exactly back to baseline
+    assert _body_attributes() == baseline_body_attrs
+    assert _body_attr_count() == baseline_body_attr_count
+    # Document owner never received the metadata either
+    assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _document_attributes()
+
+
+@pytest.mark.asyncio
+async def test_metadata_mid_plan_write_failure_leaves_no_partial_metadata(
+    fake_desktop,
+):
+    """Blocker 1: a mid-plan attribute-write failure must compensate the writes
+    already applied so zero partial metadata remains and the command fails."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    import adsk.core
+
+    doc = adsk.core.Application.get().activeDocument
+    attrs_cls = type(doc.attributes)
+    original_add = attrs_cls.add
+
+    def add_exploding_on_provenance(self, group_name, name, value):
+        if name == PROVENANCE_ATTRIBUTE_NAME:
+            raise RuntimeError("simulated mid-plan attribute write failure")
+        return original_add(self, group_name, name, value)
+
+    attrs_cls.add = add_exploding_on_provenance
+    try:
+        baseline_body_attrs = _body_attributes()
+        baseline_body_attr_count = _body_attr_count()
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+        assert exc.value.code == ErrorCode.FUSION_API_ERROR
+        assert _body_attributes() == baseline_body_attrs
+        assert _body_attr_count() == baseline_body_attr_count
+        assert desktop.mutation_calls == 1
+    finally:
+        attrs_cls.add = original_add
+
+
+@pytest.mark.asyncio
+async def test_metadata_geometry_hook_failure_applies_no_metadata(fake_desktop):
+    """Blocker 1: the geometry primitive runs BEFORE any metadata write, so a
+    geometry failure leaves zero Bridge metadata behind."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+
+    def _geometry_explodes(payload):
+        raise RuntimeError("geometry primitive exploded")
+
+    desktop.mutation_primitive = _geometry_explodes
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    baseline_body_attrs = _body_attributes()
+    baseline_doc_attrs = _document_attributes()
+
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "set",
+                "target": body_ref,
+                "name": "finish",
+                "value": "anodized",
+                "expected_revision": "rev_1",
+            },
+            group="metadata",
+        )
+    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert fake_adsk.volume == 100.0
+    assert _body_attributes() == baseline_body_attrs
+    assert _document_attributes() == baseline_doc_attrs
+
+
+@pytest.mark.asyncio
+async def test_metadata_provenance_uses_durable_command_operation_id(fake_desktop):
+    """Blocker 3: the persisted provenance record and the desktop operation
+    journal share the SAME durable command operation_id, and created_revision
+    truthfully records the post-mutation revision."""
+    desktop = fake_desktop["desktop"]
+    captured = {}
+    inner_submit = desktop.submit
+
+    async def capturing_submit(node_id, tool_name, arguments, journal=None):
+        captured["journal"] = journal
+        return await inner_submit(node_id, tool_name, arguments, journal=journal)
+
+    desktop.submit = capturing_submit
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    # recipe / logical_object_ref travel at the domain plan layer (supplied by
+    # later recipe-driven flows, not by the strict public metadata request
+    # schema); the public command still proves the durable operation id share.
+    payload_plan_probe = {
+        "operation": "tag",
+        "tag_name": "layout",
+        "tag_value": "schedule",
+        "expected_revision": "rev_1",
+        "recipe": "name_plate/v1",
+        "logical_object_ref": "text_schedule_01",
+    }
+    apply_metadata_mutation_plan(
+        payload_plan_probe,
+        operation_id="op_probe_recipe_1",
+        created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+    )
+    assert payload_plan_probe["provenance"]["recipe"] == "name_plate/v1"
+    assert payload_plan_probe["provenance"]["logical_object_ref"] == "text_schedule_01"
+
+    res = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "tag",
+            "target": body_ref,
+            "tag_name": "layout",
+            "tag_value": "schedule",
+            "expected_revision": "rev_1",
+        },
+        group="metadata",
+    )
+    res_data = res.data if isinstance(res, CadResult) else res["data"]
+    assert res_data.get("applied") is True
+
+    journal = captured.get("journal")
+    assert isinstance(journal, dict)
+    persisted = _body_attributes()[
+        (RESERVED_METADATA_GROUP, PROVENANCE_ATTRIBUTE_NAME)
+    ]
+    provenance = parse_provenance_attribute(persisted)
+    # Same durable command operation id in journal and provenance
+    assert journal.get("operation_id") == provenance.operation_id
+    assert _re.fullmatch(r"op_[A-Za-z0-9._-]+", provenance.operation_id)
+    # Truthful post-mutation revision (the mutation advanced rev_1 -> rev_2)
+    assert provenance.created_revision == "rev_2"
+    assert provenance.created_revision != "rev_1"
+
+
+@pytest.mark.asyncio
+async def test_geometry_mutation_script_applies_same_command_provenance_plan(
+    fake_desktop,
+):
+    """Blocker 4: the common safe path — a non-metadata mutate command carries
+    the provenance payload and applies it in the SAME script execution that
+    changes geometry, with no second command. Later Task 11 geometry features
+    reuse exactly this path."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    desktop.mutation_primitive = lambda payload: setattr(
+        fake_adsk, "volume", float(fake_adsk.volume) + 10.0
+    )
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    tracker = cad_service.revision_tracker
+    rec = tracker.current("doc_1")
+    assert rec.revision == "rev_1"
+
+    payload = {
+        "operation": "show",
+        "target": {
+            "ref": body_ref,
+            "kind": "body",
+            "name": "Body1",
+            "native_token": "body_token_1",
+            "component_path": [],
+        },
+        "expected_revision": rec.revision,
+        "expected_fingerprint": rec.fingerprint,
+        "document_ref": "doc_1",
+    }
+    apply_geometry_provenance_plan(
+        payload,
+        operation="show",
+        creator_operation="fusion_style:show",
+        operation_id="op_geo_command_1",
+        created_revision=tracker.next_revision("doc_1"),
+    )
+    script = FusionCadScriptBundle().build("mutate", payload)
+    output = _exec_rendered_mutate(script, desktop.mutation_primitive)
+
+    # The same single execution applied the geometry change AND the provenance
+    assert output["status"] == "succeeded"
+    assert output["data"]["applied"] is True
+    assert output["data"]["provenance"]["operation_id"] == "op_geo_command_1"
+    assert fake_adsk.volume == 110.0
+    persisted = _body_attributes()[
+        (RESERVED_METADATA_GROUP, PROVENANCE_ATTRIBUTE_NAME)
+    ]
+    provenance = parse_provenance_attribute(persisted)
+    assert provenance.operation_id == "op_geo_command_1"
+    assert provenance.creator_operation == "fusion_style:show"
+    assert provenance.created_revision == "rev_2"
+    # No separate metadata mutation command was ever dispatched
+    assert desktop.mutation_calls == 0
+    assert desktop.read_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mutate_script_never_falls_back_to_document_owner_for_unresolved_target(
+    fake_desktop,
+):
+    """Blocker 2 (script-side defense in depth): a raw unresolved entity ref and
+    a hint without a native token must never be mapped onto the document owner,
+    even when the rendered script is executed directly."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    tracker = cad_service.revision_tracker
+    rec = tracker.current("doc_1")
+    bundle = FusionCadScriptBundle()
+
+    for bad_target in ("ent_unregistered_raw", {"ref": "ent_hint_without_token"}):
+        payload = {
+            "operation": "set",
+            "target": bad_target,
+            "name": "finish",
+            "value": "anodized",
+            "expected_revision": rec.revision,
+            "expected_fingerprint": rec.fingerprint,
+            "document_ref": "doc_1",
+        }
+        apply_metadata_mutation_plan(
+            payload,
+            operation_id="op_script_defense_1",
+            created_revision=tracker.next_revision("doc_1"),
+        )
+        script = bundle.build("mutate", payload)
+        output = _exec_rendered_mutate(script)
+
+        assert output["status"] == "failed", f"target {bad_target!r} must fail closed"
+        assert output["error"]["code"] == "REF_STALE"
+        # The document owner never received metadata while echoing the entity ref
+        assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _document_attributes()
+        assert ("bridge.cad/v1", "finish") not in _document_attributes()

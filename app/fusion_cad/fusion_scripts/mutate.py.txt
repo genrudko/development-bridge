@@ -95,41 +95,60 @@ def run():
         return records
 
     def _resolve_owner(doc, design, target):
-        """Resolve the metadata owner: exact native-token targets only, else the document."""
+        """Resolve the metadata owner EXACTLY; fail closed, never document fallback.
+
+        - No target at all: explicit document-scope metadata (document owner).
+        - Mapping target with a native token: exact entity-token resolution;
+          ambiguous or stale resolutions fail closed (REF_AMBIGUOUS/REF_STALE).
+        - Mapping target WITHOUT a native token and any raw string ref: fail
+          closed with REF_STALE. An unresolvable entity target is never
+          silently mapped onto the document owner, so document metadata is
+          never written while echoing an entity ref.
+        """
+        if target is None:
+            return doc, None
         if isinstance(target, dict):
             token = target.get("native_token")
-            if token:
-                if not hasattr(design, "findEntityByToken"):
-                    raise FusionScriptError(
-                        "CAPABILITY_UNAVAILABLE",
-                        "Entity-token resolver unavailable; cannot resolve metadata target exactly",
-                        details={"ref": target.get("ref")},
-                    )
-                try:
-                    resolved = design.findEntityByToken(token)
-                except Exception:
-                    resolved = None
-                matches = []
-                if resolved is not None:
-                    if hasattr(resolved, "count"):
-                        matches = [resolved.item(i) for i in range(resolved.count)]
-                    else:
-                        matches = [resolved]
-                if len(matches) == 1:
-                    return matches[0], target.get("ref")
-                if len(matches) > 1:
-                    raise FusionScriptError(
-                        "REF_AMBIGUOUS",
-                        "Metadata target resolves to multiple current entities; refusing to pick one",
-                        details={"ref": target.get("ref")},
-                    )
+            if not token:
                 raise FusionScriptError(
                     "REF_STALE",
-                    "Metadata target no longer resolves to a current entity",
+                    "Metadata target hint lacks a native token and cannot be resolved exactly; refusing document fallback",
                     details={"ref": target.get("ref")},
                 )
-            return doc, target.get("ref")
-        return doc, None
+            if not hasattr(design, "findEntityByToken"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Entity-token resolver unavailable; cannot resolve metadata target exactly",
+                    details={"ref": target.get("ref")},
+                )
+            try:
+                resolved = design.findEntityByToken(token)
+            except Exception:
+                resolved = None
+            matches = []
+            if resolved is not None:
+                if hasattr(resolved, "count"):
+                    matches = [resolved.item(i) for i in range(resolved.count)]
+                else:
+                    matches = [resolved]
+            if len(matches) == 1:
+                return matches[0], target.get("ref")
+            if len(matches) > 1:
+                raise FusionScriptError(
+                    "REF_AMBIGUOUS",
+                    "Metadata target resolves to multiple current entities; refusing to pick one",
+                    details={"ref": target.get("ref")},
+                )
+            raise FusionScriptError(
+                "REF_STALE",
+                "Metadata target no longer resolves to a current entity",
+                details={"ref": target.get("ref")},
+            )
+        raise FusionScriptError(
+            "REF_STALE",
+            "Metadata target is an unresolved opaque entity ref; unknown or stale refs fail closed and never fall back to the document owner",
+            details={"target_type": type(target).__name__},
+        )
 
     def _public_target(target, target_ref):
         if target_ref:
@@ -137,6 +156,199 @@ def run():
         if isinstance(target, str):
             return target
         return None
+
+    def _reserved_records(owner):
+        """Snapshot of the owner's reserved-group attributes as (name, value) pairs."""
+        _attrs, items = _owner_attributes(owner)
+        records = []
+        for a in items:
+            if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                continue
+            records.append(
+                (
+                    str(getattr(a, "name", "") or ""),
+                    str(getattr(a, "value", "") or ""),
+                )
+            )
+        return records
+
+    def _preflight_metadata_plan(owner, writes, removals):
+        """Verify every capability the metadata plan needs BEFORE any mutation.
+
+        Fails closed (CAPABILITY_UNAVAILABLE) when attribute writes/removals or
+        the compensation primitives (Attribute.deleteMe / Attributes.add) are
+        unavailable, so a plan that could not be rolled back never starts
+        applying. Read-only: applies nothing.
+        """
+        attrs, items = _owner_attributes(owner)
+        if writes and not hasattr(attrs, "add"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Attribute collection does not support writes; failing closed before any mutation",
+                details={"operation": op},
+            )
+        removal_requests = []
+        for removal in removals:
+            if not isinstance(removal, dict):
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata removal plan contains a non-object entry",
+                    details={"operation": op},
+                )
+            rm_name = str(removal.get("name", "") or "")
+            if not rm_name:
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata removal plan contains an empty attribute name",
+                    details={"operation": op},
+                )
+            removal_requests.append((rm_name, removal.get("value")))
+        for a in items:
+            if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                continue
+            nm = str(getattr(a, "name", "") or "")
+            val = str(getattr(a, "value", "") or "")
+            for rm_name, expected_val in removal_requests:
+                if nm != rm_name:
+                    continue
+                if expected_val is not None and val != str(expected_val):
+                    continue
+                if not hasattr(a, "deleteMe"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Attribute does not support deleteMe; failing closed instead of leaving stale Bridge metadata",
+                        details={"operation": op},
+                    )
+
+    def _rollback_metadata(owner, undo):
+        """Restore the exact pre-mutation reserved-namespace state (all-or-nothing).
+
+        Uses ONLY the verified primitives this script already uses for metadata
+        (Attribute.deleteMe and Attributes.add); no transaction/undo APIs are
+        invented. Raises when the restored state does not match the pre-mutation
+        snapshot so a partially applied plan can never be reported as success.
+        """
+        if undo is None:
+            return
+        added_attrs, removed_records, snapshot = undo
+        for attr in reversed(added_attrs):
+            if not hasattr(attr, "deleteMe"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Added attribute does not support deleteMe; metadata compensation is unavailable and partial metadata may remain",
+                    details={"operation": op, "compensated": False},
+                )
+            attr.deleteMe()
+        restore_attrs = getattr(owner, "attributes", None)
+        for name, value in reversed(removed_records):
+            if restore_attrs is None or not hasattr(restore_attrs, "add"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Attribute collection does not support writes; metadata compensation is unavailable and partial metadata may remain",
+                    details={"operation": op, "compensated": False},
+                )
+            restore_attrs.add(_RESERVED_GROUP, name, value)
+        current = sorted(_reserved_records(owner))
+        if current != sorted(snapshot):
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Metadata compensation did not restore the pre-mutation attribute state; partial metadata may remain",
+                details={"operation": op, "compensated": False},
+            )
+
+    def _apply_metadata_plan(owner, writes, removals):
+        """Apply the plan with an undo log; any failure compensates fully.
+
+        Returns (applied_writes, applied_removals, undo). On any application
+        failure the reserved-namespace state is restored to the exact
+        pre-mutation snapshot before the failure is re-raised, so a failed
+        command never leaves partial metadata/provenance behind.
+        """
+        snapshot = _reserved_records(owner)
+        undo = ([], [], snapshot)
+        added_attrs, removed_records, _snap = undo
+        applied_writes = []
+        applied_removals = []
+        try:
+            for removal in removals:
+                if not isinstance(removal, dict):
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Metadata removal plan contains a non-object entry",
+                        details={"operation": op},
+                    )
+                rm_name = str(removal.get("name", "") or "")
+                if not rm_name:
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Metadata removal plan contains an empty attribute name",
+                        details={"operation": op},
+                    )
+                expected_val = removal.get("value")
+                _attrs, items = _owner_attributes(owner)
+                for a in items:
+                    if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                        continue
+                    if str(getattr(a, "name", "") or "") != rm_name:
+                        continue
+                    if expected_val is not None and str(
+                        getattr(a, "value", "") or ""
+                    ) != str(expected_val):
+                        continue
+                    if not hasattr(a, "deleteMe"):
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "Attribute does not support deleteMe; failing closed instead of leaving stale Bridge metadata",
+                            details={"operation": op},
+                        )
+                    removed_value = str(getattr(a, "value", "") or "")
+                    a.deleteMe()
+                    removed_records.append((rm_name, removed_value))
+                    applied_removals.append(
+                        {
+                            "name": rm_name,
+                            "value": str(expected_val)
+                            if expected_val is not None
+                            else None,
+                        }
+                    )
+
+            for write in writes:
+                if not isinstance(write, dict):
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Metadata write plan contains a non-object entry",
+                        details={"operation": op},
+                    )
+                wr_name = str(write.get("name", "") or "")
+                wr_value = write.get("value")
+                if not wr_name or wr_value is None:
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Metadata write plan contains an empty attribute name or missing value",
+                        details={"operation": op},
+                    )
+                attrs, _items = _owner_attributes(owner)
+                if not hasattr(attrs, "add"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Attribute collection does not support writes; failing closed",
+                        details={"operation": op},
+                    )
+                new_attr = attrs.add(_RESERVED_GROUP, wr_name, str(wr_value))
+                added_attrs.append(new_attr)
+                applied_writes.append({"name": wr_name, "value": str(wr_value)})
+        except FusionScriptError:
+            _rollback_metadata(owner, undo)
+            raise
+        except Exception:
+            _rollback_metadata(owner, undo)
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Metadata plan application failed; compensated back to the exact pre-mutation metadata state",
+                details={"operation": op, "compensated": True},
+            )
+        return applied_writes, applied_removals, undo
 
     if op in _MUTATION_OPS:
         # Authoritative Fusion-side freshness guard runs in this SAME command
@@ -172,94 +384,50 @@ def run():
         _app, doc, design, safe_doc = _open_runtime()
         owner, target_ref = _resolve_owner(doc, design, PAYLOAD.get("target"))
 
-        applied_writes = []
-        applied_removals = []
+        # Preflight verifies every capability the plan needs (including the
+        # compensation primitives) BEFORE anything is mutated.
+        _preflight_metadata_plan(owner, writes, removals)
 
-        for removal in removals:
-            if not isinstance(removal, dict):
-                raise FusionScriptError(
-                    "INVALID_ARGUMENT",
-                    "Metadata removal plan contains a non-object entry",
-                    details={"operation": op},
-                )
-            rm_name = str(removal.get("name", "") or "")
-            if not rm_name:
-                raise FusionScriptError(
-                    "INVALID_ARGUMENT",
-                    "Metadata removal plan contains an empty attribute name",
-                    details={"operation": op},
-                )
-            expected_val = removal.get("value")
-            attrs, items = _owner_attributes(owner)
-            for a in items:
-                if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
-                    continue
-                if str(getattr(a, "name", "") or "") != rm_name:
-                    continue
-                if expected_val is not None and str(
-                    getattr(a, "value", "") or ""
-                ) != str(expected_val):
-                    continue
-                if not hasattr(a, "deleteMe"):
-                    raise FusionScriptError(
-                        "CAPABILITY_UNAVAILABLE",
-                        "Attribute does not support deleteMe; failing closed instead of leaving stale Bridge metadata",
-                        details={"operation": op},
-                    )
-                a.deleteMe()
-                applied_removals.append(
-                    {
-                        "name": rm_name,
-                        "value": str(expected_val) if expected_val is not None else None,
-                    }
-                )
+        # Geometry primitive (when present) runs BEFORE any metadata write so a
+        # geometry failure cannot leave partial Bridge metadata behind. The
+        # geometry change itself has no verified undo primitive; every failure
+        # after it still fails the whole command closed.
+        primitive_hook = globals().get("_mutation_primitive")
+        if callable(primitive_hook):
+            primitive_hook(PAYLOAD)
 
-        for write in writes:
-            if not isinstance(write, dict):
-                raise FusionScriptError(
-                    "INVALID_ARGUMENT",
-                    "Metadata write plan contains a non-object entry",
-                    details={"operation": op},
-                )
-            wr_name = str(write.get("name", "") or "")
-            wr_value = write.get("value")
-            if not wr_name or wr_value is None:
-                raise FusionScriptError(
-                    "INVALID_ARGUMENT",
-                    "Metadata write plan contains an empty attribute name or missing value",
-                    details={"operation": op},
-                )
-            attrs, _items = _owner_attributes(owner)
-            if not hasattr(attrs, "add"):
-                raise FusionScriptError(
-                    "CAPABILITY_UNAVAILABLE",
-                    "Attribute collection does not support writes; failing closed",
-                    details={"operation": op},
-                )
-            attrs.add(_RESERVED_GROUP, wr_name, str(wr_value))
-            applied_writes.append({"name": wr_name, "value": str(wr_value)})
-
+        applied_writes, applied_removals, undo = _apply_metadata_plan(
+            owner, writes, removals
+        )
         if not applied_writes:
+            _rollback_metadata(owner, undo)
             raise FusionScriptError(
                 "INVALID_ARGUMENT",
                 "Metadata mutation plan produced no attribute writes; provenance cannot be recorded transactionally",
                 details={"operation": op},
             )
 
-        # Geometry primitive (when present) is part of THIS same command execution
-        primitive_hook = globals().get("_mutation_primitive")
-        if callable(primitive_hook):
-            primitive_hook(PAYLOAD)
-
-        # Freshly collect real post-apply fingerprint of actual model state
-        post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+        # Freshly collect real post-apply fingerprint of actual model state. Any
+        # failure here is compensated so partial metadata is never left behind
+        # and the command is never externally reported as applied.
+        try:
+            post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+        except Exception:
+            _rollback_metadata(owner, undo)
+            raise
         if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
+            _rollback_metadata(owner, undo)
             return make_error(
                 "FINGERPRINT_FAILED",
                 "Authoritative post-apply model fingerprint collection failed or returned empty",
-                details={"document_ref": post_doc_ref or doc_ref, "applied": False},
+                details={
+                    "document_ref": post_doc_ref or doc_ref,
+                    "applied": False,
+                    "compensated": True,
+                },
             )
         if post_fp == current_fp:
+            _rollback_metadata(owner, undo)
             return make_error(
                 "MUTATION_FAILED",
                 "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
@@ -268,6 +436,7 @@ def run():
                     "initial_fingerprint": current_fp,
                     "post_fingerprint": post_fp,
                     "applied": False,
+                    "compensated": True,
                 },
             )
 
@@ -422,8 +591,13 @@ def run():
             document=_doc_state(safe_doc, doc),
         )
 
-    # Fallback for other mutate-group operations (style/text, Task 11): keep the
-    # authoritative guard + primitive + post-fingerprint structure unchanged.
+    # Fallback for other mutate-group operations (geometry/style mutations, to be
+    # owned by later tasks): the same authoritative guard + geometry primitive +
+    # one-command metadata plan structure. When the Bridge attaches a metadata
+    # plan, THIS same script execution applies it right after the geometry
+    # primitive — provenance travels with the geometry change in one command,
+    # with identical preflight/compensation/post-fingerprint atomicity. Without
+    # a plan nothing metadata-related is touched.
     expected_fp = PAYLOAD.get("expected_fingerprint")
     current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
     if expected_fp is None or expected_fp != current_fp:
@@ -441,18 +615,52 @@ def run():
 
     _app, doc, design, safe_doc = _open_runtime()
 
+    plan_writes = PAYLOAD.get("metadata_writes")
+    plan_removals = PAYLOAD.get("metadata_removals")
+    has_plan = isinstance(plan_writes, list) and isinstance(plan_removals, list)
+    plan_owner = None
+    plan_undo = None
+
+    if has_plan:
+        plan_owner, target_ref = _resolve_owner(
+            doc, design, PAYLOAD.get("target")
+        )
+        _preflight_metadata_plan(plan_owner, plan_writes, plan_removals)
+
     primitive_hook = globals().get("_mutation_primitive")
     if callable(primitive_hook):
         primitive_hook(PAYLOAD)
 
-    post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+    if has_plan:
+        applied_writes, applied_removals, plan_undo = _apply_metadata_plan(
+            plan_owner, plan_writes, plan_removals
+        )
+        if not applied_writes:
+            _rollback_metadata(plan_owner, plan_undo)
+            raise FusionScriptError(
+                "INVALID_ARGUMENT",
+                "Metadata plan produced no attribute writes; provenance cannot be recorded transactionally",
+                details={"operation": op},
+            )
+
+    try:
+        post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+    except Exception:
+        _rollback_metadata(plan_owner, plan_undo)
+        raise
     if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
+        _rollback_metadata(plan_owner, plan_undo)
         return make_error(
             "FINGERPRINT_FAILED",
             "Authoritative post-apply model fingerprint collection failed or returned empty",
-            details={"document_ref": post_doc_ref or doc_ref, "applied": False},
+            details={
+                "document_ref": post_doc_ref or doc_ref,
+                "applied": False,
+                "compensated": True,
+            },
         )
     if post_fp == current_fp:
+        _rollback_metadata(plan_owner, plan_undo)
         return make_error(
             "MUTATION_FAILED",
             "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
@@ -461,16 +669,22 @@ def run():
                 "initial_fingerprint": current_fp,
                 "post_fingerprint": post_fp,
                 "applied": False,
+                "compensated": True,
             },
         )
 
+    result_data = {
+        "operation": op,
+        "applied": True,
+        "fingerprint": post_fp,
+        "document_ref": post_doc_ref or doc_ref,
+    }
+    if has_plan:
+        result_data["attributes"] = applied_writes
+        result_data["removed"] = applied_removals
+        result_data["provenance"] = PAYLOAD.get("provenance")
     return make_result(
-        data={
-            "operation": op,
-            "applied": True,
-            "fingerprint": post_fp,
-            "document_ref": post_doc_ref or doc_ref,
-        },
+        data=result_data,
         summary=f"Executed mutate:{op}",
         document=_doc_state(safe_doc, doc),
         changed_refs=[PAYLOAD.get("target")] if PAYLOAD.get("target") else [],

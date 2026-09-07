@@ -52,7 +52,7 @@ def test_foreign_attribute_groups_are_rejected_for_reads_and_writes(foreign_grou
 def test_provenance_record_contains_design_required_fields():
     record = build_provenance_record(
         operation="tag",
-        expected_revision="rev_4",
+        created_revision="rev_5",
         transaction_id="tx_layout_1",
         tag_name="layout",
         tag_value="schedule",
@@ -65,15 +65,17 @@ def test_provenance_record_contains_design_required_fields():
     assert record.transaction_id == "tx_layout_1"
     assert record.recipe == "name_plate/v1"
     assert record.logical_object_ref == "text_schedule_01"
-    # created_revision records the revision the mutation was applied against
-    assert record.created_revision == "rev_4"
+    # created_revision records the revision in which the created/changed
+    # entity exists (the truthful post-mutation revision), never the
+    # pre-mutation expected revision
+    assert record.created_revision == "rev_5"
     assert [(t.name, t.value) for t in record.tags] == [("layout", "schedule")]
 
 
 def test_provenance_record_accepts_explicit_operation_id():
     record = build_provenance_record(
         operation="set",
-        expected_revision="rev_2",
+        created_revision="rev_3",
         operation_id="op_explicit_1",
     )
     assert record.operation_id == "op_explicit_1"
@@ -82,7 +84,7 @@ def test_provenance_record_accepts_explicit_operation_id():
 def test_provenance_attribute_value_is_canonical_json_and_roundtrips():
     record = build_provenance_record(
         operation="set_role",
-        expected_revision="rev_7",
+        created_revision="rev_8",
         operation_id="op_role_1",
         role="mounting_bracket",
     )
@@ -124,7 +126,8 @@ def test_mutation_plan_always_includes_provenance_write():
             "name": "finish",
             "value": "anodized",
             "expected_revision": "rev_3",
-        }
+        },
+        created_revision="rev_4",
     )
     names = [w.name for w in plan.writes]
     assert "finish" in names
@@ -132,7 +135,8 @@ def test_mutation_plan_always_includes_provenance_write():
     provenance_write = next(w for w in plan.writes if w.name == PROVENANCE_ATTRIBUTE_NAME)
     assert parse_provenance_attribute(provenance_write.value) == plan.provenance
     assert plan.provenance.creator_operation == "fusion_metadata:set"
-    assert plan.provenance.created_revision == "rev_3"
+    # Truthful post-mutation revision, distinct from expected_revision rev_3
+    assert plan.provenance.created_revision == "rev_4"
     assert plan.removals == ()
 
 
@@ -143,7 +147,8 @@ def test_mutation_plan_tag_untag_set_role_clear_role_and_remove():
             "tag_name": "layout",
             "tag_value": "schedule",
             "expected_revision": "rev_1",
-        }
+        },
+        created_revision="rev_2",
     )
     assert [(w.name, w.value) for w in tag_plan.writes if w.name != PROVENANCE_ATTRIBUTE_NAME] == [
         (f"{TAG_ATTRIBUTE_PREFIX}layout", "schedule")
@@ -155,7 +160,8 @@ def test_mutation_plan_tag_untag_set_role_clear_role_and_remove():
             "operation": "untag",
             "tag_name": "layout",
             "expected_revision": "rev_2",
-        }
+        },
+        created_revision="rev_3",
     )
     assert [r.name for r in untag_plan.removals] == [f"{TAG_ATTRIBUTE_PREFIX}layout"]
     assert untag_plan.writes[-1].name == PROVENANCE_ATTRIBUTE_NAME
@@ -165,7 +171,8 @@ def test_mutation_plan_tag_untag_set_role_clear_role_and_remove():
             "operation": "set_role",
             "role": "mounting_bracket",
             "expected_revision": "rev_3",
-        }
+        },
+        created_revision="rev_4",
     )
     assert [(w.name, w.value) for w in role_plan.writes if w.name != PROVENANCE_ATTRIBUTE_NAME] == [
         (ROLE_ATTRIBUTE_NAME, "mounting_bracket")
@@ -178,14 +185,16 @@ def test_mutation_plan_tag_untag_set_role_clear_role_and_remove():
             "operation": "clear_role",
             "role": "decorative_text",
             "expected_revision": "rev_4",
-        }
+        },
+        created_revision="rev_5",
     )
     assert [(r.name, r.value) for r in clear_filtered.removals] == [
         (ROLE_ATTRIBUTE_NAME, "decorative_text")
     ]
 
     clear_any = build_metadata_mutation_plan(
-        {"operation": "clear_role", "expected_revision": "rev_5"}
+        {"operation": "clear_role", "expected_revision": "rev_5"},
+        created_revision="rev_6",
     )
     assert [(r.name, r.value) for r in clear_any.removals] == [(ROLE_ATTRIBUTE_NAME, None)]
 
@@ -194,7 +203,8 @@ def test_mutation_plan_tag_untag_set_role_clear_role_and_remove():
             "operation": "remove",
             "name": "finish",
             "expected_revision": "rev_6",
-        }
+        },
+        created_revision="rev_7",
     )
     assert [r.name for r in remove_plan.removals] == ["finish"]
     assert remove_plan.writes[-1].name == PROVENANCE_ATTRIBUTE_NAME
@@ -241,7 +251,7 @@ def _persisted_attributes_entity() -> dict:
     """Entity carrying ONLY persisted model attribute records (no transient fields)."""
     provenance = build_provenance_record(
         operation="tag",
-        expected_revision="rev_2",
+        created_revision="rev_2",
         operation_id="op_prov_1",
         transaction_id="tx_prov_1",
         tag_name="layout",

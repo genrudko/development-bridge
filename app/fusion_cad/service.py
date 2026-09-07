@@ -429,12 +429,14 @@ class FusionCadService:
                 payload[key] = self._resolve_inspect_selector(raw, payload)
 
     def _inject_metadata_target_hint(self, payload: dict[str, Any]) -> None:
-        """Resolve a metadata target into an exact native hint when registered.
+        """Resolve a metadata target into an exact native hint, failing closed.
 
         Registered opaque refs become {ref, kind, native_token, ...} hints bound
-        to the effective document context. Unregistered refs pass through so the
-        script falls back to the document owner (metadata applied at document
-        scope) instead of fabricating an entity resolution.
+        to the effective document context. Unknown/stale refs, refs registered
+        to a different document than the effective context, and refs without a
+        native resolution hint fail closed BEFORE dispatch: metadata is never
+        silently applied to the document owner while echoing an entity ref.
+        Only an absent/None target means explicit document scope.
         """
         raw = payload.get("target")
         if isinstance(raw, Mapping):
@@ -445,36 +447,64 @@ class FusionCadService:
                 payload.get("document_ref")
                 or self._revision_tracker.active_document_ref
             )
-            record = (
-                self._ref_registry.get_internal_record(raw, doc_ref)
-                if doc_ref
-                else self._ref_registry.get_internal_record(raw)
-            )
-            if record is not None and record.native_token:
-                hint: dict[str, Any] = {
-                    "ref": record.ref,
-                    "kind": record.kind,
-                    "name": record.name,
-                    "native_token": record.native_token,
-                    "component_path": list(record.component_path),
-                }
-                if record.geometry_signature:
-                    hint["geometry_signature"] = dict(record.geometry_signature)
-                payload["target"] = hint
+            record = self._resolve_opaque_inspect_ref(raw, doc_ref)
+            if record is None:
+                raise FusionCadError(
+                    ErrorCode.REF_STALE,
+                    "Metadata target ref is unknown or stale in the effective document context; refusing to fall back to the document owner",
+                    details={"ref": raw, "active_document_ref": doc_ref},
+                )
+            if not record.native_token:
+                raise FusionCadError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    "Metadata target ref has no native resolution hint; metadata cannot be applied to an exactly resolved entity, failing closed",
+                    details={
+                        "ref": record.ref,
+                        "active_document_ref": record.document_ref,
+                    },
+                )
+            hint: dict[str, Any] = {
+                "ref": record.ref,
+                "kind": record.kind,
+                "name": record.name,
+                "native_token": record.native_token,
+                "component_path": list(record.component_path),
+            }
+            if record.geometry_signature:
+                hint["geometry_signature"] = dict(record.geometry_signature)
+            payload["target"] = hint
 
-    def _prepare_metadata_payload(self, payload: dict[str, Any], op: str) -> None:
+    def _prepare_metadata_payload(
+        self,
+        payload: dict[str, Any],
+        op: str,
+        *,
+        operation_id: str | None = None,
+    ) -> None:
         """Task 10 payload preparation for reserved-namespace metadata operations.
 
         Mutations get the one-command plan (explicit writes/removals plus the
         provenance write) executed by the same script execution as any geometry
         change; reads are normalized to the reserved namespace. Foreign groups
-        fail closed before any dispatch.
+        and unknown/stale/cross-document entity targets fail closed before any
+        dispatch. The provenance record carries the durable command operation id
+        (shared with the desktop operation journal) and the truthful
+        post-mutation created_revision resolved from the RevisionTracker.
         """
         if op == "set" and "name" not in payload:
             # fusion_style visibility set: not a metadata operation
             return
         if op in _METADATA_MUTATION_OPS:
-            apply_metadata_mutation_plan(payload)
+            doc_ref = (
+                payload.get("document_ref")
+                or self._revision_tracker.active_document_ref
+            )
+            created_revision = (
+                self._revision_tracker.next_revision(doc_ref) if doc_ref else None
+            )
+            apply_metadata_mutation_plan(
+                payload, operation_id=operation_id, created_revision=created_revision
+            )
         elif op in _METADATA_READ_OPS:
             payload["group"] = assert_reserved_metadata_group(payload.get("group"))
         else:
@@ -2154,8 +2184,16 @@ class FusionCadService:
         # the one-command plan (explicit writes/removals plus provenance) applied
         # by the SAME script execution as any geometry change; foreign groups
         # fail closed before dispatch.
+        # Durable command identity: for standalone mutations the SAME operation
+        # id is used by the desktop operation journal and by the provenance
+        # attribute written inside the same script execution.
+        journal_operation_id: str | None = None
+        if effective_bundle_group == "mutate" and is_mutation:
+            journal_operation_id = f"op_{uuid.uuid4().hex[:12]}"
         if effective_bundle_group == "mutate" and op in _METADATA_OPS:
-            self._prepare_metadata_payload(payload, op)
+            self._prepare_metadata_payload(
+                payload, op, operation_id=journal_operation_id
+            )
 
         # Inspection targets known to this service get exact native resolution hints;
         # view zoom/orient target operations reuse the exact Task5/Task7 ref machinery.
@@ -2176,6 +2214,8 @@ class FusionCadService:
                 "document_ref": payload.get("document_ref"),
             },
         }
+        if journal_operation_id is not None:
+            journal["operation_id"] = journal_operation_id
 
         # Authoritative DesktopNodeService session_generation captured before dispatching read:capabilities
         probe_generation: int | None = None
