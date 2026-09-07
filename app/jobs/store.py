@@ -398,6 +398,8 @@ class JobStore:
                 for item in payload["artifacts"]
             ),
             payload.get("stdin"),
+            payload.get("execution_root"),
+            payload.get("worktree_branch"),
         )
 
     def execution_environment_keys(self, job_id: str) -> tuple[str, ...]:

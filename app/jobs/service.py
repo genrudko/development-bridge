@@ -19,6 +19,7 @@ from app.capabilities import Capability, CapabilityPolicy
 from app.projects import ProjectRegistry, Repository
 from app.settings import ArtifactSettings
 from app.tasks import TaskProfile, TaskRegistry
+from app.worktrees import resolve_repository_worktree
 
 from .artifacts import ArtifactStorage
 from .models import JobArtifact, JobRecord, JobStatus
@@ -522,6 +523,8 @@ class JobService:
         executor_quota_state: str | None = None,
         environment_keys: tuple[str, ...] = (),
         require_repository_idle: bool = False,
+        execution_root: str | Path | None = None,
+        worktree_branch: str | None = None,
     ) -> JobRecord:
         self._require_execute(repository)
         if not isinstance(executable, str) or not 1 <= len(executable) <= 4096 or "\0" in executable:
@@ -553,6 +556,19 @@ class JobService:
         for value in (executor, executor_model, executor_quota_state):
             if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 128):
                 raise BridgeError(ErrorCode.INVALID_ARGUMENT, "executor attribution is invalid")
+        if (execution_root is None) != (worktree_branch is None):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "execution_root and worktree_branch must be supplied together")
+        execution_root_text = None
+        if execution_root is not None:
+            try:
+                root_path = Path(execution_root)
+            except TypeError as exc:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "execution_root is invalid") from exc
+            if not root_path.is_absolute():
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "execution_root must be absolute")
+            execution_root_text = str(root_path)
+            if not isinstance(worktree_branch, str) or not worktree_branch or "\0" in worktree_branch or len(worktree_branch) > 1024:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "worktree_branch is invalid")
         if (not isinstance(environment_keys, tuple) or len(environment_keys) != len(set(environment_keys))
                 or any(key not in {
                     "HOME",
@@ -586,6 +602,9 @@ class JobService:
             "executor_quota_state": executor_quota_state,
             "environment_keys": list(environment_keys),
         }
+        if execution_root_text is not None:
+            payload["execution_root"] = execution_root_text
+            payload["worktree_branch"] = worktree_branch
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         store = self._require_store(execution=True)
         async with self._admission(repository):
@@ -852,12 +871,40 @@ class JobService:
                 "task_profile_unavailable",
             )
             return
+
+        execution_repository = repository
+        if profile.worktree_branch is not None or profile.execution_root is not None:
+            try:
+                if profile.worktree_branch is None or profile.execution_root is None:
+                    raise BridgeError(ErrorCode.POLICY_VIOLATION, "Incomplete execution worktree identity")
+                resolved_root = await resolve_repository_worktree(repository, profile.worktree_branch)
+                expected_root = Path(profile.execution_root)
+                if not expected_root.is_absolute() or resolved_root != expected_root:
+                    raise BridgeError(
+                        ErrorCode.POLICY_VIOLATION,
+                        "Selected worktree changed after job admission",
+                        details={"reason": "worktree_changed_after_admission"},
+                    )
+                execution_repository = Repository(
+                    repository.project_id, repository.id, resolved_root, repository.capabilities
+                )
+            except (BridgeError, OSError):
+                await self._finish_job(
+                    job_id, JobStatus.FAILED, failure_reason="execution_root_unavailable"
+                )
+                final = store.get_by_id(job_id)
+                assert final is not None
+                await self._emit(
+                    final, "fail", AuditOutcome.ERROR, "execution_root_unavailable"
+                )
+                return
+
         started = time.perf_counter()
         try:
             process = await asyncio.create_subprocess_exec(
                 profile.executable,
                 *profile.arguments,
-                cwd=repository.root,
+                cwd=execution_repository.root,
                 env=self._task_environment(store.execution_environment_keys(job_id)),
                 start_new_session=True,
                 stdin=(asyncio.subprocess.PIPE if profile.stdin_text is not None else None),
@@ -921,7 +968,7 @@ class JobService:
                 )
             else:
                 captured = await asyncio.to_thread(
-                    self._artifacts.capture, job, profile, repository
+                    self._artifacts.capture, job, profile, execution_repository
                 )
             store.save_artifacts(job_id, captured)
             required_failure = next(

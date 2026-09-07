@@ -138,6 +138,7 @@ class FakeOpenRouter:
         self.authenticated = authenticated
         self.last_error = last_error
         self.probes = []
+        self.launch_roots = []
 
     def probe(self, *, busy):
         self.probes.append(busy)
@@ -156,6 +157,7 @@ class FakeOpenRouter:
         )
 
     def launch(self, repository, request, status):
+        self.launch_roots.append(repository.root)
         if not status.available or not status.authenticated:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "blocked", details={"reason": status.last_error})
         model = request.model or "deepseek/deepseek-v4-flash-0731"
@@ -195,6 +197,7 @@ async def test_explicit_openrouter_submits_durable_execution_and_persists_model(
     assert kwargs["executor"] == "openrouter"
     assert kwargs["executor_model"] == "qwen/qwen3-coder-next"
     assert kwargs["require_repository_idle"] is False
+    assert openrouter.launch_roots == [repository.root]
 
 
 @pytest.mark.asyncio
@@ -270,3 +273,31 @@ async def test_automatic_selection_unchanged(repository):
     # Even with openrouter present, automatic selection picks codex (or antigravity when suitable), never openrouter!
     assert jobs.calls[0][1]["executor"] in {"codex", "antigravity"}
     assert jobs.calls[0][1]["executor"] != "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_worktree_selector_launches_from_selected_root_but_queues_canonical_repo(repository, monkeypatch):
+    jobs = Jobs()
+    antigravity = Antigravity(status())
+    openrouter = FakeOpenRouter()
+    linked = repository.root / "linked"
+    linked.mkdir()
+
+    async def resolve(repo, branch):
+        assert repo is repository
+        assert branch == "feature/linked"
+        return linked
+
+    monkeypatch.setattr("app.executors.service.resolve_repository_worktree", resolve)
+    req = ExecutorRequest(
+        "task", TaskKind.IMPLEMENTATION, ExecutorName.OPENROUTER, 100, 2048, "same",
+        worktree_branch="feature/linked",
+    )
+    await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
+        repository, req, "req_1"
+    )
+    assert openrouter.launch_roots == [linked]
+    args, kwargs = jobs.calls[0]
+    assert args[0] is repository
+    assert kwargs["execution_root"] == linked
+    assert kwargs["worktree_branch"] == "feature/linked"

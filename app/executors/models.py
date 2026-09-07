@@ -87,6 +87,7 @@ class ExecutorRequest:
     output_limit_bytes: int
     idempotency_key: str | None
     model: str | None = None
+    worktree_branch: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

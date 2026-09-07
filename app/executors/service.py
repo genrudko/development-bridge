@@ -7,6 +7,7 @@ from app.executors.selector import ExecutorSelector
 from app.jobs import JobRecord, JobService
 from app.projects.models import Repository
 from app.settings import OpenRouterExecutorSettings
+from app.worktrees import resolve_repository_worktree
 
 
 class ExecutorService:
@@ -60,10 +61,22 @@ class ExecutorService:
         request_id: str,
     ) -> JobRecord:
         busy = self._jobs.repository_busy(repository)
+        if request.worktree_branch is not None and request.executor is not ExecutorName.OPENROUTER:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "worktree_branch is only supported for the openrouter executor",
+            )
         if request.model is not None and request.executor is not ExecutorName.OPENROUTER:
             raise BridgeError(
                 ErrorCode.INVALID_ARGUMENT,
                 "model parameter is only supported for the openrouter executor",
+            )
+        execution_root = None
+        launch_repository = repository
+        if request.executor is ExecutorName.OPENROUTER and request.worktree_branch is not None:
+            execution_root = await resolve_repository_worktree(repository, request.worktree_branch)
+            launch_repository = Repository(
+                repository.project_id, repository.id, execution_root, repository.capabilities
             )
         if request.executor is ExecutorName.OPENROUTER:
             openrouter = self._openrouter.probe(busy=busy)
@@ -89,7 +102,7 @@ class ExecutorService:
                     openrouter.last_success_at,
                     openrouter.version,
                 )
-            launch = self._openrouter.launch(repository, request, selection_status)
+            launch = self._openrouter.launch(launch_repository, request, selection_status)
         else:
             antigravity = await self._antigravity.probe(busy=busy)
             selection_status = antigravity
@@ -147,4 +160,6 @@ class ExecutorService:
             executor_quota_state=launch.quota_state.value,
             environment_keys=launch.environment_keys,
             require_repository_idle=False,
+            execution_root=execution_root,
+            worktree_branch=request.worktree_branch,
         )

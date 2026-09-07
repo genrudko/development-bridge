@@ -37,6 +37,7 @@ def executor_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...
             output_limit_bytes=arguments.get("output_limit_bytes", configured.output_limit_bytes),
             idempotency_key=arguments.get("idempotency_key"),
             model=model,
+            worktree_branch=arguments.get("worktree_branch"),
         )
         job = await container.executors.start(repository(arguments), request, request_context.request_id)
         return to_mcp_result(success(request_context.request_id, job.status_dict()))
@@ -55,6 +56,7 @@ def executor_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...
                 "task_kind": {"type": "string", "enum": ["implementation", "review", "other"]},
                 "executor": {"type": "string", "enum": ["codex", "antigravity", "openrouter"]},
                 "model": {"type": "string", "minLength": 1, "maxLength": 128},
+                "worktree_branch": {"type": "string", "minLength": 1, "maxLength": 1024},
                 "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
                 "output_limit_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
                 "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128}},

@@ -34,6 +34,8 @@ class TaskProfile:
     output_limit_bytes: int
     artifacts: tuple[ArtifactDeclaration, ...] = ()
     stdin_text: str | None = None
+    execution_root: str | None = None
+    worktree_branch: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
