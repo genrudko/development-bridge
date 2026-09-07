@@ -858,7 +858,7 @@ def test_failed_cad_error_boundary_sanitizes_nested_token_aliases():
 
     # Legitimate non-token diagnostics must be preserved
     assert err.code == ErrorCode.REF_STALE
-    assert err.message == "Reference ent_stale_123 is stale"
+    assert err.message == "Referenced CAD entity is stale or no longer exists"
     assert err.details.get("target") == "ent_stale_123"
     assert err.details.get("nested", {}).get("code") == "STALE_TARGET"
 

@@ -23,6 +23,7 @@ from app.fusion_cad.errors import (
     sanitize_error_message,
     sanitize_public_payload,
     sanitize_validation_errors,
+    trusted_detail,
 )
 from app.fusion_cad.models import (
     ENTITY_REF_PATTERN,
@@ -404,7 +405,7 @@ class FusionCadService:
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
                 "Unexpected non-dict result type from desktop node",
-                details={"parsed_type": type(raw_result).__name__},
+                details={"parsed_type": trusted_detail(type(raw_result).__name__)},
             )
 
         if "isError" in raw_result and raw_result["isError"] is not False:
@@ -447,7 +448,9 @@ class FusionCadService:
                         raise FusionCadError(
                             ErrorCode.FUSION_API_ERROR,
                             "Invalid domain output type: expected JSON object",
-                            details={"parsed_type": type(parsed).__name__},
+                            details={
+                                "parsed_type": trusted_detail(type(parsed).__name__)
+                            },
                         )
 
                     if (
@@ -552,7 +555,7 @@ class FusionCadService:
             if stored_baseline is None and op == "commit":
                 raise FusionCadError(
                     ErrorCode.INVALID_ARGUMENT,
-                    f"No stored baseline for transaction '{tx_id}'; call transaction:begin first",
+                    "No stored baseline for transaction; call transaction:begin first",
                     details={"transaction_id": tx_id, "operation": op},
                 )
             if stored_baseline is not None:
@@ -1034,11 +1037,11 @@ class FusionCadService:
                     return self._desktop_nodes.store_external_result(
                         node_id, domain_payload
                     )
-                except Exception as exc:
+                except Exception:  # noqa: BLE001 - low-level storage errors stay internal only
                     store_err = FusionCadError(
                         ErrorCode.INTERNAL_ERROR,
-                        f"Failed to externalize binary result payload: {exc}",
-                        details={"node_id": node_id},
+                        "Failed to externalize binary result payload",
+                        details={"node_id": trusted_detail(node_id)},
                     )
                 if store_err is not None:
                     raise store_err
@@ -1370,9 +1373,12 @@ class FusionCadService:
             if matrix is None:
                 raise FusionCadError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
-                    f"Node '{node_id}' capability state is unprobed; invoke fusion_read(operation='capabilities') first",
+                    "Node capability state is unprobed; invoke fusion_read(operation='capabilities') first",
                     retryable=False,
-                    details={"node_id": node_id, "capability": required_cap},
+                    details={
+                        "node_id": trusted_detail(node_id),
+                        "capability": trusted_detail(required_cap),
+                    },
                 )
             matrix.require(required_cap, allow_degraded=False)
 
@@ -1391,11 +1397,13 @@ class FusionCadService:
             if matrix is None:
                 raise FusionCadError(
                     ErrorCode.CAPABILITY_UNAVAILABLE,
-                    f"Node '{node_id}' capability state is unprobed; invoke fusion_read(operation='capabilities') first",
+                    "Node capability state is unprobed; invoke fusion_read(operation='capabilities') first",
                     retryable=False,
                     details={
-                        "node_id": node_id,
-                        "capability": "revision.external_change_detection",
+                        "node_id": trusted_detail(node_id),
+                        "capability": trusted_detail(
+                            "revision.external_change_detection"
+                        ),
                     },
                 )
             matrix.require("revision.external_change_detection", allow_degraded=False)
@@ -1404,7 +1412,7 @@ class FusionCadService:
         if is_standalone_mutation and not payload.get("expected_revision"):
             raise FusionCadError(
                 ErrorCode.REVISION_CONFLICT,
-                f"expected_revision is required for standalone mutation '{op}'",
+                "expected_revision is required for standalone mutation",
                 details={
                     "document_ref": payload.get("document_ref")
                     or self._revision_tracker.active_document_ref,
@@ -1436,7 +1444,7 @@ class FusionCadService:
             if stored_baseline is None:
                 raise FusionCadError(
                     ErrorCode.INVALID_ARGUMENT,
-                    f"No stored baseline for transaction '{tx_id}'; call transaction:begin first",
+                    "No stored baseline for transaction; call transaction:begin first",
                     details={"transaction_id": tx_id, "operation": op},
                 )
             if (
@@ -1651,7 +1659,7 @@ class FusionCadService:
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
                 "Unexpected non-dict result type from desktop node",
-                details={"parsed_type": type(raw_result).__name__},
+                details={"parsed_type": trusted_detail(type(raw_result).__name__)},
             )
 
         # Handle external_result reference already returned by desktop node

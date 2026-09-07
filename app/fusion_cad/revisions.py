@@ -298,7 +298,7 @@ def canonicalize_fingerprint_payload(payload: Mapping[str, Any]) -> dict[str, An
                     if not owner_id or not owner_id.strip():
                         raise FusionCadError(
                             ErrorCode.INVALID_ARGUMENT,
-                            f"Attribute for {owner_t} lacks stable owner_id; empty IDs or mutable names are rejected",
+                            "Attribute lacks stable owner_id; empty IDs or mutable names are rejected",
                             details={"attribute": dict(a)},
                         )
                     attr_items.append(
@@ -588,7 +588,7 @@ class RevisionTracker:
         if not b_fp or not isinstance(b_fp, str) or not b_fp.strip():
             raise FusionCadError(
                 ErrorCode.INVALID_ARGUMENT,
-                f"Authoritative baseline_fingerprint is required and cannot be empty for transaction '{transaction_id}' on document '{doc_ref}'",
+                "Authoritative baseline_fingerprint is required and cannot be empty",
                 details={"transaction_id": transaction_id, "document_ref": doc_ref},
             )
 

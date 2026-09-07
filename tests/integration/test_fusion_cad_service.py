@@ -2678,7 +2678,7 @@ async def test_falsify_transaction_preview_and_commit_bound_to_begin_baseline_an
         )
     assert exc_wrong_doc.value.code == ErrorCode.WRONG_DOCUMENT
     assert (
-        "Transaction 'tx_bound' is bound to document 'doc_1', but request specified 'doc_other'"
+        "does not match active document runtime identity"
         in exc_wrong_doc.value.message
     )
 
@@ -3783,7 +3783,11 @@ async def test_falsify_no_doc_1_fallback_and_fabricated_fingerprint_rejected(
             group="read",
         )
     assert exc_mock.value.code == ErrorCode.INVALID_ARGUMENT
-    assert "mock_model_state" in str(exc_mock.value)
+    assert any(
+        ve.get("type") == "extra_forbidden"
+        and "mock_model_state" in ve.get("loc", [])
+        for ve in exc_mock.value.details.get("validation_errors", [])
+    ), exc_mock.value.details
 
     # 3. Even if supplied directly to script bundle, mock_model_state is not recognized
     from app.fusion_cad.scripts import FusionCadScriptBundle
@@ -4431,7 +4435,7 @@ async def test_falsify_externalization_failure_preserves_baseline_and_tracker_au
             group="transaction",
         )
     assert exc_ext.value.code == ErrorCode.INTERNAL_ERROR
-    assert "External artifact storage disk full" in exc_ext.value.message
+    assert "Failed to externalize binary result payload" in exc_ext.value.message
 
     # Baseline authority must remain preserved
     assert (

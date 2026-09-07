@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.api.errors import ErrorCode
-from app.fusion_cad.errors import FusionCadError
+from app.fusion_cad.errors import FusionCadError, trusted_detail
 from app.fusion_cad.models import CapabilityRecord, ImmutableMapping
 
 
@@ -200,11 +200,11 @@ class CapabilityMatrix:
     def require(self, name: str, allow_degraded: bool = False) -> CapabilityRecord:
         record = self._records.get(name)
         if record is None or record.state == "unavailable":
-            details: dict[str, Any] = {"capability": name}
+            details: dict[str, Any] = {"capability": trusted_detail(name)}
             if record is not None:
                 details["record"] = record.model_dump(mode="json")
                 if record.limitations:
-                    details["limitations"] = list(record.limitations)
+                    details["limitations"] = trusted_detail(list(record.limitations))
             raise FusionCadError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 f"Capability '{name}' is unavailable on this Fusion CAD runtime",
@@ -215,9 +215,9 @@ class CapabilityMatrix:
         if record.state == "degraded":
             if not allow_degraded:
                 details = {
-                    "capability": name,
+                    "capability": trusted_detail(name),
                     "record": record.model_dump(mode="json"),
-                    "limitations": list(record.limitations),
+                    "limitations": trusted_detail(list(record.limitations)),
                 }
                 lim_text = f": {', '.join(record.limitations)}" if record.limitations else ""
                 raise FusionCadError(
