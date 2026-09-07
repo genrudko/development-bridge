@@ -890,6 +890,33 @@ async def test_nonzero_exit_without_receipt_classification(tmp_path: Path):
     res_c = await transport_c.deliver(req_c)
     assert res_c.disposition == "owner_input_required"
 
+    # Case D: Explicit post-submit cross-thread escape outranks incidental login text -> uncertain
+    req_d = WakeDeliveryRequest(
+        target=target,
+        continuation_id="cont_cross_thread",
+        prompt="DBRIDGE_CONTINUE cont_cross_thread",
+        delivery_key="cont_cross_thread",
+    )
+    runner_d = FakeProcessRunner(
+        exit_code=1,
+        stderr=(
+            "Managed browser login probe completed. "
+            "Draft staging failed: Auto-send committed, but a post-send cross-thread escape was observed. "
+            "Do not auto-resend."
+        ),
+    )
+    transport_d = ReviewGptWakeTransport(
+        node_path="/usr/bin/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=receipt_dir,
+        process_runner=runner_d,
+    )
+    res_d = await transport_d.deliver(req_d)
+    assert res_d.disposition == "uncertain"
+    assert "cross-thread escape" in (res_d.detail or "")
+
 
 @pytest.mark.asyncio
 async def test_spawn_failure_is_not_submitted(tmp_path: Path):

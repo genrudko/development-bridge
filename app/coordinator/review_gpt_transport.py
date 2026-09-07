@@ -478,6 +478,12 @@ class ReviewGptWakeTransport:
                 detail=f"Failure proven before auto-send: {bounded_text}",
             )
 
+        if "cross-thread escape" in lower_out:
+            return WakeDeliveryResult(
+                disposition="uncertain",
+                detail=f"Post-submit cross-thread escape requires reconciliation: {bounded_text}",
+            )
+
         if is_owner_input_required_error(lower_out):
             return WakeDeliveryResult(
                 disposition="owner_input_required",
