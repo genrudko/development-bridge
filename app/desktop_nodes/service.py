@@ -44,6 +44,7 @@ class NodeState:
     result_outbox_count: int = 0
     last_result_delivery: float | None = None
     last_claim: float | None = None
+    session_generation: int = 1
 
 
 @dataclass(slots=True)
@@ -55,6 +56,259 @@ class ResultUpload:
     sha256: str
     path: Path
     offset: int = 0
+
+
+_BASE64_MAGIC_PREFIXES: dict[str, str] = {
+    "iVBORw0KGgo": "image/png",
+    "/9j/": "image/jpeg",
+    "R0lGOD": "image/gif",
+    "UklGR": "image/webp",
+    "Qk": "image/bmp",
+    "JVBERi0": "application/pdf",
+    "UEsDB": "application/zip",
+}
+
+_BINARY_MIME_PREFIXES: tuple[str, ...] = (
+    "image/",
+    "audio/",
+    "video/",
+    "model/",
+)
+
+_BINARY_MIME_EXACT: frozenset[str] = frozenset({
+    "application/octet-stream",
+    "application/pdf",
+    "application/zip",
+    "application/x-step",
+    "application/sla",
+    "application/vnd.ms-pki.stl",
+    "application/step",
+    "application/3mf",
+})
+
+_EXPLICIT_BINARY_KEYS: frozenset[str] = frozenset({
+    "base64Data",
+    "base64_data",
+    "b64_data",
+    "image_data",
+    "binary_data",
+    "raw_bytes",
+    "thumbnail_b64",
+    "screenshot_b64",
+    "png_base64",
+    "jpg_base64",
+    "jpeg_base64",
+    "stl_base64",
+    "step_base64",
+    "mesh_data",
+    "blob",
+    "bytes",
+    "base64",
+})
+
+_EXPLICIT_BINARY_SUFFIXES: tuple[str, ...] = (
+    "_b64",
+    "_base64",
+    "Base64",
+    "_binary",
+    "_bytes",
+    "_blob",
+)
+
+_MIME_EXTENSIONS: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "application/pdf": ".pdf",
+    "application/zip": ".zip",
+    "model/stl": ".stl",
+    "model/3mf": ".3mf",
+    "model/step": ".step",
+    "application/sla": ".stl",
+    "application/vnd.ms-pki.stl": ".stl",
+    "application/step": ".step",
+    "application/x-step": ".step",
+    "application/3mf": ".3mf",
+    "application/octet-stream": ".bin",
+}
+
+_BASE64_CHARS_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+
+
+@dataclass(slots=True)
+class ExtractedBinaryResource:
+    raw_bytes: bytes
+    mime_type: str
+    suggested_name: str | None = None
+
+
+def _is_mime_binary(mime: Any) -> bool:
+    if not isinstance(mime, str):
+        return False
+    mime_lower = mime.lower().strip()
+    return mime_lower.startswith(_BINARY_MIME_PREFIXES) or mime_lower in _BINARY_MIME_EXACT
+
+
+def _detect_verified_binary_magic(raw: bytes, preferred_mime: str | None = None) -> str | None:
+    if len(raw) >= 8 and raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if len(raw) >= 3 and raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(raw) >= 6 and raw.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if len(raw) >= 14 and raw.startswith(b"BM"):
+        return "image/bmp"
+    if len(raw) >= 5 and raw.startswith(b"%PDF-"):
+        return "application/pdf"
+    if len(raw) >= 4 and raw.startswith(b"PK\x03\x04"):
+        return preferred_mime if preferred_mime in ("model/3mf", "application/3mf") else "application/zip"
+    if len(raw) >= 14 and raw.startswith(b"ISO-10303-21;"):
+        return preferred_mime if preferred_mime else "model/step"
+    if len(raw) >= 84:
+        triangle_count = int.from_bytes(raw[80:84], "little")
+        if triangle_count > 0 and len(raw) == 84 + triangle_count * 50:
+            return preferred_mime if preferred_mime else "model/stl"
+    return None
+
+
+def _detect_mime_from_bytes(raw: bytes, preferred_mime: str | None = None) -> str:
+    if preferred_mime and _is_mime_binary(preferred_mime):
+        return preferred_mime
+    magic_mime = _detect_verified_binary_magic(raw, preferred_mime)
+    if magic_mime:
+        return magic_mime
+    if raw.startswith((b"solid ", b"ISO-10303-21;")):
+        return preferred_mime if preferred_mime else "model/stl"
+    return preferred_mime or "application/octet-stream"
+
+
+def extract_binary_resources(value: Any) -> list[ExtractedBinaryResource]:
+    results: list[ExtractedBinaryResource] = []
+    seen_raw: set[bytes] = set()
+
+    def _add_resource(raw: bytes, mime: str, name: str | None = None) -> None:
+        if not raw or raw in seen_raw:
+            return
+        seen_raw.add(raw)
+        results.append(ExtractedBinaryResource(raw, mime, name))
+
+    def _try_decode_base64_string(s: str, candidate_name: str | None = None, preferred_mime: str | None = None) -> bool:
+        str_val = s.strip()
+        if not str_val:
+            return False
+
+        if str_val.startswith("data:") and ";base64," in str_val:
+            header, b64_payload = str_val.split(";base64,", 1)
+            data_mime = header.removeprefix("data:").strip()
+            try:
+                raw = base64.b64decode(b64_payload, validate=True)
+                if raw:
+                    verified_magic = _detect_verified_binary_magic(raw, data_mime)
+                    if _is_mime_binary(data_mime) or verified_magic:
+                        mime = (
+                            data_mime
+                            if _is_mime_binary(data_mime)
+                            else (verified_magic or preferred_mime or "application/octet-stream")
+                        )
+                        _add_resource(raw, mime, candidate_name)
+                        return True
+            except (ValueError, TypeError):
+                return False
+
+        is_explicit_binary = bool(
+            (
+                candidate_name
+                and (
+                    candidate_name in _EXPLICIT_BINARY_KEYS
+                    or any(candidate_name.endswith(suffix) for suffix in _EXPLICIT_BINARY_SUFFIXES)
+                )
+            )
+            or (preferred_mime and _is_mime_binary(preferred_mime))
+        )
+
+        if is_explicit_binary:
+            try:
+                raw = base64.b64decode(str_val, validate=True)
+                if raw:
+                    mime = _detect_mime_from_bytes(raw, preferred_mime)
+                    _add_resource(raw, mime, candidate_name)
+                    return True
+            except (ValueError, TypeError):
+                pass
+
+        if len(str_val) >= 4 and len(str_val) % 4 == 0 and _BASE64_CHARS_RE.fullmatch(str_val):
+            try:
+                raw = base64.b64decode(str_val, validate=True)
+                if raw:
+                    verified_magic = _detect_verified_binary_magic(raw, preferred_mime)
+                    if verified_magic:
+                        _add_resource(raw, verified_magic, candidate_name)
+                        return True
+            except (ValueError, TypeError):
+                pass
+
+        return False
+
+    def _traverse(node: Any, parent_key: str | None = None) -> None:
+        if isinstance(node, (bytes, bytearray, memoryview)):
+            raw = bytes(node)
+            _add_resource(raw, _detect_mime_from_bytes(raw), parent_key)
+            return
+
+        if isinstance(node, str):
+            _try_decode_base64_string(node, candidate_name=parent_key)
+            return
+
+        if isinstance(node, dict):
+            node_type = str(node.get("type", "")).lower()
+            node_mime = node.get("mimeType") or node.get("mime_type") or node.get("contentType") or node.get("content_type")
+            node_encoding = str(node.get("encoding") or node.get("transfer_encoding", "")).lower()
+            node_name = node.get("file_name") or node.get("name") or parent_key
+
+            is_binary_container = (
+                node_type in ("image", "binary", "blob")
+                or _is_mime_binary(node_mime)
+                or node_encoding in ("base64", "binary", "hex")
+            )
+
+            if is_binary_container:
+                for data_key in ("data", "content", "bytes", "payload", "base64Data", "base64_data", "raw_bytes"):
+                    if data_key in node:
+                        val = node[data_key]
+                        if isinstance(val, (bytes, bytearray, memoryview)):
+                            raw = bytes(val)
+                            _add_resource(raw, _detect_mime_from_bytes(raw, node_mime), node_name)
+                        elif isinstance(val, str):
+                            _try_decode_base64_string(val, candidate_name=node_name or data_key, preferred_mime=node_mime)
+
+            for k, v in node.items():
+                if isinstance(k, str) and (
+                    k in _EXPLICIT_BINARY_KEYS or any(k.endswith(suffix) for suffix in _EXPLICIT_BINARY_SUFFIXES)
+                ):
+                    if isinstance(v, (bytes, bytearray, memoryview)):
+                        raw = bytes(v)
+                        _add_resource(raw, _detect_mime_from_bytes(raw, node_mime), k)
+                    elif isinstance(v, str):
+                        _try_decode_base64_string(v, candidate_name=k, preferred_mime=node_mime)
+                else:
+                    _traverse(v, parent_key=k)
+            return
+
+        if isinstance(node, (list, tuple, set, frozenset)):
+            for item in node:
+                _traverse(item, parent_key=parent_key)
+            return
+
+    _traverse(value)
+    return results
+
+
+def has_binary_data(value: Any) -> bool:
+    return bool(extract_binary_resources(value))
 
 
 class DesktopNodeService:
@@ -206,8 +460,10 @@ class DesktopNodeService:
         async with self._condition:
             node = self._nodes.get(node_id)
             if node is None:
-                node = NodeState(node_id=node_id, last_seen=self._now(), last_seen_wall=time.time())
+                node = NodeState(node_id=node_id, last_seen=self._now(), last_seen_wall=time.time(), session_generation=1)
                 self._nodes[node_id] = node
+            else:
+                node.session_generation += 1
             self._touch(node)
             node.tools = tools
             node.fusion_available = fusion_available
@@ -223,13 +479,25 @@ class DesktopNodeService:
         async with self._condition:
             node = self._node(node_id)
             self._touch(node)
+            generation_bump = False
             if tools is not None:
+                if tools != node.tools:
+                    generation_bump = True
                 node.tools = tools
             if fusion_available is not None:
+                if fusion_available != node.fusion_available:
+                    generation_bump = True
                 node.fusion_available = fusion_available
+            if generation_bump:
+                node.session_generation += 1
             self._apply_telemetry(node, telemetry)
             self._condition.notify_all()
         return self.status(node_id)
+
+    def get_session_generation(self, node_id: str) -> int:
+        self._configured()
+        node = self._node(node_id)
+        return node.session_generation
 
     def status(self, node_id: str) -> dict[str, Any]:
         self._configured()
@@ -237,6 +505,7 @@ class DesktopNodeService:
         recent = self._journal.recent(node_id, 10)
         return {
             "node_id": node.node_id,
+            "session_generation": node.session_generation,
             "last_seen": node.last_seen_wall,
             "age_seconds": max(0.0, self._now() - node.last_seen),
             "online": self._online(node),
@@ -432,7 +701,27 @@ class DesktopNodeService:
             and isinstance(external.get("sha256"), str)
             else self._json_hash(result)
         )
-        result_failed = bool(result.get("isError", False))
+        has_is_error = "isError" in result and result.get("isError") is not False
+        result_failed = bool(
+            has_is_error
+            or result.get("status") in ("failed", "error")
+            or "error" in result
+        )
+        if not result_failed and isinstance(result.get("content"), list):
+            for block in result["content"]:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    try:
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict) and (
+                            ("isError" in parsed and parsed.get("isError") is not False)
+                            or parsed.get("status") in ("failed", "error")
+                            or "error" in parsed
+                        ):
+                            result_failed = True
+                            break
+                    except (ValueError, TypeError):
+                        pass
         external_result_id = (
             external.get("result_id")
             if isinstance(external, dict) and isinstance(external.get("result_id"), str)
@@ -486,7 +775,18 @@ class DesktopNodeService:
         return path
 
     def _store_result_value(self, node_id: str, command_id: str, value: dict[str, Any]) -> str:
-        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        def _json_default(obj: Any) -> Any:
+            if isinstance(obj, (bytes, bytearray, memoryview)):
+                return base64.b64encode(bytes(obj)).decode("ascii")
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+            default=_json_default,
+        ).encode("utf-8")
         result_id = token_urlsafe(18)
         created_at = time.time()
         path = self._artifact_dir() / f"{result_id}.json"
@@ -499,34 +799,45 @@ class DesktopNodeService:
         self._extract_image_resources(result_id, value, created_at)
         return result_id
 
+
+    def store_external_result(self, node_id: str, value: dict[str, Any], command_id: str = "direct") -> dict[str, Any]:
+        self._configured()
+        self._validate_node_id(node_id)
+        if not isinstance(value, dict):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion command result must be a JSON-safe object")
+        self._cleanup_external_results()
+        result_id = self._store_result_value(node_id, command_id, value)
+        item = self._external_results[result_id]
+        return {
+            "external_result": {
+                "result_id": result_id,
+                "size_bytes": item["size_bytes"],
+                "sha256": item["sha256"],
+            },
+            "isError": (value.get("isError") is not False) if "isError" in value else False,
+        }
+
     def _extract_image_resources(self, result_id: str, value: dict[str, Any], created_at: float) -> None:
         parent = self._external_results[result_id]
-        extensions = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
-        for index, content in enumerate(value.get("content", [])):
-            if not isinstance(content, dict) or content.get("type") != "image":
-                continue
-            data = content.get("data")
-            if not isinstance(data, str):
-                data = content.get("base64Data")
-            mime_type = content.get("mimeType")
-            if not isinstance(mime_type, str):
-                mime_type = content.get("mime_type")
-            if not isinstance(data, str) or not isinstance(mime_type, str):
-                continue
-            try:
-                raw = base64.b64decode(data, validate=True)
-            except (TypeError, ValueError):
-                continue
-            if not raw:
-                continue
+        extracted = extract_binary_resources(value)
+        for index, item in enumerate(extracted):
             resource_id = token_urlsafe(18)
-            extension = extensions.get(mime_type, ".bin")
-            path = self._artifact_dir() / f"{result_id}-image-{index}{extension}"
-            path.write_bytes(raw)
+            extension = _MIME_EXTENSIONS.get(item.mime_type, ".bin")
+            base_name = item.suggested_name or f"{result_id}-resource-{index}"
+            if not base_name.endswith(extension):
+                file_name = f"{base_name}{extension}"
+            else:
+                file_name = base_name
+            path = self._artifact_dir() / f"{result_id}-res-{index}{extension}"
+            path.write_bytes(item.raw_bytes)
             self._external_resources[resource_id] = {
-                "path": path, "parent_result_id": result_id, "size_bytes": len(raw),
-                "sha256": hashlib.sha256(raw).hexdigest(), "created_at": created_at,
-                "mime_type": mime_type, "file_name": path.name,
+                "path": path,
+                "parent_result_id": result_id,
+                "size_bytes": len(item.raw_bytes),
+                "sha256": hashlib.sha256(item.raw_bytes).hexdigest(),
+                "created_at": created_at,
+                "mime_type": item.mime_type,
+                "file_name": file_name,
             }
             parent["resource_ids"].append(resource_id)
 
@@ -545,6 +856,12 @@ class DesktopNodeService:
                     item["path"].unlink(missing_ok=True)
                 except OSError:
                     pass
+                for pattern in (f"{result_id}-res-*", f"{result_id}-image-*"):
+                    for res_path in self._artifact_dir().glob(pattern):
+                        try:
+                            res_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                 self._external_results.pop(result_id, None)
 
     def begin_result_upload(self, node_id: str, command_id: str, size_bytes: int, sha256: str) -> dict[str, Any]:
@@ -621,7 +938,7 @@ class DesktopNodeService:
                 "size_bytes": upload.size_bytes,
                 "sha256": upload.sha256,
             },
-            "isError": bool(value.get("isError", False)),
+            "isError": (value.get("isError") is not False) if "isError" in value else False,
         }
 
     def _recover_external_result(self, result_id: Any) -> dict[str, Any] | None:
@@ -632,8 +949,9 @@ class DesktopNodeService:
             stat = path.stat()
             if stat.st_mtime <= time.time() - self.settings.result_artifact_ttl_seconds:
                 path.unlink(missing_ok=True)
-                for image_path in self._artifact_dir().glob(f"{result_id}-image-*"):
-                    image_path.unlink(missing_ok=True)
+                for pattern in (f"{result_id}-res-*", f"{result_id}-image-*"):
+                    for res_path in self._artifact_dir().glob(pattern):
+                        res_path.unlink(missing_ok=True)
                 return None
             raw = path.read_bytes()
             value = json.loads(raw)

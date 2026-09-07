@@ -1,0 +1,1297 @@
+# fusion.cad/v1 runtime prelude
+import json
+import traceback
+
+API_VERSION = "fusion.cad/v1"
+
+PAYLOAD_RAW = __PAYLOAD_JSON__
+PAYLOAD = json.loads(PAYLOAD_RAW) if isinstance(PAYLOAD_RAW, str) else (PAYLOAD_RAW or {})
+
+
+def make_result(data=None, summary="ok", status="succeeded", warnings=None, artifacts=None, changed_refs=None, diff=None, validation=None, capabilities=None, document=None):
+    res = {
+        "api_version": API_VERSION,
+        "status": status,
+        "summary": summary,
+        "data": data or {},
+        "changed_refs": changed_refs or [],
+        "warnings": warnings or [],
+        "artifacts": artifacts or [],
+    }
+    if document is not None:
+        res["document"] = document
+    if diff is not None:
+        res["diff"] = diff
+    if validation is not None:
+        res["validation"] = validation
+    if capabilities is not None:
+        res["capabilities"] = capabilities
+    return res
+
+
+def make_error(error_code, message, details=None):
+    return {
+        "api_version": API_VERSION,
+        "status": "failed",
+        "error": {
+            "code": error_code,
+            "message": message,
+            "details": details or {},
+        },
+    }
+
+
+class FusionScriptError(RuntimeError):
+    def __init__(self, code, message, details=None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details or {}
+
+
+def canonicalize_value(val):
+    if val is None or isinstance(val, (bool, int, str)):
+        return val
+    if isinstance(val, float):
+        rounded = round(val, 6)
+        return 0.0 if rounded == 0.0 else rounded
+    if isinstance(val, dict):
+        return {k: canonicalize_value(val[k]) for k in sorted(val.keys())}
+    if isinstance(val, (set, frozenset)):
+        items = [canonicalize_value(x) for x in val]
+        try:
+            return sorted(
+                items,
+                key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")) if isinstance(item, (dict, list, tuple)) else str(item)
+            )
+        except Exception:
+            return items
+    if isinstance(val, (list, tuple)):
+        items = [canonicalize_value(x) for x in val]
+        return tuple(items) if isinstance(val, tuple) else items
+    return str(val)
+
+
+def collect_model_fingerprint(payload=None):
+    payload = payload or {}
+    import hashlib
+    import re
+
+    app = None
+    doc = None
+    design = None
+    try:
+        import adsk.core
+        app = adsk.core.Application.get()
+        if app:
+            doc = getattr(app, "activeDocument", None)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to access adsk.core Application: {exc}") from exc
+
+    try:
+        import adsk.fusion
+        if doc and hasattr(doc, "products"):
+            design = doc.products.itemByClass("adsk::fusion::Design")
+    except Exception as exc:
+        raise RuntimeError(f"Failed to access adsk.fusion Design product: {exc}") from exc
+
+    if not doc or not design:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Active document and design required in Fusion runtime context; "
+            "authoritative fingerprint requires active Fusion document and design with runtime-derived stable identity",
+            details={"has_doc": bool(doc), "has_design": bool(design)},
+        )
+
+    canonical = {}
+
+    # 1. Document identity / modified marker (stable identity required, fail closed on mutable name)
+    data_file = getattr(doc, "dataFile", None)
+    doc_id = (
+        getattr(doc, "dataId", None)
+        or getattr(doc, "creationId", None)
+        or (data_file and getattr(data_file, "id", None))
+    )
+    if not doc_id:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Document lacks stable runtime identity (dataId/creationId/dataFile.id); "
+            "mutable document name and payload.document_ref cannot be used as authoritative identity",
+            details={"name": getattr(doc, "name", None)},
+        )
+
+    doc_id_str = str(doc_id)
+    if doc_id_str.startswith("doc_"):
+        safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str[4:])
+    else:
+        safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str)
+
+    req_doc_ref = payload.get("document_ref") if isinstance(payload, dict) else None
+    if req_doc_ref and req_doc_ref != safe_doc_ref:
+        raise FusionScriptError(
+            "WRONG_DOCUMENT",
+            f"Requested document_ref '{req_doc_ref}' does not match active document runtime identity '{safe_doc_ref}'; "
+            "authoritative guard fails closed on document mismatch",
+            details={"requested_document_ref": req_doc_ref, "active_document_ref": safe_doc_ref},
+        )
+
+    canonical["document"] = {
+        "document_ref": safe_doc_ref,
+        "name": getattr(doc, "name", None),
+        "is_modified": bool(getattr(doc, "isModified", False)),
+        "saved_version": getattr(doc, "savedVersion", None),
+    }
+
+    # 2. Timeline feature identity / health / suppression (mandatory when design is active)
+    timeline = getattr(design, "timeline", None) if design else None
+    if design and (not timeline or not hasattr(timeline, "count")):
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "Active design lacks accessible timeline collection; "
+            "mandatory fingerprint group 'timeline' cannot be omitted",
+        )
+    if timeline and hasattr(timeline, "count"):
+        t_items = []
+        for i in range(timeline.count):
+            try:
+                item = timeline.item(i)
+                t_items.append({
+                    "index": i,
+                    "id": str(getattr(item, "entityToken", None) or getattr(item, "id", None) or i),
+                    "name": str(getattr(item, "name", "")),
+                    "is_suppressed": bool(getattr(item, "isSuppressed", False)),
+                    "is_valid": bool(getattr(item, "isValid", True)),
+                    "is_rolled_back": bool(getattr(item, "isRolledBack", False)),
+                    "health_status": str(getattr(item, "healthStatus", None)) if getattr(item, "healthStatus", None) is not None else None,
+                })
+            except Exception as exc:
+                raise FusionScriptError("FUSION_API_ERROR", f"Failed to read timeline item {i}: {exc}") from exc
+        t_items.sort(key=lambda x: (x["index"], x["id"], x["name"]))
+        canonical["timeline"] = t_items
+
+    # 3. Components / occurrences / transforms (mandatory when design is active)
+    comps_list = []
+    if design:
+        all_comps = getattr(design, "allComponents", None)
+        if not all_comps or not hasattr(all_comps, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Active design lacks allComponents collection; "
+                "mandatory fingerprint group 'components' cannot be omitted",
+            )
+        for i in range(all_comps.count):
+            try:
+                c = all_comps.item(i)
+                comps_list.append(c)
+            except Exception as exc:
+                raise FusionScriptError("FUSION_API_ERROR", f"Failed to read component {i}: {exc}") from exc
+        root = getattr(design, "rootComponent", None)
+        if not root:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Active design lacks rootComponent; "
+                "mandatory fingerprint group 'components' cannot be omitted",
+            )
+        if root not in comps_list:
+            comps_list.insert(0, root)
+
+        c_items = []
+        for c in comps_list:
+            try:
+                c_items.append({
+                    "name": str(getattr(c, "name", "")),
+                    "id": str(getattr(c, "id", "") or getattr(c, "entityToken", "")),
+                })
+            except Exception as exc:
+                raise FusionScriptError("FUSION_API_ERROR", f"Failed to read component data: {exc}") from exc
+        c_items.sort(key=lambda x: (x["name"], x["id"]))
+        canonical["components"] = c_items
+
+        all_occs = getattr(root, "allOccurrences", None)
+        if all_occs is None or not hasattr(all_occs, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Active design lacks allOccurrences collection; "
+                "mandatory fingerprint group 'occurrences' cannot be omitted",
+            )
+        occ_items = []
+        for i in range(all_occs.count):
+            try:
+                occ = all_occs.item(i)
+                occ_name = str(getattr(occ, "name", ""))
+                transform = getattr(occ, "transform", None)
+                if transform is None or not hasattr(transform, "asArray"):
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        f"Occurrence '{occ_name}' has unreadable or missing transform",
+                    )
+                t_arr = transform.asArray()
+                if t_arr is None:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        f"Occurrence '{occ_name}' transform.asArray returned None",
+                    )
+                t_mat = [round(float(v), 6) for v in t_arr]
+
+                raw_local = getattr(occ, "isLightBulbOn", None)
+                raw_eff = getattr(occ, "isVisible", None)
+                if raw_local is None and raw_eff is None:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        f"Occurrence '{occ_name}' has unreadable visibility (isLightBulbOn/isVisible missing)",
+                    )
+                is_local_vis = bool(raw_local if raw_local is not None else raw_eff)
+                is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
+                occ_items.append({
+                    "name": occ_name,
+                    "full_path_name": str(getattr(occ, "fullPathName", occ_name)),
+                    "is_visible": is_local_vis,
+                    "effective_visibility": is_eff_vis,
+                    "transform": t_mat,
+                })
+            except FusionScriptError:
+                raise
+            except Exception as exc:
+                raise FusionScriptError("FUSION_API_ERROR", f"Failed to read occurrence {i}: {exc}") from exc
+        occ_items.sort(key=lambda x: x["full_path_name"])
+        canonical["occurrences"] = occ_items
+
+        # 4. Bodies and geometry summary across all components (mandatory)
+        b_items = []
+        for c in comps_list:
+            c_name = str(getattr(c, "name", ""))
+            bodies = getattr(c, "bRepBodies", None)
+            if bodies is None or not hasattr(bodies, "count"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Component '{c_name}' lacks bRepBodies collection; "
+                    "mandatory fingerprint group 'bodies' cannot be omitted",
+                )
+            for b_idx in range(bodies.count):
+                try:
+                    b = bodies.item(b_idx)
+                    b_name = str(getattr(b, "name", ""))
+
+                    raw_solid = getattr(b, "isSolid", None)
+                    if raw_solid is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable or missing isSolid")
+
+                    raw_vol = getattr(b, "volume", None)
+                    if raw_vol is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable or missing volume")
+
+                    raw_area = getattr(b, "area", None)
+                    if raw_area is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable or missing area")
+
+                    raw_local = getattr(b, "isLightBulbOn", None)
+                    raw_eff = getattr(b, "isVisible", None)
+                    if raw_local is None and raw_eff is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable visibility")
+
+                    bb = getattr(b, "boundingBox", None)
+                    if bb is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' has unreadable or missing boundingBox")
+                    min_pt = getattr(bb, "minPoint", None)
+                    max_pt = getattr(bb, "maxPoint", None)
+                    if min_pt is None or max_pt is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' boundingBox minPoint or maxPoint is unreadable")
+
+                    bbox = {
+                        "min": [round(float(min_pt.x), 6), round(float(min_pt.y), 6), round(float(min_pt.z), 6)],
+                        "max": [round(float(max_pt.x), 6), round(float(max_pt.y), 6), round(float(max_pt.z), 6)],
+                    }
+
+                    faces = getattr(b, "faces", None)
+                    if faces is None or not hasattr(faces, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' faces collection is unreadable")
+
+                    edges = getattr(b, "edges", None)
+                    if edges is None or not hasattr(edges, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edges collection is unreadable")
+
+                    # Detailed vertex coordinates (fail closed on missing)
+                    verts = getattr(b, "vertices", None)
+                    if verts is None or not hasattr(verts, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' vertices collection is unreadable")
+                    vert_items = []
+                    for vi in range(verts.count):
+                        v = verts.item(vi)
+                        if v is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' vertex {vi} is unreadable (None)")
+                        v_geom = getattr(v, "geometry", None)
+                        if v_geom is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' vertex {vi} has unreadable geometry")
+                        vert_items.append([round(float(v_geom.x), 6), round(float(v_geom.y), 6), round(float(v_geom.z), 6)])
+                    if len(vert_items) != verts.count:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' vertex items count {len(vert_items)} does not match verts.count {verts.count}")
+                    vert_items.sort()
+
+                    # Detailed face signatures (fail closed on missing)
+                    face_items = []
+                    for fi in range(faces.count):
+                        f = faces.item(fi)
+                        if f is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} is unreadable (None)")
+                        f_dict = {}
+                        fc = getattr(f, "centroid", None)
+                        if fc is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} centroid is unreadable")
+                        f_dict["centroid"] = [round(float(fc.x), 6), round(float(fc.y), 6), round(float(fc.z), 6)]
+
+                        fa = getattr(f, "area", None)
+                        if fa is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} area is unreadable")
+                        f_dict["area"] = canonicalize_value(float(fa))
+
+                        fg = getattr(f, "geometry", None)
+                        if fg is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} geometry is unreadable")
+                        f_dict["surface_type"] = str(getattr(fg, "objectType", None) or getattr(fg, "surfaceType", None) or type(fg).__name__)
+
+                        # Topology / connectivity on face
+                        f_loops = getattr(f, "loops", None)
+                        if f_loops is None or not hasattr(f_loops, "count"):
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} loops collection is unreadable")
+                        f_dict["loops_count"] = f_loops.count
+                        loop_items = []
+                        for li in range(f_loops.count):
+                            lp = f_loops.item(li)
+                            if lp is None:
+                                raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} loop {li} is unreadable (None)")
+                            lp_edges = getattr(lp, "edges", None)
+                            if lp_edges is None or not hasattr(lp_edges, "count"):
+                                raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} loop {li} edges collection is unreadable")
+                            loop_items.append({
+                                "is_outer": bool(getattr(lp, "isOuter", False)),
+                                "edges_count": lp_edges.count,
+                            })
+                        loop_items.sort(key=lambda x: (not x["is_outer"], x["edges_count"]))
+                        f_dict["loops"] = loop_items
+
+                        f_edges = getattr(f, "edges", None)
+                        if f_edges is None or not hasattr(f_edges, "count"):
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} edges collection is unreadable")
+                        f_dict["edges_count"] = f_edges.count
+
+                        f_verts = getattr(f, "vertices", None)
+                        if f_verts is None or not hasattr(f_verts, "count"):
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} vertices collection is unreadable")
+                        f_dict["vertices_count"] = f_verts.count
+
+                        f_dict["is_param_reversed"] = bool(getattr(f, "isParamReversed", False))
+
+                        f_bb = getattr(f, "boundingBox", None)
+                        if f_bb is None or getattr(f_bb, "minPoint", None) is None or getattr(f_bb, "maxPoint", None) is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face {fi} boundingBox is unreadable")
+                        f_dict["bounding_box"] = {
+                            "min": [round(float(f_bb.minPoint.x), 6), round(float(f_bb.minPoint.y), 6), round(float(f_bb.minPoint.z), 6)],
+                            "max": [round(float(f_bb.maxPoint.x), 6), round(float(f_bb.maxPoint.y), 6), round(float(f_bb.maxPoint.z), 6)],
+                        }
+
+                        # Surface geometry parameters
+                        if hasattr(fg, "origin") and getattr(fg, "origin", None) is not None:
+                            o = fg.origin
+                            f_dict["origin"] = [round(float(o.x), 6), round(float(o.y), 6), round(float(o.z), 6)]
+                        if hasattr(fg, "normal") and getattr(fg, "normal", None) is not None:
+                            n = fg.normal
+                            f_dict["normal"] = [round(float(n.x), 6), round(float(n.y), 6), round(float(n.z), 6)]
+                        if hasattr(fg, "axis") and getattr(fg, "axis", None) is not None:
+                            ax = fg.axis
+                            f_dict["axis"] = [round(float(ax.x), 6), round(float(ax.y), 6), round(float(ax.z), 6)]
+                        if hasattr(fg, "radius") and getattr(fg, "radius", None) is not None:
+                            f_dict["radius"] = canonicalize_value(float(fg.radius))
+                        if hasattr(fg, "majorRadius") and getattr(fg, "majorRadius", None) is not None:
+                            f_dict["major_radius"] = canonicalize_value(float(fg.majorRadius))
+                        if hasattr(fg, "minorRadius") and getattr(fg, "minorRadius", None) is not None:
+                            f_dict["minor_radius"] = canonicalize_value(float(fg.minorRadius))
+                        if hasattr(fg, "halfAngle") and getattr(fg, "halfAngle", None) is not None:
+                            f_dict["half_angle"] = canonicalize_value(float(fg.halfAngle))
+
+                        face_items.append(f_dict)
+                    if len(face_items) != faces.count:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' face items count {len(face_items)} does not match faces.count {faces.count}")
+                    face_items.sort(key=lambda x: json.dumps(x, sort_keys=True))
+
+                    # Detailed edge signatures (fail closed on missing)
+                    edge_items = []
+                    for ei in range(edges.count):
+                        e = edges.item(ei)
+                        if e is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edge {ei} is unreadable (None)")
+                        e_dict = {}
+                        el = getattr(e, "length", None)
+                        if el is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edge {ei} length is unreadable")
+                        e_dict["length"] = canonicalize_value(float(el))
+
+                        eg = getattr(e, "geometry", None)
+                        if eg is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edge {ei} geometry is unreadable")
+                        e_dict["curve_type"] = str(getattr(eg, "objectType", None) or getattr(eg, "curveType", None) or type(eg).__name__)
+
+                        # Topology / connectivity on edge
+                        e_faces = getattr(e, "faces", None)
+                        if e_faces is None or not hasattr(e_faces, "count"):
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edge {ei} faces collection is unreadable")
+                        e_dict["faces_count"] = e_faces.count
+
+                        sv = getattr(e, "startVertex", None)
+                        if sv is not None:
+                            svg = getattr(sv, "geometry", None)
+                            if svg is None:
+                                raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edge {ei} startVertex geometry is unreadable")
+                            e_dict["start_vertex"] = [round(float(svg.x), 6), round(float(svg.y), 6), round(float(svg.z), 6)]
+
+                        ev = getattr(e, "endVertex", None)
+                        if ev is not None:
+                            evg = getattr(ev, "geometry", None)
+                            if evg is None:
+                                raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edge {ei} endVertex geometry is unreadable")
+                            e_dict["end_vertex"] = [round(float(evg.x), 6), round(float(evg.y), 6), round(float(evg.z), 6)]
+
+                        e_dict["is_degenerate"] = bool(getattr(e, "isDegenerate", False))
+                        e_dict["is_param_reversed"] = bool(getattr(e, "isParamReversed", False))
+
+                        e_bb = getattr(e, "boundingBox", None)
+                        if e_bb is None or getattr(e_bb, "minPoint", None) is None or getattr(e_bb, "maxPoint", None) is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edge {ei} boundingBox is unreadable")
+                        e_dict["bounding_box"] = {
+                            "min": [round(float(e_bb.minPoint.x), 6), round(float(e_bb.minPoint.y), 6), round(float(e_bb.minPoint.z), 6)],
+                            "max": [round(float(e_bb.maxPoint.x), 6), round(float(e_bb.maxPoint.y), 6), round(float(e_bb.maxPoint.z), 6)],
+                        }
+
+                        # Curve parameters
+                        e_dict["is_closed"] = bool(getattr(eg, "isClosed", False))
+                        if hasattr(eg, "startPoint") and getattr(eg, "startPoint", None) is not None:
+                            sp = eg.startPoint
+                            e_dict["start_point"] = [round(float(sp.x), 6), round(float(sp.y), 6), round(float(sp.z), 6)]
+                        if hasattr(eg, "endPoint") and getattr(eg, "endPoint", None) is not None:
+                            ep = eg.endPoint
+                            e_dict["end_point"] = [round(float(ep.x), 6), round(float(ep.y), 6), round(float(ep.z), 6)]
+                        if hasattr(eg, "center") and getattr(eg, "center", None) is not None:
+                            cp = eg.center
+                            e_dict["center"] = [round(float(cp.x), 6), round(float(cp.y), 6), round(float(cp.z), 6)]
+                        if hasattr(eg, "radius") and getattr(eg, "radius", None) is not None:
+                            e_dict["radius"] = canonicalize_value(float(eg.radius))
+                        if hasattr(eg, "majorRadius") and getattr(eg, "majorRadius", None) is not None:
+                            e_dict["major_radius"] = canonicalize_value(float(eg.majorRadius))
+                        if hasattr(eg, "minorRadius") and getattr(eg, "minorRadius", None) is not None:
+                            e_dict["minor_radius"] = canonicalize_value(float(eg.minorRadius))
+
+                        edge_items.append(e_dict)
+                    if len(edge_items) != edges.count:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Body '{b_name}' edge items count {len(edge_items)} does not match edges.count {edges.count}")
+                    edge_items.sort(key=lambda x: json.dumps(x, sort_keys=True))
+
+                    # Center of mass / physical properties
+                    raw_com = None
+                    phys = getattr(b, "physicalProperties", None)
+                    if phys is None:
+                        get_phys = getattr(b, "getPhysicalProperties", None)
+                        if callable(get_phys):
+                            phys = get_phys()
+                    if phys is not None:
+                        com_pt = getattr(phys, "centerOfMass", None)
+                        if com_pt is not None:
+                            raw_com = [round(float(com_pt.x), 6), round(float(com_pt.y), 6), round(float(com_pt.z), 6)]
+
+                    is_local_vis = bool(raw_local if raw_local is not None else raw_eff)
+                    is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
+                    b_items.append({
+                        "name": b_name,
+                        "component": c_name,
+                        "is_solid": bool(raw_solid),
+                        "is_visible": is_local_vis,
+                        "effective_visibility": is_eff_vis,
+                        "volume": canonicalize_value(float(raw_vol)),
+                        "area": canonicalize_value(float(raw_area)),
+                        "faces_count": faces.count,
+                        "edges_count": edges.count,
+                        "bounding_box": bbox,
+                        "center_of_mass": raw_com,
+                        "vertices": vert_items,
+                        "faces": face_items,
+                        "edges": edge_items,
+                    })
+                except FusionScriptError:
+                    raise
+                except Exception as exc:
+                    raise FusionScriptError("FUSION_API_ERROR", f"Failed to read body {b_idx} in component '{c_name}': {exc}") from exc
+        b_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
+        canonical["bodies"] = b_items
+
+        # 5. Sketches, constraints, and dimensions across all components (mandatory)
+        s_items = []
+        for c in comps_list:
+            c_name = str(getattr(c, "name", ""))
+            sketches = getattr(c, "sketches", None)
+            if sketches is None or not hasattr(sketches, "count"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Component '{c_name}' lacks sketches collection; "
+                    "mandatory fingerprint group 'sketches' cannot be omitted",
+                )
+            for s_idx in range(sketches.count):
+                try:
+                    s = sketches.item(s_idx)
+                    s_name = str(getattr(s, "name", ""))
+
+                    raw_local = getattr(s, "isLightBulbOn", None)
+                    raw_eff = getattr(s, "isVisible", None)
+                    if raw_local is None and raw_eff is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' has unreadable visibility")
+
+                    prof = getattr(s, "profiles", None)
+                    if prof is None or not hasattr(prof, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' has unreadable profiles collection")
+
+                    curves = getattr(s, "sketchCurves", None)
+                    if curves is None or not hasattr(curves, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' has unreadable sketchCurves collection")
+
+                    geom_cons = getattr(s, "geometricConstraints", None)
+                    if geom_cons is None or not hasattr(geom_cons, "count"):
+                        raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Sketch '{s_name}' lacks geometricConstraints collection")
+
+                    sketch_dims = getattr(s, "sketchDimensions", None)
+                    if sketch_dims is None or not hasattr(sketch_dims, "count"):
+                        raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Sketch '{s_name}' lacks sketchDimensions collection")
+
+                    cons_items = []
+                    for ci in range(geom_cons.count):
+                        try:
+                            con = geom_cons.item(ci)
+                            cons_items.append({
+                                "type": str(getattr(con, "objectType", None) or type(con).__name__),
+                                "is_deletable": bool(getattr(con, "isDeletable", True)),
+                            })
+                        except Exception as exc:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Failed to read constraint {ci} on sketch '{s_name}': {exc}") from exc
+                    cons_items.sort(key=lambda x: x["type"])
+
+                    dim_items = []
+                    for di in range(sketch_dims.count):
+                        try:
+                            dim = sketch_dims.item(di)
+                            param = getattr(dim, "parameter", None)
+                            dim_items.append({
+                                "name": str(getattr(param, "name", "") if param else getattr(dim, "name", "")),
+                                "value": canonicalize_value(float(getattr(param, "value", getattr(dim, "value", 0.0)))) if (param or hasattr(dim, "value")) else None,
+                                "expression": str(getattr(param, "expression", "")) if param else None,
+                            })
+                        except Exception as exc:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Failed to read dimension {di} on sketch '{s_name}': {exc}") from exc
+                    dim_items.sort(key=lambda x: (x["name"], str(x.get("value"))))
+
+                    # Detailed curves geometry
+                    curve_items = []
+                    for c_idx in range(curves.count):
+                        cv = curves.item(c_idx)
+                        c_dict = {
+                            "type": str(getattr(cv, "objectType", None) or type(cv).__name__),
+                        }
+                        c_len = getattr(cv, "length", None)
+                        if c_len is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' curve {c_idx} length is unreadable")
+                        c_dict["length"] = canonicalize_value(float(c_len))
+
+                        c_geom = getattr(cv, "geometry", None)
+                        if c_geom is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' curve {c_idx} geometry is unreadable")
+
+                        # Curve geometry parameters
+                        if hasattr(c_geom, "startPoint") and getattr(c_geom, "startPoint", None) is not None:
+                            sp = c_geom.startPoint
+                            c_dict["start_point"] = [round(float(sp.x), 6), round(float(sp.y), 6), round(float(sp.z), 6)]
+                        if hasattr(c_geom, "endPoint") and getattr(c_geom, "endPoint", None) is not None:
+                            ep = c_geom.endPoint
+                            c_dict["end_point"] = [round(float(ep.x), 6), round(float(ep.y), 6), round(float(ep.z), 6)]
+                        if hasattr(c_geom, "center") and getattr(c_geom, "center", None) is not None:
+                            cp = c_geom.center
+                            c_dict["center"] = [round(float(cp.x), 6), round(float(cp.y), 6), round(float(cp.z), 6)]
+                        if hasattr(c_geom, "radius") and getattr(c_geom, "radius", None) is not None:
+                            c_dict["radius"] = canonicalize_value(float(c_geom.radius))
+                        if hasattr(c_geom, "majorRadius") and getattr(c_geom, "majorRadius", None) is not None:
+                            c_dict["major_radius"] = canonicalize_value(float(c_geom.majorRadius))
+                        if hasattr(c_geom, "minorRadius") and getattr(c_geom, "minorRadius", None) is not None:
+                            c_dict["minor_radius"] = canonicalize_value(float(c_geom.minorRadius))
+                        if hasattr(c_geom, "startAngle") and getattr(c_geom, "startAngle", None) is not None:
+                            c_dict["start_angle"] = canonicalize_value(float(c_geom.startAngle))
+                        if hasattr(c_geom, "endAngle") and getattr(c_geom, "endAngle", None) is not None:
+                            c_dict["end_angle"] = canonicalize_value(float(c_geom.endAngle))
+                        if hasattr(c_geom, "normal") and getattr(c_geom, "normal", None) is not None:
+                            cn = c_geom.normal
+                            c_dict["normal"] = [round(float(cn.x), 6), round(float(cn.y), 6), round(float(cn.z), 6)]
+                        if hasattr(c_geom, "referenceVector") and getattr(c_geom, "referenceVector", None) is not None:
+                            rv = c_geom.referenceVector
+                            c_dict["reference_vector"] = [round(float(rv.x), 6), round(float(rv.y), 6), round(float(rv.z), 6)]
+                        c_dict["is_closed"] = bool(getattr(c_geom, "isClosed", getattr(cv, "isClosed", False)))
+
+                        # Topology / connectivity & roles
+                        s_pt = getattr(cv, "startSketchPoint", None)
+                        if s_pt is not None:
+                            spg = getattr(s_pt, "geometry", None)
+                            if spg is None:
+                                raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' curve {c_idx} startSketchPoint geometry is unreadable")
+                            c_dict["start_sketch_point"] = [round(float(spg.x), 6), round(float(spg.y), 6), round(float(spg.z), 6)]
+                        e_pt = getattr(cv, "endSketchPoint", None)
+                        if e_pt is not None:
+                            epg = getattr(e_pt, "geometry", None)
+                            if epg is None:
+                                raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' curve {c_idx} endSketchPoint geometry is unreadable")
+                            c_dict["end_sketch_point"] = [round(float(epg.x), 6), round(float(epg.y), 6), round(float(epg.z), 6)]
+                        cp_pt = getattr(cv, "centerSketchPoint", None)
+                        if cp_pt is not None:
+                            cpg = getattr(cp_pt, "geometry", None)
+                            if cpg is None:
+                                raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' curve {c_idx} centerSketchPoint geometry is unreadable")
+                            c_dict["center_sketch_point"] = [round(float(cpg.x), 6), round(float(cpg.y), 6), round(float(cpg.z), 6)]
+
+                        c_dict["is_construction"] = bool(getattr(cv, "isConstruction", False))
+                        c_dict["is_fixed"] = bool(getattr(cv, "isFixed", False))
+
+                        # Bounding box (mandatory)
+                        c_bb = getattr(cv, "boundingBox", None)
+                        if c_bb is None or getattr(c_bb, "minPoint", None) is None or getattr(c_bb, "maxPoint", None) is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' curve {c_idx} has unreadable boundingBox")
+                        c_dict["bounding_box"] = {
+                            "min": [round(float(c_bb.minPoint.x), 6), round(float(c_bb.minPoint.y), 6), round(float(c_bb.minPoint.z), 6)],
+                            "max": [round(float(c_bb.maxPoint.x), 6), round(float(c_bb.maxPoint.y), 6), round(float(c_bb.maxPoint.z), 6)],
+                        }
+                        curve_items.append(c_dict)
+                    if len(curve_items) != curves.count:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' curve items count {len(curve_items)} does not match curves.count {curves.count}")
+                    curve_items.sort(key=lambda x: json.dumps(x, sort_keys=True))
+
+                    # Sketch points
+                    sketch_pts = getattr(s, "sketchPoints", None)
+                    if sketch_pts is None or not hasattr(sketch_pts, "count"):
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' sketchPoints collection is unreadable")
+                    pts_items = []
+                    for pi in range(sketch_pts.count):
+                        pt = sketch_pts.item(pi)
+                        if pt is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' point {pi} is unreadable (None)")
+                        pt_geom = getattr(pt, "geometry", None)
+                        if pt_geom is None:
+                            raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' point {pi} has unreadable geometry")
+                        pts_items.append([round(float(pt_geom.x), 6), round(float(pt_geom.y), 6), round(float(pt_geom.z), 6)])
+                    if len(pts_items) != sketch_pts.count:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' point items count {len(pts_items)} does not match sketch_pts.count {sketch_pts.count}")
+                    pts_items.sort()
+
+                    # Sketch bounding box
+                    s_bb = getattr(s, "boundingBox", None)
+                    if s_bb is None or getattr(s_bb, "minPoint", None) is None or getattr(s_bb, "maxPoint", None) is None:
+                        raise FusionScriptError("FUSION_API_ERROR", f"Sketch '{s_name}' has unreadable boundingBox")
+                    min_pt = s_bb.minPoint
+                    max_pt = s_bb.maxPoint
+                    s_bbox = {
+                        "min": [round(float(min_pt.x), 6), round(float(min_pt.y), 6), round(float(min_pt.z), 6)],
+                        "max": [round(float(max_pt.x), 6), round(float(max_pt.y), 6), round(float(max_pt.z), 6)],
+                    }
+
+                    is_local_vis = bool(raw_local if raw_local is not None else raw_eff)
+                    is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
+                    s_items.append({
+                        "name": s_name,
+                        "component": c_name,
+                        "is_visible": is_local_vis,
+                        "effective_visibility": is_eff_vis,
+                        "profiles_count": prof.count,
+                        "curves_count": curves.count,
+                        "constraints_count": len(cons_items),
+                        "constraints": cons_items,
+                        "dimensions_count": len(dim_items),
+                        "dimensions": dim_items,
+                        "curves": curve_items,
+                        "points": pts_items,
+                        "bounding_box": s_bbox,
+                    })
+                except FusionScriptError:
+                    raise
+                except Exception as exc:
+                    raise FusionScriptError("FUSION_API_ERROR", f"Failed to read sketch {s_idx} in component '{c_name}': {exc}") from exc
+        s_items.sort(key=lambda x: (x.get("component") or "", x["name"]))
+        canonical["sketches"] = s_items
+
+        # 6. Parameters (mandatory when design is active)
+        params = getattr(design, "allParameters", None)
+        if not params or not hasattr(params, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Active design lacks allParameters collection; "
+                "mandatory fingerprint group 'parameters' cannot be omitted",
+            )
+        p_items = []
+        for i in range(params.count):
+            try:
+                p = params.item(i)
+                p_items.append({
+                    "name": str(getattr(p, "name", "")),
+                    "expression": str(getattr(p, "expression", "")),
+                    "value": canonicalize_value(float(getattr(p, "value", 0.0))),
+                    "unit": str(getattr(p, "unit", "")),
+                    "is_favorite": bool(getattr(p, "isFavorite", False)),
+                })
+            except Exception as exc:
+                raise FusionScriptError("FUSION_API_ERROR", f"Failed to read parameter {i}: {exc}") from exc
+        p_items.sort(key=lambda x: x["name"])
+        canonical["parameters"] = p_items
+
+    # 7. Bridge attributes across relevant document/components/occurrences/entities (mandatory)
+    attrs = getattr(doc, "attributes", None) if doc else None
+    if doc and (attrs is None or not hasattr(attrs, "count")):
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "Active document lacks attributes collection; "
+            "mandatory fingerprint group 'attributes' cannot be omitted",
+        )
+    attr_items = []
+
+    def _read_owner_attributes(owner, owner_type, owner_id):
+        if not owner_id or not isinstance(owner_id, str) or not owner_id.strip():
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"{owner_type} lacks stable runtime identity; mutable name or empty ID cannot be used as authoritative owner identity",
+                details={"owner_type": owner_type, "owner_id": owner_id},
+            )
+        o_attrs = getattr(owner, "attributes", None)
+        if o_attrs is None or not hasattr(o_attrs, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"{owner_type} '{owner_id}' lacks attributes collection or attributes are unreadable; missing attribute collection cannot silently be treated as empty",
+                details={"owner_type": owner_type, "owner_id": owner_id},
+            )
+        for idx in range(o_attrs.count):
+            try:
+                a = o_attrs.item(idx)
+                grp = getattr(a, "groupName", "")
+                if grp == "bridge.cad/v1":
+                    attr_items.append({
+                        "owner_type": owner_type,
+                        "owner_id": owner_id,
+                        "group": grp,
+                        "name": str(getattr(a, "name", "")),
+                        "value": str(getattr(a, "value", "")),
+                    })
+            except Exception as exc:
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    f"Failed to read attribute {idx} on {owner_type} '{owner_id}': {exc}",
+                ) from exc
+
+    # Document attributes
+    if doc:
+        _read_owner_attributes(doc, "document", safe_doc_ref)
+
+    # Component attributes
+    for c in comps_list:
+        c_id = getattr(c, "entityToken", None) or getattr(c, "id", None)
+        if not c_id or not str(c_id).strip():
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"Component '{getattr(c, 'name', '')}' lacks stable runtime identity (entityToken or id); mutable component name cannot be used as authoritative identity",
+                details={"component_name": getattr(c, "name", None)},
+            )
+        _read_owner_attributes(c, "component", str(c_id).strip())
+
+    # Occurrence attributes
+    if design and root:
+        all_occs = getattr(root, "allOccurrences", None)
+        if all_occs is None or not hasattr(all_occs, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"Occurrence collection unreadable for root component '{getattr(root, 'name', '')}'",
+            )
+        for i in range(all_occs.count):
+            occ = all_occs.item(i)
+            occ_id = getattr(occ, "entityToken", None) or getattr(occ, "id", None)
+            if not occ_id or not str(occ_id).strip():
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Occurrence '{getattr(occ, 'name', '')}' lacks stable runtime identity (entityToken or id); mutable occurrence name cannot be used as authoritative identity",
+                    details={"occurrence_name": getattr(occ, "name", None)},
+                )
+            _read_owner_attributes(occ, "occurrence", str(occ_id).strip())
+
+    # Body attributes, Face attributes, and Edge attributes
+    for c in comps_list:
+        bodies = getattr(c, "bRepBodies", None)
+        if bodies is None or not hasattr(bodies, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"Component '{getattr(c, 'name', '')}' lacks bRepBodies collection for attribute extraction",
+            )
+        for b_idx in range(bodies.count):
+            b = bodies.item(b_idx)
+            b_id = getattr(b, "entityToken", None) or getattr(b, "id", None)
+            if not b_id or not str(b_id).strip():
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Body '{getattr(b, 'name', '')}' lacks stable runtime identity (entityToken or id); mutable body name cannot be used as authoritative identity",
+                    details={"body_name": getattr(b, "name", None)},
+                )
+            _read_owner_attributes(b, "body", str(b_id).strip())
+
+            # Face attributes
+            faces = getattr(b, "faces", None)
+            if faces is None or not hasattr(faces, "count"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Body '{getattr(b, 'name', '')}' lacks faces collection for attribute extraction",
+                )
+            for f_idx in range(faces.count):
+                f = faces.item(f_idx)
+                f_id = getattr(f, "entityToken", None) or getattr(f, "id", None)
+                if not f_id or not str(f_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Face {f_idx} on body '{getattr(b, 'name', '')}' lacks stable runtime identity (entityToken or id)",
+                        details={"body_name": getattr(b, "name", None), "face_index": f_idx},
+                    )
+                _read_owner_attributes(f, "face", str(f_id).strip())
+
+            # Edge attributes
+            edges = getattr(b, "edges", None)
+            if edges is None or not hasattr(edges, "count"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Body '{getattr(b, 'name', '')}' lacks edges collection for attribute extraction",
+                )
+            for e_idx in range(edges.count):
+                e = edges.item(e_idx)
+                e_id = getattr(e, "entityToken", None) or getattr(e, "id", None)
+                if not e_id or not str(e_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Edge {e_idx} on body '{getattr(b, 'name', '')}' lacks stable runtime identity (entityToken or id)",
+                        details={"body_name": getattr(b, "name", None), "edge_index": e_idx},
+                    )
+                _read_owner_attributes(e, "edge", str(e_id).strip())
+
+    # Sketch attributes, Sketch-curve attributes, and Sketch-point attributes
+    for c in comps_list:
+        sketches = getattr(c, "sketches", None)
+        if sketches is None or not hasattr(sketches, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"Component '{getattr(c, 'name', '')}' lacks sketches collection for attribute extraction",
+            )
+        for s_idx in range(sketches.count):
+            s = sketches.item(s_idx)
+            s_id = getattr(s, "entityToken", None) or getattr(s, "id", None)
+            if not s_id or not str(s_id).strip():
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Sketch '{getattr(s, 'name', '')}' lacks stable runtime identity (entityToken or id); mutable sketch name cannot be used as authoritative identity",
+                    details={"sketch_name": getattr(s, "name", None)},
+                )
+            _read_owner_attributes(s, "sketch", str(s_id).strip())
+
+            # Sketch curves
+            curves = getattr(s, "sketchCurves", None)
+            if curves is None or not hasattr(curves, "count"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Sketch '{getattr(s, 'name', '')}' lacks sketchCurves collection for attribute extraction",
+                )
+            for cv_idx in range(curves.count):
+                cv = curves.item(cv_idx)
+                cv_id = getattr(cv, "entityToken", None) or getattr(cv, "id", None)
+                if not cv_id or not str(cv_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Sketch curve {cv_idx} on sketch '{getattr(s, 'name', '')}' lacks stable runtime identity (entityToken or id)",
+                        details={"sketch_name": getattr(s, "name", None), "curve_index": cv_idx},
+                    )
+                _read_owner_attributes(cv, "sketch_curve", str(cv_id).strip())
+
+            # Sketch points
+            pts = getattr(s, "sketchPoints", None)
+            if pts is None or not hasattr(pts, "count"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Sketch '{getattr(s, 'name', '')}' lacks sketchPoints collection for attribute extraction",
+                )
+            for pt_idx in range(pts.count):
+                pt = pts.item(pt_idx)
+                pt_id = getattr(pt, "entityToken", None) or getattr(pt, "id", None)
+                if not pt_id or not str(pt_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Sketch point {pt_idx} on sketch '{getattr(s, 'name', '')}' lacks stable runtime identity (entityToken or id)",
+                        details={"sketch_name": getattr(s, "name", None), "point_index": pt_idx},
+                    )
+                _read_owner_attributes(pt, "sketch_point", str(pt_id).strip())
+
+    # Timeline / Feature entity attributes
+    if design:
+        if timeline is None or not hasattr(timeline, "count"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Active design lacks timeline collection for attribute extraction",
+            )
+        for t_idx in range(timeline.count):
+            t = timeline.item(t_idx)
+            t_id = getattr(t, "entityToken", None) or getattr(t, "id", None)
+            if not t_id or not str(t_id).strip():
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    f"Timeline item {t_idx} lacks stable runtime identity (entityToken or id); mutable timeline name cannot be used as authoritative identity",
+                    details={"timeline_index": t_idx},
+                )
+            _read_owner_attributes(t, "timeline", str(t_id).strip())
+            feat = getattr(t, "entity", None)
+            if feat:
+                f_id = getattr(feat, "entityToken", None) or getattr(feat, "id", None)
+                if not f_id or not str(f_id).strip():
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        f"Timeline feature on item {t_idx} lacks stable runtime identity (entityToken or id); mutable feature name cannot be used as authoritative identity",
+                        details={"timeline_index": t_idx},
+                    )
+                _read_owner_attributes(feat, "feature", str(f_id).strip())
+
+    attr_items.sort(key=lambda x: (x["owner_type"], x["owner_id"], x["group"], x["name"], x.get("value", "")))
+    canonical["attributes"] = attr_items
+
+    # Mandatory group validation: when design is active, all groups must be present
+    if design:
+        _mandatory_groups = ("document", "timeline", "components", "occurrences", "bodies", "sketches", "parameters", "attributes")
+        _missing = [g for g in _mandatory_groups if g not in canonical]
+        if _missing:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                f"Mandatory fingerprint groups missing: {_missing}; "
+                "authoritative fingerprint cannot silently omit mutation-sensitive groups",
+            )
+
+    serialized = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    fp = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return fp, canonical, safe_doc_ref
+
+
+def resolve_fusion_entity(payload=None):
+    payload = payload or {}
+    import re
+
+    app = None
+    doc = None
+    design = None
+    try:
+        import adsk.core
+        app = adsk.core.Application.get()
+        if app:
+            doc = getattr(app, "activeDocument", None)
+    except Exception:
+        pass
+
+    try:
+        import adsk.fusion
+        if doc and hasattr(doc, "products"):
+            design = doc.products.itemByClass("adsk::fusion::Design")
+    except Exception:
+        pass
+
+    if not doc or not design:
+        raise FusionScriptError(
+            "NO_ACTIVE_DESIGN",
+            "Active document and design required for entity resolution",
+            details={"has_doc": bool(doc), "has_design": bool(design)},
+        )
+
+    # 1. Document identity check - fails BEFORE native lookup
+    doc_id = (
+        getattr(doc, "creationId", None)
+        or getattr(doc, "dataId", None)
+        or getattr(getattr(doc, "dataFile", None), "id", None)
+    )
+    clean_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(doc_id).strip()) if doc_id else "unknown"
+    safe_doc_ref = f"doc_{clean_id}"
+
+    req_doc = payload.get("document_ref") or payload.get("document")
+    if req_doc and req_doc != safe_doc_ref:
+        raise FusionScriptError(
+            "WRONG_DOCUMENT",
+            f"Requested document_ref '{req_doc}' does not match active document runtime identity '{safe_doc_ref}'",
+            details={"requested": req_doc, "active": safe_doc_ref},
+        )
+
+    native_token = payload.get("native_token")
+    kind = payload.get("kind")
+    name = payload.get("name")
+    component_path = payload.get("component_path") or ()
+    ref = payload.get("ref")
+    geometry_signature = payload.get("geometry_signature")
+
+    def _extract_candidate_info(entity):
+        ent_name = getattr(entity, "name", None)
+        ent_type = getattr(entity, "objectType", None) or type(entity).__name__
+        return {
+            "name": str(ent_name) if ent_name is not None else None,
+            "native_type": str(ent_type) if ent_type is not None else None,
+            "document_ref": safe_doc_ref,
+        }
+
+    # 2. Native token lookup via design.findEntityByToken
+    if native_token and hasattr(design, "findEntityByToken"):
+        try:
+            resolved = design.findEntityByToken(native_token)
+            if resolved is not None:
+                if hasattr(resolved, "count"):
+                    if resolved.count == 1:
+                        return {
+                            "outcome": "exact",
+                            "ref": ref,
+                            "candidates": [_extract_candidate_info(resolved.item(0))],
+                            "document_ref": safe_doc_ref,
+                        }
+                    elif resolved.count > 1:
+                        cands = [_extract_candidate_info(resolved.item(i)) for i in range(resolved.count)]
+                        return {
+                            "outcome": "split",
+                            "ref": ref,
+                            "candidates": cands,
+                            "document_ref": safe_doc_ref,
+                        }
+                else:
+                    return {
+                        "outcome": "exact",
+                        "ref": ref,
+                        "candidates": [_extract_candidate_info(resolved)],
+                        "document_ref": safe_doc_ref,
+                    }
+        except Exception:
+            pass
+
+    # 3. Contextual fallback
+    root = getattr(design, "rootComponent", None)
+    target_comp = root
+    component_path_resolved = True
+    has_complete_path = False
+
+    if component_path and root:
+        curr = root
+        root_name = getattr(root, "name", None)
+        path_segs = list(component_path)
+        if path_segs and (path_segs[0] == root_name or path_segs[0] == "Root"):
+            path_segs = path_segs[1:]
+
+        for path_seg in path_segs:
+            found_comp = None
+            if hasattr(curr, "occurrences") and curr.occurrences is not None:
+                occ_count = getattr(curr.occurrences, "count", 0)
+                for idx in range(occ_count):
+                    occ = curr.occurrences.item(idx)
+                    if getattr(occ, "name", None) == path_seg:
+                        found_comp = getattr(occ, "component", None)
+                        break
+            if found_comp is None:
+                # Every segment must resolve exactly; missing/partial path cannot continue
+                component_path_resolved = False
+                target_comp = None
+                break
+            curr = found_comp
+        if component_path_resolved:
+            target_comp = curr
+            has_complete_path = True
+
+    candidates = []
+    if component_path_resolved and target_comp and kind:
+        if kind == "body" and hasattr(target_comp, "bRepBodies") and target_comp.bRepBodies is not None:
+            body_count = getattr(target_comp.bRepBodies, "count", 0)
+            for i in range(body_count):
+                b = target_comp.bRepBodies.item(i)
+                if name is None or getattr(b, "name", None) == name:
+                    candidates.append(b)
+        elif kind == "sketch" and hasattr(target_comp, "sketches") and target_comp.sketches is not None:
+            sketch_count = getattr(target_comp.sketches, "count", 0)
+            for i in range(sketch_count):
+                s = target_comp.sketches.item(i)
+                if name is None or getattr(s, "name", None) == name:
+                    candidates.append(s)
+        elif kind == "occurrence" and hasattr(target_comp, "occurrences") and target_comp.occurrences is not None:
+            occ_count = getattr(target_comp.occurrences, "count", 0)
+            for i in range(occ_count):
+                occ = target_comp.occurrences.item(i)
+                if name is None or getattr(occ, "name", None) == name:
+                    candidates.append(occ)
+        elif kind == "face" and hasattr(target_comp, "bRepBodies") and target_comp.bRepBodies is not None:
+            body_count = getattr(target_comp.bRepBodies, "count", 0)
+            for i in range(body_count):
+                b = target_comp.bRepBodies.item(i)
+                faces = getattr(b, "faces", None)
+                if faces is not None:
+                    face_count = getattr(faces, "count", 0)
+                    for j in range(face_count):
+                        f = faces.item(j)
+                        if name is None or getattr(f, "name", None) == name:
+                            candidates.append(f)
+        elif kind == "edge" and hasattr(target_comp, "bRepBodies") and target_comp.bRepBodies is not None:
+            body_count = getattr(target_comp.bRepBodies, "count", 0)
+            for i in range(body_count):
+                b = target_comp.bRepBodies.item(i)
+                edges = getattr(b, "edges", None)
+                if edges is not None:
+                    edge_count = getattr(edges, "count", 0)
+                    for j in range(edge_count):
+                        e = edges.item(j)
+                        if name is None or getattr(e, "name", None) == name:
+                            candidates.append(e)
+
+    def _matches_geometry_signature(ent, sig):
+        if not sig or not isinstance(sig, dict):
+            return True
+
+        def _approx_eq(v1, v2, tol=1e-4):
+            try:
+                return abs(float(v1) - float(v2)) <= tol
+            except (TypeError, ValueError):
+                return v1 == v2
+
+        for key, expected in sig.items():
+            actual = None
+            if key == "volume":
+                actual = getattr(ent, "volume", None)
+            elif key == "area":
+                actual = getattr(ent, "area", None)
+            elif key == "is_solid":
+                actual = getattr(ent, "isSolid", getattr(ent, "is_solid", None))
+            elif key == "faces_count":
+                fc = getattr(ent, "faces", None)
+                actual = getattr(fc, "count", None) if fc is not None else getattr(ent, "faces_count", None)
+            elif key == "edges_count":
+                ec = getattr(ent, "edges", None)
+                actual = getattr(ec, "count", None) if ec is not None else getattr(ent, "edges_count", None)
+            elif key == "curves_count":
+                sc = getattr(ent, "sketchCurves", None)
+                actual = getattr(sc, "count", None) if sc is not None else getattr(ent, "curves_count", None)
+            elif key == "profiles_count":
+                pc = getattr(ent, "profiles", None)
+                actual = getattr(pc, "count", None) if pc is not None else getattr(ent, "profiles_count", None)
+            elif key == "length":
+                actual = getattr(ent, "length", None)
+            elif key == "surface_type":
+                geom = getattr(ent, "geometry", None)
+                actual = getattr(geom, "objectType", None) or getattr(geom, "surfaceType", None) or (type(geom).__name__ if geom else None)
+            elif key == "curve_type":
+                geom = getattr(ent, "geometry", None)
+                actual = getattr(geom, "objectType", None) or getattr(geom, "curveType", None) or (type(geom).__name__ if geom else None)
+            elif key == "centroid":
+                c = getattr(ent, "centroid", None)
+                if c is not None and hasattr(c, "x") and hasattr(c, "y") and hasattr(c, "z"):
+                    actual = [c.x, c.y, c.z]
+                else:
+                    actual = getattr(ent, "centroid", None)
+            elif key == "bounding_box":
+                bb = getattr(ent, "boundingBox", None)
+                if bb is not None and getattr(bb, "minPoint", None) is not None and getattr(bb, "maxPoint", None) is not None:
+                    actual = {
+                        "min": [bb.minPoint.x, bb.minPoint.y, bb.minPoint.z],
+                        "max": [bb.maxPoint.x, bb.maxPoint.y, bb.maxPoint.z],
+                    }
+                else:
+                    actual = getattr(ent, "bounding_box", None)
+            else:
+                actual = getattr(ent, key, None)
+                if actual is None and isinstance(ent, dict):
+                    actual = ent.get(key)
+
+            if actual is None:
+                return False
+
+            if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+                if not _approx_eq(actual, expected):
+                    return False
+            elif isinstance(expected, (list, tuple)) and isinstance(actual, (list, tuple)):
+                if len(actual) != len(expected):
+                    return False
+                for a_val, e_val in zip(actual, expected):
+                    if not _approx_eq(a_val, e_val):
+                        return False
+            elif isinstance(expected, dict) and isinstance(actual, dict):
+                for sub_k, sub_e in expected.items():
+                    sub_a = actual.get(sub_k)
+                    if sub_a is None:
+                        return False
+                    if isinstance(sub_e, (int, float)):
+                        if not _approx_eq(sub_a, sub_e):
+                            return False
+                    elif isinstance(sub_e, (list, tuple)) and isinstance(sub_a, (list, tuple)):
+                        if len(sub_a) != len(sub_e):
+                            return False
+                        for a_v, e_v in zip(sub_a, sub_e):
+                            if not _approx_eq(a_v, e_v):
+                                return False
+                    elif sub_a != sub_e:
+                        return False
+            elif actual != expected:
+                return False
+
+        return True
+
+    def _is_usable_geometry_signature(sig):
+        if not sig or not isinstance(sig, dict):
+            return False
+        return any(v is not None for v in sig.values())
+
+    has_usable_geom = _is_usable_geometry_signature(geometry_signature)
+    if has_usable_geom:
+        candidates = [c for c in candidates if _matches_geometry_signature(c, geometry_signature)]
+
+    # Fail closed: unambiguous exact recovery requires both complete component_path and usable geometry_signature
+    has_sufficient_context = has_complete_path and has_usable_geom
+
+    if len(candidates) == 1:
+        if has_sufficient_context:
+            return {
+                "outcome": "exact",
+                "ref": ref,
+                "candidates": [_extract_candidate_info(candidates[0])],
+                "document_ref": safe_doc_ref,
+            }
+        else:
+            # Insufficient contextual identity (e.g. name/kind alone at root or missing signature):
+            # cannot declare exact; return ambiguous according to evidence
+            return {
+                "outcome": "ambiguous",
+                "ref": ref,
+                "candidates": [_extract_candidate_info(candidates[0])],
+                "document_ref": safe_doc_ref,
+            }
+    elif len(candidates) > 1:
+        return {
+            "outcome": "ambiguous",
+            "ref": ref,
+            "candidates": [_extract_candidate_info(c) for c in candidates],
+            "document_ref": safe_doc_ref,
+        }
+
+    return {
+        "outcome": "stale",
+        "ref": ref,
+        "candidates": [],
+        "document_ref": safe_doc_ref,
+    }
+
+
+# __GROUP_SCRIPT__
+
+
+
+if __name__ == "__main__" or True:
+    try:
+        if "run" not in globals() or not callable(globals()["run"]):
+            raise RuntimeError("Group script must define callable run()")
+        _output = run()
+        print(json.dumps(_output, ensure_ascii=False, separators=(",", ":")))
+    except FusionScriptError as _exc:
+        _err = make_error(_exc.code, _exc.message, _exc.details)
+        _output = _err
+        print(json.dumps(_err, ensure_ascii=False, separators=(",", ":")))
+    except Exception as _exc:
+        _err = make_error("FUSION_API_ERROR", str(_exc), {"traceback": traceback.format_exc()})
+        _output = _err
+        print(json.dumps(_err, ensure_ascii=False, separators=(",", ":")))

@@ -33,6 +33,7 @@ from app.executors import (
     OpenRouterExecutor,
 )
 from app.files import FileService
+from app.fusion_cad.service import FusionCadService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
     GitHubActionsArtifactExportService,
@@ -101,6 +102,7 @@ class ApplicationContainer:
     commands: RepositoryCommandService
     bridge_restart: BridgeRestartService
     desktop_nodes: DesktopNodeService
+    fusion_cad: FusionCadService | None = None
     coordinator_wake_delivery: CoordinatorWakeDeliveryService | None = None
     route_control: RouteControlService | None = None
     route_control_trace_store: RouteControlTraceStore | None = None
@@ -492,11 +494,12 @@ def build_container(
         route_control=route_control,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
-        desktop_nodes=DesktopNodeService(
+        desktop_nodes=(desktop_nodes := DesktopNodeService(
             configured.desktop_nodes,
             str(configured.server.public_base_url) if configured.server.public_base_url else None,
             configured.server.endpoint,
-        ),
+        )),
+        fusion_cad=FusionCadService(desktop_nodes),
         coordinator_wake_delivery=coordinator_wake_delivery,
         route_control_trace_store=route_control_trace_store,
     )

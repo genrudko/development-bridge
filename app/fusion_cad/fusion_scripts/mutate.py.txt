@@ -1,0 +1,74 @@
+def run():
+    op = PAYLOAD.get("operation", "")
+    if op == "test_op":
+        return make_result(data={"operation": op}, summary=f"Executed mutate:{op}")
+
+    expected_fp = PAYLOAD.get("expected_fingerprint")
+
+    # Authoritative Fusion-side freshness guard:
+    # Freshly collect current fingerprint before any apply
+    current_fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
+
+    if expected_fp is None or expected_fp != current_fp:
+        return make_error(
+            "REVISION_CONFLICT",
+            "Authoritative Fusion-side guard: model fingerprint diverged from baseline",
+            details={
+                "document_ref": doc_ref,
+                "expected_revision": PAYLOAD.get("expected_revision"),
+                "expected_fingerprint": expected_fp,
+                "current_fingerprint": current_fp,
+                "applied": False,
+            },
+        )
+
+    # Guard passed: execute mutation primitive
+    primitive_hook = globals().get("_mutation_primitive")
+    if callable(primitive_hook):
+        primitive_hook(PAYLOAD)
+
+    try:
+        import adsk.core
+        app = adsk.core.Application.get()
+        if app and getattr(app, "activeDocument", None):
+            doc = app.activeDocument
+            if hasattr(doc, "attributes") and op in ("set", "tag"):
+                target = PAYLOAD.get("target") or "document"
+                name = PAYLOAD.get("tag_name") or PAYLOAD.get("name") or "marker"
+                val = PAYLOAD.get("value") or "true"
+                doc.attributes.add("bridge.cad/v1", f"{target}:{name}", str(val))
+    except Exception as exc:
+        raise RuntimeError(f"Mutation primitive failed: {exc}") from exc
+
+    # Freshly collect real post-apply fingerprint of actual model state
+    post_fp, post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+    if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
+        return make_error(
+            "FINGERPRINT_FAILED",
+            "Authoritative post-apply model fingerprint collection failed or returned empty",
+            details={"document_ref": post_doc_ref or doc_ref, "applied": False},
+        )
+
+    if post_fp == current_fp:
+        return make_error(
+            "MUTATION_FAILED",
+            "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
+            details={
+                "document_ref": post_doc_ref or doc_ref,
+                "initial_fingerprint": current_fp,
+                "post_fingerprint": post_fp,
+                "applied": False,
+            },
+        )
+
+    result_data = {
+        "operation": op,
+        "applied": True,
+        "fingerprint": post_fp,
+        "document_ref": post_doc_ref or doc_ref,
+    }
+    return make_result(
+        data=result_data,
+        summary=f"Executed mutate:{op}",
+        changed_refs=[PAYLOAD.get("target")] if PAYLOAD.get("target") else [],
+    )

@@ -1,0 +1,943 @@
+def probe_runtime():
+    facts = {}
+    app = None
+    fusion_version = None
+    ui = None
+    doc = None
+    design = None
+
+    try:
+        import adsk.core
+        app = adsk.core.Application.get()
+        if app:
+            facts["has_app"] = True
+            fusion_version = getattr(app, "version", None)
+            facts["has_measure_manager"] = hasattr(app, "measureManager")
+            facts["has_user_interface"] = hasattr(app, "userInterface")
+            ui = getattr(app, "userInterface", None)
+            if ui:
+                facts["has_selection_primitives"] = hasattr(ui, "activeSelections")
+                try:
+                    selections = getattr(ui, "activeSelections", None)
+                    if selections is not None and hasattr(selections, "count"):
+                        facts["has_active_selections_context"] = True
+                except Exception:
+                    pass
+            doc = getattr(app, "activeDocument", None)
+            if doc:
+                facts["has_active_document"] = True
+                facts["has_mutation_indicators"] = hasattr(doc, "isModified")
+                try:
+                    if isinstance(doc.isModified, bool):
+                        facts["mutation_indicators_verified"] = True
+                except Exception:
+                    pass
+                facts["has_attributes"] = hasattr(doc, "attributes")
+                try:
+                    attrs = getattr(doc, "attributes", None)
+                    if attrs is not None and hasattr(attrs, "count") and hasattr(attrs, "add"):
+                        facts["has_attributes_context"] = True
+                except Exception:
+                    pass
+            viewport = getattr(app, "activeViewport", None)
+            if viewport:
+                facts["has_active_viewport"] = True
+                try:
+                    cam = getattr(viewport, "camera", None)
+                    if cam and hasattr(cam, "eye") and hasattr(cam, "target") and hasattr(cam, "upVector"):
+                        facts["has_active_camera"] = True
+                except Exception:
+                    pass
+                try:
+                    if hasattr(viewport, "modelToScreen") and hasattr(viewport, "screenToModel"):
+                        facts["has_viewport_conversion_context"] = True
+                except Exception:
+                    pass
+    except Exception as exc:
+        facts["adsk_core_probe_error"] = str(exc)
+
+    try:
+        import adsk.fusion
+        facts["has_adsk_fusion"] = True
+        facts["has_design_class"] = hasattr(adsk.fusion, "Design")
+        facts["has_sketch_class"] = hasattr(adsk.fusion, "Sketch")
+        facts["has_sketch_text"] = hasattr(adsk.fusion, "SketchTexts") or hasattr(adsk.fusion, "SketchText")
+        facts["has_export_manager"] = hasattr(adsk.fusion, "ExportManager") or hasattr(adsk.fusion, "DXFExportOptions")
+        facts["has_joint_access"] = hasattr(adsk.fusion, "Joints") or hasattr(adsk.fusion, "AsBuiltJoints")
+
+        if app and getattr(app, "activeDocument", None):
+            doc = app.activeDocument
+            products = getattr(doc, "products", None)
+            if products:
+                try:
+                    design = products.itemByClass("adsk::fusion::Design")
+                except Exception:
+                    design = None
+            if design:
+                facts["has_design_access"] = True
+                facts["has_timeline_access"] = hasattr(design, "timeline")
+                facts["has_entity_token_resolver"] = hasattr(design, "findEntityByToken")
+                root = getattr(design, "rootComponent", None)
+                facts["has_sketch_access"] = hasattr(root, "sketches") if root else False
+            else:
+                facts["has_design_access"] = False
+                facts["has_timeline_access"] = False
+                facts["has_entity_token_resolver"] = False
+                facts["has_sketch_access"] = False
+        else:
+            facts["has_design_access"] = False
+            facts["has_timeline_access"] = False
+            facts["has_entity_token_resolver"] = False
+            facts["has_sketch_access"] = False
+    except Exception as exc:
+        facts["adsk_fusion_probe_error"] = str(exc)
+
+    try:
+        import adsk.core
+        facts["has_camera"] = hasattr(adsk.core, "Camera")
+        facts["has_viewport_conversion"] = hasattr(adsk.core.Viewport, "modelToScreen") and hasattr(adsk.core.Viewport, "screenToModel")
+    except Exception:
+        pass
+
+    try:
+        import adsk.core
+        facts["has_command_preview"] = hasattr(adsk.core, "CommandCreatedEventHandler") and hasattr(adsk.core, "Command")
+        facts["has_undo_redo"] = hasattr(adsk.core.Application, "executeTextCommand") or hasattr(adsk.core, "Transaction")
+    except Exception:
+        pass
+
+    try:
+        import adsk.core
+        facts["has_attributes"] = facts.get("has_attributes", False) or hasattr(adsk.core, "Attributes")
+    except Exception:
+        pass
+
+    if "probe_facts" in PAYLOAD and isinstance(PAYLOAD["probe_facts"], dict):
+        facts.update(PAYLOAD["probe_facts"])
+
+    probe_err = facts.get("adsk_core_probe_error") or facts.get("adsk_fusion_probe_error")
+    probe_failed = bool(probe_err) or (
+        not facts.get("has_app")
+        and not facts.get("has_adsk_fusion")
+        and not facts.get("has_design_access")
+    )
+
+    resolved_version = fusion_version or PAYLOAD.get("fusion_version")
+    relay_version = PAYLOAD.get("relay_version")
+
+    def err_limits(default_msg):
+        limits = [default_msg]
+        if facts.get("adsk_core_probe_error"):
+            limits.append("adsk.core probe error: " + str(facts["adsk_core_probe_error"]))
+        if facts.get("adsk_fusion_probe_error"):
+            limits.append("adsk.fusion probe error: " + str(facts["adsk_fusion_probe_error"]))
+        return limits
+
+    records = []
+    # 1. entity.token_resolver
+    if not probe_failed and facts.get("has_entity_token_resolver") and facts.get("has_design_access"):
+        records.append({
+            "name": "entity.token_resolver",
+            "state": "supported",
+            "implementation": "adsk.fusion.Design.findEntityByToken",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_entity_token_resolver"):
+        records.append({
+            "name": "entity.token_resolver",
+            "state": "degraded",
+            "implementation": "adsk.fusion.Design.findEntityByToken",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Native design entity-token resolver present on class but unverified without active design context"],
+        })
+    else:
+        records.append({
+            "name": "entity.token_resolver",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Native design entity-token resolver not available on this Fusion runtime"),
+        })
+
+    # 2. design.access
+    if not probe_failed and facts.get("has_design_access"):
+        records.append({
+            "name": "design.access",
+            "state": "supported",
+            "implementation": "adsk.fusion.Design",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_design_class"):
+        records.append({
+            "name": "design.access",
+            "state": "degraded",
+            "implementation": "adsk.fusion.Design",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Design product class present but active design context unavailable on active document"],
+        })
+    else:
+        records.append({
+            "name": "design.access",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Design product access not available on active document"),
+        })
+
+    # 3. timeline.access
+    if not probe_failed and facts.get("has_timeline_access") and facts.get("has_design_access"):
+        records.append({
+            "name": "timeline.access",
+            "state": "supported",
+            "implementation": "adsk.fusion.Timeline",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_timeline_access"):
+        records.append({
+            "name": "timeline.access",
+            "state": "degraded",
+            "implementation": "adsk.fusion.Timeline",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Timeline access unverified without active design context"],
+        })
+    else:
+        records.append({
+            "name": "timeline.access",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Timeline access not available on active design"),
+        })
+
+    # 4. sketch.access
+    if not probe_failed and facts.get("has_sketch_access") and facts.get("has_design_access"):
+        records.append({
+            "name": "sketch.access",
+            "state": "supported",
+            "implementation": "adsk.fusion.Sketches",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif not probe_failed and (facts.get("has_sketch_access") or facts.get("has_sketch_class")):
+        records.append({
+            "name": "sketch.access",
+            "state": "degraded",
+            "implementation": "adsk.fusion.Sketches",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Sketch collection access unverified without active root component context"],
+        })
+    else:
+        records.append({
+            "name": "sketch.access",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Sketch collection access not available on active root component"),
+        })
+
+    # 5. inspect.measure (Finding 3: do not claim contract-level supported from hasattr alone)
+    if not probe_failed and facts.get("has_measure_manager"):
+        records.append({
+            "name": "inspect.measure",
+            "state": "degraded",
+            "implementation": "adsk.core.MeasureManager",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["MeasureManager object presence does not guarantee contract-level geometric measurement without active document and entity context"],
+        })
+    else:
+        records.append({
+            "name": "inspect.measure",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("MeasureManager API not available"),
+        })
+
+    # 6. view.camera (Finding 2: property existence is insufficient; prefer degraded/unavailable)
+    if not probe_failed and (facts.get("has_camera") or facts.get("has_active_camera") or facts.get("camera_runtime_verified")):
+        records.append({
+            "name": "view.camera",
+            "state": "degraded",
+            "implementation": "adsk.core.Camera",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Camera class presence does not guarantee contract-level viewport camera control without active viewport and camera runtime context"],
+        })
+    else:
+        records.append({
+            "name": "view.camera",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Camera control API not available"),
+        })
+
+    # 7. view.viewport_conversion (Finding 2: method presence is insufficient; prefer degraded/unavailable)
+    if not probe_failed and (facts.get("has_viewport_conversion") or facts.get("has_viewport_conversion_context") or facts.get("viewport_conversion_verified")):
+        records.append({
+            "name": "view.viewport_conversion",
+            "state": "degraded",
+            "implementation": "adsk.core.Viewport",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Viewport screen/model coordinate conversion methods present on class but unverified without active viewport runtime context"],
+        })
+    else:
+        records.append({
+            "name": "view.viewport_conversion",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Viewport screen/model coordinate conversion methods not available"),
+        })
+
+    # 8. view.pick (Finding 3: load-bearing pick remains degraded/unavailable until later live feasibility proof)
+    if not probe_failed and facts.get("has_selection_primitives"):
+        records.append({
+            "name": "view.pick",
+            "state": "degraded",
+            "implementation": "native-preselect",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Visual pick requires live feasibility proof; load-bearing pick remains degraded pending live verification"],
+        })
+    elif not probe_failed and facts.get("has_viewport_conversion"):
+        records.append({
+            "name": "view.pick",
+            "state": "degraded",
+            "implementation": "viewport-raycast",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Raycast geometry intersection without native preselection; load-bearing pick remains degraded pending live verification"],
+        })
+    else:
+        records.append({
+            "name": "view.pick",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Neither selection primitives nor viewport projection methods available"),
+        })
+
+    # 9. selection.primitives (Finding 2: activeSelections/count is insufficient; prefer degraded/unavailable)
+    if not probe_failed and (facts.get("has_selection_primitives") or facts.get("has_active_selections_context") or facts.get("selection_runtime_verified")):
+        records.append({
+            "name": "selection.primitives",
+            "state": "degraded",
+            "implementation": "adsk.core.UserInterface.activeSelections",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["UserInterface activeSelections attribute present but interactive selection collection runtime behavior unverified without active selection context"],
+        })
+    else:
+        records.append({
+            "name": "selection.primitives",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Interactive selection primitives not available"),
+        })
+
+    # 10. transaction.preview_hooks (Finding 2: preview API presence is insufficient; prefer degraded/unavailable)
+    if not probe_failed and (facts.get("has_command_preview") or facts.get("preview_hooks_verified")):
+        records.append({
+            "name": "transaction.preview_hooks",
+            "state": "degraded",
+            "implementation": "adsk.core.Command.executePreview",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Command execution preview hooks present on classes but runtime preview execution unverified without live command lifecycle"],
+        })
+    else:
+        records.append({
+            "name": "transaction.preview_hooks",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Command execution preview hooks not available"),
+        })
+
+    # 11. transaction.preview_replay (Finding 3: load-bearing transaction remains degraded/unavailable until later live feasibility proof)
+    if not probe_failed and facts.get("has_command_preview") and facts.get("has_undo_redo"):
+        records.append({
+            "name": "transaction.preview_replay",
+            "state": "degraded",
+            "implementation": "command-preview-replay",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Staged transaction preview and replay semantics require live feasibility proof; load-bearing transaction remains degraded pending live verification"],
+        })
+    elif not probe_failed and facts.get("has_undo_redo"):
+        records.append({
+            "name": "transaction.preview_replay",
+            "state": "degraded",
+            "implementation": "undo-redo-fallback",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Command preview hooks not available; rollback relies on active transaction undo; load-bearing transaction remains degraded pending live verification"],
+        })
+    else:
+        records.append({
+            "name": "transaction.preview_replay",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Neither command preview nor undo/redo available for transaction replay"),
+        })
+
+    # 12. metadata.attributes (Finding 2: collection/add/count is insufficient; prefer degraded/unavailable)
+    if not probe_failed and (facts.get("has_attributes") or facts.get("has_attributes_context") or facts.get("attributes_runtime_verified")):
+        records.append({
+            "name": "metadata.attributes",
+            "state": "degraded",
+            "implementation": "adsk.core.Attributes",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Custom attributes API present but active document attribute collection runtime access unverified"],
+        })
+    else:
+        records.append({
+            "name": "metadata.attributes",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Custom attributes API not available"),
+        })
+
+    # 13. style.sketch_text (Finding 3: do not claim contract-level supported from hasattr alone)
+    if not probe_failed and facts.get("has_sketch_text"):
+        records.append({
+            "name": "style.sketch_text",
+            "state": "degraded",
+            "implementation": "adsk.fusion.SketchTexts",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["SketchText creation and extrusion contract semantics unverified from object existence alone; requires active sketch context and text engine validation"],
+        })
+    else:
+        records.append({
+            "name": "style.sketch_text",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("SketchText API not available"),
+        })
+
+    # 14. transaction.undo_redo (Finding 2: undo API presence is insufficient; prefer degraded/unavailable)
+    if not probe_failed and (facts.get("has_undo_redo") or facts.get("has_undo_redo_context") or facts.get("undo_redo_verified")):
+        records.append({
+            "name": "transaction.undo_redo",
+            "state": "degraded",
+            "implementation": "adsk.core.Application",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Application executeTextCommand / Transaction presence does not guarantee contract-level undo/redo behavior without active transaction context"],
+        })
+    else:
+        records.append({
+            "name": "transaction.undo_redo",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Application text command / transaction undo not available"),
+        })
+
+    # 15. revision.mutation_indicators (Finding 2: require active document context)
+    if not probe_failed and (facts.get("mutation_indicators_verified") or (facts.get("has_mutation_indicators") and facts.get("has_active_document"))):
+        records.append({
+            "name": "revision.mutation_indicators",
+            "state": "supported",
+            "implementation": "adsk.core.Document.isModified",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_mutation_indicators"):
+        records.append({
+            "name": "revision.mutation_indicators",
+            "state": "degraded",
+            "implementation": "adsk.core.Document.isModified",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Document mutation modified indicator unverified without active document runtime context"],
+        })
+    else:
+        records.append({
+            "name": "revision.mutation_indicators",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("Document mutation modified indicator not available"),
+        })
+
+    # 16. revision.external_change_detection (Finding 3: do not claim contract-level supported from hasattr alone)
+    if not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "degraded",
+            "implementation": "timeline-fingerprint-guard",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime atomicity proof"],
+        })
+    elif not probe_failed and facts.get("has_mutation_indicators"):
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "degraded",
+            "implementation": "document-modified-indicator",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": ["Heuristic document change detection without granular timeline markers; atomicity not guaranteed"],
+        })
+    else:
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "unavailable",
+            "implementation": None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": err_limits("No reliable mutation indicators available for external change detection"),
+        })
+
+    # 17. export.dxf (Finding 3: DXF is capability-gated until P2)
+    records.append({
+        "name": "export.dxf",
+        "state": "unavailable",
+        "implementation": None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": err_limits("DXF export contract semantics not supported on this runtime; capability-gated until P2"),
+    })
+
+    # 18. view.section (Finding 3: section analysis is capability-gated until P2)
+    records.append({
+        "name": "view.section",
+        "state": "unavailable",
+        "implementation": None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": err_limits("Section view analysis contract semantics not available on this runtime; capability-gated until P2"),
+    })
+
+    # 19. assembly.joints (Finding 3: assembly joints are capability-gated until P2)
+    records.append({
+        "name": "assembly.joints",
+        "state": "unavailable",
+        "implementation": None,
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "limitations": err_limits("Assembly joint operations not supported on this runtime; capability-gated until P2"),
+    })
+
+    data_payload = {
+        "application": "Autodesk Fusion" if facts.get("has_app") else PAYLOAD.get("application"),
+        "fusion_version": resolved_version,
+        "relay_version": relay_version,
+        "platform": PAYLOAD.get("platform"),
+        "local_tool": PAYLOAD.get("local_tool"),
+        "probe_facts": facts,
+    }
+    return make_result(data=data_payload, summary="Runtime capabilities probed", capabilities=records)
+
+
+def run():
+    op = PAYLOAD.get("operation", "")
+    if op == "capabilities":
+        return probe_runtime()
+    if op == "echo":
+        return make_result(data={"text": PAYLOAD.get("text", "")}, summary="echo")
+    if op == "test_op":
+        return make_result(data={"operation": op}, summary=f"Executed read:{op}")
+    if op == "entity":
+        resolved = resolve_fusion_entity(PAYLOAD)
+        return make_result(
+            data=resolved,
+            summary=f"Resolved entity {PAYLOAD.get('ref') or 'entity'}: {resolved.get('outcome')}",
+        )
+
+    fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
+    doc_state = {
+        "document_ref": doc_ref,
+        "model_revision": PAYLOAD.get("expected_revision") or "rev_1",
+        "name": canonical_data.get("document", {}).get("name") or "active",
+        "units": "mm",
+    }
+    if op == "model_snapshot":
+        detail = PAYLOAD.get("detail", "compact")
+        comps = canonical_data.get("components", [])
+        occs = canonical_data.get("occurrences", [])
+        bodies = canonical_data.get("bodies", [])
+        sketches = canonical_data.get("sketches", [])
+        timeline = canonical_data.get("timeline", [])
+        params = canonical_data.get("parameters", [])
+        if isinstance(params, dict):
+            param_count = len(params.get("model_parameters", [])) + len(params.get("user_parameters", []))
+        elif isinstance(params, list):
+            param_count = len(params)
+        else:
+            param_count = 0
+        total_faces = sum(int(b.get("faces_count") or len(b.get("faces", [])) or 0) for b in bodies)
+        total_edges = sum(int(b.get("edges_count") or len(b.get("edges", [])) or 0) for b in bodies)
+        total_verts = sum(int(b.get("vertices_count") or len(b.get("vertices", [])) or 0) for b in bodies)
+
+        counts = {
+            "components": len(comps),
+            "occurrences": len(occs),
+            "bodies": len(bodies),
+            "sketches": len(sketches),
+            "features": len(timeline),
+            "parameters": param_count,
+            "faces": total_faces,
+            "edges": total_edges,
+            "vertices": total_verts,
+        }
+
+        sanitized_bodies = []
+        for b in bodies:
+            b_copy = dict(b)
+            if detail == "compact":
+                b_copy.pop("faces", None)
+                b_copy.pop("edges", None)
+                b_copy.pop("vertices", None)
+            sanitized_bodies.append(b_copy)
+
+        snapshot_data = {
+            "operation": "model_snapshot",
+            "detail": detail,
+            "fingerprint": fp,
+            "counts": counts,
+            "components": comps,
+            "occurrences": occs,
+            "bodies": sanitized_bodies,
+            "sketches": sketches,
+            "features": timeline,
+            "parameters": params,
+            "visibility": {"effective_visibility": canonical_data.get("effective_visibility", [])},
+            "appearance": {},
+            "health": {"is_healthy": True},
+            "logical_objects": canonical_data.get("custom_attributes", []),
+        }
+        if detail == "full":
+            all_faces = []
+            all_edges = []
+            for b in bodies:
+                all_faces.extend(b.get("faces", []))
+                all_edges.extend(b.get("edges", []))
+            if all_faces:
+                snapshot_data["faces"] = all_faces
+            if all_edges:
+                snapshot_data["edges"] = all_edges
+
+        return make_result(data=snapshot_data, summary=f"Model snapshot captured for {doc_ref}", document=doc_state)
+
+    if op == "feature_tree":
+        features = canonical_data.get("timeline", [])
+        enriched = []
+        for f in features:
+            f_copy = dict(f)
+            f_copy["timeline_index"] = f_copy.get("index", 0)
+            f_copy["feature_type"] = f_copy.get("feature_type", "Feature")
+            inputs = f_copy.get("inputs", [])
+            norm_inputs = []
+            for inp in inputs:
+                dep_type = inp.get("dependency_type", "unknown")
+                if dep_type not in ("exact", "inferred", "unknown"):
+                    dep_type = "unknown"
+                norm_inputs.append({
+                    "ref": inp.get("ref") or f"ent_{inp.get('id', 'dep')}",
+                    "kind": inp.get("kind"),
+                    "dependency_type": dep_type,
+                })
+            f_copy["inputs"] = norm_inputs
+            f_copy["dependencies"] = norm_inputs
+            enriched.append(f_copy)
+        return make_result(data={"features": enriched, "count": len(enriched)}, summary=f"Feature tree read ({len(enriched)} features)", document=doc_state)
+
+    if op == "sketch":
+        target_ref = PAYLOAD.get("ref", "")
+        sketches = canonical_data.get("sketches", [])
+        matching_sketch = None
+        for sk in sketches:
+            if sk.get("ref") == target_ref or sk.get("name") == target_ref or sk.get("id") == target_ref:
+                matching_sketch = dict(sk)
+                break
+        if matching_sketch is None:
+            resolved = resolve_fusion_entity({"ref": target_ref, "kind": "sketch"})
+            record = resolved.get("record") or {}
+            matching_sketch = {
+                "ref": target_ref,
+                "name": record.get("name", target_ref),
+                "fully_constrained": None,
+                "profiles": [],
+                "constraints": [],
+                "dimensions": [],
+                "geometry": {},
+            }
+        matching_sketch.pop("dof", None)
+        if not PAYLOAD.get("include_profiles", True):
+            matching_sketch["profiles"] = []
+        if not PAYLOAD.get("include_constraints", True):
+            matching_sketch["constraints"] = []
+        return make_result(data=matching_sketch, summary=f"Read sketch {target_ref}", document=doc_state)
+
+    if op == "parameters":
+        params = canonical_data.get("parameters", {})
+        include_model = PAYLOAD.get("include_model_params", True)
+        include_user = PAYLOAD.get("include_user_params", True)
+        if isinstance(params, dict):
+            filtered_params = {}
+            if include_model:
+                filtered_params["model_parameters"] = params.get("model_parameters", [])
+            if include_user:
+                filtered_params["user_parameters"] = params.get("user_parameters", [])
+            params = filtered_params
+        elif isinstance(params, (list, tuple)):
+            params = [
+                p for p in params
+                if (include_user if (isinstance(p, dict) and p.get("is_user")) else include_model)
+            ]
+        return make_result(data={"parameters": params}, summary="Parameters read", document=doc_state)
+
+    if op == "visibility":
+        target = PAYLOAD.get("target")
+        vis_list = canonical_data.get("effective_visibility", [])
+        if target:
+            target_str = target.get("ref") if isinstance(target, dict) else str(target)
+            vis_list = [v for v in vis_list if v.get("ref") == target_str or v.get("target") == target_str]
+        vis_data = {
+            "target": target,
+            "effective_visibility": vis_list,
+        }
+        return make_result(data=vis_data, summary="Visibility read", document=doc_state)
+
+    if op == "selection":
+        selected_items = []
+        try:
+            import adsk.core
+            app = adsk.core.Application.get()
+            if app and hasattr(app, "userInterface"):
+                ui = app.userInterface
+                if ui and hasattr(ui, "activeSelections"):
+                    selections = ui.activeSelections
+                    for i in range(selections.count):
+                        sel = selections.item(i)
+                        ent = getattr(sel, "entity", None)
+                        pt = getattr(sel, "point", None)
+                        pt_dict = None
+                        if pt:
+                            pt_dict = {
+                                "x": round(float(pt.x), 6),
+                                "y": round(float(pt.y), 6),
+                                "z": round(float(pt.z), 6),
+                                "frame": {"space": "world", "ref": None},
+                            }
+                        ent_name = getattr(ent, "name", None) if ent else None
+                        ent_type = type(ent).__name__ if ent else "Unknown"
+                        safe_ref = f"ent_sel_{i}"
+                        selected_items.append({
+                            "ref": safe_ref,
+                            "kind": ent_type,
+                            "name": ent_name,
+                            "selection_point": pt_dict,
+                            "frame": {"space": "world", "ref": None},
+                        })
+        except Exception:
+            pass
+
+        if "mock_selection" in PAYLOAD and isinstance(PAYLOAD["mock_selection"], list):
+            selected_items = PAYLOAD["mock_selection"]
+
+        refs = [s.get("ref") for s in selected_items if s.get("ref")]
+        return make_result(
+            data={"count": len(selected_items), "refs": refs, "entities": selected_items},
+            summary=f"Selection read ({len(selected_items)} selected)",
+            document=doc_state,
+        )
+
+    if op == "query":
+        attrs_by_owner = {}
+        for a in canonical_data.get("custom_attributes", []):
+            o_id = a.get("owner_id")
+            if o_id:
+                attrs_by_owner.setdefault(str(o_id), []).append(a)
+
+        candidates = []
+        for c in canonical_data.get("components", []):
+            c_name = str(c.get("name", ""))
+            c_id = str(c.get("id") or c.get("entityToken") or c_name)
+            c_attrs = attrs_by_owner.get(c_id, []) + (attrs_by_owner.get(c_name, []) if c_name != c_id else [])
+            c_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in c_attrs]
+            c_roles = [str(a.get("value")) for a in c_attrs if a.get("name") == "role"]
+            c_log = next((str(a.get("value")) for a in c_attrs if a.get("name") == "logical_object"), None)
+            c_recipe = next((str(a.get("value")) for a in c_attrs if a.get("name") == "recipe"), None)
+            c_tx = next((str(a.get("value")) for a in c_attrs if a.get("name") == "transaction_id"), None)
+            c_cand = {
+                "ref": c.get("ref") or f"ent_{c.get('id', 'comp')}",
+                "name": c_name,
+                "kind": "component",
+                "component_path": c.get("component_path") or (),
+                "tags": c_tags,
+                "role": c_roles or None,
+                "logical_object": c_log,
+                "recipe": c_recipe,
+                "transaction_id": c_tx,
+                "entityToken": c.get("entityToken"),
+            }
+            candidates.append(c_cand)
+
+        for o in canonical_data.get("occurrences", []):
+            o_name = str(o.get("name", ""))
+            o_path = str(o.get("full_path_name") or o_name)
+            o_attrs = attrs_by_owner.get(o_path, []) + (attrs_by_owner.get(o_name, []) if o_name != o_path else [])
+            o_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in o_attrs]
+            o_roles = [str(a.get("value")) for a in o_attrs if a.get("name") == "role"]
+            o_log = next((str(a.get("value")) for a in o_attrs if a.get("name") == "logical_object"), None)
+            o_recipe = next((str(a.get("value")) for a in o_attrs if a.get("name") == "recipe"), None)
+            o_tx = next((str(a.get("value")) for a in o_attrs if a.get("name") == "transaction_id"), None)
+            o_cand = {
+                "ref": o.get("ref") or f"ent_{o_name}",
+                "name": o_name,
+                "full_path_name": o_path,
+                "kind": "occurrence",
+                "component_path": o.get("component_path") or (),
+                "occurrence": o.get("ref") or f"ent_{o_name}",
+                "is_visible": o.get("is_visible"),
+                "visible": o.get("is_visible"),
+                "transform": o.get("transform"),
+                "tags": o_tags,
+                "role": o_roles or None,
+                "logical_object": o_log,
+                "recipe": o_recipe,
+                "transaction_id": o_tx,
+                "entityToken": o.get("entityToken"),
+            }
+            candidates.append(o_cand)
+
+        for b in canonical_data.get("bodies", []):
+            b_name = str(b.get("name", ""))
+            b_comp = b.get("component_name") or b.get("component")
+            b_attrs = attrs_by_owner.get(b_name, []) + (attrs_by_owner.get(f"{b_comp}:{b_name}", []) if b_comp else [])
+            b_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in b_attrs]
+            b_roles = [str(a.get("value")) for a in b_attrs if a.get("name") == "role"]
+            b_log = next((str(a.get("value")) for a in b_attrs if a.get("name") == "logical_object"), None)
+            b_recipe = next((str(a.get("value")) for a in b_attrs if a.get("name") == "recipe"), None)
+            b_tx = next((str(a.get("value")) for a in b_attrs if a.get("name") == "transaction_id"), None)
+            b_cand = {
+                "ref": b.get("ref") or f"ent_{b_name}",
+                "name": b_name,
+                "kind": "body",
+                "component_name": b_comp,
+                "component_path": b.get("component_path") or ((str(b_comp),) if b_comp else ()),
+                "is_solid": b.get("is_solid"),
+                "is_visible": b.get("is_visible"),
+                "visible": b.get("is_visible"),
+                "volume": b.get("volume"),
+                "area": b.get("area"),
+                "bounding_box": b.get("bounding_box"),
+                "appearance": b.get("appearance"),
+                "tags": b_tags,
+                "role": b_roles or None,
+                "logical_object": b_log,
+                "recipe": b_recipe,
+                "transaction_id": b_tx,
+                "entityToken": b.get("entityToken"),
+            }
+            candidates.append(b_cand)
+
+        for s in canonical_data.get("sketches", []):
+            s_name = str(s.get("name", ""))
+            s_comp = s.get("component_name") or s.get("component")
+            s_attrs = attrs_by_owner.get(s_name, []) + (attrs_by_owner.get(f"{s_comp}:{s_name}", []) if s_comp else [])
+            s_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in s_attrs]
+            s_roles = [str(a.get("value")) for a in s_attrs if a.get("name") == "role"]
+            s_log = next((str(a.get("value")) for a in s_attrs if a.get("name") == "logical_object"), None)
+            s_recipe = next((str(a.get("value")) for a in s_attrs if a.get("name") == "recipe"), None)
+            s_tx = next((str(a.get("value")) for a in s_attrs if a.get("name") == "transaction_id"), None)
+            s_cand = {
+                "ref": s.get("ref") or f"ent_{s_name}",
+                "name": s_name,
+                "kind": "sketch",
+                "component_name": s_comp,
+                "component_path": s.get("component_path") or ((str(s_comp),) if s_comp else ()),
+                "is_visible": s.get("is_visible"),
+                "visible": s.get("is_visible"),
+                "bounding_box": s.get("bounding_box"),
+                "fully_constrained": s.get("fully_constrained"),
+                "tags": s_tags,
+                "role": s_roles or None,
+                "logical_object": s_log,
+                "recipe": s_recipe,
+                "transaction_id": s_tx,
+                "entityToken": s.get("entityToken"),
+            }
+            candidates.append(s_cand)
+
+        for f in canonical_data.get("timeline", []):
+            f_name = str(f.get("name", ""))
+            f_attrs = attrs_by_owner.get(f_name, [])
+            f_tags = [{"group": str(a.get("group", "")), "name": str(a.get("name", "")), "value": str(a.get("value", ""))} for a in f_attrs]
+            f_roles = [str(a.get("value")) for a in f_attrs if a.get("name") == "role"]
+            f_log = next((str(a.get("value")) for a in f_attrs if a.get("name") == "logical_object"), None)
+            f_recipe = next((str(a.get("value")) for a in f_attrs if a.get("name") == "recipe"), None)
+            f_tx = next((str(a.get("value")) for a in f_attrs if a.get("name") == "transaction_id"), None)
+            f_cand = {
+                "ref": f.get("ref") or f"ent_{f_name}",
+                "name": f_name,
+                "kind": "feature",
+                "feature_type": f.get("feature_type", "Feature"),
+                "timeline_index": f.get("index", 0),
+                "component_path": f.get("component_path") or (),
+                "is_suppressed": f.get("is_suppressed", False),
+                "health_status": f.get("health_status", "ok"),
+                "inputs": f.get("inputs", []),
+                "outputs": f.get("outputs", []),
+                "parent": f.get("parent"),
+                "children": f.get("children", []),
+                "tags": f_tags,
+                "role": f_roles or None,
+                "logical_object": f_log,
+                "recipe": f_recipe,
+                "transaction_id": f_tx,
+                "entityToken": f.get("entityToken"),
+            }
+            candidates.append(f_cand)
+
+        return make_result(
+            data={"candidates": candidates},
+            summary=f"Collected {len(candidates)} candidates for query",
+            document=doc_state,
+        )
+
+    result_data = {
+        "operation": op,
+        "fingerprint": fp,
+        "fingerprint_data": canonical_data,
+    }
+    return make_result(data=result_data, summary=f"Executed read:{op}", document=doc_state)
