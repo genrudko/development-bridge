@@ -1,3 +1,147 @@
+def _validation_owner_attributes(owner):
+    values = {}
+    attrs = getattr(owner, "attributes", None)
+    if attrs is None or not hasattr(attrs, "count"):
+        return values
+    for index in range(attrs.count):
+        attribute = attrs.item(index)
+        if getattr(attribute, "groupName", "") == "bridge.cad/v1":
+            values[str(getattr(attribute, "name", ""))] = str(getattr(attribute, "value", ""))
+    return values
+
+
+def _validation_provenance(attributes):
+    raw = attributes.get("provenance")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {"valid": False}
+    if not isinstance(parsed, dict):
+        return {"valid": False}
+    return {
+        "valid": bool(parsed.get("creator_tool") and parsed.get("operation_id") and parsed.get("created_revision")),
+        "logical_id": parsed.get("logical_object_ref"),
+        "role": parsed.get("role"),
+        "generation": parsed.get("generation"),
+        "current": parsed.get("is_current"),
+    }
+
+
+def _validation_bbox(raw):
+    if not isinstance(raw, dict):
+        return None
+    minimum = raw.get("min")
+    maximum = raw.get("max")
+    if not isinstance(minimum, (list, tuple)) or not isinstance(maximum, (list, tuple)):
+        return None
+    if len(minimum) != 3 or len(maximum) != 3:
+        return None
+    return list(minimum) + list(maximum)
+
+
 def run():
-    op = PAYLOAD.get("operation", "")
-    return make_result(data={"operation": op}, summary=f"Executed validate:{op}")
+    if PAYLOAD.get("operation") == "test_op":
+        return make_result(data={"operation": "test_op"}, summary="Executed validate:test_op")
+    if PAYLOAD.get("operation") != "run":
+        raise FusionScriptError("INVALID_ARGUMENT", "Unsupported validation operation")
+
+    canonical = collect_model_fingerprint(PAYLOAD)
+    import adsk.core
+    import adsk.fusion
+
+    app = adsk.core.Application.get()
+    doc = getattr(app, "activeDocument", None) if app else None
+    design = doc.products.itemByClass("adsk::fusion::Design") if doc and hasattr(doc, "products") else None
+    if not doc or not design:
+        raise FusionScriptError("NO_ACTIVE_DESIGN", "Validation requires an active Fusion design")
+
+    facts = {
+        "document_ref": canonical["document"]["document_ref"],
+        "features": [], "sketches": [], "references": [], "bodies": [],
+        "text_outputs": [],
+        "timeline": {"available": True, "rolled_back": False},
+        "limitations": [],
+    }
+    timeline = getattr(design, "timeline", None)
+    if timeline is None or not hasattr(timeline, "count"):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Timeline evidence is unavailable")
+    for index in range(timeline.count):
+        item = timeline.item(index)
+        native_id = getattr(item, "entityToken", None) or getattr(item, "id", None)
+        if not native_id:
+            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Timeline item lacks stable runtime identity")
+        valid = bool(getattr(item, "isValid", True))
+        health = str(getattr(item, "healthStatus", "unknown"))
+        facts["timeline"]["rolled_back"] = facts["timeline"]["rolled_back"] or bool(getattr(item, "isRolledBack", False))
+        facts["features"].append({"kind": "feature", "native_token": str(native_id), "name": str(getattr(item, "name", "")), "valid": valid, "health": health})
+        if not valid or health.lower() in ("error", "failed", "broken"):
+            facts["references"].append({"kind": "feature", "native_token": str(native_id), "state": "broken"})
+
+    components = getattr(design, "allComponents", None)
+    if components is None or not hasattr(components, "count"):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Component evidence is unavailable")
+    canonical_bodies = {(body.get("component", ""), body.get("name", "")): body for body in canonical.get("bodies", [])}
+    canonical_sketches = {(sketch.get("component", ""), sketch.get("name", "")): sketch for sketch in canonical.get("sketches", [])}
+    for component_index in range(components.count):
+        component = components.item(component_index)
+        component_name = str(getattr(component, "name", ""))
+        bodies = getattr(component, "bRepBodies", None)
+        sketches = getattr(component, "sketches", None)
+        if bodies is None or not hasattr(bodies, "count") or sketches is None or not hasattr(sketches, "count"):
+            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Body or sketch evidence collection is unavailable")
+        for body_index in range(bodies.count):
+            body = bodies.item(body_index)
+            native_id = getattr(body, "entityToken", None) or getattr(body, "id", None)
+            if not native_id:
+                raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Body lacks stable runtime identity")
+            name = str(getattr(body, "name", ""))
+            raw = canonical_bodies.get((component_name, name), {})
+            attributes = _validation_owner_attributes(body)
+            provenance = _validation_provenance(attributes)
+            legacy_name = name.startswith("AZURE_LEFT_TEXT_")
+            suffix = name[len("AZURE_LEFT_TEXT_"):] if legacy_name else ""
+            generation = int(suffix) if suffix.isdigit() else None
+            logical_id = "AZURE_LEFT_TEXT" if legacy_name else None
+            current = None
+            if provenance:
+                logical_id = provenance.get("logical_id") or logical_id
+                generation = provenance.get("generation") if provenance.get("generation") is not None else generation
+                current = provenance.get("current")
+            facts["bodies"].append({
+                "kind": "body", "native_token": str(native_id), "name": name,
+                "valid": bool(getattr(body, "isValid", True)),
+                "empty": int(raw.get("faces_count", 0)) == 0,
+                "volume": raw.get("volume"), "bbox": _validation_bbox(raw.get("bounding_box")),
+                "bridge_generated": bool(provenance),
+                "orphaned": bool(provenance and not provenance.get("logical_id")),
+                "role": attributes.get("role") or (provenance and provenance.get("role")),
+                "provenance_valid": None if provenance is None else provenance.get("valid"),
+                "logical_id": logical_id, "generation": generation, "current": current,
+                "legacy_generated": legacy_name and provenance is None,
+            })
+            role = attributes.get("role") or (provenance and provenance.get("role"))
+            if provenance and ("text" in str(role).lower() or provenance.get("logical_id")):
+                facts["text_outputs"].append({
+                    "kind": "body",
+                    "native_token": str(native_id),
+                    "source_ref": provenance.get("logical_id"),
+                    "output_refs": [str(native_id)],
+                })
+        for sketch_index in range(sketches.count):
+            sketch = sketches.item(sketch_index)
+            native_id = getattr(sketch, "entityToken", None) or getattr(sketch, "id", None)
+            if not native_id:
+                raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Sketch lacks stable runtime identity")
+            name = str(getattr(sketch, "name", ""))
+            raw = canonical_sketches.get((component_name, name), {})
+            facts["sketches"].append({
+                "kind": "sketch", "native_token": str(native_id), "name": name,
+                "valid": bool(getattr(sketch, "isValid", True)),
+                "health": str(getattr(sketch, "healthStatus", "unknown")),
+                "fully_constrained": None, "constraints_count": raw.get("constraints_count", 0),
+                "profiles_count": raw.get("profiles_count", 0), "open_profiles_count": None,
+            })
+    facts["limitations"].append("constraint_and_open_profile_state_unavailable")
+    return make_result(data=facts, summary="Validation evidence collected")

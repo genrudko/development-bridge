@@ -15,6 +15,80 @@ from app.fusion_cad.service import FusionCadService
 from app.settings import DesktopNodeSettings
 
 
+@pytest.mark.asyncio
+async def test_validate_run_normalizes_raw_evidence_without_advancing_revision(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [CapabilityRecord(name="design.access", state="supported")]
+        ),
+    )
+    cad_service.revision_tracker.observe("doc_1", "fingerprint-before")
+    before = cad_service.revision_tracker.current("doc_1")
+    mock_desktop_service.submit = AsyncMock(
+        return_value={
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Validation evidence collected",
+            "data": {
+                "document_ref": "doc_1",
+                "features": [
+                    {
+                        "kind": "feature",
+                        "name": "BrokenFeature",
+                        "native_token": "native-feature-secret",
+                        "valid": False,
+                        "health": "error",
+                    }
+                ],
+                "timeline": {"available": True, "rolled_back": False},
+            },
+        }
+    )
+
+    result = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "run",
+            "profiles": ["pre_mutation"],
+        },
+        group="validate",
+    )
+
+    assert isinstance(result, CadResult)
+    assert result.validation is not None
+    assert result.validation["verdict"] == "RED"
+    assert result.data["read_only"] is True
+    assert "native-feature-secret" not in result.model_dump_json()
+    assert cad_service.revision_tracker.current("doc_1") == before
+    assert mock_desktop_service.submit.call_args.kwargs["journal"]["mutation"] is False
+
+
+@pytest.mark.asyncio
+async def test_validate_rejects_non_p0_profile_before_dispatch(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [CapabilityRecord(name="design.access", state="supported")]
+        ),
+    )
+
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "run", "profiles": ["future_profile"]},
+            group="validate",
+        )
+
+    assert exc.value.code == ErrorCode.INVALID_ARGUMENT
+    assert mock_desktop_service.submit.call_count == 0
+
+
 @pytest.fixture
 def mock_desktop_service() -> DesktopNodeService:
     service = MagicMock(spec=DesktopNodeService)

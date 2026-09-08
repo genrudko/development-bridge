@@ -60,6 +60,7 @@ from app.fusion_cad.snapshots import (
     normalize_snapshot,
 )
 from app.fusion_cad.text import normalize_text_lineage
+from app.fusion_cad.validation import P0_VALIDATION_PROFILES, validate_model_evidence
 from app.fusion_cad.views import (
     ViewRefStore,
     canonicalize_section_payload,
@@ -1982,6 +1983,61 @@ class FusionCadService:
                     cad_result, op=op, payload=payload, node_id=node_id
                 )
 
+            if effective_bundle_group == "validate" and op == "run":
+                raw_evidence = (
+                    dict(cad_result.data)
+                    if isinstance(cad_result.data, (dict, Mapping))
+                    else {}
+                )
+                validation_doc = (
+                    raw_evidence.get("document_ref")
+                    or target_doc
+                    or self._revision_tracker.active_document_ref
+                    or "doc_active"
+                )
+                normalized_evidence = self._normalize_validation_evidence(
+                    raw_evidence, document_ref=validation_doc
+                )
+                current = self._revision_tracker.current(validation_doc)
+                report = validate_model_evidence(
+                    normalized_evidence,
+                    profiles=tuple(payload.get("profiles") or P0_VALIDATION_PROFILES),
+                    checks=tuple(payload.get("checks") or ()),
+                    model_revision=current.revision if current is not None else None,
+                )
+                limitation_codes = raw_evidence.get("limitations")
+                public_limitations = []
+                if isinstance(limitation_codes, (list, tuple)) and (
+                    "constraint_and_open_profile_state_unavailable" in limitation_codes
+                ):
+                    public_limitations.append(
+                        "Authoritative fully-constrained and open-profile state is unavailable from proven runtime access; no state was inferred"
+                    )
+                cad_result = cad_result.model_copy(
+                    update={
+                        "summary": report.summary,
+                        "data": ImmutableMapping(
+                            {
+                                "read_only": True,
+                                "document_ref": validation_doc,
+                                "finding_count": len(report.findings),
+                                "limitations": public_limitations,
+                            }
+                        ),
+                        "validation": ImmutableMapping(
+                            sanitize_public_payload(
+                                report.model_dump(mode="python", exclude_none=True)
+                            )
+                        ),
+                        "document": DocumentState(
+                            document_ref=validation_doc,
+                            model_revision=current.revision if current is not None else "rev_0",
+                            name=cad_result.document.name if cad_result.document else None,
+                            units="mm",
+                        ),
+                    }
+                )
+
             domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
             if node_id and (
                 has_binary_data(domain_payload) or self._is_oversized(domain_payload)
@@ -2012,6 +2068,60 @@ class FusionCadService:
         except Exception:
             self._revision_tracker.restore(tracker_snapshot)
             raise
+
+    def _normalize_validation_evidence(
+        self, raw: Mapping[str, Any], *, document_ref: str
+    ) -> dict[str, Any]:
+        """Replace runtime identities with document-scoped opaque refs."""
+        normalized: dict[str, Any] = {}
+        token_refs: dict[str, str] = {}
+        entity_groups = ("features", "sketches", "references", "bodies", "text_outputs")
+
+        for group in entity_groups:
+            clean_items: list[dict[str, Any]] = []
+            source_items = raw.get(group, ())
+            if not isinstance(source_items, (list, tuple)):
+                source_items = ()
+            for source in source_items:
+                if not isinstance(source, Mapping):
+                    continue
+                clean = dict(sanitize_public_payload(source))
+                native_id = source.get("native_token") or source.get("native_id")
+                kind = str(source.get("kind") or group.rstrip("s") or "entity")
+                existing_ref = source.get("ref")
+                if isinstance(existing_ref, str) and re.fullmatch(ENTITY_REF_PATTERN, existing_ref):
+                    clean["ref"] = existing_ref
+                elif isinstance(native_id, str) and native_id:
+                    issued = self._ref_registry.issue(
+                        document_ref=document_ref,
+                        kind=kind,
+                        native_token=native_id,
+                        name=str(source.get("name")) if source.get("name") else None,
+                    ).ref
+                    clean["ref"] = issued
+                    token_refs[native_id] = issued
+                clean_items.append(clean)
+            normalized[group] = clean_items
+
+        for item in normalized.get("references", []):
+            target = item.get("target_ref")
+            if isinstance(target, str) and target in token_refs:
+                item["target_ref"] = token_refs[target]
+        for item in normalized.get("text_outputs", []):
+            source_ref = item.get("source_ref")
+            if isinstance(source_ref, str) and source_ref in token_refs:
+                item["source_ref"] = token_refs[source_ref]
+            output_refs = item.get("output_refs")
+            if isinstance(output_refs, (list, tuple)):
+                item["output_refs"] = [token_refs.get(str(ref), str(ref)) for ref in output_refs]
+
+        timeline = raw.get("timeline")
+        normalized["timeline"] = (
+            dict(sanitize_public_payload(timeline))
+            if isinstance(timeline, Mapping)
+            else {"available": False}
+        )
+        return normalized
 
     def finalize_terminal_operation(
         self,
@@ -2328,6 +2438,17 @@ class FusionCadService:
 
         # Enforce capability-first dispatch before script generation or execution
         op = str(payload.get("operation", ""))
+        if effective_bundle_group == "validate" and op == "run":
+            requested_profiles = tuple(payload.get("profiles") or ())
+            if not requested_profiles or any(
+                profile not in P0_VALIDATION_PROFILES
+                for profile in requested_profiles
+            ):
+                raise FusionCadError(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Validation profiles must be non-empty P0 profile names",
+                    details={"profile_set": "invalid"},
+                )
         required_cap = get_required_capability(domain_group, op, payload)
         if required_cap is not None:
             matrix = self.get_node_capabilities(node_id)
