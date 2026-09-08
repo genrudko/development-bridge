@@ -9685,3 +9685,198 @@ async def test_task13_non_spike_stage_remains_stageable_but_preview_fails_closed
             group="transaction",
         )
     assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+
+@pytest.mark.asyncio
+async def test_task13_degraded_transaction_capability_is_internal_feasibility_only(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    degraded = CapabilityMatrix.from_records(
+        [
+            CapabilityRecord(
+                name="transaction.preview_replay",
+                state="degraded",
+                limitations=("Live acceptance pending",),
+            ),
+            CapabilityRecord(
+                name="revision.external_change_detection", state="supported"
+            ),
+        ]
+    )
+    cad_service.set_node_capabilities("desk-1", degraded)
+    mock_desktop_service.submit = AsyncMock(
+        return_value={"status": "queued", "operation_id": "op_tx_begin"}
+    )
+
+    queued = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "begin", "transaction_id": "tx_feas_1"},
+        group="transaction",
+    )
+    assert queued["status"] == "queued"
+    assert mock_desktop_service.submit.call_count == 1
+
+    unavailable = CapabilityMatrix.from_records(
+        [
+            CapabilityRecord(name="transaction.preview_replay", state="unavailable"),
+            CapabilityRecord(
+                name="revision.external_change_detection", state="supported"
+            ),
+        ]
+    )
+    cad_service.set_node_capabilities("desk-1", unavailable)
+    with pytest.raises(FusionCadError) as exc_unavailable:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "begin", "transaction_id": "tx_feas_2"},
+            group="transaction",
+        )
+    assert exc_unavailable.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert mock_desktop_service.submit.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_task13_degraded_non_spike_preview_still_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [
+                CapabilityRecord(
+                    name="transaction.preview_replay",
+                    state="degraded",
+                    limitations=("Live acceptance pending",),
+                ),
+                CapabilityRecord(
+                    name="revision.external_change_detection", state="supported"
+                ),
+            ]
+        ),
+    )
+    rec = cad_service.revision_tracker.observe("doc_1", "fp_base")
+    cad_service.revision_tracker.begin_transaction(
+        "tx_nonspike", "doc_1", rec.revision, "fp_base"
+    )
+    cad_service.transaction_store.begin(
+        "tx_nonspike", "doc_1", rec.revision, "fp_base", {}
+    )
+    cad_service.transaction_store.stage(
+        "tx_nonspike", {"action_type": "show", "target": "ent_existing"}
+    )
+
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_nonspike"},
+            group="transaction",
+        )
+    assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert mock_desktop_service.submit.call_count == 0
+
+
+def test_task13_commit_native_hint_becomes_opaque_ref_only_after_terminal_success(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    rec = cad_service.revision_tracker.observe("doc_1", "fp_base")
+    cad_service.revision_tracker.begin_transaction(
+        "tx_ref_1", "doc_1", rec.revision, "fp_base"
+    )
+    provenance = {
+        "creator_tool": "bridge.fusion-cad-agent",
+        "creator_operation": "fusion_style:text_create",
+        "operation_id": "op_123456789abc",
+        "transaction_id": "tx_ref_1",
+        "logical_object_ref": "text_123456789abcdef0",
+        "created_revision": "rev_2",
+        "tags": [],
+    }
+    cad_service.transaction_store.begin(
+        "tx_ref_1", "doc_1", rec.revision, "fp_base", {}
+    )
+    cad_service.transaction_store.stage(
+        "tx_ref_1",
+        {
+            "action_type": "text_create",
+            "text": "ПЫТОК",
+            "height_mm": 4.0,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}},
+            "provenance": provenance,
+        },
+    )
+    native = "native::text::secret"
+    result = CadResult(
+        status="succeeded",
+        summary="Committed exact staged transaction plan",
+        data={
+            "transaction_id": "tx_ref_1",
+            "operation": "commit",
+            "applied": True,
+            "fingerprint": "fp_after",
+            "document_ref": "doc_1",
+            "internal_ref_hints": [{"kind": "sketch_text", "native_token": native}],
+            "provenance": provenance,
+            "persisted_provenance": provenance,
+        },
+    )
+    finalized = cad_service._finalize_completed_execution(
+        result,
+        effective_bundle_group="transaction",
+        op="commit",
+        payload={"transaction_id": "tx_ref_1", "document_ref": "doc_1"},
+        node_id="desk-1",
+    )
+    assert isinstance(finalized, CadResult)
+    assert len(finalized.changed_refs) == 1
+    opaque = finalized.changed_refs[0]
+    assert opaque.startswith("ent_")
+    assert native not in finalized.model_dump_json()
+    assert "internal_ref_hints" not in finalized.data
+    stored = cad_service.ref_registry.get_internal_record(opaque, "doc_1")
+    assert stored is not None
+    assert stored.native_token == native
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_ref_1") is None
+
+    failed_service = FusionCadService(mock_desktop_service)
+    failed_rec = failed_service.revision_tracker.observe("doc_1", "fp_base")
+    failed_service.revision_tracker.begin_transaction(
+        "tx_ref_fail", "doc_1", failed_rec.revision, "fp_base"
+    )
+    failed_service.transaction_store.begin(
+        "tx_ref_fail", "doc_1", failed_rec.revision, "fp_base", {}
+    )
+    failed_provenance = dict(provenance)
+    failed_provenance["transaction_id"] = "tx_ref_fail"
+    failed_service.transaction_store.stage(
+        "tx_ref_fail",
+        {
+            "action_type": "text_create",
+            "text": "ПЫТОК",
+            "height_mm": 4.0,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}},
+            "provenance": failed_provenance,
+        },
+    )
+    failed = CadResult(
+        status="succeeded",
+        summary="failed logical commit",
+        data={
+            "transaction_id": "tx_ref_fail",
+            "operation": "commit",
+            "applied": False,
+            "fingerprint": "fp_after",
+            "document_ref": "doc_1",
+            "internal_ref_hints": [{"kind": "sketch_text", "native_token": native}],
+            "provenance": failed_provenance,
+            "persisted_provenance": failed_provenance,
+        },
+    )
+    with pytest.raises(FusionCadError):
+        failed_service._finalize_completed_execution(
+            failed,
+            effective_bundle_group="transaction",
+            op="commit",
+            payload={"transaction_id": "tx_ref_fail", "document_ref": "doc_1"},
+            node_id="desk-1",
+        )
+    assert failed_service.ref_registry.get_internal_record("ent_missing", "doc_1") is None
+    assert not failed_service.ref_registry.has_document("doc_1")

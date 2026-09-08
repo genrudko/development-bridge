@@ -1424,6 +1424,105 @@ class FusionCadService:
         fixed["data"] = fixed_data
         self._desktop_nodes.overwrite_external_result(reference, fixed)
 
+    def _normalize_transaction_commit_refs(
+        self,
+        cad_result: CadResult,
+        *,
+        payload: dict[str, Any],
+        target_doc: str | None,
+    ) -> tuple[CadResult, list[tuple[str, str, str]]]:
+        """Sanitize Task 13 adapter-private native hints before public emission.
+
+        The runtime may return native tokens only as adapter-private commit evidence.
+        We validate persisted provenance against the staged service-owned record,
+        allocate public opaque refs without mutating the registry, and defer actual
+        registry persistence until outward finalization has succeeded.
+        """
+        data = dict(cad_result.data) if isinstance(cad_result.data, Mapping) else {}
+        raw_hints = data.pop("internal_ref_hints", None)
+        if raw_hints is None:
+            return cad_result, []
+        if not target_doc or not isinstance(target_doc, str):
+            raise FusionCadError(
+                ErrorCode.NO_ACTIVE_DESIGN,
+                "Transaction commit native-ref evidence lacks stable document identity",
+            )
+        if not isinstance(raw_hints, (list, tuple)) or len(raw_hints) != 1:
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Task 13 commit must return exactly one internal ref hint",
+                details={"operation": "commit"},
+            )
+        tx_id = payload.get("transaction_id")
+        record = self._transaction_store.find(tx_id) if isinstance(tx_id, str) else None
+        if record is None or len(record.plan) != 1 or record.plan[0].get("action_type") != "text_create":
+            raise FusionCadError(
+                ErrorCode.TRANSACTION_CONFLICT,
+                "Task 13 commit ref evidence is not bound to the exact staged text_create spike",
+                details={"operation": "commit"},
+            )
+        try:
+            expected = ProvenanceRecord.model_validate(record.plan[0].get("provenance"))
+            returned = ProvenanceRecord.model_validate(data.get("provenance"))
+            persisted = ProvenanceRecord.model_validate(data.get("persisted_provenance"))
+        except (ValidationError, TypeError, ValueError) as exc:
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Transaction commit lacks valid persisted same-command provenance",
+                details={"operation": "commit"},
+            ) from exc
+        if returned != expected or persisted != expected:
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Transaction commit provenance does not match the staged service-owned record",
+                details={"operation": "commit"},
+            )
+
+        hint = raw_hints[0]
+        if not isinstance(hint, Mapping):
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Transaction commit returned malformed internal ref evidence",
+            )
+        native_token = hint.get("native_token")
+        kind = hint.get("kind")
+        if not isinstance(native_token, str) or not native_token.strip():
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Transaction commit returned unusable native ref evidence",
+            )
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "sketch_text"
+        opaque_ref = f"ent_{uuid.uuid4().hex[:16]}"
+        data["refs"] = [opaque_ref]
+        data.pop("persisted_provenance", None)
+        clean_data = ImmutableMapping(sanitize_public_payload(data))
+        clean_result = cad_result.model_copy(
+            update={"data": clean_data, "changed_refs": (opaque_ref,)}
+        )
+        return clean_result, [(opaque_ref, kind, native_token)]
+
+    def _register_transaction_commit_refs(
+        self,
+        pending: list[tuple[str, str, str]],
+        *,
+        document_ref: str | None,
+    ) -> None:
+        if not pending:
+            return
+        if not document_ref:
+            raise FusionCadError(
+                ErrorCode.NO_ACTIVE_DESIGN,
+                "Transaction commit cannot persist refs without document identity",
+            )
+        for opaque_ref, kind, native_token in pending:
+            self._ref_registry.issue(
+                document_ref=document_ref,
+                kind=kind,
+                native_token=native_token,
+                opaque_ref=opaque_ref,
+            )
+
     def _finalize_completed_execution(
         self,
         result: CadResult | dict[str, Any],
@@ -1440,6 +1539,7 @@ class FusionCadService:
             if isinstance(result, CadResult)
             else self.decode_domain_result(result)
         )
+        pending_transaction_refs: list[tuple[str, str, str]] = []
 
         # 0. Pre-validate transaction commit / abort / rollback before observing or mutating tracker state
         if effective_bundle_group == "transaction" and op in (
@@ -1605,6 +1705,11 @@ class FusionCadService:
                 and cad_result.document.model_revision
             ):
                 observed_rec = self._revision_tracker.current(target_doc)
+
+            if effective_bundle_group == "transaction" and op == "commit":
+                cad_result, pending_transaction_refs = self._normalize_transaction_commit_refs(
+                    cad_result, payload=payload, target_doc=target_doc
+                )
 
             # 2. Transaction begin: persist authoritative baseline ONLY after proven successful terminal execution
             if effective_bundle_group == "transaction" and op == "begin":
@@ -2114,8 +2219,14 @@ class FusionCadService:
                     raise store_err
                 if sanitize_binary:
                     self._bind_screenshot_image_uri(external_ref)
+                self._register_transaction_commit_refs(
+                    pending_transaction_refs, document_ref=target_doc
+                )
                 return external_ref
 
+            self._register_transaction_commit_refs(
+                pending_transaction_refs, document_ref=target_doc
+            )
             if isinstance(result, dict) and not isinstance(result, CadResult):
                 return cad_result.model_dump(mode="python", exclude_none=True)
             return cad_result
@@ -2516,7 +2627,14 @@ class FusionCadService:
                         "capability": trusted_detail(required_cap),
                     },
                 )
-            matrix.require(required_cap, allow_degraded=False)
+            allow_internal_transaction_feasibility = (
+                effective_bundle_group == "transaction"
+                and required_cap == "transaction.preview_replay"
+            )
+            matrix.require(
+                required_cap,
+                allow_degraded=allow_internal_transaction_feasibility,
+            )
 
         is_async, is_mutation, summary = self._classify_operation(
             effective_bundle_group, payload

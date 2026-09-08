@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from types import ModuleType, SimpleNamespace
+
 from app.fusion_cad.scripts import FusionCadScriptBundle
 
 
@@ -8,6 +11,243 @@ def _run(payload, runtime):
     scope = {"__name__": "__main__", **runtime}
     exec(compile(script, "<task13-transaction>", "exec"), scope)  # noqa: S102
     return scope["_output"]
+
+
+class _Event:
+    def __init__(self):
+        self.handlers = []
+
+    def add(self, handler):
+        self.handlers.append(handler)
+
+    def fire(self, args):
+        for handler in tuple(self.handlers):
+            handler.notify(args)
+
+
+def _production_command_runtime(monkeypatch, *, preview):
+    import hashlib
+    import json
+
+    events = []
+
+    class Collection:
+        def __init__(self, items=None):
+            self._items = list(items or [])
+
+        @property
+        def count(self):
+            return len(self._items)
+
+        def item(self, index):
+            return self._items[index]
+
+    class Attributes(Collection):
+        def add(self, group, name, value):
+            attr = SimpleNamespace(groupName=group, name=name, value=value)
+            self._items.append(attr)
+            return attr
+
+        def itemByName(self, group, name):
+            for attr in self._items:
+                if attr.groupName == group and attr.name == name:
+                    return attr
+            return None
+
+    class Point:
+        def __init__(self, x=0.0, y=0.0, z=0.0):
+            self.x = float(x)
+            self.y = float(y)
+            self.z = float(z)
+
+    class BoundingBox:
+        def __init__(self):
+            self.minPoint = Point(0, 0, 0)
+            self.maxPoint = Point(1, 1, 0)
+
+    class SketchTexts:
+        def createInput(self, text, height, position):
+            events.append(("createInput", text, height, position.x, position.y, position.z))
+            return SimpleNamespace(formattedText=text)
+
+        def add(self, _input):
+            events.append("text.add")
+            return SimpleNamespace(entityToken="native::text::secret", attributes=Attributes())
+
+    class Sketch:
+        def __init__(self, index):
+            self.name = f"BridgeText{index}"
+            self.entityToken = f"sketch_token_{index}"
+            self.isVisible = True
+            self.isLightBulbOn = True
+            self.profiles = Collection([])
+            self.sketchCurves = Collection([])
+            self.sketchPoints = Collection([])
+            self.geometricConstraints = Collection([])
+            self.sketchDimensions = Collection([])
+            self.boundingBox = BoundingBox()
+            self.attributes = Attributes()
+            self.sketchTexts = SketchTexts()
+
+    class TimelineItem:
+        def __init__(self, index):
+            self.index = index
+            self.entityToken = f"timeline_token_{index}"
+            self.name = f"BridgeText{index}"
+            self.isSuppressed = False
+            self.isValid = True
+            self.isRolledBack = False
+            self.healthStatus = "ok"
+            self.attributes = Attributes()
+            self.entity = SimpleNamespace(entityToken=f"feature_token_{index}", attributes=Attributes())
+
+    class Sketches(Collection):
+        def add(self, plane):
+            assert plane == "world-xy"
+            index = len(self._items) + 1
+            sketch = Sketch(index)
+            self._items.append(sketch)
+            design.timeline._items.append(TimelineItem(index))
+            doc.isModified = True
+            events.append("sketch.add")
+            return sketch
+
+    root = SimpleNamespace(
+        name="Root", id="comp_root", entityToken="comp_root",
+        bRepBodies=Collection([]), sketches=None, allOccurrences=Collection([]),
+        attributes=Attributes(), xYConstructionPlane="world-xy",
+    )
+    design = SimpleNamespace(
+        rootComponent=root, allComponents=Collection([root]),
+        timeline=Collection([]), allParameters=Collection([]),
+    )
+    root.sketches = Sketches([])
+
+    class Products:
+        def itemByClass(self, name):
+            return design if "Design" in name else None
+
+    doc = SimpleNamespace(
+        dataId="doc_1", name="TestDoc", isModified=False, savedVersion=1,
+        attributes=Attributes(), products=Products(),
+    )
+
+    class Event:
+        def __init__(self):
+            self.handlers = []
+        def add(self, handler):
+            self.handlers.append(handler)
+        def fire(self, args):
+            for handler in tuple(self.handlers):
+                handler.notify(args)
+
+    class Command:
+        def __init__(self):
+            self.isAutoExecute = True
+            self.execute = Event()
+        def doExecute(self, terminate):
+            events.append(("doExecute", terminate, self.isAutoExecute))
+            before_sketches = list(root.sketches._items)
+            before_timeline = list(design.timeline._items)
+            before_modified = doc.isModified
+            args = SimpleNamespace(executeFailed=False)
+            self.execute.fire(args)
+            if args.executeFailed:
+                root.sketches._items[:] = before_sketches
+                design.timeline._items[:] = before_timeline
+                doc.isModified = before_modified
+            events.append(("executeFailed", args.executeFailed))
+
+    class Definition:
+        def __init__(self):
+            self.commandCreated = Event()
+        def execute(self):
+            self.commandCreated.fire(SimpleNamespace(command=Command()))
+        def deleteMe(self):
+            events.append("definition.delete")
+            return True
+
+    class Definitions:
+        def addButtonDefinition(self, command_id, name, description):
+            events.append(("definition.add", command_id, name, description))
+            return Definition()
+
+    app = SimpleNamespace(
+        userInterface=SimpleNamespace(commandDefinitions=Definitions()),
+        activeProduct=design, activeDocument=doc,
+    )
+    adsk = ModuleType("adsk")
+    core = ModuleType("adsk.core")
+    fusion = ModuleType("adsk.fusion")
+    core.Application = SimpleNamespace(get=lambda: app)
+    core.Point3D = SimpleNamespace(create=lambda x, y, z: Point(x, y, z))
+    core.CommandCreatedEventHandler = object
+    core.CommandEventHandler = object
+    fusion.Design = SimpleNamespace(cast=lambda product: product)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    canonical = {
+        "document": {"document_ref": "doc_1", "name": "TestDoc", "is_modified": False, "saved_version": 1},
+        "timeline": [], "components": [{"name": "Root", "id": "comp_root"}],
+        "occurrences": [], "bodies": [], "sketches": [], "parameters": [], "attributes": [],
+    }
+    baseline_fp = hashlib.sha256(json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    provenance = {
+        "creator_tool": "bridge.fusion-cad-agent",
+        "creator_operation": "fusion_style:text_create",
+        "operation_id": "op_123456789abc",
+        "transaction_id": "tx_spike",
+        "logical_object_ref": "text_123456789abcdef0",
+        "created_revision": "rev_2",
+        "tags": [],
+    }
+    payload = {
+        "operation": "preview" if preview else "commit",
+        "transaction_id": "tx_spike", "document_ref": "doc_1",
+        "expected_fingerprint": baseline_fp,
+        "plan": [{
+            "action_type": "text_create", "text": "ПЫТОК", "height_mm": 4.0,
+            "position": {"x": 10.0, "y": 20.0, "z": 0.0, "frame": {"space": "world"}},
+            "metadata_writes": [{"name": "provenance", "value": json.dumps(provenance, ensure_ascii=False, separators=(",", ":"))}],
+            "provenance": provenance,
+        }],
+        "baseline_snapshot": {"structural_hash": baseline_fp, "counts": {"sketches": 0}, "refs": []},
+    }
+    return payload, {}, {"doc": doc, "design": design, "root": root}, events
+
+def test_production_preview_uses_command_execute_failed_without_transaction_hooks(monkeypatch):
+    payload, runtime, state, events = _production_command_runtime(monkeypatch, preview=True)
+    result = _run(payload, runtime)
+
+    assert result["status"] == "succeeded"
+    assert result["data"]["preview"] is True
+    assert result["data"]["preview_refs_durable"] is False
+    assert state["root"].sketches.count == 0
+    assert state["design"].timeline.count == 0
+    assert state["doc"].isModified is False
+    assert ("doExecute", True, False) in events
+    assert ("executeFailed", True) in events
+    assert ("createInput", "ПЫТОК", 0.4, 1.0, 2.0, 0.0) in events
+
+
+def test_production_commit_persists_and_reads_provenance_and_returns_internal_hint(monkeypatch):
+    payload, runtime, state, events = _production_command_runtime(monkeypatch, preview=False)
+    result = _run(payload, runtime)
+
+    assert result["status"] == "succeeded"
+    assert result["data"]["persisted_provenance"] == payload["plan"][0]["provenance"]
+    assert result["data"]["internal_ref_hints"] == [
+        {"kind": "sketch_text", "native_token": "native::text::secret"}
+    ]
+    assert result["changed_refs"] == []
+    assert state["doc"].isModified is True
+    assert state["root"].sketches.count == 1
+    assert state["design"].timeline.count == 1
+    assert ("executeFailed", False) in events
 
 
 def test_preview_applies_snapshot_validates_then_aborts_without_durable_evidence():

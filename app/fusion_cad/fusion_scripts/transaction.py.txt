@@ -29,6 +29,117 @@ def _transaction_opaque_refs(value):
     return list(refs)
 
 
+def _transaction_exact_text_create_plan(plan):
+    if not isinstance(plan, list) or len(plan) != 1 or not isinstance(plan[0], dict) or plan[0].get("action_type") != "text_create":
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "P0 transaction replay supports exactly one staged text_create action", {"applied": False})
+    action = plan[0]
+    position = action.get("position")
+    frame = position.get("frame") if isinstance(position, dict) else None
+    if not isinstance(position, dict) or not isinstance(frame, dict) or frame.get("space") != "world" or abs(float(position.get("z", 0.0))) > 1e-6:
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "P0 transaction text_create supports only the verified world XY plane (z=0)", {"applied": False})
+    writes = action.get("metadata_writes")
+    provenance = action.get("provenance")
+    if not isinstance(writes, list) or len(writes) != 1 or not isinstance(writes[0], dict) or writes[0].get("name") != "provenance" or not isinstance(writes[0].get("value"), str) or not isinstance(provenance, dict):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "P0 transaction text_create requires one service-prepared provenance write", {"applied": False})
+    try:
+        persisted_record = json.loads(writes[0]["value"])
+    except Exception as exc:
+        raise FusionScriptError("INVALID_ARGUMENT", "Service-prepared provenance is not valid JSON", {"applied": False}) from exc
+    if persisted_record != provenance:
+        raise FusionScriptError("INVALID_ARGUMENT", "Service-prepared provenance write and record disagree", {"applied": False})
+    return action
+
+
+def _transaction_snapshot_from_fingerprint(fingerprint, canonical):
+    canonical = canonical if isinstance(canonical, dict) else {}
+    counts = {}
+    for key in ("timeline", "components", "occurrences", "bodies", "sketches", "parameters", "attributes"):
+        value = canonical.get(key)
+        if isinstance(value, (list, tuple, dict)):
+            counts[key] = len(value)
+    return {"structural_hash": fingerprint, "counts": counts, "refs": []}
+
+
+def _transaction_native_text_command(plan, preview):
+    import uuid
+    import adsk.core
+    import adsk.fusion
+
+    action = _transaction_exact_text_create_plan(plan)
+    app = adsk.core.Application.get()
+    ui = getattr(app, "userInterface", None) if app else None
+    design = adsk.fusion.Design.cast(getattr(app, "activeProduct", None)) if app else None
+    root = getattr(design, "rootComponent", None) if design else None
+    definitions = getattr(ui, "commandDefinitions", None) if ui else None
+    if root is None or definitions is None:
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Verified Fusion command transaction runtime is unavailable", {"applied": False})
+
+    result = {"error": None, "applied": None, "snapshot": None, "validation": None}
+    retained_handlers = []
+
+    class ExecuteHandler(adsk.core.CommandEventHandler):
+        def __init__(self):
+            super().__init__()
+
+        def notify(self, args):
+            try:
+                position = action["position"]
+                sketch = root.sketches.add(root.xYConstructionPlane)
+                point = adsk.core.Point3D.create(float(position["x"]) / 10.0, float(position["y"]) / 10.0, 0.0)
+                text_input = sketch.sketchTexts.createInput(action["text"], float(action["height_mm"]) / 10.0, point)
+                text = sketch.sketchTexts.add(text_input)
+                write = action["metadata_writes"][0]
+                text.attributes.add("bridge.cad/v1", "provenance", write["value"])
+                actual = text.attributes.itemByName("bridge.cad/v1", "provenance")
+                actual_value = getattr(actual, "value", None) if actual else None
+                if actual_value != write["value"] or json.loads(actual_value) != action["provenance"]:
+                    raise FusionScriptError("FUSION_API_ERROR", "Persisted SketchText provenance read-back did not match the service-prepared value", {"applied": False})
+                during_fp, during_canonical, _during_doc = _transaction_fingerprint(PAYLOAD)
+                result["snapshot"] = _transaction_snapshot_from_fingerprint(during_fp, during_canonical)
+                result["validation"] = {"status": "passed", "errors": []}
+                result["applied"] = {
+                    "provenance": action["provenance"],
+                    "persisted_provenance": json.loads(actual_value),
+                    "same_operation_provenance": True,
+                    "internal_ref_hints": [{"kind": "sketch_text", "native_token": str(text.entityToken)}],
+                }
+                if preview:
+                    args.executeFailed = True
+            except Exception as exc:
+                result["error"] = exc
+                args.executeFailed = True
+
+    class CreatedHandler(adsk.core.CommandCreatedEventHandler):
+        def __init__(self):
+            super().__init__()
+
+        def notify(self, args):
+            command = args.command
+            command.isAutoExecute = False
+            execute_handler = ExecuteHandler()
+            retained_handlers.append(execute_handler)
+            command.execute.add(execute_handler)
+            command.doExecute(True)
+
+    command_id = "bridge_tx_text_" + uuid.uuid4().hex
+    definition = definitions.addButtonDefinition(command_id, "Bridge transaction text", "Atomic P0 transaction text replay")
+    try:
+        created_handler = CreatedHandler()
+        retained_handlers.append(created_handler)
+        definition.commandCreated.add(created_handler)
+        definition.execute()
+    finally:
+        definition.deleteMe()
+    if result["error"] is not None:
+        error = result["error"]
+        if isinstance(error, FusionScriptError):
+            raise error
+        raise FusionScriptError("FUSION_API_ERROR", "Fusion command transaction text replay failed", {"applied": False}) from error
+    if not isinstance(result["applied"], dict):
+        raise FusionScriptError("FUSION_API_ERROR", "Fusion command transaction did not execute", {"applied": False})
+    return result
+
+
 def _transaction_guard(op):
     current_fp, _canonical, doc_ref = _transaction_fingerprint(PAYLOAD)
     if not isinstance(current_fp, str) or not current_fp.strip():
@@ -64,6 +175,12 @@ def run():
         raise FusionScriptError("INVALID_ARGUMENT", "Transaction requires a non-empty declarative plan", {"applied": False})
 
     if op == "preview":
+        if not callable(globals().get("_transaction_begin_primitive")):
+            native = _transaction_native_text_command(plan, True)
+            restored_fp, _, restored_doc = _transaction_fingerprint(PAYLOAD)
+            if restored_fp != current_fp or restored_doc != doc_ref:
+                raise FusionScriptError("TRANSACTION_CONFLICT", "Preview command abort did not restore the authoritative baseline", {"applied": False})
+            return make_result(data={"operation": op, "applied": False, "preview": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id, "preview_snapshot": native["snapshot"], "preview_refs": [], "preview_refs_durable": False, "provenance": native["applied"].get("provenance"), "provenance_durable": False}, summary="Previewed and aborted exact staged transaction plan", diff=_minimal_preview_diff(PAYLOAD.get("baseline_snapshot") or {}, native["snapshot"]), validation=native["validation"])
         begin = _require_transaction_primitive("_transaction_begin_primitive")
         apply_plan = _require_transaction_primitive("_transaction_apply_plan_primitive")
         snapshot = _require_transaction_primitive("_transaction_snapshot_primitive")
@@ -83,6 +200,13 @@ def run():
         return make_result(data={"operation": op, "applied": False, "preview": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id, "preview_snapshot": preview_snapshot, "preview_refs": preview_refs, "preview_refs_durable": False, "provenance": applied.get("provenance") if isinstance(applied, dict) else None, "provenance_durable": False}, summary="Previewed and aborted exact staged transaction plan", diff=_minimal_preview_diff(PAYLOAD.get("baseline_snapshot") or {}, preview_snapshot), validation=validation)
 
     if op == "commit":
+        if not callable(globals().get("_transaction_begin_primitive")):
+            native = _transaction_native_text_command(plan, False)
+            applied = native["applied"]
+            post_fp, _, post_doc = _transaction_fingerprint(PAYLOAD)
+            if post_doc != doc_ref or not isinstance(post_fp, str) or not post_fp.strip() or post_fp == current_fp:
+                raise FusionScriptError("MUTATION_FAILED", "Transaction commit lacks truthful changed authoritative state", {"applied": False})
+            return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id, "refs": [], "internal_ref_hints": applied["internal_ref_hints"], "provenance": applied["provenance"], "persisted_provenance": applied["persisted_provenance"], "same_command_provenance": True, "same_operation_provenance": True, "replayed_plan": plan}, summary="Committed exact staged transaction plan", changed_refs=[])
         begin = _require_transaction_primitive("_transaction_begin_primitive")
         apply_plan = _require_transaction_primitive("_transaction_apply_plan_primitive")
         commit = _require_transaction_primitive("_transaction_commit_primitive")
