@@ -984,9 +984,12 @@ def run():
         "text_extrude", "text_cut",
     )
     _VISIBILITY_OPS = ("show", "hide", "set", "show_only", "isolate", "restore")
-    if op in _TEXT_OPS + _VISIBILITY_OPS and not (
-        isinstance(PAYLOAD.get("metadata_writes"), list)
-        and isinstance(PAYLOAD.get("metadata_removals"), list)
+    if op in _TEXT_OPS + _VISIBILITY_OPS and (
+        PAYLOAD.get("style_semantic_contract") == "task11.v1"
+        or not (
+            isinstance(PAYLOAD.get("metadata_writes"), list)
+            and isinstance(PAYLOAD.get("metadata_removals"), list)
+        )
     ):
         style_hook = globals().get("_style_primitive")
         if not callable(style_hook):
@@ -1003,6 +1006,16 @@ def run():
                 raise FusionScriptError(
                     "FUSION_API_ERROR",
                     "Verified style adapter returned no semantic text lineage",
+                    details={"operation": op},
+                )
+            lineage = style_data.get("lineage")
+            if not isinstance(lineage, dict) or (
+                lineage.get("logical_ref") != PAYLOAD.get("text_ref")
+                or lineage.get("is_current") is not True
+            ):
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    "Logical text read did not return the requested current lineage",
                     details={"operation": op},
                 )
             return make_result(
@@ -1042,21 +1055,146 @@ def run():
                 raise FusionScriptError(
                     "FUSION_API_ERROR", "Verified style adapter returned no semantic result"
                 )
-            if op in _TEXT_OPS and (
-                not isinstance(style_data.get("provenance"), dict)
-                or style_data.get("same_operation_provenance") is not True
-            ):
-                raise FusionScriptError(
-                    "FUSION_API_ERROR",
-                    "Logical text mutation did not verify same-operation provenance",
-                    details={"operation": op},
+            if op in _TEXT_OPS:
+                expected_provenance = PAYLOAD.get("provenance")
+                lineage = style_data.get("lineage")
+                requested_ref = PAYLOAD.get("logical_object_ref") or PAYLOAD.get("text_ref")
+                if op != "text_delete" and (
+                    not isinstance(lineage, dict)
+                    or lineage.get("logical_ref") != requested_ref
+                    or (
+                        op in ("text_update", "text_extrude", "text_cut")
+                        and lineage.get("is_current") is not True
+                    )
+                ):
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Logical text mutation did not return the requested current lineage",
+                        details={"operation": op},
+                    )
+                if (
+                    not isinstance(expected_provenance, dict)
+                    or style_data.get("provenance") != expected_provenance
+                    or style_data.get("persisted_provenance") != expected_provenance
+                    or style_data.get("same_operation_provenance") is not True
+                ):
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Logical text mutation did not verify the service-prepared persisted same-command provenance",
+                        details={"operation": op},
+                    )
+                if op == "text_update":
+                    replacement = style_data.get("replacement_evidence")
+                    if not isinstance(replacement, dict) or not (
+                        replacement.get("logical_ref") == PAYLOAD.get("text_ref")
+                        and isinstance(replacement.get("previous_generation"), int)
+                        and isinstance(replacement.get("current_generation"), int)
+                        and replacement.get("current_generation") > replacement.get("previous_generation")
+                        and replacement.get("previous_generation_is_current") is False
+                        and replacement.get("current_generation_count") == 1
+                        and replacement.get("replacement_or_rebind_verified") is True
+                        and replacement.get("unrelated_legacy_preserved") is True
+                    ):
+                        raise FusionScriptError(
+                            "FUSION_API_ERROR",
+                            "Logical text update lacks verified single-current-generation replacement evidence",
+                            details={"operation": op},
+                        )
+            else:
+                visibility = style_data.get("visibility")
+                target = PAYLOAD.get("target")
+                target_ref = target.get("ref") if isinstance(target, dict) else target
+                requested_visible = (
+                    PAYLOAD.get("visible")
+                    if op == "set"
+                    else op in ("show", "show_only", "isolate")
                 )
-            if op == "restore" and style_data.get("restoration_verified") is not True:
-                raise FusionScriptError(
-                    "CAPABILITY_UNAVAILABLE",
-                    "Visibility restoration could not be verified exactly",
-                    details={"operation": op},
+                visibility_ok = (
+                    isinstance(visibility, dict)
+                    and visibility.get("operation") == op
+                    and isinstance(visibility.get("local_visible"), bool)
+                    and isinstance(visibility.get("parent_visible"), bool)
+                    and isinstance(visibility.get("effective_visible"), bool)
+                    and visibility.get("effective_visible")
+                    == (visibility.get("local_visible") and visibility.get("parent_visible"))
                 )
+                if op != "restore":
+                    visibility_ok = visibility_ok and (
+                        visibility.get("target_ref") == target_ref
+                        and visibility.get("requested_visible") is requested_visible
+                        and visibility.get("local_visible") is requested_visible
+                    )
+                if not visibility_ok:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Visibility mutation lacks operation-specific local/effective evidence",
+                        details={"operation": op},
+                    )
+                if op in ("show_only", "isolate", "restore"):
+                    scope_evidence = style_data.get("scope_evidence")
+                    captured = scope_evidence.get("captured") if isinstance(scope_evidence, dict) else None
+                    changed_refs = scope_evidence.get("changed_refs") if isinstance(scope_evidence, dict) else None
+                    captured_state = {}
+                    if isinstance(captured, list):
+                        for entry in captured:
+                            if not isinstance(entry, dict):
+                                captured_state = None
+                                break
+                            ref = entry.get("ref")
+                            local = entry.get("local_visible")
+                            if not isinstance(ref, str) or ref in captured_state or not isinstance(local, bool):
+                                captured_state = None
+                                break
+                            captured_state[ref] = local
+                    else:
+                        captured_state = None
+                    valid_scope = (
+                        isinstance(scope_evidence, dict)
+                        and scope_evidence.get("scope") == "own_mutation"
+                        and scope_evidence.get("operation") in ("show_only", "isolate")
+                        and captured_state is not None
+                        and isinstance(changed_refs, list)
+                        and len(changed_refs) == len(set(changed_refs))
+                        and set(changed_refs) == set(captured_state)
+                    )
+                    if op in ("show_only", "isolate"):
+                        valid_scope = valid_scope and (
+                            scope_evidence.get("operation") == op
+                            and scope_evidence.get("target_ref") == target_ref
+                        )
+                    else:
+                        restored = scope_evidence.get("restored") if isinstance(scope_evidence, dict) else None
+                        restored_state = {}
+                        if isinstance(restored, list):
+                            for entry in restored:
+                                if not isinstance(entry, dict):
+                                    restored_state = None
+                                    break
+                                ref = entry.get("ref")
+                                local = entry.get("local_visible")
+                                if not isinstance(ref, str) or ref in restored_state or not isinstance(local, bool):
+                                    restored_state = None
+                                    break
+                                restored_state[ref] = local
+                        else:
+                            restored_state = None
+                        valid_scope = valid_scope and (
+                            restored_state == captured_state
+                            and isinstance(scope_evidence.get("state_ref"), str)
+                            and scope_evidence.get("state_ref") == visibility.get("state_ref")
+                        )
+                    if not valid_scope:
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "Scoped visibility mutation lacks own-mutation capture evidence",
+                            details={"operation": op},
+                        )
+                if op == "restore" and style_data.get("restoration_verified") is not True:
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Visibility restoration could not be verified exactly",
+                        details={"operation": op},
+                    )
             post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
             if not post_fp or post_fp == current_fp:
                 raise FusionScriptError(

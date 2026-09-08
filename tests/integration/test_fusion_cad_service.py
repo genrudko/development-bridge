@@ -9390,6 +9390,14 @@ def test_task11_rendered_unicode_text_mutates_with_same_operation_provenance(
         "expected_revision": "rev_1",
         "expected_fingerprint": "replaced-with-observed-baseline",
         "document_ref": "doc_1",
+        "provenance": {
+            "creator_tool": "bridge.fusion-cad-agent",
+            "creator_operation": "fusion_style:text_create",
+            "operation_id": "op_task11_rendered_1",
+            "logical_object_ref": logical_ref,
+            "created_revision": "rev_2",
+            "tags": [],
+        },
     }
     # Obtain the real baseline rather than trusting the placeholder above.
     read_scope = {"__name__": "__main__"}
@@ -9416,9 +9424,33 @@ def test_task11_rendered_unicode_text_mutates_with_same_operation_provenance(
                 "fallback_reason": None,
                 "height_mm": command["height_mm"],
             },
-            "provenance": {"logical_object_ref": command["logical_object_ref"]},
+            "provenance": command["provenance"],
+            "persisted_provenance": command["provenance"],
             "same_operation_provenance": True,
         }
+
+    def forged_style_primitive(command):
+        result = style_primitive(command)
+        forged = dict(command["provenance"])
+        forged["operation_id"] = "op_forged_task11"
+        result["provenance"] = forged
+        result["persisted_provenance"] = forged
+        return result
+
+    baseline_volume = fake_adsk.volume
+    forged_scope = {
+        "__name__": "__main__",
+        "_style_primitive": forged_style_primitive,
+        "_mutation_compensation_capture": lambda _command: fake_adsk.volume,
+        "_mutation_compensation_rollback": lambda captured: (
+            setattr(fake_adsk, "volume", captured) or True
+        ),
+    }
+    script = FusionCadScriptBundle().build("mutate", payload)
+    exec(compile(script, "<task11-forged-provenance>", "exec"), forged_scope)  # noqa: S102
+    assert forged_scope["_output"]["status"] == "failed"
+    assert forged_scope["_output"]["error"]["code"] == "FUSION_API_ERROR"
+    assert fake_adsk.volume == baseline_volume
 
     scope = {
         "__name__": "__main__",
@@ -9428,7 +9460,6 @@ def test_task11_rendered_unicode_text_mutates_with_same_operation_provenance(
             setattr(fake_adsk, "volume", captured) or True
         ),
     }
-    script = FusionCadScriptBundle().build("mutate", payload)
     exec(compile(script, "<task11-success>", "exec"), scope)  # noqa: S102
     output = scope["_output"]
     assert output["status"] == "succeeded"

@@ -27,9 +27,10 @@ from app.fusion_cad.errors import (
 )
 from app.fusion_cad.inspect import normalize_inspect_result
 from app.fusion_cad.metadata import (
+    ProvenanceRecord,
+    apply_geometry_provenance_plan,
     apply_metadata_mutation_plan,
     assert_reserved_metadata_group,
-    build_provenance_record,
     parse_provenance_attribute,
 )
 from app.fusion_cad.models import (
@@ -281,7 +282,6 @@ class FusionCadService:
         except (TypeError, ValueError, OverflowError):
             return False
 
-
     def _snapshot_selector_candidates(self, snapshot: Any) -> list[Any]:
         """Collect the current/latest Task5 semantic snapshot candidate records
         (components, occurrences, bodies, sketches, features, faces, edges)."""
@@ -301,7 +301,9 @@ class FusionCadService:
         with EXACT-ONE cardinality and inject the resulting opaque ref / native
         resolution hint. Fails closed with SELECTOR_EMPTY or SELECTOR_AMBIGUOUS
         when exact-one cannot be proven."""
-        doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+        doc_ref = (
+            payload.get("document_ref") or self._revision_tracker.active_document_ref
+        )
         if not doc_ref:
             raise FusionCadError(
                 ErrorCode.SELECTOR_EMPTY,
@@ -408,7 +410,9 @@ class FusionCadService:
         Unregistered opaque refs with no effective document context fall through
         to contextual resolution in the script.
         """
-        doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+        doc_ref = (
+            payload.get("document_ref") or self._revision_tracker.active_document_ref
+        )
         for key in ("target", "target_a", "target_b", "face_a", "face_b"):
             raw = payload.get(key)
             if isinstance(raw, str) and re.match(ENTITY_REF_PATTERN, raw):
@@ -602,23 +606,26 @@ class FusionCadService:
             payload["logical_object_ref"] = logical_ref
         else:
             payload["logical_object_ref"] = logical_ref
-        doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
-        payload["provenance"] = build_provenance_record(
+        doc_ref = (
+            payload.get("document_ref") or self._revision_tracker.active_document_ref
+        )
+        apply_geometry_provenance_plan(
+            payload,
             operation=op,
             creator_operation=f"fusion_style:{op}",
             operation_id=operation_id,
-            transaction_id=payload.get("transaction_id"),
-            logical_object_ref=logical_ref,
-            created_revision=(self._revision_tracker.next_revision(doc_ref) if doc_ref else None),
-        ).model_dump(mode="json", exclude_none=True)
+            created_revision=(
+                self._revision_tracker.next_revision(doc_ref) if doc_ref else None
+            ),
+        )
+        payload["style_semantic_contract"] = "task11.v1"
 
     def _finalize_style_execution(
         self, cad_result: CadResult, *, op: str, payload: dict[str, Any]
     ) -> CadResult:
         """Validate semantic Task 11 evidence and strip adapter-private state."""
         data = dict(cad_result.data) if isinstance(cad_result.data, Mapping) else {}
-        data.pop("restore_state", None)
-        data.pop("captured", None)
+        public: dict[str, Any] = {}
         if op.startswith("text_"):
             raw_lineage = data.get("lineage")
             if raw_lineage is None and op != "text_delete":
@@ -636,33 +643,239 @@ class FusionCadService:
                         "Logical text operation returned invalid lineage",
                         details={"operation": op},
                     ) from exc
-                if op == "text_create" and lineage["logical_ref"] != payload.get(
-                    "logical_object_ref"
+                expected_ref = payload.get("logical_object_ref") or payload.get(
+                    "text_ref"
+                )
+                if expected_ref and lineage["logical_ref"] != expected_ref:
+                    raise FusionCadError(
+                        ErrorCode.FUSION_API_ERROR,
+                        "Logical text adapter returned lineage for a different TextRef",
+                        details={"operation": op},
+                    )
+                if (
+                    op in {"text_update", "text_read", "text_extrude", "text_cut"}
+                    and lineage["is_current"] is not True
                 ):
                     raise FusionCadError(
                         ErrorCode.FUSION_API_ERROR,
-                        "Logical text adapter returned a different TextRef than the command allocated",
+                        "Logical text operation did not return the current generation",
                         details={"operation": op},
                     )
-                data["lineage"] = lineage
-            if op != "text_read" and (
-                data.get("same_operation_provenance") is not True
-                or not isinstance(data.get("provenance"), Mapping)
-            ):
+                public["lineage"] = lineage
+            if op == "text_update":
+                replacement = data.get("replacement_evidence")
+                valid_replacement = (
+                    isinstance(replacement, Mapping)
+                    and replacement.get("logical_ref") == payload.get("text_ref")
+                    and isinstance(replacement.get("previous_generation"), int)
+                    and isinstance(replacement.get("current_generation"), int)
+                    and replacement.get("current_generation")
+                    > replacement.get("previous_generation")
+                    and replacement.get("previous_generation_is_current") is False
+                    and replacement.get("current_generation_count") == 1
+                    and replacement.get("replacement_or_rebind_verified") is True
+                    and replacement.get("unrelated_legacy_preserved") is True
+                )
+                if not valid_replacement:
+                    raise FusionCadError(
+                        ErrorCode.FUSION_API_ERROR,
+                        "Logical text update lacks verified single-current-generation replacement evidence",
+                        details={"operation": op},
+                    )
+                public["replacement_evidence"] = {
+                    key: replacement[key]
+                    for key in (
+                        "logical_ref",
+                        "previous_generation",
+                        "current_generation",
+                        "previous_generation_is_current",
+                        "current_generation_count",
+                        "replacement_or_rebind_verified",
+                        "unrelated_legacy_preserved",
+                    )
+                }
+            if op != "text_read":
+                expected_raw = payload.get("provenance")
+                try:
+                    expected = ProvenanceRecord.model_validate(expected_raw)
+                    returned = ProvenanceRecord.model_validate(data.get("provenance"))
+                    persisted = ProvenanceRecord.model_validate(
+                        data.get("persisted_provenance")
+                    )
+                except (ValidationError, TypeError, ValueError) as exc:
+                    raise FusionCadError(
+                        ErrorCode.FUSION_API_ERROR,
+                        "Logical text mutation lacks valid persisted same-command provenance",
+                        details={"operation": op},
+                    ) from exc
+                if (
+                    data.get("same_operation_provenance") is not True
+                    or returned != expected
+                    or persisted != expected
+                ):
+                    raise FusionCadError(
+                        ErrorCode.FUSION_API_ERROR,
+                        "Logical text provenance does not match the service-prepared same-command record",
+                        details={"operation": op},
+                    )
+                public["provenance"] = expected.model_dump(
+                    mode="json", exclude_none=True
+                )
+                public["same_operation_provenance"] = True
+        else:
+            visibility = data.get("visibility")
+            if not isinstance(visibility, Mapping):
                 raise FusionCadError(
                     ErrorCode.FUSION_API_ERROR,
-                    "Logical text mutation lacks verified same-operation provenance",
+                    "Visibility operation lacks typed semantic visibility evidence",
                     details={"operation": op},
                 )
-        if op == "restore" and data.get("restoration_verified") is not True:
-            raise FusionCadError(
-                ErrorCode.CAPABILITY_UNAVAILABLE,
-                "Visibility restore did not prove exact restoration",
-                details={"operation": op, "applied": False},
+            target = payload.get("target")
+            expected_target = (
+                target.get("ref") if isinstance(target, Mapping) else target
             )
+            requested = (
+                payload.get("visible")
+                if op == "set"
+                else op in {"show", "show_only", "isolate"}
+            )
+            valid_visibility = (
+                visibility.get("operation") == op
+                and isinstance(visibility.get("local_visible"), bool)
+                and isinstance(visibility.get("parent_visible"), bool)
+                and isinstance(visibility.get("effective_visible"), bool)
+                and visibility.get("effective_visible")
+                == (
+                    visibility.get("local_visible") and visibility.get("parent_visible")
+                )
+            )
+            if op != "restore":
+                valid_visibility = (
+                    valid_visibility
+                    and visibility.get("target_ref") == expected_target
+                    and re.fullmatch(
+                        ENTITY_REF_PATTERN, str(visibility.get("target_ref") or "")
+                    )
+                    is not None
+                    and visibility.get("requested_visible") is requested
+                    and visibility.get("local_visible") is requested
+                )
+            if not valid_visibility:
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Visibility adapter evidence does not prove the requested local and effective state",
+                    details={"operation": op},
+                )
+            public["visibility"] = {
+                key: visibility[key]
+                for key in (
+                    "operation",
+                    "target_ref",
+                    "state_ref",
+                    "requested_visible",
+                    "local_visible",
+                    "parent_visible",
+                    "effective_visible",
+                )
+                if key in visibility
+            }
+            if op in {"show_only", "isolate", "restore"}:
+                scope = data.get("scope_evidence")
+                scope_operation = (
+                    scope.get("operation") if isinstance(scope, Mapping) else None
+                )
+                captured = scope.get("captured") if isinstance(scope, Mapping) else None
+                changed_refs = (
+                    scope.get("changed_refs") if isinstance(scope, Mapping) else None
+                )
+                restored = scope.get("restored") if isinstance(scope, Mapping) else None
+
+                def _visibility_states(value: Any) -> dict[str, bool] | None:
+                    if not isinstance(value, (list, tuple)):
+                        return None
+                    states: dict[str, bool] = {}
+                    for entry in value:
+                        if not isinstance(entry, Mapping):
+                            return None
+                        ref = entry.get("ref")
+                        local = entry.get("local_visible")
+                        if (
+                            not isinstance(ref, str)
+                            or re.fullmatch(ENTITY_REF_PATTERN, ref) is None
+                            or ref in states
+                            or not isinstance(local, bool)
+                        ):
+                            return None
+                        states[ref] = local
+                    return states
+
+                captured_states = _visibility_states(captured)
+                changed_set = (
+                    set(changed_refs)
+                    if isinstance(changed_refs, (list, tuple))
+                    and all(
+                        isinstance(ref, str) and re.fullmatch(ENTITY_REF_PATTERN, ref)
+                        for ref in changed_refs
+                    )
+                    else None
+                )
+                valid_scope = (
+                    isinstance(scope, Mapping)
+                    and scope.get("scope") == "own_mutation"
+                    and scope_operation in {"show_only", "isolate"}
+                    and captured_states is not None
+                    and changed_set == set(captured_states)
+                    and len(changed_refs) == len(changed_set)
+                )
+                if op in {"show_only", "isolate"}:
+                    valid_scope = (
+                        valid_scope
+                        and scope_operation == op
+                        and scope.get("target_ref") == expected_target
+                    )
+                else:
+                    restored_states = _visibility_states(restored)
+                    valid_scope = (
+                        valid_scope
+                        and restored_states == captured_states
+                        and isinstance(scope.get("state_ref"), str)
+                        and scope.get("state_ref") == visibility.get("state_ref")
+                    )
+                if not valid_scope:
+                    raise FusionCadError(
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                        "Scoped visibility operation lacks own-mutation capture evidence",
+                        details={"operation": op, "applied": False},
+                    )
+                if op == "restore" and data.get("restoration_verified") is not True:
+                    raise FusionCadError(
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                        "Visibility restore did not prove exact restoration",
+                        details={"operation": op, "applied": False},
+                    )
+                public_scope = {
+                    "scope": "own_mutation",
+                    "operation": scope_operation,
+                    "captured": [
+                        {"ref": entry["ref"], "local_visible": entry["local_visible"]}
+                        for entry in captured
+                    ],
+                    "changed_refs": list(changed_refs),
+                }
+                for key in ("target_ref", "state_ref"):
+                    if key in scope:
+                        public_scope[key] = scope[key]
+                if op == "restore":
+                    public_scope["restored"] = [
+                        {"ref": entry["ref"], "local_visible": entry["local_visible"]}
+                        for entry in restored
+                    ]
+                public["scope_evidence"] = public_scope
+                if op == "restore":
+                    public["restoration_verified"] = True
         return cad_result.model_copy(
             update={
-                "data": ImmutableMapping(sanitize_public_payload(data)),
+                "data": ImmutableMapping(sanitize_public_payload(public)),
                 "summary": f"Fusion style {op} completed with verified semantic state",
             }
         )
@@ -1123,9 +1336,7 @@ class FusionCadService:
             "camera_revision": current.camera_revision,
             "visibility_revision": current.visibility_revision,
             "section_revision": current.section_revision,
-            "visibility": sanitize_public_payload(
-                visibility_state.get("entries", [])
-            ),
+            "visibility": sanitize_public_payload(visibility_state.get("entries", [])),
             "section": dict(section_state),
         }
         update: dict[str, Any] = {
@@ -1176,7 +1387,9 @@ class FusionCadService:
             raise FusionCadError(
                 ErrorCode.CAPABILITY_UNAVAILABLE,
                 "Screenshot produced no external image resource URI; the immutable ViewRef image cannot bind to a fabricated placeholder",
-                details={"node_id": trusted_detail(str(external_ref.get("result_id", "")))},
+                details={
+                    "node_id": trusted_detail(str(external_ref.get("result_id", "")))
+                },
             )
         image_uri = image_resource.get("uri")
         if not isinstance(image_uri, str) or not image_uri.strip():
@@ -2305,8 +2518,7 @@ class FusionCadService:
         # Inspection targets known to this service get exact native resolution hints;
         # view zoom/orient target operations reuse the exact Task5/Task7 ref machinery.
         if effective_bundle_group == "inspect" or (
-            effective_bundle_group == "view"
-            and op in ("zoom_entity", "orient_to_face")
+            effective_bundle_group == "view" and op in ("zoom_entity", "orient_to_face")
         ):
             self._inject_inspect_target_hints(payload)
 
