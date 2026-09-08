@@ -9376,7 +9376,7 @@ def test_task11_rendered_style_script_fails_closed_without_verified_adapter():
     assert "verified Fusion style adapter" in output["error"]["message"]
 
 
-def test_task11_rendered_unicode_text_mutates_with_same_operation_provenance(
+def test_task11_rendered_text_rejects_self_attested_provenance_and_persists_plan(
     fake_desktop,
 ):
     fake_adsk = fake_desktop["adsk"]
@@ -9406,6 +9406,14 @@ def test_task11_rendered_unicode_text_mutates_with_same_operation_provenance(
     )
     exec(compile(read_script, "<task11-baseline>", "exec"), read_scope)  # noqa: S102
     payload["expected_fingerprint"] = read_scope["_output"]["data"]["fingerprint"]
+    apply_geometry_provenance_plan(
+        payload,
+        operation="text_create",
+        creator_operation="fusion_style:text_create",
+        operation_id="op_task11_rendered_1",
+        created_revision="rev_2",
+    )
+    payload["style_semantic_contract"] = "task11.v1"
 
     def style_primitive(command):
         fake_adsk.volume += 1.0
@@ -9429,29 +9437,8 @@ def test_task11_rendered_unicode_text_mutates_with_same_operation_provenance(
             "same_operation_provenance": True,
         }
 
-    def forged_style_primitive(command):
-        result = style_primitive(command)
-        forged = dict(command["provenance"])
-        forged["operation_id"] = "op_forged_task11"
-        result["provenance"] = forged
-        result["persisted_provenance"] = forged
-        return result
-
     baseline_volume = fake_adsk.volume
-    forged_scope = {
-        "__name__": "__main__",
-        "_style_primitive": forged_style_primitive,
-        "_mutation_compensation_capture": lambda _command: fake_adsk.volume,
-        "_mutation_compensation_rollback": lambda captured: (
-            setattr(fake_adsk, "volume", captured) or True
-        ),
-    }
     script = FusionCadScriptBundle().build("mutate", payload)
-    exec(compile(script, "<task11-forged-provenance>", "exec"), forged_scope)  # noqa: S102
-    assert forged_scope["_output"]["status"] == "failed"
-    assert forged_scope["_output"]["error"]["code"] == "FUSION_API_ERROR"
-    assert fake_adsk.volume == baseline_volume
-
     scope = {
         "__name__": "__main__",
         "_style_primitive": style_primitive,
@@ -9462,9 +9449,33 @@ def test_task11_rendered_unicode_text_mutates_with_same_operation_provenance(
     }
     exec(compile(script, "<task11-success>", "exec"), scope)  # noqa: S102
     output = scope["_output"]
-    assert output["status"] == "succeeded"
-    assert output["data"]["lineage"]["text"] == "РАСПИСАНИЕ ПЫТОК 😈"
-    assert output["data"]["same_operation_provenance"] is True
+    assert output["status"] == "failed"
+    assert output["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert "provenance owner" in output["error"]["message"]
+    assert fake_adsk.volume == baseline_volume
+
+    def authoritative_style_primitive(command):
+        result = style_primitive(command)
+        result["provenance_owner"] = {
+            "ref": "ent_body_01",
+            "native_token": "body_token_1",
+        }
+        return result
+
+    persisted_scope = {
+        "__name__": "__main__",
+        "_style_primitive": authoritative_style_primitive,
+        "_mutation_compensation_capture": lambda _command: fake_adsk.volume,
+        "_mutation_compensation_rollback": lambda captured: (
+            setattr(fake_adsk, "volume", captured) or True
+        ),
+    }
+    exec(compile(script, "<task11-persisted-provenance>", "exec"), persisted_scope)  # noqa: S102
+    persisted_output = persisted_scope["_output"]
+    assert persisted_output["status"] == "succeeded"
+    assert persisted_output["data"]["lineage"]["text"] == "РАСПИСАНИЕ ПЫТОК 😈"
+    assert persisted_output["data"]["same_operation_provenance"] is True
+    assert persisted_output["data"]["persisted_provenance"] == payload["provenance"]
 
 
 @pytest.mark.asyncio

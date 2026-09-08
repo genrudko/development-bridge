@@ -977,8 +977,9 @@ def run():
     # verified Fusion API surface for creating SketchText and reversible
     # hierarchy visibility is not assumed here: a live relay that has not
     # supplied this adapter fails closed before changing the model.  The adapter
-    # must perform geometry and Bridge provenance in this same command and
-    # return only serializable semantic evidence.
+    # performs geometry and returns serializable semantic evidence plus an
+    # exact provenance-owner hint.  This script, not the adapter, applies and
+    # verifies the service-prepared Bridge provenance plan.
     _TEXT_OPS = (
         "text_create", "text_read", "text_update", "text_delete",
         "text_extrude", "text_cut",
@@ -1048,6 +1049,8 @@ def run():
             )
         captured = capture_hook(PAYLOAD)
         applied = False
+        metadata_owner = None
+        metadata_undo = None
         try:
             applied = True
             style_data = style_hook(PAYLOAD)
@@ -1057,6 +1060,8 @@ def run():
                 )
             if op in _TEXT_OPS:
                 expected_provenance = PAYLOAD.get("provenance")
+                writes = PAYLOAD.get("metadata_writes")
+                removals = PAYLOAD.get("metadata_removals")
                 lineage = style_data.get("lineage")
                 requested_ref = PAYLOAD.get("logical_object_ref") or PAYLOAD.get("text_ref")
                 if op != "text_delete" and (
@@ -1072,15 +1077,27 @@ def run():
                         "Logical text mutation did not return the requested current lineage",
                         details={"operation": op},
                     )
-                if (
-                    not isinstance(expected_provenance, dict)
-                    or style_data.get("provenance") != expected_provenance
-                    or style_data.get("persisted_provenance") != expected_provenance
-                    or style_data.get("same_operation_provenance") is not True
+                if not isinstance(expected_provenance, dict) or not (
+                    isinstance(writes, list)
+                    and len(writes) == 1
+                    and isinstance(writes[0], dict)
+                    and writes[0].get("name") == _PROVENANCE_NAME
+                    and isinstance(removals, list)
+                    and not removals
                 ):
                     raise FusionScriptError(
-                        "FUSION_API_ERROR",
-                        "Logical text mutation did not verify the service-prepared persisted same-command provenance",
+                        "INVALID_ARGUMENT",
+                        "Logical text mutation lacks the service-prepared provenance-only metadata plan",
+                        details={"operation": op},
+                    )
+                try:
+                    planned_provenance = json.loads(str(writes[0].get("value")))
+                except Exception:
+                    planned_provenance = None
+                if planned_provenance != expected_provenance:
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Logical text provenance plan does not match the service-prepared record",
                         details={"operation": op},
                     )
                 if op == "text_update":
@@ -1100,6 +1117,49 @@ def run():
                             "Logical text update lacks verified single-current-generation replacement evidence",
                             details={"operation": op},
                         )
+                provenance_owner = style_data.get("provenance_owner")
+                if not isinstance(provenance_owner, dict):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Logical text mutation did not provide an exact provenance owner; geometry was compensated and document-scope fallback was refused",
+                        details={"operation": op, "applied": False},
+                    )
+                metadata_owner, _metadata_owner_ref = _resolve_owner(
+                    doc, _design, provenance_owner
+                )
+                _preflight_metadata_plan(metadata_owner, writes, removals)
+                applied_writes, _applied_removals, metadata_undo = _apply_metadata_plan(
+                    metadata_owner, writes, removals
+                )
+                if len(applied_writes) != 1:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Logical text provenance plan was not applied exactly once",
+                        details={"operation": op},
+                    )
+                persisted_records = [
+                    value
+                    for name, value in _reserved_records(metadata_owner)
+                    if name == _PROVENANCE_NAME
+                ]
+                try:
+                    persisted_provenance = (
+                        json.loads(persisted_records[0])
+                        if len(persisted_records) == 1
+                        else None
+                    )
+                except Exception:
+                    persisted_provenance = None
+                if persisted_provenance != expected_provenance:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Persisted logical text provenance does not match the service-prepared same-command record",
+                        details={"operation": op},
+                    )
+                style_data.pop("provenance_owner", None)
+                style_data["provenance"] = expected_provenance
+                style_data["persisted_provenance"] = persisted_provenance
+                style_data["same_operation_provenance"] = True
             else:
                 visibility = style_data.get("visibility")
                 target = PAYLOAD.get("target")
@@ -1204,14 +1264,18 @@ def run():
                 )
         except Exception as exc:
             if applied:
-                rollback_ok = rollback_hook(captured)
-                restored_fp, _restored, _restored_doc = collect_model_fingerprint(PAYLOAD)
-                if rollback_ok is not True or restored_fp != current_fp:
-                    raise FusionScriptError(
-                        "CAPABILITY_UNAVAILABLE",
-                        "Style mutation failed and exact restoration could not be verified",
-                        details={"operation": op, "applied": False, "compensated": False},
-                    )
+                try:
+                    if metadata_owner is not None and metadata_undo is not None:
+                        _rollback_metadata_or_fail(metadata_owner, metadata_undo)
+                finally:
+                    rollback_ok = rollback_hook(captured)
+                    restored_fp, _restored, _restored_doc = collect_model_fingerprint(PAYLOAD)
+                    if rollback_ok is not True or restored_fp != current_fp:
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "Style mutation failed and exact restoration could not be verified",
+                            details={"operation": op, "applied": False, "compensated": False},
+                        )
             if isinstance(exc, FusionScriptError):
                 raise exc
             raise FusionScriptError(
