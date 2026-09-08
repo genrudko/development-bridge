@@ -7769,6 +7769,78 @@ async def test_geometry_mutation_script_applies_same_command_provenance_plan(
     assert desktop.read_calls == 1
 
 
+
+@pytest.mark.parametrize("operation", ["set", "show"])
+@pytest.mark.asyncio
+async def test_compensated_arbitrary_mutation_exception_never_leaks_raw_diagnostics(
+    fake_desktop, operation
+):
+    """Arbitrary primitive/runtime exceptions are model-untrusted diagnostics.
+
+    Even after exact compensation succeeds, the public fusion.cad/v1 error must
+    use a constant sanitized message/details and must not expose the exception
+    string or traceback. Exercise both the primary metadata mutation branch and
+    the fallback geometry/style branch.
+    """
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    rec = cad_service.revision_tracker.current("doc_1")
+    target = {
+        "ref": body_ref,
+        "kind": "body",
+        "name": "Body1",
+        "native_token": "body_token_1",
+        "component_path": [],
+    }
+    payload = {
+        "operation": operation,
+        "target": target,
+        "expected_revision": rec.revision,
+        "expected_fingerprint": rec.fingerprint,
+        "document_ref": "doc_1",
+    }
+    if operation == "set":
+        payload.update({"name": "finish", "value": "anodized"})
+        apply_metadata_mutation_plan(
+            payload,
+            operation_id="op_secret_diag_set",
+            created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+        )
+    else:
+        apply_geometry_provenance_plan(
+            payload,
+            operation="show",
+            creator_operation="fusion_style:show",
+            operation_id="op_secret_diag_show",
+            created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+        )
+
+    secret = f"secret::native::{operation}::AQAA-RAW-TOKEN"
+
+    def hostile_primitive(_payload):
+        fake_adsk.volume = 125.0
+        raise RuntimeError(secret)
+
+    output = _exec_rendered_mutate(
+        FusionCadScriptBundle().build("mutate", payload),
+        mutation_primitive=hostile_primitive,
+        mutation_compensation_capture=lambda _payload: fake_adsk.volume,
+        mutation_compensation_rollback=lambda captured: (
+            setattr(fake_adsk, "volume", 100.0) or True
+        ),
+    )
+
+    assert fake_adsk.volume == 100.0
+    assert output["status"] == "failed"
+    assert output["error"]["code"] == "FUSION_API_ERROR"
+    public = json.dumps(output, ensure_ascii=False)
+    assert secret not in public
+    assert "traceback" not in output["error"].get("details", {})
+
 @pytest.mark.asyncio
 async def test_mutate_script_never_falls_back_to_document_owner_for_unresolved_target(
     fake_desktop,
