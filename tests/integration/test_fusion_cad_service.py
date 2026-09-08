@@ -7135,6 +7135,78 @@ async def test_geometry_provenance_failure_restores_geometry_and_full_fingerprin
     assert verify_output["data"]["fingerprint"] == initial_fp
 
 
+
+@pytest.mark.parametrize("operation", ["set", "show"])
+@pytest.mark.parametrize("post_mode", ["invalid", "unchanged"])
+@pytest.mark.asyncio
+async def test_post_fingerprint_failure_attempts_geometry_rollback_even_if_metadata_rollback_fails(
+    fake_desktop, operation, post_mode
+):
+    """Metadata rollback failure must never skip required geometry rollback."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    rec = cad_service.revision_tracker.current("doc_1")
+    payload = {
+        "operation": operation,
+        "target": {
+            "ref": body_ref,
+            "kind": "body",
+            "name": "Body1",
+            "native_token": "body_token_1",
+            "component_path": [],
+        },
+        "expected_revision": rec.revision,
+        "expected_fingerprint": rec.fingerprint,
+        "document_ref": "doc_1",
+    }
+    apply_geometry_provenance_plan(
+        payload,
+        operation=operation,
+        creator_operation=f"fusion_style:{operation}",
+        operation_id=f"op_postfp_{operation}_{post_mode}",
+        created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+    )
+
+    attrs_cls, healthy_add, hostile_add = _arm_hostile_created_delete(
+        fake_adsk, PROVENANCE_ATTRIBUTE_NAME, "false_after_delete"
+    )
+    attrs_cls.add = hostile_add
+    try:
+        script = FusionCadScriptBundle().build("mutate", payload)
+        assert script.count("        _output = run()") == 1
+        script = script.replace("        _output = run()", "        _output = None", 1)
+        scope = {
+            "__name__": "__main__",
+            "_mutation_primitive": lambda _payload: setattr(fake_adsk, "volume", 125.0),
+            "_mutation_compensation_capture": lambda _payload: fake_adsk.volume,
+            "_mutation_compensation_rollback": lambda captured: (
+                setattr(fake_adsk, "volume", captured) or True
+            ),
+        }
+        exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+        baseline_fp = rec.fingerprint
+        post_fp = "" if post_mode == "invalid" else baseline_fp
+        fingerprints = iter([
+            (baseline_fp, {}, "doc_1"),
+            (post_fp, {}, "doc_1"),
+            (baseline_fp, {}, "doc_1"),
+        ])
+        scope["collect_model_fingerprint"] = lambda _payload=None: next(fingerprints)
+        with pytest.raises(Exception) as exc:
+            scope["run"]()
+        assert getattr(exc.value, "code", None) in {
+            "CAPABILITY_UNAVAILABLE",
+            "FUSION_API_ERROR",
+        }
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert fake_adsk.volume == 100.0
+
 @pytest.mark.asyncio
 async def test_plan_bearing_geometry_without_compensation_fails_before_geometry(
     fake_desktop,

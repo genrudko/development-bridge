@@ -723,9 +723,11 @@ def run():
                     _compensate_geometry(geometry_capture, current_fp)
             raise
         if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
-            _rollback_metadata(owner, undo)
-            if geometry_applied:
-                _compensate_geometry(geometry_capture, current_fp)
+            try:
+                _rollback_metadata(owner, undo)
+            finally:
+                if geometry_applied:
+                    _compensate_geometry(geometry_capture, current_fp)
             return make_error(
                 "FINGERPRINT_FAILED",
                 "Authoritative post-apply model fingerprint collection failed or returned empty",
@@ -736,9 +738,11 @@ def run():
                 },
             )
         if post_fp == current_fp:
-            _rollback_metadata(owner, undo)
-            if geometry_applied:
-                _compensate_geometry(geometry_capture, current_fp)
+            try:
+                _rollback_metadata(owner, undo)
+            finally:
+                if geometry_applied:
+                    _compensate_geometry(geometry_capture, current_fp)
             return make_error(
                 "MUTATION_FAILED",
                 "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
@@ -970,9 +974,11 @@ def run():
                 _compensate_geometry(geometry_capture, current_fp)
         raise
     if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
-        _rollback_metadata(plan_owner, plan_undo)
-        if geometry_applied and has_plan:
-            _compensate_geometry(geometry_capture, current_fp)
+        try:
+            _rollback_metadata(plan_owner, plan_undo)
+        finally:
+            if geometry_applied and has_plan:
+                _compensate_geometry(geometry_capture, current_fp)
         return make_error(
             "FINGERPRINT_FAILED",
             "Authoritative post-apply model fingerprint collection failed or returned empty",
@@ -983,9 +989,11 @@ def run():
             },
         )
     if post_fp == current_fp:
-        _rollback_metadata(plan_owner, plan_undo)
-        if geometry_applied and has_plan:
-            _compensate_geometry(geometry_capture, current_fp)
+        try:
+            _rollback_metadata(plan_owner, plan_undo)
+        finally:
+            if geometry_applied and has_plan:
+                _compensate_geometry(geometry_capture, current_fp)
         return make_error(
             "MUTATION_FAILED",
             "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
