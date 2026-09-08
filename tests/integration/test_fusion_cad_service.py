@@ -7841,6 +7841,140 @@ async def test_compensated_arbitrary_mutation_exception_never_leaks_raw_diagnost
     assert secret not in public
     assert "traceback" not in output["error"].get("details", {})
 
+
+@pytest.mark.parametrize("operation", ["set", "show"])
+@pytest.mark.asyncio
+async def test_result_construction_failure_compensates_and_is_sanitized(
+    fake_desktop, operation
+):
+    """A failure after a distinct post-apply fingerprint is still transactional."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    rec = cad_service.revision_tracker.current("doc_1")
+    baseline_attrs = _body_attributes()
+    payload = {
+        "operation": operation,
+        "target": {
+            "ref": body_ref,
+            "kind": "body",
+            "name": "Body1",
+            "native_token": "body_token_1",
+            "component_path": [],
+        },
+        "expected_revision": rec.revision,
+        "expected_fingerprint": rec.fingerprint,
+        "document_ref": "doc_1",
+    }
+    if operation == "set":
+        payload.update({"name": "finish", "value": "anodized"})
+        apply_metadata_mutation_plan(
+            payload,
+            operation_id="op_result_failure_set",
+            created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+        )
+    else:
+        apply_geometry_provenance_plan(
+            payload,
+            operation="show",
+            creator_operation="fusion_style:show",
+            operation_id="op_result_failure_show",
+            created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+        )
+
+    script = FusionCadScriptBundle().build("mutate", payload)
+    script = script.replace("        _output = run()", "        _output = None", 1)
+    scope = {
+        "__name__": "__main__",
+        "_mutation_primitive": lambda _payload: setattr(fake_adsk, "volume", 125.0),
+        "_mutation_compensation_capture": lambda _payload: fake_adsk.volume,
+        "_mutation_compensation_rollback": lambda captured: (
+            setattr(fake_adsk, "volume", captured) or True
+        ),
+    }
+    exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+    secret = f"secret::result::{operation}::AQAA-RAW-TOKEN"
+
+    def hostile_make_result(**_kwargs):
+        raise RuntimeError(secret)
+
+    scope["make_result"] = hostile_make_result
+    with pytest.raises(scope["FusionScriptError"]) as exc:
+        scope["run"]()
+
+    assert exc.value.code == "FUSION_API_ERROR"
+    assert exc.value.message == (
+        "Mutation execution failed after an apply attempt; exact compensation completed"
+    )
+    assert exc.value.details == {
+        "operation": operation,
+        "applied": False,
+        "compensated": True,
+    }
+    assert secret not in json.dumps(exc.value.details)
+    assert secret not in exc.value.message
+    assert fake_adsk.volume == 100.0
+    assert _body_attributes() == baseline_attrs
+    verify = FusionCadScriptBundle().build(
+        "read", {"operation": "model_snapshot", "document_ref": "doc_1"}
+    )
+    assert _exec_rendered_mutate(verify)["data"]["fingerprint"] == rec.fingerprint
+    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+
+@pytest.mark.asyncio
+async def test_mid_plan_failure_rolls_back_created_attribute_exactly_once(fake_desktop):
+    """An internal plan rollback is not repeated by the outer transaction handler."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+
+    import adsk.core
+
+    attrs_cls = type(adsk.core.Application.get().activeDocument.attributes)
+    healthy_add = attrs_cls.add
+    delete_calls = {"count": 0}
+
+    def fail_after_created_write(self, group_name, name, value):
+        if name == PROVENANCE_ATTRIBUTE_NAME:
+            raise RuntimeError("mid-plan failure")
+        attr = healthy_add(self, group_name, name, value)
+        original_delete = attr.deleteMe
+
+        def counted_delete():
+            delete_calls["count"] += 1
+            if delete_calls["count"] > 1:
+                raise RuntimeError("created attribute rollback repeated")
+            return original_delete()
+
+        attr.deleteMe = counted_delete
+        return attr
+
+    attrs_cls.add = fail_after_created_write
+    try:
+        with pytest.raises(FusionCadError):
+            await cad_service.execute(
+                {
+                    "node_id": "desk-1",
+                    "operation": "set",
+                    "target": body_ref,
+                    "name": "finish",
+                    "value": "anodized",
+                    "expected_revision": "rev_1",
+                },
+                group="metadata",
+            )
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert delete_calls["count"] == 1
+    assert _body_attributes() == {}
+
 @pytest.mark.asyncio
 async def test_mutate_script_never_falls_back_to_document_owner_for_unresolved_target(
     fake_desktop,

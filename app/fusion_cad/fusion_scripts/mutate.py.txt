@@ -761,22 +761,36 @@ def run():
                 },
             )
 
-        result_data = {
-            "operation": op,
-            "applied": True,
-            "fingerprint": post_fp,
-            "document_ref": post_doc_ref or doc_ref,
-            "target": _public_target(PAYLOAD.get("target"), target_ref),
-            "attributes": applied_writes,
-            "removed": applied_removals,
-            "provenance": PAYLOAD.get("provenance"),
-        }
-        return make_result(
-            data=result_data,
-            summary=f"Executed mutate:{op}",
-            document=_doc_state(safe_doc, doc),
-            changed_refs=[target_ref] if target_ref else [],
-        )
+        try:
+            result_data = {
+                "operation": op,
+                "applied": True,
+                "fingerprint": post_fp,
+                "document_ref": post_doc_ref or doc_ref,
+                "target": _public_target(PAYLOAD.get("target"), target_ref),
+                "attributes": applied_writes,
+                "removed": applied_removals,
+                "provenance": PAYLOAD.get("provenance"),
+            }
+            return make_result(
+                data=result_data,
+                summary=f"Executed mutate:{op}",
+                document=_doc_state(safe_doc, doc),
+                changed_refs=[target_ref] if target_ref else [],
+            )
+        except Exception as exc:
+            try:
+                _rollback_metadata(owner, undo)
+            finally:
+                if geometry_applied:
+                    _compensate_geometry(geometry_capture, current_fp)
+            if isinstance(exc, FusionScriptError):
+                raise exc
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Mutation execution failed after an apply attempt; exact compensation completed",
+                details={"operation": op, "applied": False, "compensated": True},
+            )
 
     if op in _READ_OPS:
         # Read-only metadata: no expected_revision, no mutation, no fingerprint write.
@@ -1018,19 +1032,34 @@ def run():
             },
         )
 
-    result_data = {
-        "operation": op,
-        "applied": True,
-        "fingerprint": post_fp,
-        "document_ref": post_doc_ref or doc_ref,
-    }
-    if has_plan:
-        result_data["attributes"] = applied_writes
-        result_data["removed"] = applied_removals
-        result_data["provenance"] = PAYLOAD.get("provenance")
-    return make_result(
-        data=result_data,
-        summary=f"Executed mutate:{op}",
-        document=_doc_state(safe_doc, doc),
-        changed_refs=[target_ref] if has_plan and target_ref else [],
-    )
+    try:
+        result_data = {
+            "operation": op,
+            "applied": True,
+            "fingerprint": post_fp,
+            "document_ref": post_doc_ref or doc_ref,
+        }
+        if has_plan:
+            result_data["attributes"] = applied_writes
+            result_data["removed"] = applied_removals
+            result_data["provenance"] = PAYLOAD.get("provenance")
+        return make_result(
+            data=result_data,
+            summary=f"Executed mutate:{op}",
+            document=_doc_state(safe_doc, doc),
+            changed_refs=[target_ref] if has_plan and target_ref else [],
+        )
+    except Exception as exc:
+        try:
+            if plan_undo is not None:
+                _rollback_metadata(plan_owner, plan_undo)
+        finally:
+            if geometry_applied and has_plan:
+                _compensate_geometry(geometry_capture, current_fp)
+        if isinstance(exc, FusionScriptError):
+            raise exc
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            "Mutation execution failed after an apply attempt; exact compensation completed",
+            details={"operation": op, "applied": False, "compensated": True},
+        )
