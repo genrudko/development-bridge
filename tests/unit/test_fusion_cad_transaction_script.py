@@ -248,6 +248,242 @@ def _production_command_runtime(monkeypatch, *, preview):
     }
     return payload, {}, {"doc": doc, "design": design, "root": root}, events
 
+
+def _ptransaction_runtime(monkeypatch, *, preview):
+    """Internal opt-in PTransaction fake runtime.
+
+    Simulates dterracino/f360mcp donor semantics for Application.executeTextCommand:
+      PTransaction.Start "<fixed-safe-name>" opens a transaction,
+      PTransaction.Abort restores the pre-start model state and fingerprint,
+      PTransaction.Commit keeps the mutated state. No CommandDefinition surface.
+    """
+    import hashlib
+    import json
+
+    events = []
+    state = {
+        "in_transaction": False,
+        "fp": None,
+        "baseline_fp": None,
+        "fp_at_start": None,
+        "start": None,
+        "sketches": [],
+        "timeline": [],
+        "doc_is_modified": False,
+        "provenance": None,
+        "text_add_count": 0,
+        "fail_on_text_add": False,
+        "fail_on_commit": False,
+    }
+
+    class Collection:
+        def __init__(self, items=None):
+            self._items = items if items is not None else []
+
+        @property
+        def count(self):
+            return len(self._items)
+
+        def item(self, index):
+            return self._items[index]
+
+    class Attributes(Collection):
+        def add(self, group, name, value):
+            attr = SimpleNamespace(groupName=group, name=name, value=value)
+            self._items.append(attr)
+            if name == "provenance":
+                state["provenance"] = value
+            return attr
+
+        def itemByName(self, group, name):
+            for attr in self._items:
+                if attr.groupName == group and attr.name == name:
+                    return attr
+            return None
+
+    class Point:
+        def __init__(self, x=0.0, y=0.0, z=0.0):
+            self.x = float(x)
+            self.y = float(y)
+            self.z = float(z)
+
+    class SketchTexts:
+        def createInput(self, text, height, position):
+            events.append(("createInput", text, height, position.x, position.y, position.z))
+            return SimpleNamespace(formattedText=text)
+
+        def add(self, _input):
+            state["text_add_count"] += 1
+            events.append("text.add")
+            if state["fail_on_text_add"]:
+                raise RuntimeError("boom during ptransaction text add")
+            return SimpleNamespace(
+                entityToken=f"native::ptx::secret_{state['text_add_count']}",
+                attributes=Attributes(),
+            )
+
+    class Sketch:
+        def __init__(self, index):
+            self.name = f"BridgeText{index}"
+            self.entityToken = f"sketch_token_{index}"
+            self.sketchTexts = SketchTexts()
+
+    class Sketches(Collection):
+        def add(self, plane):
+            assert plane == "world-xy"
+            events.append("sketch.add")
+            index = len(state["sketches"]) + 1
+            sketch = Sketch(index)
+            state["sketches"].append(sketch)
+            state["timeline"].append(
+                SimpleNamespace(index=index, entityToken=f"timeline_token_{index}", name=sketch.name)
+            )
+            state["doc_is_modified"] = True
+            state["fp"] = f"fp_mutated_{index}"
+            return sketch
+
+    class Timeline(Collection):
+        def __init__(self):
+            super().__init__(state["timeline"])
+
+    root = SimpleNamespace(
+        name="Root", id="comp_root", entityToken="comp_root",
+        xYConstructionPlane="world-xy", sketches=None,
+    )
+    design = SimpleNamespace(rootComponent=root, timeline=Timeline())
+    root.sketches = Sketches(state["sketches"])
+
+    class Products:
+        def itemByClass(self, name):
+            return design if "Design" in name else None
+
+    class Doc:
+        dataId = "doc_1"
+        name = "TestDoc"
+        savedVersion = 1
+
+        @property
+        def isModified(self):
+            return state["doc_is_modified"]
+
+        @isModified.setter
+        def isModified(self, value):
+            state["doc_is_modified"] = bool(value)
+
+    doc = Doc()
+    doc.attributes = Attributes()
+    doc.products = Products()
+
+    canonical = {
+        "document": {"document_ref": "doc_1", "name": "TestDoc", "is_modified": False, "saved_version": 1},
+        "timeline": [], "components": [{"name": "Root", "id": "comp_root"}],
+        "occurrences": [], "bodies": [], "sketches": [], "parameters": [], "attributes": [],
+    }
+    baseline_fp = hashlib.sha256(json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    state["fp"] = baseline_fp
+    state["baseline_fp"] = baseline_fp
+
+    def state_canonical():
+        return {
+            "document": {
+                "document_ref": "doc_1",
+                "name": "TestDoc",
+                "is_modified": state["doc_is_modified"],
+                "saved_version": 1,
+            },
+            "timeline": [
+                {"index": item.index, "id": item.entityToken, "name": item.name}
+                for item in state["timeline"]
+            ],
+            "components": [{"name": "Root", "id": "comp_root"}],
+            "occurrences": [],
+            "bodies": [],
+            "sketches": [{"name": s.name, "id": s.entityToken} for s in state["sketches"]],
+            "parameters": [],
+            "attributes": [],
+        }
+
+    def fingerprint(_payload):
+        return state["fp"], state_canonical(), "doc_1"
+
+    class FakeApp:
+        activeProduct = design
+        activeDocument = doc
+        userInterface = None
+
+        def executeTextCommand(self, command):
+            events.append(("executeTextCommand", command))
+            if command.startswith("PTransaction.Start"):
+                assert state["in_transaction"] is False, f"nested PTransaction.Start ({command})"
+                state["in_transaction"] = True
+                state["fp_at_start"] = state["fp"]
+                state["start"] = {
+                    "sketches": list(state["sketches"]),
+                    "timeline": list(state["timeline"]),
+                    "doc_is_modified": state["doc_is_modified"],
+                    "provenance": state["provenance"],
+                }
+            elif command == "PTransaction.Abort":
+                assert state["in_transaction"] is True, "PTransaction.Abort without an active transaction"
+                state["in_transaction"] = False
+                start = state["start"]
+                if start is not None:
+                    state["sketches"][:] = start["sketches"]
+                    state["timeline"][:] = start["timeline"]
+                    state["doc_is_modified"] = start["doc_is_modified"]
+                    state["provenance"] = start["provenance"]
+                state["fp"] = state["fp_at_start"]
+            elif command == "PTransaction.Commit":
+                assert state["in_transaction"] is True, "PTransaction.Commit without an active transaction"
+                if state["fail_on_commit"]:
+                    raise RuntimeError("boom during ptransaction commit")
+                state["in_transaction"] = False
+                state["start"] = None
+            else:
+                raise AssertionError(f"Unexpected text command {command!r}")
+
+    app = FakeApp()
+
+    adsk = ModuleType("adsk")
+    core = ModuleType("adsk.core")
+    fusion = ModuleType("adsk.fusion")
+    core.Application = SimpleNamespace(get=lambda: app)
+    core.Point3D = SimpleNamespace(create=lambda x, y, z: Point(x, y, z))
+    fusion.Design = SimpleNamespace(cast=lambda product: product)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    provenance = {
+        "creator_tool": "bridge.fusion-cad-agent",
+        "creator_operation": "fusion_style:text_create",
+        "operation_id": "op_123456789abc",
+        "transaction_id": "tx_spike",
+        "logical_object_ref": "text_123456789abcdef0",
+        "created_revision": "rev_2",
+        "tags": [],
+    }
+    payload = {
+        "operation": "preview" if preview else "commit",
+        "transaction_id": "tx_spike", "document_ref": "doc_1",
+        "expected_fingerprint": baseline_fp,
+        "plan": [{
+            "action_type": "text_create", "text": "ПЫТОК", "height_mm": 4.0,
+            "position": {"x": 10.0, "y": 20.0, "z": 0.0, "frame": {"space": "world"}},
+            "metadata_writes": [{"name": "provenance", "value": json.dumps(provenance, ensure_ascii=False, separators=(",", ":"))}],
+            "provenance": provenance,
+        }],
+        "baseline_snapshot": {"structural_hash": baseline_fp, "counts": {"sketches": 0}, "refs": []},
+        "_transaction_runtime": "ptransaction",
+    }
+    state["doc"] = doc
+    state["design"] = design
+    state["root"] = root
+    return payload, {"_transaction_fingerprint_primitive": fingerprint}, state, events
+
+
 def test_production_preview_uses_command_execute_failed_without_transaction_hooks(monkeypatch):
     payload, runtime, state, events = _production_command_runtime(monkeypatch, preview=True)
     result = _run(payload, runtime)
@@ -446,3 +682,174 @@ def test_commit_rejects_nonopaque_generated_refs():
     assert result["status"] == "failed"
     assert result["error"]["code"] == "FUSION_API_ERROR"
     assert "native-token-secret" not in str(result)
+
+
+def test_ptransaction_preview_orders_start_mutation_abort_and_restores_baseline(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=True)
+    result = _run(payload, runtime)
+
+    assert result["status"] == "succeeded"
+    text_commands = [
+        entry[1]
+        for entry in events
+        if isinstance(entry, tuple) and entry[0] == "executeTextCommand"
+    ]
+    assert text_commands == [
+        'PTransaction.Start "bridge_cad_transaction"',
+        "PTransaction.Abort",
+    ]
+    assert events.index(("executeTextCommand", 'PTransaction.Start "bridge_cad_transaction"')) < events.index("sketch.add")
+    assert events.index("sketch.add") < events.index("text.add")
+    assert events.index("text.add") < events.index(("executeTextCommand", "PTransaction.Abort"))
+    assert "definition.add" not in events
+    assert "doExecute" not in events
+    assert "commandCreated.returned" not in events
+
+    assert result["data"]["preview"] is True
+    assert result["data"]["preview_refs_durable"] is False
+    assert result["data"]["preview_refs"] == []
+    assert result["data"]["provenance_durable"] is False
+    assert result["data"]["preview_snapshot"]["counts"]["sketches"] == 1
+    assert state["fp"] == payload["expected_fingerprint"]
+    assert state["sketches"] == []
+    assert state["timeline"] == []
+    assert state["doc_is_modified"] is False
+    assert state["in_transaction"] is False
+    assert state["provenance"] is None
+    assert result["data"]["provenance"] == payload["plan"][0]["provenance"]
+
+
+def test_ptransaction_commit_orders_start_mutation_commit_and_persists_once(monkeypatch):
+    import json
+
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    result = _run(payload, runtime)
+
+    assert result["status"] == "succeeded"
+    text_commands = [
+        entry[1]
+        for entry in events
+        if isinstance(entry, tuple) and entry[0] == "executeTextCommand"
+    ]
+    assert text_commands == [
+        'PTransaction.Start "bridge_cad_transaction"',
+        "PTransaction.Commit",
+    ]
+    assert "PTransaction.Abort" not in text_commands
+    assert events.index(("executeTextCommand", 'PTransaction.Start "bridge_cad_transaction"')) < events.index("sketch.add")
+    assert events.index("sketch.add") < events.index("text.add")
+    assert events.index("text.add") < events.index(("executeTextCommand", "PTransaction.Commit"))
+    assert "definition.add" not in events
+    assert "doExecute" not in events
+    assert "commandCreated.returned" not in events
+
+    assert result["data"]["applied"] is True
+    assert state["in_transaction"] is False
+    assert state["text_add_count"] == 1
+    assert len(state["sketches"]) == 1
+    assert len(state["timeline"]) == 1
+    assert state["doc_is_modified"] is True
+    assert state["fp"] != payload["expected_fingerprint"]
+    assert json.loads(state["provenance"]) == payload["plan"][0]["provenance"]
+    assert result["data"]["internal_ref_hints"] == [
+        {"kind": "sketch_text", "native_token": "native::ptx::secret_1"}
+    ]
+    assert result["data"]["same_command_provenance"] is True
+    assert result["data"]["same_operation_provenance"] is True
+    assert result["data"]["persisted_provenance"] == payload["plan"][0]["provenance"]
+    assert result["data"]["refs"] == []
+    assert "native::ptx::secret_1" not in json.dumps(result["changed_refs"])
+
+
+def test_ptransaction_requires_optin_selector_and_default_keeps_command_runtime(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    payload.pop("_transaction_runtime", None)
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    text_commands = [
+        entry[1]
+        for entry in events
+        if isinstance(entry, tuple) and entry[0] == "executeTextCommand"
+    ]
+    assert text_commands == []
+    assert state["in_transaction"] is False
+    assert state["text_add_count"] == 0
+
+
+def test_ptransaction_exact_plan_validation_runs_before_transaction_start(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    payload["plan"] = [{
+        "action_type": "text_create", "text": "ПЫТОК", "height_mm": 4.0,
+        "position": {"x": 1.0, "y": 1.0, "z": 1.0, "frame": {"space": "world"}},
+        "metadata_writes": payload["plan"][0]["metadata_writes"],
+        "provenance": payload["plan"][0]["provenance"],
+    }]
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert events == []
+    assert state["in_transaction"] is False
+
+
+def test_ptransaction_exception_between_start_and_terminal_aborts_fail_closed(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    state["fail_on_text_add"] = True
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "FUSION_API_ERROR"
+    assert "boom during ptransaction text add" in result["error"]["message"]
+    text_commands = [
+        entry[1]
+        for entry in events
+        if isinstance(entry, tuple) and entry[0] == "executeTextCommand"
+    ]
+    assert text_commands == [
+        'PTransaction.Start "bridge_cad_transaction"',
+        "PTransaction.Abort",
+    ]
+    assert events.index(("executeTextCommand", "PTransaction.Abort")) > events.index("text.add")
+    assert state["in_transaction"] is False
+
+
+def test_ptransaction_commit_failure_attempts_abort_and_preserves_original_error(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    state["fail_on_commit"] = True
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "FUSION_API_ERROR"
+    assert "boom during ptransaction commit" in result["error"]["message"]
+    text_commands = [
+        entry[1]
+        for entry in events
+        if isinstance(entry, tuple) and entry[0] == "executeTextCommand"
+    ]
+    assert text_commands == [
+        'PTransaction.Start "bridge_cad_transaction"',
+        "PTransaction.Commit",
+        "PTransaction.Abort",
+    ]
+    assert state["in_transaction"] is False
+
+
+def test_ptransaction_rendered_script_compiles_for_all_seven_operations():
+    from app.fusion_cad.scripts import FusionCadScriptBundle
+
+    bundle = FusionCadScriptBundle()
+    for op in ("begin", "stage", "preview", "commit", "abort", "rollback", "status"):
+        payload = {
+            "operation": op,
+            "transaction_id": "tx_spike",
+            "document_ref": "doc_1",
+            "expected_fingerprint": "fp",
+            "plan": [{"action_type": "text_create"}],
+            "_transaction_runtime": "ptransaction",
+        }
+        script = bundle.build("transaction", payload)
+        compiled = compile(script, f"<tx-{op}>", "exec")
+        assert compiled is not None
+        assert "_transaction_runtime" in script

@@ -60,6 +60,45 @@ def _transaction_snapshot_from_fingerprint(fingerprint, canonical):
     return {"structural_hash": fingerprint, "counts": counts, "refs": []}
 
 
+def _transaction_apply_text_create_mutation(root, action, preview):
+    """Apply the exact P0 text_create mutation with same-operation provenance.
+
+    Shared by the default CommandDefinition runtime and the internal opt-in
+    PTransaction runtime so the opt-in path reuses the IDENTICAL mutation and
+    provenance semantics: world-XY SketchText creation (the exact-plan and
+    world-XY constraints are enforced by _transaction_exact_text_create_plan),
+    the service-prepared provenance write/readback, fingerprint snapshot +
+    validation, and the adapter-private native ref hint ONLY on commit (preview
+    evidence stays non-durable and never carries native tokens outward).
+    """
+    import adsk.core
+
+    position = action["position"]
+    sketch = root.sketches.add(root.xYConstructionPlane)
+    point = adsk.core.Point3D.create(float(position["x"]) / 10.0, float(position["y"]) / 10.0, 0.0)
+    text_input = sketch.sketchTexts.createInput(action["text"], float(action["height_mm"]) / 10.0, point)
+    text = sketch.sketchTexts.add(text_input)
+    write = action["metadata_writes"][0]
+    text.attributes.add("bridge.cad/v1", "provenance", write["value"])
+    actual = text.attributes.itemByName("bridge.cad/v1", "provenance")
+    actual_value = getattr(actual, "value", None) if actual else None
+    if actual_value != write["value"] or json.loads(actual_value) != action["provenance"]:
+        raise FusionScriptError("FUSION_API_ERROR", "Persisted SketchText provenance read-back did not match the service-prepared value", {"applied": False})
+    during_fp, during_canonical, _during_doc = _transaction_fingerprint(PAYLOAD)
+    applied = {
+        "provenance": action["provenance"],
+        "persisted_provenance": json.loads(actual_value),
+        "same_operation_provenance": True,
+    }
+    if not preview:
+        applied["internal_ref_hints"] = [{"kind": "sketch_text", "native_token": str(text.entityToken)}]
+    return {
+        "snapshot": _transaction_snapshot_from_fingerprint(during_fp, during_canonical),
+        "validation": {"status": "passed", "errors": []},
+        "applied": applied,
+    }
+
+
 def _transaction_native_text_command(plan, preview):
     import time
     import uuid
@@ -93,26 +132,7 @@ def _transaction_native_text_command(plan, preview):
 
         def notify(self, args):
             try:
-                position = action["position"]
-                sketch = root.sketches.add(root.xYConstructionPlane)
-                point = adsk.core.Point3D.create(float(position["x"]) / 10.0, float(position["y"]) / 10.0, 0.0)
-                text_input = sketch.sketchTexts.createInput(action["text"], float(action["height_mm"]) / 10.0, point)
-                text = sketch.sketchTexts.add(text_input)
-                write = action["metadata_writes"][0]
-                text.attributes.add("bridge.cad/v1", "provenance", write["value"])
-                actual = text.attributes.itemByName("bridge.cad/v1", "provenance")
-                actual_value = getattr(actual, "value", None) if actual else None
-                if actual_value != write["value"] or json.loads(actual_value) != action["provenance"]:
-                    raise FusionScriptError("FUSION_API_ERROR", "Persisted SketchText provenance read-back did not match the service-prepared value", {"applied": False})
-                during_fp, during_canonical, _during_doc = _transaction_fingerprint(PAYLOAD)
-                result["snapshot"] = _transaction_snapshot_from_fingerprint(during_fp, during_canonical)
-                result["validation"] = {"status": "passed", "errors": []}
-                result["applied"] = {
-                    "provenance": action["provenance"],
-                    "persisted_provenance": json.loads(actual_value),
-                    "same_operation_provenance": True,
-                    "internal_ref_hints": [{"kind": "sketch_text", "native_token": str(text.entityToken)}],
-                }
+                result.update(_transaction_apply_text_create_mutation(root, action, preview))
                 if preview:
                     args.executeFailed = True
             except Exception as exc:
@@ -196,6 +216,63 @@ def _transaction_native_text_command(plan, preview):
     return result
 
 
+# Fixed safe transaction boundary name for the internal opt-in PTransaction
+# runtime. Literal only: user/untrusted text is NEVER interpolated here.
+_PTRANSACTION_STATIC_NAME = "bridge_cad_transaction"
+
+
+def _transaction_ptx_command(plan, preview):
+    """Apply the exact staged plan inside a PTransaction text-command boundary.
+
+    Internal opt-in only (payload['_transaction_runtime'] == 'ptransaction') and
+    intentionally NOT a public capability. Donor provenance (dterracino/f360mcp)
+    drives transaction boundaries through Application.executeTextCommand:
+      start  -> PTransaction.Start "<fixed-safe-name>"
+      abort  -> PTransaction.Abort
+      commit -> PTransaction.Commit
+    This opt-in path deliberately removes the CommandDefinition/doExecute
+    lifecycle (no button definition, no commandCreated, no executeFailed
+    rollback). Any exception between Start and the terminal action attempts
+    Abort fail-closed and re-raises the original error; the authoritative
+    post-abort/post-commit fingerprint checks remain at the caller.
+    """
+    import adsk
+    import adsk.core
+    import adsk.fusion
+
+    action = _transaction_exact_text_create_plan(plan)
+    app = adsk.core.Application.get()
+    design = adsk.fusion.Design.cast(getattr(app, "activeProduct", None)) if app else None
+    root = getattr(design, "rootComponent", None) if design else None
+    execute_text_command = getattr(app, "executeTextCommand", None) if app is not None else None
+    if root is None or not callable(execute_text_command):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Verified PTransaction runtime is unavailable", {"applied": False})
+
+    execute_text_command('PTransaction.Start "' + _PTRANSACTION_STATIC_NAME + '"')
+    try:
+        result = _transaction_apply_text_create_mutation(root, action, preview)
+        if preview:
+            execute_text_command("PTransaction.Abort")
+        else:
+            execute_text_command("PTransaction.Commit")
+    except BaseException:
+        try:
+            execute_text_command("PTransaction.Abort")
+        except BaseException:
+            pass
+        raise
+    return result
+
+
+def _transaction_native_runtime(plan, preview):
+    """Select the internal opt-in PTransaction runtime or the default
+    CommandDefinition runtime. Absent/unknown selectors MUST keep the existing
+    CommandDefinition fallback unchanged."""
+    if PAYLOAD.get("_transaction_runtime") == "ptransaction":
+        return _transaction_ptx_command(plan, preview)
+    return _transaction_native_text_command(plan, preview)
+
+
 def _transaction_guard(op):
     current_fp, _canonical, doc_ref = _transaction_fingerprint(PAYLOAD)
     if not isinstance(current_fp, str) or not current_fp.strip():
@@ -232,7 +309,7 @@ def run():
 
     if op == "preview":
         if not callable(globals().get("_transaction_begin_primitive")):
-            native = _transaction_native_text_command(plan, True)
+            native = _transaction_native_runtime(plan, True)
             restored_fp, _, restored_doc = _transaction_fingerprint(PAYLOAD)
             if restored_fp != current_fp or restored_doc != doc_ref:
                 raise FusionScriptError("TRANSACTION_CONFLICT", "Preview command abort did not restore the authoritative baseline", {"applied": False})
@@ -257,7 +334,7 @@ def run():
 
     if op == "commit":
         if not callable(globals().get("_transaction_begin_primitive")):
-            native = _transaction_native_text_command(plan, False)
+            native = _transaction_native_runtime(plan, False)
             applied = native["applied"]
             post_fp, _, post_doc = _transaction_fingerprint(PAYLOAD)
             if post_doc != doc_ref or not isinstance(post_fp, str) or not post_fp.strip() or post_fp == current_fp:
