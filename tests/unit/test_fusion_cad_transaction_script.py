@@ -158,13 +158,18 @@ def _production_command_runtime(monkeypatch, *, preview):
             before_modified = doc.isModified
             args = SimpleNamespace(executeFailed=False)
             self.execute.fire(args)
-            if args.executeFailed:
-                root.sketches._items[:] = before_sketches
-                design.timeline._items[:] = before_timeline
-                doc.isModified = before_modified
             events.append(("executeFailed", args.executeFailed))
             if terminate:
                 pending_events.append(lambda: self.destroy.fire(SimpleNamespace()))
+            if args.executeFailed:
+                # Real Fusion finalizes executeFailed rollback on the next main-loop
+                # turn after Command.destroy, not synchronously inside doExecute.
+                def apply_failed_rollback():
+                    root.sketches._items[:] = before_sketches
+                    design.timeline._items[:] = before_timeline
+                    doc.isModified = before_modified
+                    events.append("executeFailed.rollback.applied")
+                pending_events.append(apply_failed_rollback)
             return True
 
     class Definition:
@@ -257,6 +262,8 @@ def test_production_preview_uses_command_execute_failed_without_transaction_hook
     assert "reentrant_doExecute" not in events
     assert events.index("commandCreated.returned") < events.index(("doExecute", True, False))
     assert ("executeFailed", True) in events
+    assert "executeFailed.rollback.applied" in events
+    assert events.index("executeFailed.rollback.applied") < events.index("definition.delete")
     assert ("createInput", "ПЫТОК", 0.4, 1.0, 2.0, 0.0) in events
 
 

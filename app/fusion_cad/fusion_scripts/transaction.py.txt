@@ -63,6 +63,7 @@ def _transaction_snapshot_from_fingerprint(fingerprint, canonical):
 def _transaction_native_text_command(plan, preview):
     import time
     import uuid
+
     import adsk
     import adsk.core
     import adsk.fusion
@@ -174,6 +175,13 @@ def _transaction_native_text_command(plan, preview):
             time.sleep(0.005)
         if not result["destroyed"]:
             raise FusionScriptError("FUSION_API_ERROR", "Fusion command did not terminate cleanly", {"applied": False})
+
+        # Live Fusion finalizes executeFailed rollback one main-loop turn after
+        # Command.destroy. Drain a few bounded turns before deleting the
+        # definition or letting the caller fingerprint authoritative state.
+        for _ in range(3):
+            adsk.doEvents()
+            time.sleep(0.005)
     finally:
         delete_ok = bool(definition.deleteMe())
     if not delete_ok:
