@@ -973,6 +973,132 @@ def collect_model_fingerprint(payload=None):
     return fp, canonical, safe_doc_ref
 
 
+
+def _shared_native_entity_kind(entity):
+    object_type = str(getattr(entity, "objectType", None) or type(entity).__name__)
+    if "BRepBody" in object_type:
+        return "body"
+    if "BRepFace" in object_type:
+        return "face"
+    if "BRepEdge" in object_type:
+        return "edge"
+    sketch_curve_types = (
+        "SketchCurve",
+        "SketchLine",
+        "SketchArc",
+        "SketchCircle",
+        "SketchEllipse",
+        "SketchEllipticalArc",
+        "SketchConicCurve",
+        "SketchFittedSpline",
+        "SketchControlPointSpline",
+        "SketchFixedSpline",
+    )
+    if any(type_name in object_type for type_name in sketch_curve_types):
+        return "sketch_curve"
+    if object_type.endswith("Sketch") or object_type == "Sketch":
+        return "sketch"
+    if "Occurrence" in object_type:
+        return "occurrence"
+    if "Component" in object_type:
+        return "component"
+    return "other"
+
+
+def resolve_exact_native_entity(design, hint, expected_kinds=None):
+    """Resolve one authoritative native token without contextual substitution.
+
+    The helper is intentionally narrow: it never performs kind/name traversal and
+    never includes the native token or native exception text in public error
+    details. Operation-specific adapters may retain their own contextual fallback
+    only for non-authoritative targets.
+    """
+    hint = hint if isinstance(hint, dict) else {}
+    ref = hint.get("ref")
+    native_token = hint.get("native_token")
+    try:
+        resolver = getattr(design, "findEntityByToken", None) if design is not None else None
+    except Exception:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity resolver could not be inspected safely",
+            details={"ref": ref},
+        ) from None
+    if not native_token or not callable(resolver):
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity could not be resolved in the active document",
+            details={"ref": ref},
+        )
+
+    try:
+        resolved = resolver(native_token)
+    except Exception:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity lookup failed in the active document",
+            details={"ref": ref},
+        ) from None
+
+    entity = resolved
+    if resolved is not None:
+        try:
+            count_value = getattr(resolved, "count")
+        except AttributeError:
+            count_value = None
+        except Exception:
+            raise FusionScriptError(
+                "REF_STALE",
+                "Authoritative native entity collection could not be inspected safely",
+                details={"ref": ref},
+            ) from None
+        if count_value is not None:
+            try:
+                count = int(count_value)
+                if count == 1:
+                    entity = resolved.item(0)
+                elif count > 1:
+                    raise FusionScriptError(
+                        "REF_SPLIT",
+                        "Authoritative native entity resolved to multiple split entities",
+                        details={"ref": ref},
+                    )
+                else:
+                    entity = None
+            except FusionScriptError:
+                raise
+            except Exception:
+                raise FusionScriptError(
+                    "REF_STALE",
+                    "Authoritative native entity collection could not be inspected safely",
+                    details={"ref": ref},
+                ) from None
+
+    if entity is None:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity could not be resolved in the active document",
+            details={"ref": ref},
+        )
+
+    allowed = tuple(str(kind) for kind in (expected_kinds or ()) if kind)
+    if allowed:
+        try:
+            actual_kind = _shared_native_entity_kind(entity)
+        except Exception:
+            raise FusionScriptError(
+                "REF_STALE",
+                "Resolved native entity kind could not be inspected safely",
+                details={"ref": ref, "expected_kinds": list(allowed)},
+            ) from None
+        if actual_kind not in allowed:
+            raise FusionScriptError(
+                "REF_STALE",
+                "Resolved native entity kind did not match the expected target kind",
+                details={"ref": ref, "expected_kinds": list(allowed), "actual_kind": actual_kind},
+            )
+    return entity
+
 def resolve_fusion_entity(payload=None):
     payload = payload or {}
     import re

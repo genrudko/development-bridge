@@ -261,43 +261,25 @@ def _resolve_entity(target):
     app, doc, design = _get_app_design()
 
     native_token = t.get("native_token")
-    # A target carrying an authoritative native native_token hint (injected by the
+    # A target carrying an authoritative native token hint (injected by the
     # service for a document-bounded opaque ref / resolved selector) must NEVER
-    # fall back to kind/name substitution: a stale registered ref must fail closed
-    # (REF_STALE) instead of silently resolving to an unrelated entity.
+    # fall back to kind/name substitution. Shared exact-token mechanics live in
+    # common.py.txt; contextual fallback below remains inspect-specific.
     has_authoritative_hint = "native_token" in t and t.get("ref") is not None
 
     if native_token:
-        if not hasattr(design, "findEntityByToken"):
-            if has_authoritative_hint:
-                raise FusionScriptError(
-                    "REF_STALE",
-                    "Inspection target carried an authoritative native token but the active design cannot resolve native tokens; kind/name fallback is not permitted",
-                    details={"ref": t.get("ref")},
-                )
-        else:
-            resolved = None
-            try:
-                resolved = design.findEntityByToken(native_token)
-            except FusionScriptError:
+        expected_kinds = (t.get("kind"),) if t.get("kind") else None
+        try:
+            return resolve_exact_native_entity(
+                design,
+                t,
+                expected_kinds=expected_kinds,
+            )
+        except FusionScriptError as exc:
+            # Preserve the legacy contextual fallback only for non-authoritative
+            # hints. Split is always fail-closed rather than guessed around.
+            if has_authoritative_hint or exc.code == "REF_SPLIT":
                 raise
-            except Exception:
-                resolved = None
-            if resolved is not None:
-                if hasattr(resolved, "count"):
-                    if resolved.count == 1:
-                        return resolved.item(0)
-                    if resolved.count > 1:
-                        raise FusionScriptError(
-                            "REF_SPLIT",
-                            "Inspection target resolved to multiple split entities",
-                            details={"ref": t.get("ref")},
-                        )
-                    # count == 0 -> zero native lookup; fail closed below.
-                else:
-                    return resolved
-            # resolved is None or an empty native collection: native lookup failed
-            # or returned zero candidates.
 
     if has_authoritative_hint:
         raise FusionScriptError(
