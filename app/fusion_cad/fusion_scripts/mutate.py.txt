@@ -604,6 +604,50 @@ def run():
             )
         return applied_writes, applied_removals, undo
 
+    def _prepare_geometry_compensation(primitive_hook):
+        """Capture operation-specific rollback state before geometry runs.
+
+        These hooks are internal script-scope closures supplied by the trusted
+        operation implementation. They are not payload fields or public API.
+        """
+        if not callable(primitive_hook):
+            return None
+        capture_hook = globals().get("_mutation_compensation_capture")
+        rollback_hook = globals().get("_mutation_compensation_rollback")
+        if not callable(capture_hook) or not callable(rollback_hook):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Plan-bearing geometry requires an explicit operation-specific compensation contract",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+        try:
+            return capture_hook(PAYLOAD)
+        except Exception:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Geometry compensation state could not be captured before mutation",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+
+    def _compensate_geometry(captured, baseline_fp):
+        """Rollback geometry and prove exact restoration by full fingerprint."""
+        rollback_hook = globals().get("_mutation_compensation_rollback")
+        try:
+            rollback_result = rollback_hook(captured)
+            if rollback_result is not True:
+                raise RuntimeError("rollback did not explicitly report success")
+            restored_fp, _restored_canonical, _restored_doc = collect_model_fingerprint(
+                PAYLOAD
+            )
+            if restored_fp != baseline_fp:
+                raise RuntimeError("rollback fingerprint does not match baseline")
+        except Exception:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Geometry compensation failed or exact model restoration could not be verified",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+
     if op in _MUTATION_OPS:
         # Authoritative Fusion-side freshness guard runs in this SAME command
         # execution, with no return to UI between guard and apply.
@@ -644,35 +688,44 @@ def run():
         # hook or any reserved attribute side effect.
         _preflight_metadata_plan(owner, writes, removals)
 
-        # Geometry primitive (when present) runs BEFORE any metadata write so a
-        # geometry failure cannot leave partial Bridge metadata behind. The
-        # geometry change itself has no verified undo primitive; every failure
-        # after it still fails the whole command closed.
+        # Geometry primitive (when present) runs only after operation-specific
+        # rollback state is captured. Every later failure compensates metadata
+        # and geometry, then proves exact restoration by full fingerprint.
         primitive_hook = globals().get("_mutation_primitive")
-        if callable(primitive_hook):
-            primitive_hook(PAYLOAD)
+        geometry_capture = _prepare_geometry_compensation(primitive_hook)
+        geometry_applied = False
+        try:
+            if callable(primitive_hook):
+                geometry_applied = True
+                primitive_hook(PAYLOAD)
 
-        applied_writes, applied_removals, undo = _apply_metadata_plan(
-            owner, writes, removals
-        )
-        if not applied_writes:
-            _rollback_metadata(owner, undo)
-            raise FusionScriptError(
-                "INVALID_ARGUMENT",
-                "Metadata mutation plan produced no attribute writes; provenance cannot be recorded transactionally",
-                details={"operation": op},
+            applied_writes, applied_removals, undo = _apply_metadata_plan(
+                owner, writes, removals
             )
+            if not applied_writes:
+                _rollback_metadata(owner, undo)
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata mutation plan produced no attribute writes; provenance cannot be recorded transactionally",
+                    details={"operation": op},
+                )
 
         # Freshly collect real post-apply fingerprint of actual model state. Any
         # failure here is compensated so partial metadata is never left behind
         # and the command is never externally reported as applied.
-        try:
             post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
         except Exception:
-            _rollback_metadata(owner, undo)
+            try:
+                if "undo" in locals():
+                    _rollback_metadata(owner, undo)
+            finally:
+                if geometry_applied:
+                    _compensate_geometry(geometry_capture, current_fp)
             raise
         if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
             _rollback_metadata(owner, undo)
+            if geometry_applied:
+                _compensate_geometry(geometry_capture, current_fp)
             return make_error(
                 "FINGERPRINT_FAILED",
                 "Authoritative post-apply model fingerprint collection failed or returned empty",
@@ -684,6 +737,8 @@ def run():
             )
         if post_fp == current_fp:
             _rollback_metadata(owner, undo)
+            if geometry_applied:
+                _compensate_geometry(geometry_capture, current_fp)
             return make_error(
                 "MUTATION_FAILED",
                 "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
@@ -884,28 +939,40 @@ def run():
         _preflight_metadata_plan(plan_owner, plan_writes, plan_removals)
 
     primitive_hook = globals().get("_mutation_primitive")
-    if callable(primitive_hook):
-        primitive_hook(PAYLOAD)
-
+    geometry_capture = None
+    geometry_applied = False
     if has_plan:
-        applied_writes, applied_removals, plan_undo = _apply_metadata_plan(
-            plan_owner, plan_writes, plan_removals
-        )
-        if not applied_writes:
-            _rollback_metadata(plan_owner, plan_undo)
-            raise FusionScriptError(
-                "INVALID_ARGUMENT",
-                "Metadata plan produced no attribute writes; provenance cannot be recorded transactionally",
-                details={"operation": op},
-            )
-
+        geometry_capture = _prepare_geometry_compensation(primitive_hook)
     try:
+        if callable(primitive_hook):
+            geometry_applied = True
+            primitive_hook(PAYLOAD)
+
+        if has_plan:
+            applied_writes, applied_removals, plan_undo = _apply_metadata_plan(
+                plan_owner, plan_writes, plan_removals
+            )
+            if not applied_writes:
+                _rollback_metadata(plan_owner, plan_undo)
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata plan produced no attribute writes; provenance cannot be recorded transactionally",
+                    details={"operation": op},
+                )
+
         post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
     except Exception:
-        _rollback_metadata(plan_owner, plan_undo)
+        try:
+            if plan_undo is not None:
+                _rollback_metadata(plan_owner, plan_undo)
+        finally:
+            if geometry_applied and has_plan:
+                _compensate_geometry(geometry_capture, current_fp)
         raise
     if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
         _rollback_metadata(plan_owner, plan_undo)
+        if geometry_applied and has_plan:
+            _compensate_geometry(geometry_capture, current_fp)
         return make_error(
             "FINGERPRINT_FAILED",
             "Authoritative post-apply model fingerprint collection failed or returned empty",
@@ -917,6 +984,8 @@ def run():
         )
     if post_fp == current_fp:
         _rollback_metadata(plan_owner, plan_undo)
+        if geometry_applied and has_plan:
+            _compensate_geometry(geometry_capture, current_fp)
         return make_error(
             "MUTATION_FAILED",
             "Mutation failed to produce distinct post-apply model state; cannot advance model revision",

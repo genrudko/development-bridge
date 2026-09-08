@@ -1398,12 +1398,10 @@ async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_ap
             node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
         ):
             script = arguments["script"]
-            scope = {
-                "__name__": "__main__",
-                "_mutation_primitive": lambda payload: setattr(
-                    fake_adsk, "mutated", True
-                ),
-            }
+            # Pure metadata mutation: do not inject the internal geometry hook.
+            # Geometry-bearing operations must provide the explicit compensation
+            # contract covered by the Task 10 atomicity regressions below.
+            scope = {"__name__": "__main__"}
             exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
             return scope["_output"]
 
@@ -1438,8 +1436,8 @@ async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_ap
 
         assert exc_guard.value.code == ErrorCode.REVISION_CONFLICT
         assert exc_guard.value.details.get("applied") is False
-        # Proves mutation primitive in rendered script was NOT reached
-        assert fake_adsk.mutated is False
+        # No metadata side effect was applied before the stale guard failed.
+        assert _body_attributes() == {}
         # Proves current_fingerprint diverged from initial_fp
         diverged_fp = exc_guard.value.details.get("current_fingerprint")
         assert diverged_fp != initial_fp
@@ -1484,8 +1482,8 @@ async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_ap
             assert success_res.get("status") == "succeeded"
             assert success_res.get("data", {}).get("applied") is True
 
-        # Proves mutation primitive WAS reached and executed
-        assert fake_adsk.mutated is True
+        # The pure metadata write itself is the mutation and is persisted.
+        assert _body_attributes().get((RESERVED_METADATA_GROUP, "tag")) == "v1"
         # Proves Bridge tracker advanced to rev_3
         assert cad_service.revision_tracker.current("doc_1").revision == "rev_3"
 
@@ -3314,10 +3312,8 @@ async def test_falsify_rendered_mutation_returns_real_fusion_post_apply_fingerpr
             node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
         ):
             script = arguments["script"]
-            scope = {
-                "__name__": "__main__",
-                "_mutation_primitive": lambda payload: None,
-            }
+            # Pure metadata mutation; no geometry hook is present.
+            scope = {"__name__": "__main__"}
             exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
             return scope["_output"]
 
@@ -6506,6 +6502,8 @@ class FakeFusionDesktop:
         self.mutation_calls = 0
         self.read_calls = 0
         self.mutation_primitive = None
+        self.mutation_compensation_capture = None
+        self.mutation_compensation_rollback = None
 
     def _dispatch(self, arguments):
         script = arguments["script"]
@@ -6517,6 +6515,10 @@ class FakeFusionDesktop:
         scope = {"__name__": "__main__"}
         if self.mutation_primitive is not None:
             scope["_mutation_primitive"] = self.mutation_primitive
+        if self.mutation_compensation_capture is not None:
+            scope["_mutation_compensation_capture"] = self.mutation_compensation_capture
+        if self.mutation_compensation_rollback is not None:
+            scope["_mutation_compensation_rollback"] = self.mutation_compensation_rollback
         exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
 
@@ -6679,6 +6681,10 @@ async def test_geometry_and_provenance_use_one_mutation_command(fake_desktop):
     desktop = fake_desktop["desktop"]
     desktop.mutation_primitive = lambda payload: setattr(
         fake_adsk, "volume", float(fake_adsk.volume) + 25.0
+    )
+    desktop.mutation_compensation_capture = lambda payload: fake_adsk.volume
+    desktop.mutation_compensation_rollback = lambda captured: (
+        setattr(fake_adsk, "volume", captured) or True
     )
 
     cad_service = FusionCadService(desktop)
@@ -7037,12 +7043,162 @@ def _body_attr_count():
     return body.attributes.count
 
 
-def _exec_rendered_mutate(script: str, mutation_primitive=None):
+def _exec_rendered_mutate(
+    script: str,
+    mutation_primitive=None,
+    mutation_compensation_capture=None,
+    mutation_compensation_rollback=None,
+):
     scope = {"__name__": "__main__"}
     if mutation_primitive is not None:
         scope["_mutation_primitive"] = mutation_primitive
+    if mutation_compensation_capture is not None:
+        scope["_mutation_compensation_capture"] = mutation_compensation_capture
+    if mutation_compensation_rollback is not None:
+        scope["_mutation_compensation_rollback"] = mutation_compensation_rollback
     exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
     return scope["_output"]
+
+
+def _geometry_plan_payload(cad_service, body_ref, *, operation_id):
+    rec = cad_service.revision_tracker.current("doc_1")
+    payload = {
+        "operation": "show",
+        "target": {
+            "ref": body_ref,
+            "kind": "body",
+            "name": "Body1",
+            "native_token": "body_token_1",
+            "component_path": [],
+        },
+        "expected_revision": rec.revision,
+        "expected_fingerprint": rec.fingerprint,
+        "document_ref": "doc_1",
+    }
+    apply_geometry_provenance_plan(
+        payload,
+        operation="show",
+        creator_operation="fusion_style:show",
+        operation_id=operation_id,
+        created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+    )
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_geometry_provenance_failure_restores_geometry_and_full_fingerprint(
+    fake_desktop,
+):
+    """RED: a provenance failure after geometry must restore the whole model."""
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    payload = _geometry_plan_payload(
+        cad_service, body_ref, operation_id="op_geometry_rollback_1"
+    )
+    initial_fp = cad_service.revision_tracker.current("doc_1").fingerprint
+
+    import adsk.core
+
+    attrs_cls = type(adsk.core.Application.get().activeDocument.attributes)
+    healthy_add = attrs_cls.add
+
+    def reject_provenance(self, group_name, name, value):
+        if name == PROVENANCE_ATTRIBUTE_NAME:
+            return None
+        return healthy_add(self, group_name, name, value)
+
+    attrs_cls.add = reject_provenance
+    try:
+        script = FusionCadScriptBundle().build("mutate", payload)
+        output = _exec_rendered_mutate(
+            script,
+            mutation_primitive=lambda _payload: setattr(fake_adsk, "volume", 125.0),
+            mutation_compensation_capture=lambda _payload: fake_adsk.volume,
+            mutation_compensation_rollback=lambda captured: (
+                setattr(fake_adsk, "volume", captured) or True
+            ),
+        )
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert output["status"] == "failed"
+    assert fake_adsk.volume == 100.0
+    assert _body_attributes() == {}
+    verify = FusionCadScriptBundle().build(
+        "read", {"operation": "model_snapshot", "document_ref": "doc_1"}
+    )
+    verify_output = _exec_rendered_mutate(verify)
+    assert verify_output["data"]["fingerprint"] == initial_fp
+
+
+@pytest.mark.asyncio
+async def test_plan_bearing_geometry_without_compensation_fails_before_geometry(
+    fake_desktop,
+):
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    payload = _geometry_plan_payload(
+        cad_service, _register_body_ref(cad_service), operation_id="op_no_rollback_1"
+    )
+
+    output = _exec_rendered_mutate(
+        FusionCadScriptBundle().build("mutate", payload),
+        mutation_primitive=lambda _payload: setattr(fake_adsk, "volume", 125.0),
+    )
+
+    assert output["status"] == "failed"
+    assert output["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert output["error"]["details"]["applied"] is False
+    assert fake_adsk.volume == 100.0
+    assert _body_attributes() == {}
+
+
+@pytest.mark.parametrize("rollback_mode", ["explicit_failure", "fingerprint_mismatch"])
+@pytest.mark.asyncio
+async def test_geometry_compensation_failure_reports_uncertain_not_applied(
+    fake_desktop, rollback_mode
+):
+    fake_adsk = fake_desktop["adsk"]
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    payload = _geometry_plan_payload(
+        cad_service, _register_body_ref(cad_service), operation_id="op_bad_rollback_1"
+    )
+
+    import adsk.core
+
+    attrs_cls = type(adsk.core.Application.get().activeDocument.attributes)
+    healthy_add = attrs_cls.add
+    attrs_cls.add = lambda self, group_name, name, value: (
+        None if name == PROVENANCE_ATTRIBUTE_NAME else healthy_add(self, group_name, name, value)
+    )
+    try:
+        output = _exec_rendered_mutate(
+            FusionCadScriptBundle().build("mutate", payload),
+            mutation_primitive=lambda _payload: setattr(fake_adsk, "volume", 125.0),
+            mutation_compensation_capture=lambda _payload: fake_adsk.volume,
+            mutation_compensation_rollback=(
+                (lambda _captured: False)
+                if rollback_mode == "explicit_failure"
+                else (lambda _captured: True)
+            ),
+        )
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert output["status"] == "failed"
+    assert output["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert output["error"]["details"]["applied"] is False
+    assert output["error"]["details"]["compensated"] is False
 
 
 @pytest.mark.asyncio
@@ -7141,13 +7297,16 @@ async def test_metadata_mutation_compensates_partial_metadata_after_late_failure
 ):
     """Blocker 1: a failure AFTER attribute writes (post-apply fingerprint
     collection explodes) must restore the exact pre-mutation metadata state and
-    is never externally reported as success. Geometry has no verified undo
-    primitive, so the geometry change of the same failed command is retained —
-    the command still fails closed and is never reported as applied."""
+    is never externally reported as success. The operation-specific geometry
+    compensation must restore the exact full model fingerprint too."""
     fake_adsk = fake_desktop["adsk"]
     desktop = fake_desktop["desktop"]
     desktop.mutation_primitive = lambda payload: setattr(
         fake_adsk, "volume", float(fake_adsk.volume) + 25.0
+    )
+    desktop.mutation_compensation_capture = lambda payload: fake_adsk.volume
+    desktop.mutation_compensation_rollback = lambda captured: (
+        setattr(fake_adsk, "volume", captured) or True
     )
     cad_service = FusionCadService(desktop)
     cad_service.set_node_capabilities("desk-1", _metadata_matrix())
@@ -7188,11 +7347,13 @@ async def test_metadata_mutation_compensates_partial_metadata_after_late_failure
             group="metadata",
         )
     # Never externally reported as success
-    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert exc.value.details.get("applied") is False
     assert desktop.mutation_calls == 1
     # Partial metadata is compensated: the owner is exactly back to baseline
     assert _body_attributes() == baseline_body_attrs
     assert _body_attr_count() == baseline_body_attr_count
+    assert fake_adsk.volume == 100.0
     # Document owner never received the metadata either
     assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _document_attributes()
 
@@ -7369,6 +7530,10 @@ async def test_metadata_geometry_hook_failure_applies_no_metadata(fake_desktop):
         raise RuntimeError("geometry primitive exploded")
 
     desktop.mutation_primitive = _geometry_explodes
+    desktop.mutation_compensation_capture = lambda payload: fake_adsk.volume
+    desktop.mutation_compensation_rollback = lambda captured: (
+        setattr(fake_adsk, "volume", captured) or True
+    )
     cad_service = FusionCadService(desktop)
     cad_service.set_node_capabilities("desk-1", _metadata_matrix())
     await _seed_baseline(cad_service, desktop)
@@ -7474,6 +7639,8 @@ async def test_geometry_mutation_script_applies_same_command_provenance_plan(
     desktop.mutation_primitive = lambda payload: setattr(
         fake_adsk, "volume", float(fake_adsk.volume) + 10.0
     )
+    capture = lambda payload: fake_adsk.volume
+    rollback = lambda captured: setattr(fake_adsk, "volume", captured) or True
     cad_service = FusionCadService(desktop)
     cad_service.set_node_capabilities("desk-1", _metadata_matrix())
     await _seed_baseline(cad_service, desktop)
@@ -7503,7 +7670,9 @@ async def test_geometry_mutation_script_applies_same_command_provenance_plan(
         created_revision=tracker.next_revision("doc_1"),
     )
     script = FusionCadScriptBundle().build("mutate", payload)
-    output = _exec_rendered_mutate(script, desktop.mutation_primitive)
+    output = _exec_rendered_mutate(
+        script, desktop.mutation_primitive, capture, rollback
+    )
 
     # The same single execution applied the geometry change AND the provenance
     assert output["status"] == "succeeded"
