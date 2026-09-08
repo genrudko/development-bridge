@@ -9567,3 +9567,24 @@ async def test_task11_visibility_requires_expected_revision_before_dispatch(fake
 
     assert exc.value.code == ErrorCode.REVISION_CONFLICT
     assert desktop.mutation_calls == 0
+
+@pytest.mark.asyncio
+async def test_task12_rendered_validate_unpacks_fingerprint_tuple(fake_desktop):
+    """Rendered validate:run must consume the shared fingerprint helper tuple."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+
+    result = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "run",
+            "profiles": ["parametric_health"],
+        },
+        group="validate",
+    )
+
+    assert isinstance(result, CadResult)
+    assert result.status == "succeeded"
+    assert result.data["read_only"] is True
+    assert "native_token" not in result.model_dump_json()

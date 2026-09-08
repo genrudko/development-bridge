@@ -208,4 +208,3 @@ def test_checks_filter_and_public_evidence_are_sanitized() -> None:
     assert "secret-native-token" not in serialized
     assert "nested-secret" not in serialized
     assert "private failure" not in serialized
-

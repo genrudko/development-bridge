@@ -47,7 +47,7 @@ def run():
     if PAYLOAD.get("operation") != "run":
         raise FusionScriptError("INVALID_ARGUMENT", "Unsupported validation operation")
 
-    canonical = collect_model_fingerprint(PAYLOAD)
+    _fingerprint, canonical, document_ref = collect_model_fingerprint(PAYLOAD)
     import adsk.core
     import adsk.fusion
 
@@ -58,7 +58,7 @@ def run():
         raise FusionScriptError("NO_ACTIVE_DESIGN", "Validation requires an active Fusion design")
 
     facts = {
-        "document_ref": canonical["document"]["document_ref"],
+        "document_ref": document_ref,
         "features": [], "sketches": [], "references": [], "bodies": [],
         "text_outputs": [],
         "timeline": {"available": True, "rolled_back": False},
