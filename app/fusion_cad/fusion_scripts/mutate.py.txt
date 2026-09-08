@@ -1020,5 +1020,5 @@ def run():
         data=result_data,
         summary=f"Executed mutate:{op}",
         document=_doc_state(safe_doc, doc),
-        changed_refs=[PAYLOAD.get("target")] if PAYLOAD.get("target") else [],
+        changed_refs=[target_ref] if has_plan and target_ref else [],
     )

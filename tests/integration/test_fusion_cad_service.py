@@ -7750,6 +7750,12 @@ async def test_geometry_mutation_script_applies_same_command_provenance_plan(
     assert output["status"] == "succeeded"
     assert output["data"]["applied"] is True
     assert output["data"]["provenance"]["operation_id"] == "op_geo_command_1"
+    # Public result refs are opaque strings only.  The trusted execution hint
+    # (native token/name/kind) must never escape through changed_refs, and the
+    # result must satisfy the CadResult schema after the mutation committed.
+    decoded = CadResult.model_validate(output)
+    assert decoded.changed_refs == (body_ref,)
+    assert "native_token" not in json.dumps(output.get("changed_refs", []))
     assert fake_adsk.volume == 110.0
     persisted = _body_attributes()[
         (RESERVED_METADATA_GROUP, PROVENANCE_ATTRIBUTE_NAME)
