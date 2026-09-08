@@ -29,6 +29,7 @@ from app.fusion_cad.inspect import normalize_inspect_result
 from app.fusion_cad.metadata import (
     apply_metadata_mutation_plan,
     assert_reserved_metadata_group,
+    build_provenance_record,
     parse_provenance_attribute,
 )
 from app.fusion_cad.models import (
@@ -57,6 +58,7 @@ from app.fusion_cad.snapshots import (
     normalize_sketch_read,
     normalize_snapshot,
 )
+from app.fusion_cad.text import normalize_text_lineage
 from app.fusion_cad.views import (
     ViewRefStore,
     canonicalize_section_payload,
@@ -583,6 +585,85 @@ class FusionCadService:
             update={
                 "data": ImmutableMapping(sanitize_public_payload(data)),
                 "summary": summary,
+            }
+        )
+
+    def _prepare_style_payload(
+        self, payload: dict[str, Any], op: str, operation_id: str | None
+    ) -> None:
+        """Bind Task 11 requests to opaque refs and same-command provenance."""
+        if "target" in payload:
+            self._inject_metadata_target_hint(payload)
+        if not op.startswith("text_") or op == "text_read":
+            return
+        logical_ref = payload.get("text_ref")
+        if op == "text_create":
+            logical_ref = f"text_{uuid.uuid4().hex[:16]}"
+            payload["logical_object_ref"] = logical_ref
+        else:
+            payload["logical_object_ref"] = logical_ref
+        doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+        payload["provenance"] = build_provenance_record(
+            operation=op,
+            creator_operation=f"fusion_style:{op}",
+            operation_id=operation_id,
+            transaction_id=payload.get("transaction_id"),
+            logical_object_ref=logical_ref,
+            created_revision=(self._revision_tracker.next_revision(doc_ref) if doc_ref else None),
+        ).model_dump(mode="json", exclude_none=True)
+
+    def _finalize_style_execution(
+        self, cad_result: CadResult, *, op: str, payload: dict[str, Any]
+    ) -> CadResult:
+        """Validate semantic Task 11 evidence and strip adapter-private state."""
+        data = dict(cad_result.data) if isinstance(cad_result.data, Mapping) else {}
+        data.pop("restore_state", None)
+        data.pop("captured", None)
+        if op.startswith("text_"):
+            raw_lineage = data.get("lineage")
+            if raw_lineage is None and op != "text_delete":
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Logical text operation completed without verified lineage",
+                    details={"operation": op},
+                )
+            if raw_lineage is not None:
+                try:
+                    lineage = normalize_text_lineage(raw_lineage)
+                except (ValidationError, ValueError, TypeError) as exc:
+                    raise FusionCadError(
+                        ErrorCode.FUSION_API_ERROR,
+                        "Logical text operation returned invalid lineage",
+                        details={"operation": op},
+                    ) from exc
+                if op == "text_create" and lineage["logical_ref"] != payload.get(
+                    "logical_object_ref"
+                ):
+                    raise FusionCadError(
+                        ErrorCode.FUSION_API_ERROR,
+                        "Logical text adapter returned a different TextRef than the command allocated",
+                        details={"operation": op},
+                    )
+                data["lineage"] = lineage
+            if op != "text_read" and (
+                data.get("same_operation_provenance") is not True
+                or not isinstance(data.get("provenance"), Mapping)
+            ):
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Logical text mutation lacks verified same-operation provenance",
+                    details={"operation": op},
+                )
+        if op == "restore" and data.get("restoration_verified") is not True:
+            raise FusionCadError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Visibility restore did not prove exact restoration",
+                details={"operation": op, "applied": False},
+            )
+        return cad_result.model_copy(
+            update={
+                "data": ImmutableMapping(sanitize_public_payload(data)),
+                "summary": f"Fusion style {op} completed with verified semantic state",
             }
         )
 
@@ -1658,6 +1739,30 @@ class FusionCadService:
                     target_doc=target_doc if isinstance(target_doc, str) else None,
                 )
 
+            # 5c. Task 11 logical text/visibility evidence normalization.
+            if (
+                effective_bundle_group == "mutate"
+                and op
+                in {
+                    "text_create",
+                    "text_read",
+                    "text_update",
+                    "text_delete",
+                    "text_extrude",
+                    "text_cut",
+                    "show",
+                    "hide",
+                    "set",
+                    "show_only",
+                    "isolate",
+                    "restore",
+                }
+                and not (op == "set" and "name" in payload)
+            ):
+                cad_result = self._finalize_style_execution(
+                    cad_result, op=op, payload=payload
+                )
+
             # 6. Semantic view normalization: camera/visibility/section + immutable ViewRef
             if effective_bundle_group == "view" and op in _VIEW_FINALIZE_OPS:
                 cad_result = self._finalize_view_operation(
@@ -2194,6 +2299,8 @@ class FusionCadService:
             self._prepare_metadata_payload(
                 payload, op, operation_id=journal_operation_id
             )
+        if effective_bundle_group == "mutate" and domain_group == "style":
+            self._prepare_style_payload(payload, op, journal_operation_id)
 
         # Inspection targets known to this service get exact native resolution hints;
         # view zoom/orient target operations reuse the exact Task5/Task7 ref machinery.

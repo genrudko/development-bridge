@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -379,6 +379,65 @@ class ViewRefSummary(BaseModel):
     width: int = Field(..., gt=0)
     height: int = Field(..., gt=0)
     image: str = Field(..., min_length=1)
+
+
+class FontUsage(BaseModel):
+    """Requested and verified font used by a logical text generation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requested: str = Field(..., min_length=1)
+    used: str = Field(..., min_length=1)
+    fallback_reason: str | None = None
+
+    @model_validator(mode="after")
+    def require_fallback_reason(self) -> FontUsage:
+        if self.used != self.requested and not self.fallback_reason:
+            raise ValueError("A substituted font requires an explicit fallback_reason")
+        return self
+
+
+class TextLineage(BaseModel):
+    """One generation in an opaque logical text object's lineage."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    logical_ref: str = Field(..., pattern=TEXT_REF_PATTERN)
+    generation: int = Field(..., ge=1)
+    is_current: bool
+    model_revision: str | None = Field(default=None, pattern=MODEL_REVISION_PATTERN)
+    sketch: str | None = Field(default=None, pattern=ENTITY_REF_PATTERN)
+    sketch_text_id: str | None = Field(default=None, pattern=ENTITY_REF_PATTERN)
+    feature: str | None = Field(default=None, pattern=ENTITY_REF_PATTERN)
+    outputs: tuple[Annotated[str, Field(pattern=ENTITY_REF_PATTERN)], ...] = Field(
+        default_factory=tuple
+    )
+    text: str = Field(..., min_length=1)
+    font_requested: str = Field(..., min_length=1)
+    font_used: str = Field(..., min_length=1)
+    fallback_reason: str | None = None
+    height_mm: float = Field(..., gt=0)
+
+    @model_validator(mode="after")
+    def require_fallback_reason(self) -> TextLineage:
+        FontUsage(
+            requested=self.font_requested,
+            used=self.font_used,
+            fallback_reason=self.fallback_reason,
+        )
+        return self
+
+
+class EffectiveVisibility(BaseModel):
+    """Local and parent-derived effective visibility for an opaque entity ref."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: str = Field(..., min_length=1)
+    ref: str = Field(..., pattern=ENTITY_REF_PATTERN)
+    local_visible: bool
+    effective_visible: bool
+    parent_visible: bool = True
 
 
 class CadResult(BaseModel):

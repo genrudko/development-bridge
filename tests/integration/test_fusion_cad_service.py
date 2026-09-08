@@ -9349,3 +9349,105 @@ async def test_successful_empty_metadata_plan_rolls_back_exactly_once(
 
     assert exc.value.code == "INVALID_ARGUMENT"
     assert scope["_task10_rollback_calls"] == 1
+
+
+# =========================================================================
+# Task 11: logical Unicode text and visibility service boundary
+# =========================================================================
+
+
+def test_task11_rendered_style_script_fails_closed_without_verified_adapter():
+    script = FusionCadScriptBundle().build(
+        "mutate",
+        {
+            "operation": "text_create",
+            "text": "РАСПИСАНИЕ ПЫТОК 😈",
+            "font": "Arial",
+            "height_mm": 6.0,
+            "expected_revision": "rev_1",
+            "expected_fingerprint": "fingerprint",
+            "document_ref": "doc_1",
+        },
+    )
+    output = _exec_rendered_mutate(script)
+    assert output["status"] == "failed"
+    assert output["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert output["error"]["details"]["applied"] is False
+    assert "verified Fusion style adapter" in output["error"]["message"]
+
+
+def test_task11_rendered_unicode_text_mutates_with_same_operation_provenance(
+    fake_desktop,
+):
+    fake_adsk = fake_desktop["adsk"]
+    logical_ref = "text_schedule_01"
+    payload = {
+        "operation": "text_create",
+        "text": "РАСПИСАНИЕ ПЫТОК 😈",
+        "font": "Arial",
+        "height_mm": 6.0,
+        "logical_object_ref": logical_ref,
+        "expected_revision": "rev_1",
+        "expected_fingerprint": "replaced-with-observed-baseline",
+        "document_ref": "doc_1",
+    }
+    # Obtain the real baseline rather than trusting the placeholder above.
+    read_scope = {"__name__": "__main__"}
+    read_script = FusionCadScriptBundle().build(
+        "read", {"operation": "model_snapshot", "document_ref": "doc_1"}
+    )
+    exec(compile(read_script, "<task11-baseline>", "exec"), read_scope)  # noqa: S102
+    payload["expected_fingerprint"] = read_scope["_output"]["data"]["fingerprint"]
+
+    def style_primitive(command):
+        fake_adsk.volume += 1.0
+        return {
+            "lineage": {
+                "logical_ref": command["logical_object_ref"],
+                "generation": 1,
+                "is_current": True,
+                "sketch": "ent_sketch_text_1",
+                "sketch_text_id": "ent_sketch_text_1",
+                "feature": None,
+                "outputs": [],
+                "text": command["text"],
+                "font_requested": command["font"],
+                "font_used": command["font"],
+                "fallback_reason": None,
+                "height_mm": command["height_mm"],
+            },
+            "provenance": {"logical_object_ref": command["logical_object_ref"]},
+            "same_operation_provenance": True,
+        }
+
+    scope = {
+        "__name__": "__main__",
+        "_style_primitive": style_primitive,
+        "_mutation_compensation_capture": lambda _command: fake_adsk.volume,
+        "_mutation_compensation_rollback": lambda captured: (
+            setattr(fake_adsk, "volume", captured) or True
+        ),
+    }
+    script = FusionCadScriptBundle().build("mutate", payload)
+    exec(compile(script, "<task11-success>", "exec"), scope)  # noqa: S102
+    output = scope["_output"]
+    assert output["status"] == "succeeded"
+    assert output["data"]["lineage"]["text"] == "РАСПИСАНИЕ ПЫТОК 😈"
+    assert output["data"]["same_operation_provenance"] is True
+
+
+@pytest.mark.asyncio
+async def test_task11_visibility_requires_expected_revision_before_dispatch(fake_desktop):
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    body_ref = _register_body_ref(cad_service)
+
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "hide", "target": body_ref},
+            group="style",
+        )
+
+    assert exc.value.code == ErrorCode.REVISION_CONFLICT
+    assert desktop.mutation_calls == 0

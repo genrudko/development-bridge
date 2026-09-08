@@ -973,6 +973,124 @@ def run():
             document=_doc_state(safe_doc, doc),
         )
 
+    # Task 11 uses one explicitly injected, operation-scoped primitive.  The
+    # verified Fusion API surface for creating SketchText and reversible
+    # hierarchy visibility is not assumed here: a live relay that has not
+    # supplied this adapter fails closed before changing the model.  The adapter
+    # must perform geometry and Bridge provenance in this same command and
+    # return only serializable semantic evidence.
+    _TEXT_OPS = (
+        "text_create", "text_read", "text_update", "text_delete",
+        "text_extrude", "text_cut",
+    )
+    _VISIBILITY_OPS = ("show", "hide", "set", "show_only", "isolate", "restore")
+    if op in _TEXT_OPS + _VISIBILITY_OPS and not (
+        isinstance(PAYLOAD.get("metadata_writes"), list)
+        and isinstance(PAYLOAD.get("metadata_removals"), list)
+    ):
+        style_hook = globals().get("_style_primitive")
+        if not callable(style_hook):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Logical text/visibility requires a verified Fusion style adapter; no verified adapter was supplied, so no mutation was attempted",
+                details={"operation": op, "applied": False},
+            )
+
+        _app, doc, _design, safe_doc = _open_runtime()
+        if op == "text_read":
+            style_data = style_hook(PAYLOAD)
+            if not isinstance(style_data, dict):
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    "Verified style adapter returned no semantic text lineage",
+                    details={"operation": op},
+                )
+            return make_result(
+                data=style_data,
+                summary="Read logical text lineage",
+                document=_doc_state(safe_doc, doc),
+            )
+
+        expected_fp = PAYLOAD.get("expected_fingerprint")
+        current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
+        if expected_fp is None or expected_fp != current_fp:
+            return make_error(
+                "REVISION_CONFLICT",
+                "Authoritative Fusion-side guard: model fingerprint diverged from baseline",
+                details={
+                    "document_ref": doc_ref,
+                    "expected_revision": PAYLOAD.get("expected_revision"),
+                    "expected_fingerprint": expected_fp,
+                    "current_fingerprint": current_fp,
+                    "applied": False,
+                },
+            )
+        capture_hook = globals().get("_mutation_compensation_capture")
+        rollback_hook = globals().get("_mutation_compensation_rollback")
+        if not callable(capture_hook) or not callable(rollback_hook):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Logical text/visibility mutation lacks verified compensation and restoration proof",
+                details={"operation": op, "applied": False},
+            )
+        captured = capture_hook(PAYLOAD)
+        applied = False
+        try:
+            applied = True
+            style_data = style_hook(PAYLOAD)
+            if not isinstance(style_data, dict):
+                raise FusionScriptError(
+                    "FUSION_API_ERROR", "Verified style adapter returned no semantic result"
+                )
+            if op in _TEXT_OPS and (
+                not isinstance(style_data.get("provenance"), dict)
+                or style_data.get("same_operation_provenance") is not True
+            ):
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    "Logical text mutation did not verify same-operation provenance",
+                    details={"operation": op},
+                )
+            if op == "restore" and style_data.get("restoration_verified") is not True:
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Visibility restoration could not be verified exactly",
+                    details={"operation": op},
+                )
+            post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+            if not post_fp or post_fp == current_fp:
+                raise FusionScriptError(
+                    "MUTATION_FAILED",
+                    "Style mutation did not produce a distinct authoritative model state",
+                    details={"operation": op},
+                )
+        except Exception as exc:
+            if applied:
+                rollback_ok = rollback_hook(captured)
+                restored_fp, _restored, _restored_doc = collect_model_fingerprint(PAYLOAD)
+                if rollback_ok is not True or restored_fp != current_fp:
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Style mutation failed and exact restoration could not be verified",
+                        details={"operation": op, "applied": False, "compensated": False},
+                    )
+            if isinstance(exc, FusionScriptError):
+                raise exc
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Style mutation failed; exact compensation completed",
+                details={"operation": op, "applied": False, "compensated": True},
+            )
+        style_data["operation"] = op
+        style_data["applied"] = True
+        style_data["fingerprint"] = post_fp
+        style_data["document_ref"] = post_doc_ref or doc_ref
+        return make_result(
+            data=style_data,
+            summary=f"Executed mutate:{op}",
+            document=_doc_state(safe_doc, doc),
+        )
+
     # Fallback for other mutate-group operations (geometry/style mutations, to be
     # owned by later tasks): the same authoritative guard + geometry primitive +
     # one-command metadata plan structure. When the Bridge attaches a metadata
