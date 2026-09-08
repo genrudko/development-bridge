@@ -7490,7 +7490,7 @@ async def test_metadata_rollback_restores_overwritten_existing_attributes(
 
         def __bool__(self):
             self._reads += 1
-            if self._reads >= 2:
+            if self._reads == 2:
                 raise RuntimeError("post-apply fingerprint collection exploded")
             return False
 
@@ -8893,7 +8893,7 @@ async def test_rollback_created_delete_result_must_be_verified_fail_closed(
     Attribute.deleteMe result AND post-delete re-enumeration proving the
     created reserved (name, value) record is observably absent. A False
     result that nevertheless mutated state, or a reported-True no-op, must
-    fail the compensation closed with FUSION_API_ERROR / compensated=False —
+    fail the compensation closed with CAPABILITY_UNAVAILABLE / compensated=False —
     compensation success is never inferred from the final snapshot equality
     alone."""
     fake_adsk = fake_desktop["adsk"]
@@ -8939,12 +8939,13 @@ async def test_rollback_created_delete_result_must_be_verified_fail_closed(
         attrs_cls.add = healthy_add
 
     assert output["status"] == "failed"
-    assert output["error"]["code"] == "FUSION_API_ERROR"
+    assert output["error"]["code"] == "CAPABILITY_UNAVAILABLE"
     details = output["error"]["details"]
     # The rollback delete failure must be reported as a compensation failure.
-    assert details.get("compensated") is False
-    assert details.get("attribute_name") == "finish"
-    assert "Compensation Attribute.deleteMe" in output["error"]["message"]
+    assert details == {"operation": "set", "applied": False, "compensated": False}
+    assert output["error"]["message"] == (
+        "Metadata compensation failed or exact restoration could not be verified"
+    )
     # The hostile deleteMe result object is never stringified into details.
     raw_dump = json.dumps(output, ensure_ascii=False, default=repr)
     assert _HOSTILE_DELETEME_MARKER not in raw_dump
@@ -8964,7 +8965,7 @@ async def test_rollback_delete_created_by_name_result_must_be_verified_fail_clos
     deletes re-derived by enumeration after a failed/persisting add must
     require the documented True Attribute.deleteMe result AND post-delete
     re-enumeration proving matching reserved name(s) are observably absent.
-    Either failure must fail the compensation closed with FUSION_API_ERROR /
+    Either failure must fail the compensation closed with CAPABILITY_UNAVAILABLE /
     compensated=False."""
     fake_adsk = fake_desktop["adsk"]
     desktop = fake_desktop["desktop"]
@@ -9008,12 +9009,13 @@ async def test_rollback_delete_created_by_name_result_must_be_verified_fail_clos
         attrs_cls.add = healthy_add
 
     assert output["status"] == "failed"
-    assert output["error"]["code"] == "FUSION_API_ERROR"
+    assert output["error"]["code"] == "CAPABILITY_UNAVAILABLE"
     details = output["error"]["details"]
     # The rollback delete failure must be reported as a compensation failure.
-    assert details.get("compensated") is False
-    assert details.get("attribute_name") == "finish"
-    assert "Compensation Attribute.deleteMe" in output["error"]["message"]
+    assert details == {"operation": "set", "applied": False, "compensated": False}
+    assert output["error"]["message"] == (
+        "Metadata compensation failed or exact restoration could not be verified"
+    )
     if hostile_mode == "false_after_delete":
         # The delete DID mutate persisted state, yet the bad Boolean result
         # must still fail the compensation closed.
@@ -9027,7 +9029,7 @@ async def test_service_rollback_created_delete_failure_fails_closed_rendered_pip
 ):
     """Rendered pipeline through the service: a rollback 'created' delete with
     a bad Boolean result (False after actual deletion) must fail the whole
-    command closed with FUSION_API_ERROR; the failed command never advances
+    command closed with CAPABILITY_UNAVAILABLE; the failed command never advances
     the revision authority and never reports applied success."""
     fake_adsk = fake_desktop["adsk"]
     desktop = fake_desktop["desktop"]
@@ -9060,7 +9062,7 @@ async def test_service_rollback_created_delete_failure_fails_closed_rendered_pip
     finally:
         attrs_cls.add = healthy_add
 
-    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
     assert desktop.mutation_calls == 1
     assert desktop.read_calls == 1
     # The compensation delete actually restored the pre-command reserved
@@ -9079,7 +9081,7 @@ async def test_service_rollback_delete_created_by_name_failure_fails_closed(
     """Rendered pipeline through the service: a rollback
     'delete_created_by_name' delete with a bad Boolean result (False after
     actual deletion) must fail the whole command closed with
-    FUSION_API_ERROR; the failed command never advances the revision
+    CAPABILITY_UNAVAILABLE; the failed command never advances the revision
     authority and never reports applied success."""
     fake_adsk = fake_desktop["adsk"]
     desktop = fake_desktop["desktop"]
@@ -9110,7 +9112,7 @@ async def test_service_rollback_delete_created_by_name_failure_fails_closed(
     finally:
         attrs_cls.add = healthy_add
 
-    assert exc.value.code == ErrorCode.FUSION_API_ERROR
+    assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
     assert desktop.mutation_calls == 1
     assert desktop.read_calls == 1
     # The delete actually mutated persisted state, yet the bad Boolean result
@@ -9119,3 +9121,173 @@ async def test_service_rollback_delete_created_by_name_failure_fails_closed(
     assert ("bridge.cad/v1", PROVENANCE_ATTRIBUTE_NAME) not in _body_attributes()
     # The failed command never advanced the revision authority.
     assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+
+
+# =========================================================================
+# Task 10 final repair: every post-fingerprint compensation is proven against
+# the complete baseline; rollback failures normalize; empty plans undo once.
+# =========================================================================
+
+
+def _task10_plan_payload(cad_service, body_ref, operation):
+    rec = cad_service.revision_tracker.current("doc_1")
+    payload = {
+        "operation": operation,
+        "target": {
+            "ref": body_ref,
+            "kind": "body",
+            "name": "Body1",
+            "native_token": "body_token_1",
+            "component_path": [],
+        },
+        "expected_revision": rec.revision,
+        "expected_fingerprint": rec.fingerprint,
+        "document_ref": "doc_1",
+    }
+    if operation == "set":
+        payload.update({"name": "finish", "value": "anodized"})
+        apply_metadata_mutation_plan(
+            payload,
+            operation_id="op_task10_primary",
+            created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+        )
+    else:
+        apply_geometry_provenance_plan(
+            payload,
+            operation=operation,
+            creator_operation=f"fusion_style:{operation}",
+            operation_id="op_task10_fallback",
+            created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+        )
+    return payload, rec
+
+
+def _task10_unstarted_scope(payload):
+    script = FusionCadScriptBundle().build("mutate", payload)
+    script = script.replace("        _output = run()", "        _output = None", 1)
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+    return scope
+
+
+@pytest.mark.parametrize("operation", ["set", "show"])
+@pytest.mark.parametrize("post_mode", ["throw", "invalid", "unchanged"])
+@pytest.mark.asyncio
+async def test_post_fingerprint_metadata_compensation_requires_full_baseline_proof(
+    fake_desktop, operation, post_mode
+):
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    payload, rec = _task10_plan_payload(cad_service, body_ref, operation)
+    scope = _task10_unstarted_scope(payload)
+    secret = "HOSTILE_POST_FINGERPRINT_VALUE_AQAA"
+    calls = {"count": 0}
+
+    def fingerprint(_payload=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return rec.fingerprint, {}, "doc_1"
+        if calls["count"] == 2:
+            if post_mode == "throw":
+                raise RuntimeError(secret)
+            if post_mode == "invalid":
+                return "", {}, secret
+            return rec.fingerprint, {}, "doc_1"
+        raise RuntimeError(secret)
+
+    scope["collect_model_fingerprint"] = fingerprint
+    with pytest.raises(scope["FusionScriptError"]) as exc:
+        scope["run"]()
+
+    assert calls["count"] == 3
+    assert exc.value.code == "CAPABILITY_UNAVAILABLE"
+    assert exc.value.message == (
+        "Exact model restoration after metadata compensation could not be verified"
+    )
+    assert exc.value.details == {
+        "operation": operation,
+        "applied": False,
+        "compensated": False,
+    }
+    assert secret not in json.dumps(exc.value.details)
+
+
+@pytest.mark.parametrize("operation", ["set", "show"])
+@pytest.mark.asyncio
+async def test_metadata_rollback_failure_is_constant_capability_error(
+    fake_desktop, operation
+):
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    payload, rec = _task10_plan_payload(cad_service, body_ref, operation)
+    secret = "HOSTILE_ROLLBACK_PRIMITIVE_AQAA"
+    target_name = "finish" if operation == "set" else PROVENANCE_ATTRIBUTE_NAME
+    attrs_cls, healthy_add, hostile_add = _arm_hostile_created_delete(
+        fake_desktop["adsk"], target_name, "false_after_delete"
+    )
+    attrs_cls.add = hostile_add
+    try:
+        scope = _task10_unstarted_scope(payload)
+        calls = iter(
+            [(rec.fingerprint, {}, "doc_1"), ("", {}, secret)]
+        )
+        scope["collect_model_fingerprint"] = lambda _payload=None: next(calls)
+        with pytest.raises(scope["FusionScriptError"]) as exc:
+            scope["run"]()
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert exc.value.code == "CAPABILITY_UNAVAILABLE"
+    assert exc.value.message == (
+        "Metadata compensation failed or exact restoration could not be verified"
+    )
+    assert exc.value.details == {
+        "operation": operation,
+        "applied": False,
+        "compensated": False,
+    }
+    assert secret not in json.dumps(exc.value.details)
+    assert secret not in exc.value.message
+
+
+@pytest.mark.parametrize("operation", ["set", "show"])
+@pytest.mark.asyncio
+async def test_successful_empty_metadata_plan_rolls_back_exactly_once(
+    fake_desktop, operation
+):
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    payload, rec = _task10_plan_payload(cad_service, body_ref, operation)
+    payload["metadata_writes"] = []
+    payload["metadata_removals"] = []
+    script = FusionCadScriptBundle().build("mutate", payload)
+    script = script.replace("        _output = run()", "        _output = None", 1)
+    needle = "    def _rollback_metadata(owner, undo):\n"
+    assert script.count(needle) == 1
+    script = script.replace(
+        needle,
+        needle + "        globals()['_task10_rollback_calls'] += 1\n",
+        1,
+    )
+    scope = {"__name__": "__main__", "_task10_rollback_calls": 0}
+    exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+    scope["collect_model_fingerprint"] = lambda _payload=None: (
+        rec.fingerprint,
+        {},
+        "doc_1",
+    )
+
+    with pytest.raises(scope["FusionScriptError"]) as exc:
+        scope["run"]()
+
+    assert exc.value.code == "INVALID_ARGUMENT"
+    assert scope["_task10_rollback_calls"] == 1

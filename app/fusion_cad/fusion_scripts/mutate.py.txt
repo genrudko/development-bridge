@@ -397,6 +397,17 @@ def run():
                 details={"operation": op, "compensated": False},
             )
 
+    def _rollback_metadata_or_fail(owner, undo):
+        """Normalize every unprovable metadata compensation failure."""
+        try:
+            _rollback_metadata(owner, undo)
+        except Exception:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Metadata compensation failed or exact restoration could not be verified",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+
     def _apply_metadata_plan(owner, writes, removals):
         """Apply the plan with an undo log; any failure compensates fully.
 
@@ -593,10 +604,10 @@ def run():
                     )
                 applied_writes.append({"name": wr_name, "value": str(wr_value)})
         except FusionScriptError:
-            _rollback_metadata(owner, undo)
+            _rollback_metadata_or_fail(owner, undo)
             raise
         except Exception:
-            _rollback_metadata(owner, undo)
+            _rollback_metadata_or_fail(owner, undo)
             raise FusionScriptError(
                 "FUSION_API_ERROR",
                 "Metadata plan application failed; compensated back to the exact pre-mutation metadata state",
@@ -718,7 +729,8 @@ def run():
                 owner, writes, removals
             )
             if not applied_writes:
-                _rollback_metadata(owner, undo)
+                _rollback_metadata_or_fail(owner, undo)
+                undo = None
                 raise FusionScriptError(
                     "INVALID_ARGUMENT",
                     "Metadata mutation plan produced no attribute writes; provenance cannot be recorded transactionally",
@@ -730,12 +742,16 @@ def run():
         # and the command is never externally reported as applied.
             post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
         except Exception as exc:
+            metadata_compensated_here = False
             try:
-                if "undo" in locals():
-                    _rollback_metadata(owner, undo)
+                if "undo" in locals() and undo is not None:
+                    _rollback_metadata_or_fail(owner, undo)
+                    metadata_compensated_here = True
             finally:
                 if geometry_applied:
                     _compensate_geometry(geometry_capture, current_fp)
+            if not geometry_applied and metadata_compensated_here:
+                _verify_full_restoration(current_fp)
             if isinstance(exc, FusionScriptError):
                 raise exc
             raise FusionScriptError(
@@ -745,10 +761,12 @@ def run():
             )
         if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
             try:
-                _rollback_metadata(owner, undo)
+                _rollback_metadata_or_fail(owner, undo)
             finally:
                 if geometry_applied:
                     _compensate_geometry(geometry_capture, current_fp)
+            if not geometry_applied:
+                _verify_full_restoration(current_fp)
             return make_error(
                 "FINGERPRINT_FAILED",
                 "Authoritative post-apply model fingerprint collection failed or returned empty",
@@ -760,10 +778,12 @@ def run():
             )
         if post_fp == current_fp:
             try:
-                _rollback_metadata(owner, undo)
+                _rollback_metadata_or_fail(owner, undo)
             finally:
                 if geometry_applied:
                     _compensate_geometry(geometry_capture, current_fp)
+            if not geometry_applied:
+                _verify_full_restoration(current_fp)
             return make_error(
                 "MUTATION_FAILED",
                 "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
@@ -795,7 +815,7 @@ def run():
             )
         except Exception as exc:
             try:
-                _rollback_metadata(owner, undo)
+                _rollback_metadata_or_fail(owner, undo)
             finally:
                 if geometry_applied:
                     _compensate_geometry(geometry_capture, current_fp)
@@ -994,7 +1014,8 @@ def run():
                 plan_owner, plan_writes, plan_removals
             )
             if not applied_writes:
-                _rollback_metadata(plan_owner, plan_undo)
+                _rollback_metadata_or_fail(plan_owner, plan_undo)
+                plan_undo = None
                 raise FusionScriptError(
                     "INVALID_ARGUMENT",
                     "Metadata plan produced no attribute writes; provenance cannot be recorded transactionally",
@@ -1003,12 +1024,16 @@ def run():
 
         post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
     except Exception as exc:
+        metadata_compensated_here = False
         try:
             if plan_undo is not None:
-                _rollback_metadata(plan_owner, plan_undo)
+                _rollback_metadata_or_fail(plan_owner, plan_undo)
+                metadata_compensated_here = True
         finally:
             if geometry_applied and has_plan:
                 _compensate_geometry(geometry_capture, current_fp)
+        if has_plan and not geometry_applied and metadata_compensated_here:
+            _verify_full_restoration(current_fp)
         if isinstance(exc, FusionScriptError):
             raise exc
         raise FusionScriptError(
@@ -1018,10 +1043,12 @@ def run():
         )
     if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
         try:
-            _rollback_metadata(plan_owner, plan_undo)
+            _rollback_metadata_or_fail(plan_owner, plan_undo)
         finally:
             if geometry_applied and has_plan:
                 _compensate_geometry(geometry_capture, current_fp)
+        if has_plan and not geometry_applied:
+            _verify_full_restoration(current_fp)
         return make_error(
             "FINGERPRINT_FAILED",
             "Authoritative post-apply model fingerprint collection failed or returned empty",
@@ -1033,10 +1060,12 @@ def run():
         )
     if post_fp == current_fp:
         try:
-            _rollback_metadata(plan_owner, plan_undo)
+            _rollback_metadata_or_fail(plan_owner, plan_undo)
         finally:
             if geometry_applied and has_plan:
                 _compensate_geometry(geometry_capture, current_fp)
+        if has_plan and not geometry_applied:
+            _verify_full_restoration(current_fp)
         return make_error(
             "MUTATION_FAILED",
             "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
@@ -1069,7 +1098,7 @@ def run():
     except Exception as exc:
         try:
             if plan_undo is not None:
-                _rollback_metadata(plan_owner, plan_undo)
+                _rollback_metadata_or_fail(plan_owner, plan_undo)
         finally:
             if geometry_applied and has_plan:
                 _compensate_geometry(geometry_capture, current_fp)
