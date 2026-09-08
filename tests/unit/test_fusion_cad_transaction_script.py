@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 from app.fusion_cad.scripts import FusionCadScriptBundle
 
 
@@ -245,6 +247,7 @@ def _production_command_runtime(monkeypatch, *, preview):
             "provenance": provenance,
         }],
         "baseline_snapshot": {"structural_hash": baseline_fp, "counts": {"sketches": 0}, "refs": []},
+        "_transaction_runtime": "command_definition",
     }
     return payload, {}, {"doc": doc, "design": design, "root": root}, events
 
@@ -761,21 +764,74 @@ def test_ptransaction_commit_orders_start_mutation_commit_and_persists_once(monk
     assert "native::ptx::secret_1" not in json.dumps(result["changed_refs"])
 
 
-def test_ptransaction_requires_optin_selector_and_default_keeps_command_runtime(monkeypatch):
+def test_ptransaction_is_default_without_selector_after_live_acceptance(monkeypatch):
     payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
     payload.pop("_transaction_runtime", None)
     result = _run(payload, runtime)
 
-    assert result["status"] == "failed"
-    assert result["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert result["status"] == "succeeded"
     text_commands = [
         entry[1]
         for entry in events
         if isinstance(entry, tuple) and entry[0] == "executeTextCommand"
     ]
-    assert text_commands == []
+    assert text_commands == [
+        'PTransaction.Start "bridge_cad_transaction"',
+        "PTransaction.Commit",
+    ]
+    assert state["in_transaction"] is False
+    assert state["text_add_count"] == 1
+
+
+def test_command_definition_runtime_requires_explicit_internal_selector(monkeypatch):
+    payload, runtime, state, events = _production_command_runtime(monkeypatch, preview=False)
+    assert payload["_transaction_runtime"] == "command_definition"
+    result = _run(payload, runtime)
+
+    assert result["status"] == "succeeded"
+    assert ("doExecute", True, False) in events
+    assert state["root"].sketches.count == 1
+
+
+def test_unknown_transaction_runtime_selector_fails_closed(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    payload["_transaction_runtime"] = "mystery_runtime"
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "INVALID_ARGUMENT"
     assert state["in_transaction"] is False
     assert state["text_add_count"] == 0
+    assert events == []
+
+
+@pytest.mark.parametrize("operation", ["begin", "stage", "status", "abort", "rollback"])
+def test_unknown_transaction_runtime_selector_fails_closed_for_non_native_ops(monkeypatch, operation):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    payload["operation"] = operation
+    payload["_transaction_runtime"] = "mystery_runtime"
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "INVALID_ARGUMENT"
+    assert state["in_transaction"] is False
+    assert state["text_add_count"] == 0
+    assert events == []
+
+
+@pytest.mark.parametrize("operation", ["preview", "commit"])
+def test_unknown_transaction_runtime_selector_fails_closed_before_primitive_routing(monkeypatch, operation):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=(operation == "preview"))
+    payload["operation"] = operation
+    payload["_transaction_runtime"] = "mystery_runtime"
+    runtime["_transaction_begin_primitive"] = lambda _payload: None
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "INVALID_ARGUMENT"
+    assert state["in_transaction"] is False
+    assert state["text_add_count"] == 0
+    assert events == []
 
 
 def test_ptransaction_exact_plan_validation_runs_before_transaction_start(monkeypatch):

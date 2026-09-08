@@ -63,8 +63,8 @@ def _transaction_snapshot_from_fingerprint(fingerprint, canonical):
 def _transaction_apply_text_create_mutation(root, action, preview):
     """Apply the exact P0 text_create mutation with same-operation provenance.
 
-    Shared by the default CommandDefinition runtime and the internal opt-in
-    PTransaction runtime so the opt-in path reuses the IDENTICAL mutation and
+    Shared by the primary PTransaction runtime and the explicit legacy
+    CommandDefinition fallback so both paths reuse the IDENTICAL mutation and
     provenance semantics: world-XY SketchText creation (the exact-plan and
     world-XY constraints are enforced by _transaction_exact_text_create_plan),
     the service-prepared provenance write/readback, fingerprint snapshot +
@@ -216,21 +216,21 @@ def _transaction_native_text_command(plan, preview):
     return result
 
 
-# Fixed safe transaction boundary name for the internal opt-in PTransaction
-# runtime. Literal only: user/untrusted text is NEVER interpolated here.
+# Fixed safe transaction boundary name for the primary PTransaction runtime.
+# Literal only: user/untrusted text is NEVER interpolated here.
 _PTRANSACTION_STATIC_NAME = "bridge_cad_transaction"
 
 
 def _transaction_ptx_command(plan, preview):
     """Apply the exact staged plan inside a PTransaction text-command boundary.
 
-    Internal opt-in only (payload['_transaction_runtime'] == 'ptransaction') and
-    intentionally NOT a public capability. Donor provenance (dterracino/f360mcp)
+    Primary internal runtime after bounded live acceptance; it remains an
+    implementation detail, not a public capability. Donor provenance (dterracino/f360mcp)
     drives transaction boundaries through Application.executeTextCommand:
       start  -> PTransaction.Start "<fixed-safe-name>"
       abort  -> PTransaction.Abort
       commit -> PTransaction.Commit
-    This opt-in path deliberately removes the CommandDefinition/doExecute
+    This primary path deliberately removes the CommandDefinition/doExecute
     lifecycle (no button definition, no commandCreated, no executeFailed
     rollback). Any exception between Start and the terminal action attempts
     Abort fail-closed and re-raises the original error; the authoritative
@@ -264,11 +264,27 @@ def _transaction_ptx_command(plan, preview):
     return result
 
 
+def _transaction_runtime_selector():
+    selector = PAYLOAD.get("_transaction_runtime")
+    if selector not in (None, "ptransaction", "command_definition"):
+        raise FusionScriptError(
+            "INVALID_ARGUMENT",
+            "Unknown internal transaction runtime selector",
+            {"applied": False},
+        )
+    return selector
+
+
 def _transaction_native_runtime(plan, preview):
-    """Select the internal opt-in PTransaction runtime or the default
-    CommandDefinition runtime. Absent/unknown selectors MUST keep the existing
-    CommandDefinition fallback unchanged."""
-    if PAYLOAD.get("_transaction_runtime") == "ptransaction":
+    """Select the primary PTransaction runtime or explicit legacy fallback.
+
+    After bounded live acceptance, an absent selector is intentionally equivalent
+    to ``ptransaction``. The previous CommandDefinition/doExecute runtime remains
+    available only through the internal ``command_definition`` selector while the
+    final service-level acceptance is pending. Unknown selectors fail closed.
+    """
+    selector = _transaction_runtime_selector()
+    if selector in (None, "ptransaction"):
         return _transaction_ptx_command(plan, preview)
     return _transaction_native_text_command(plan, preview)
 
@@ -289,6 +305,7 @@ def run():
     op = PAYLOAD.get("operation", "")
     if op not in ("begin", "stage", "status", "preview", "commit", "abort", "rollback"):
         return make_result(data={"operation": op}, summary="Executed transaction:" + str(op))
+    _transaction_runtime_selector()
     guarded, error = _transaction_guard(op)
     if error:
         return error
