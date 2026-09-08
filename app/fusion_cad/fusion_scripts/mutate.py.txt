@@ -408,6 +408,11 @@ def run():
                 details={"operation": op, "applied": False, "compensated": False},
             )
 
+    # Script-private control state lets an outer transaction handler observe a
+    # successful rollback even when _apply_metadata_plan re-raises before its
+    # tuple assignment completes. It is never included in a result or error.
+    _metadata_compensation_count = [0]
+
     def _apply_metadata_plan(owner, writes, removals):
         """Apply the plan with an undo log; any failure compensates fully.
 
@@ -605,9 +610,11 @@ def run():
                 applied_writes.append({"name": wr_name, "value": str(wr_value)})
         except FusionScriptError:
             _rollback_metadata_or_fail(owner, undo)
+            _metadata_compensation_count[0] += 1
             raise
         except Exception:
             _rollback_metadata_or_fail(owner, undo)
+            _metadata_compensation_count[0] += 1
             raise FusionScriptError(
                 "FUSION_API_ERROR",
                 "Metadata plan application failed; compensated back to the exact pre-mutation metadata state",
@@ -720,6 +727,7 @@ def run():
         primitive_hook = globals().get("_mutation_primitive")
         geometry_capture = _prepare_geometry_compensation(primitive_hook)
         geometry_applied = False
+        metadata_compensations_before = _metadata_compensation_count[0]
         try:
             if callable(primitive_hook):
                 geometry_applied = True
@@ -742,7 +750,9 @@ def run():
         # and the command is never externally reported as applied.
             post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
         except Exception as exc:
-            metadata_compensated_here = False
+            metadata_compensated_here = (
+                _metadata_compensation_count[0] > metadata_compensations_before
+            )
             try:
                 if "undo" in locals() and undo is not None:
                     _rollback_metadata_or_fail(owner, undo)
@@ -1004,6 +1014,7 @@ def run():
     geometry_applied = False
     if has_plan:
         geometry_capture = _prepare_geometry_compensation(primitive_hook)
+    metadata_compensations_before = _metadata_compensation_count[0]
     try:
         if callable(primitive_hook):
             geometry_applied = True
@@ -1024,7 +1035,9 @@ def run():
 
         post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
     except Exception as exc:
-        metadata_compensated_here = False
+        metadata_compensated_here = (
+            _metadata_compensation_count[0] > metadata_compensations_before
+        )
         try:
             if plan_undo is not None:
                 _rollback_metadata_or_fail(plan_owner, plan_undo)

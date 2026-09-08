@@ -9170,6 +9170,64 @@ def _task10_unstarted_scope(payload):
     return scope
 
 
+@pytest.mark.parametrize("add_failure", ["null", "mismatch", "internal"])
+@pytest.mark.asyncio
+async def test_internally_compensated_metadata_apply_requires_full_restoration_proof(
+    fake_desktop, add_failure
+):
+    """A failed add may mutate before its bad result/exception is observed."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    payload, rec = _task10_plan_payload(cad_service, body_ref, "set")
+    scope = _task10_unstarted_scope(payload)
+
+    import adsk.core
+
+    attrs_cls = type(adsk.core.Application.get().activeDocument.attributes)
+    healthy_add = attrs_cls.add
+    baseline_attrs = _body_attributes()
+    fingerprint_calls = {"count": 0}
+
+    def fingerprint(_payload=None):
+        fingerprint_calls["count"] += 1
+        if fingerprint_calls["count"] == 1:
+            return rec.fingerprint, {}, "doc_1"
+        return "not-the-restored-baseline", {}, "doc_1"
+
+    def hostile_add(self, group_name, name, value):
+        if add_failure == "internal" and name == PROVENANCE_ATTRIBUTE_NAME:
+            raise RuntimeError("HOSTILE_INTERNAL_ADD_DIAGNOSTIC_AQAA")
+        added = healthy_add(self, group_name, name, value)
+        if name != "finish":
+            return added
+        if add_failure == "null":
+            return None
+        if add_failure == "mismatch":
+            added.value = "mismatched-return-value"
+            return added
+        return added
+
+    scope["collect_model_fingerprint"] = fingerprint
+    attrs_cls.add = hostile_add
+    try:
+        with pytest.raises(scope["FusionScriptError"]) as exc:
+            scope["run"]()
+    finally:
+        attrs_cls.add = healthy_add
+
+    assert fingerprint_calls["count"] == 2
+    assert exc.value.code == "CAPABILITY_UNAVAILABLE"
+    assert exc.value.details == {
+        "operation": "set",
+        "applied": False,
+        "compensated": False,
+    }
+    assert _body_attributes() == baseline_attrs
+
+
 @pytest.mark.parametrize("operation", ["set", "show"])
 @pytest.mark.parametrize("post_mode", ["throw", "invalid", "unchanged"])
 @pytest.mark.asyncio
