@@ -7925,6 +7925,89 @@ async def test_result_construction_failure_compensates_and_is_sanitized(
     assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
 
 
+@pytest.mark.parametrize(
+    ("operation", "restoration_mode"),
+    [("set", "unavailable"), ("show", "mismatch")],
+)
+@pytest.mark.asyncio
+async def test_result_construction_failure_without_geometry_requires_full_restoration_proof(
+    fake_desktop, operation, restoration_mode
+):
+    """Metadata-only compensation must prove the full fingerprint was restored."""
+    desktop = fake_desktop["desktop"]
+    cad_service = FusionCadService(desktop)
+    cad_service.set_node_capabilities("desk-1", _metadata_matrix())
+    await _seed_baseline(cad_service, desktop)
+    body_ref = _register_body_ref(cad_service)
+    rec = cad_service.revision_tracker.current("doc_1")
+    baseline_attrs = _body_attributes()
+    payload = {
+        "operation": operation,
+        "target": {
+            "ref": body_ref,
+            "kind": "body",
+            "name": "Body1",
+            "native_token": "body_token_1",
+            "component_path": [],
+        },
+        "expected_revision": rec.revision,
+        "expected_fingerprint": rec.fingerprint,
+        "document_ref": "doc_1",
+    }
+    if operation == "set":
+        payload.update({"name": "finish", "value": "anodized"})
+        apply_metadata_mutation_plan(
+            payload,
+            operation_id="op_result_proof_set",
+            created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+        )
+    else:
+        apply_geometry_provenance_plan(
+            payload,
+            operation="show",
+            creator_operation="fusion_style:show",
+            operation_id="op_result_proof_show",
+            created_revision=cad_service.revision_tracker.next_revision("doc_1"),
+        )
+
+    script = FusionCadScriptBundle().build("mutate", payload)
+    script = script.replace("        _output = run()", "        _output = None", 1)
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
+    secret = f"secret::restoration::{operation}::AQAA-RAW-TOKEN"
+    fingerprint_calls = iter(
+        [
+            (rec.fingerprint, {}, "doc_1"),
+            (f"distinct-{operation}", {}, "doc_1"),
+        ]
+    )
+
+    def collect_fingerprint(_payload=None):
+        try:
+            return next(fingerprint_calls)
+        except StopIteration:
+            if restoration_mode == "unavailable":
+                raise RuntimeError(secret)
+            return (f"not-restored-{operation}", {}, "doc_1")
+
+    scope["collect_model_fingerprint"] = collect_fingerprint
+    scope["make_result"] = lambda **_kwargs: (_ for _ in ()).throw(
+        RuntimeError(secret)
+    )
+    with pytest.raises(scope["FusionScriptError"]) as exc:
+        scope["run"]()
+
+    assert exc.value.code == "CAPABILITY_UNAVAILABLE"
+    assert exc.value.details == {
+        "operation": operation,
+        "applied": False,
+        "compensated": False,
+    }
+    assert secret not in exc.value.message
+    assert secret not in json.dumps(exc.value.details)
+    assert _body_attributes() == baseline_attrs
+
+
 @pytest.mark.asyncio
 async def test_mid_plan_failure_rolls_back_created_attribute_exactly_once(fake_desktop):
     """An internal plan rollback is not repeated by the outer transaction handler."""

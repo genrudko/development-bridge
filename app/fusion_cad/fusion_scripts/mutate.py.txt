@@ -648,6 +648,21 @@ def run():
                 details={"operation": op, "applied": False, "compensated": False},
             )
 
+    def _verify_full_restoration(baseline_fp):
+        """Prove metadata-only compensation restored the complete model state."""
+        try:
+            restored_fp, _restored_canonical, _restored_doc = collect_model_fingerprint(
+                PAYLOAD
+            )
+            if restored_fp != baseline_fp:
+                raise RuntimeError("rollback fingerprint does not match baseline")
+        except Exception:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Exact model restoration after metadata compensation could not be verified",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+
     if op in _MUTATION_OPS:
         # Authoritative Fusion-side freshness guard runs in this SAME command
         # execution, with no return to UI between guard and apply.
@@ -784,6 +799,8 @@ def run():
             finally:
                 if geometry_applied:
                     _compensate_geometry(geometry_capture, current_fp)
+            if not geometry_applied:
+                _verify_full_restoration(current_fp)
             if isinstance(exc, FusionScriptError):
                 raise exc
             raise FusionScriptError(
@@ -1056,6 +1073,8 @@ def run():
         finally:
             if geometry_applied and has_plan:
                 _compensate_geometry(geometry_capture, current_fp)
+        if has_plan and not geometry_applied:
+            _verify_full_restoration(current_fp)
         if isinstance(exc, FusionScriptError):
             raise exc
         raise FusionScriptError(
