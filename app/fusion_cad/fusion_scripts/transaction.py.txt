@@ -1,193 +1,106 @@
+def _transaction_fingerprint(payload):
+    hook = globals().get("_transaction_fingerprint_primitive")
+    return hook(payload) if callable(hook) else collect_model_fingerprint(payload)
+
+
+def _minimal_preview_diff(before, after):
+    bc, ac = dict(before.get("counts") or {}), dict(after.get("counts") or {})
+    br, ar = set(before.get("refs") or []), set(after.get("refs") or [])
+    return {
+        "before": {"structural_hash": before.get("structural_hash"), "counts": bc},
+        "after": {"structural_hash": after.get("structural_hash"), "counts": ac},
+        "counts": {key: int(ac.get(key, 0)) - int(bc.get(key, 0)) for key in sorted(set(bc) | set(ac))},
+        "refs": {"added": sorted(ar - br), "removed": sorted(br - ar)},
+    }
+
+
+def _require_transaction_primitive(name):
+    primitive = globals().get(name)
+    if not callable(primitive):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Verified transaction runtime primitive is unavailable", {"primitive": name, "applied": False})
+    return primitive
+
+
+def _transaction_opaque_refs(value):
+    import re
+    refs = value if isinstance(value, list) else []
+    if any(not isinstance(ref, str) or re.fullmatch(r"ent_[A-Za-z0-9._-]+", ref) is None for ref in refs):
+        raise FusionScriptError("FUSION_API_ERROR", "Transaction runtime returned a non-opaque generated reference", {"applied": False})
+    return list(refs)
+
+
+def _transaction_guard(op):
+    current_fp, _canonical, doc_ref = _transaction_fingerprint(PAYLOAD)
+    if not isinstance(current_fp, str) or not current_fp.strip():
+        raise FusionScriptError("FINGERPRINT_FAILED", "Authoritative fingerprint unavailable", {"applied": False})
+    if not isinstance(doc_ref, str) or not doc_ref.strip():
+        raise FusionScriptError("NO_ACTIVE_DESIGN", "Stable document identity unavailable", {"applied": False})
+    expected_fp = PAYLOAD.get("expected_fingerprint")
+    if op in ("preview", "commit") and expected_fp != current_fp:
+        return None, make_error("REVISION_CONFLICT", "Authoritative Fusion-side transaction guard rejected a stale baseline", {"document_ref": doc_ref, "expected_revision": PAYLOAD.get("expected_revision"), "expected_fingerprint": expected_fp, "current_fingerprint": current_fp, "applied": False})
+    return (current_fp, doc_ref), None
+
+
 def run():
     op = PAYLOAD.get("operation", "")
+    if op not in ("begin", "stage", "status", "preview", "commit", "abort", "rollback"):
+        return make_result(data={"operation": op}, summary="Executed transaction:" + str(op))
+    guarded, error = _transaction_guard(op)
+    if error:
+        return error
+    current_fp, doc_ref = guarded
+    tx_id = PAYLOAD.get("transaction_id")
 
     if op == "begin":
         expected_fp = PAYLOAD.get("expected_fingerprint")
-        current_fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
-
-        if not current_fp or not isinstance(current_fp, str) or not current_fp.strip():
-            return make_error(
-                "FINGERPRINT_FAILED",
-                "Authoritative model fingerprint collection failed or returned empty at transaction begin",
-                details={"document_ref": doc_ref, "applied": False},
-            )
-
-        if not doc_ref or not isinstance(doc_ref, str) or not doc_ref.strip():
-            return make_error(
-                "NO_ACTIVE_DESIGN",
-                "Document lacks stable runtime identity at transaction begin",
-                details={"applied": False},
-            )
-
         if expected_fp is not None and expected_fp != current_fp:
-            return make_error(
-                "REVISION_CONFLICT",
-                f"Authoritative Fusion-side guard: model fingerprint diverged from baseline during transaction {op}",
-                details={
-                    "document_ref": doc_ref,
-                    "expected_revision": PAYLOAD.get("expected_revision"),
-                    "expected_fingerprint": expected_fp,
-                    "current_fingerprint": current_fp,
-                    "applied": False,
-                },
-            )
+            return make_error("REVISION_CONFLICT", "Authoritative Fusion-side transaction guard rejected a stale baseline", {"document_ref": doc_ref, "current_fingerprint": current_fp, "applied": False})
+        return make_result(data={"operation": op, "applied": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id}, summary="Executed transaction:begin")
+    if op in ("stage", "status"):
+        return make_result(data={"operation": op, "applied": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id}, summary="Executed transaction:" + op)
 
-        return make_result(
-            data={
-                "operation": op,
-                "applied": True,
-                "fingerprint": current_fp,
-                "document_ref": doc_ref,
-                "transaction_id": PAYLOAD.get("transaction_id"),
-            },
-            summary=f"Executed transaction:{op}",
-        )
+    plan = PAYLOAD.get("plan")
+    if op in ("preview", "commit") and (not isinstance(plan, list) or not plan):
+        raise FusionScriptError("INVALID_ARGUMENT", "Transaction requires a non-empty declarative plan", {"applied": False})
 
-    if op in ("preview", "commit"):
-        expected_fp = PAYLOAD.get("expected_fingerprint")
-        current_fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
+    if op == "preview":
+        begin = _require_transaction_primitive("_transaction_begin_primitive")
+        apply_plan = _require_transaction_primitive("_transaction_apply_plan_primitive")
+        snapshot = _require_transaction_primitive("_transaction_snapshot_primitive")
+        validate = _require_transaction_primitive("_transaction_validate_primitive")
+        abort = _require_transaction_primitive("_transaction_abort_primitive")
+        begin(PAYLOAD)
+        try:
+            applied = apply_plan(plan)
+            preview_snapshot = snapshot(PAYLOAD)
+            validation = validate(PAYLOAD)
+        finally:
+            abort(PAYLOAD)
+        restored_fp, _, restored_doc = _transaction_fingerprint(PAYLOAD)
+        if restored_fp != current_fp or restored_doc != doc_ref:
+            raise FusionScriptError("TRANSACTION_CONFLICT", "Preview abort did not restore the authoritative baseline", {"applied": False})
+        preview_refs = _transaction_opaque_refs(applied.get("refs")) if isinstance(applied, dict) else []
+        return make_result(data={"operation": op, "applied": False, "preview": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id, "preview_snapshot": preview_snapshot, "preview_refs": preview_refs, "preview_refs_durable": False, "provenance": applied.get("provenance") if isinstance(applied, dict) else None, "provenance_durable": False}, summary="Previewed and aborted exact staged transaction plan", diff=_minimal_preview_diff(PAYLOAD.get("baseline_snapshot") or {}, preview_snapshot), validation=validation)
 
-        if not current_fp or not isinstance(current_fp, str) or not current_fp.strip():
-            return make_error(
-                "FINGERPRINT_FAILED",
-                f"Authoritative model fingerprint collection failed or returned empty during transaction {op}",
-                details={"document_ref": doc_ref, "applied": False},
-            )
-
-        if not doc_ref or not isinstance(doc_ref, str) or not doc_ref.strip():
-            return make_error(
-                "NO_ACTIVE_DESIGN",
-                f"Document lacks stable runtime identity during transaction {op}",
-                details={"applied": False},
-            )
-
-        if expected_fp is None or expected_fp != current_fp:
-            return make_error(
-                "REVISION_CONFLICT",
-                f"Authoritative Fusion-side guard: model fingerprint diverged from baseline during transaction {op}",
-                details={
-                    "document_ref": doc_ref,
-                    "expected_revision": PAYLOAD.get("expected_revision"),
-                    "expected_fingerprint": expected_fp,
-                    "current_fingerprint": current_fp,
-                    "applied": False,
-                },
-            )
-
-        if op == "commit":
-            commit_primitive = globals().get("_transaction_commit_primitive")
-            if callable(commit_primitive):
-                commit_primitive(PAYLOAD)
-
-            post_fp, _, post_doc_ref = collect_model_fingerprint(PAYLOAD)
-            if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
-                return make_error(
-                    "FINGERPRINT_FAILED",
-                    "Authoritative post-apply fingerprint collection failed or returned empty after transaction commit",
-                    details={"document_ref": post_doc_ref or doc_ref, "applied": False},
-                )
-
-            if not post_doc_ref or not isinstance(post_doc_ref, str) or not post_doc_ref.strip():
-                return make_error(
-                    "NO_ACTIVE_DESIGN",
-                    "Document lacks stable runtime identity after transaction commit",
-                    details={"applied": False},
-                )
-
-            expected_doc = PAYLOAD.get("document_ref")
-            if expected_doc and expected_doc != post_doc_ref:
-                return make_error(
-                    "WRONG_DOCUMENT",
-                    f"Active document {post_doc_ref} does not match expected document {expected_doc} after transaction commit",
-                    details={
-                        "document_ref": post_doc_ref,
-                        "expected_document_ref": expected_doc,
-                        "applied": False,
-                    },
-                )
-
-            if post_fp == current_fp:
-                return make_error(
-                    "MUTATION_FAILED",
-                    "Transaction commit failed to produce distinct post-apply model state; cannot advance model revision",
-                    details={
-                        "document_ref": post_doc_ref,
-                        "initial_fingerprint": current_fp,
-                        "post_fingerprint": post_fp,
-                        "applied": False,
-                    },
-                )
-
-            return make_result(
-                data={
-                    "operation": op,
-                    "applied": True,
-                    "fingerprint": post_fp,
-                    "document_ref": post_doc_ref,
-                    "transaction_id": PAYLOAD.get("transaction_id"),
-                },
-                summary=f"Executed transaction:{op}",
-            )
-        elif op == "preview":
-            preview_primitive = globals().get("_transaction_preview_primitive")
-            if callable(preview_primitive):
-                preview_primitive(PAYLOAD)
-
-            return make_result(
-                data={
-                    "operation": op,
-                    "applied": False,
-                    "fingerprint": current_fp,
-                    "document_ref": doc_ref,
-                    "transaction_id": PAYLOAD.get("transaction_id"),
-                    "preview": True,
-                },
-                summary=f"Executed transaction:{op}",
-                diff={"status": "clean", "changes": []},
-                validation={"status": "passed", "errors": []},
-            )
+    if op == "commit":
+        begin = _require_transaction_primitive("_transaction_begin_primitive")
+        apply_plan = _require_transaction_primitive("_transaction_apply_plan_primitive")
+        commit = _require_transaction_primitive("_transaction_commit_primitive")
+        begin(PAYLOAD)
+        applied = apply_plan(plan)
+        if not isinstance(applied, dict) or applied.get("same_operation_provenance") is not True:
+            raise FusionScriptError("FUSION_API_ERROR", "Transaction replay did not prove same-command provenance", {"applied": False})
+        refs = _transaction_opaque_refs(applied.get("refs"))
+        commit(PAYLOAD)
+        post_fp, _, post_doc = _transaction_fingerprint(PAYLOAD)
+        if post_doc != doc_ref or not isinstance(post_fp, str) or not post_fp.strip() or post_fp == current_fp:
+            raise FusionScriptError("MUTATION_FAILED", "Transaction commit lacks truthful changed authoritative state", {"applied": False})
+        return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id, "refs": refs, "provenance": applied.get("provenance"), "same_command_provenance": True, "replayed_plan": plan}, summary="Committed exact staged transaction plan", changed_refs=refs)
 
     if op in ("abort", "rollback"):
-        abort_primitive = globals().get(f"_transaction_{op}_primitive")
-        if callable(abort_primitive):
-            abort_primitive(PAYLOAD)
-
-        post_fp, canonical_data, post_doc_ref = collect_model_fingerprint(PAYLOAD)
-        if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
-            return make_error(
-                "FINGERPRINT_FAILED",
-                f"Authoritative model fingerprint collection failed or returned empty during transaction {op}",
-                details={"document_ref": post_doc_ref, "applied": False},
-            )
-
-        if not post_doc_ref or not isinstance(post_doc_ref, str) or not post_doc_ref.strip():
-            return make_error(
-                "NO_ACTIVE_DESIGN",
-                f"Document lacks stable runtime identity during transaction {op}",
-                details={"applied": False},
-            )
-
-        expected_doc = PAYLOAD.get("document_ref")
-        if expected_doc and expected_doc != post_doc_ref:
-            return make_error(
-                "WRONG_DOCUMENT",
-                f"Active document {post_doc_ref} does not match expected document {expected_doc} during transaction {op}",
-                details={
-                    "document_ref": post_doc_ref,
-                    "expected_document_ref": expected_doc,
-                    "applied": False,
-                },
-            )
-
-        return make_result(
-            data={
-                "operation": op,
-                "applied": True,
-                "fingerprint": post_fp,
-                "document_ref": post_doc_ref,
-                "transaction_id": PAYLOAD.get("transaction_id"),
-            },
-            summary=f"Executed transaction:{op}",
-        )
-
-    return make_result(data={"operation": op}, summary=f"Executed transaction:{op}")
+        primitive = globals().get("_transaction_" + op + "_primitive")
+        if callable(primitive):
+            primitive(PAYLOAD)
+        post_fp, _, post_doc = _transaction_fingerprint(PAYLOAD)
+        return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id}, summary="Executed transaction:" + op)
+    raise FusionScriptError("INVALID_ARGUMENT", "Unsupported transaction operation", {"applied": False})

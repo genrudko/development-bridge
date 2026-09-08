@@ -60,6 +60,7 @@ from app.fusion_cad.snapshots import (
     normalize_snapshot,
 )
 from app.fusion_cad.text import normalize_text_lineage
+from app.fusion_cad.transactions import TransactionState, TransactionStore
 from app.fusion_cad.validation import P0_VALIDATION_PROFILES, validate_model_evidence
 from app.fusion_cad.views import (
     ViewRefStore,
@@ -196,6 +197,7 @@ class FusionCadService:
         ref_registry: EntityRefRegistry | None = None,
         snapshot_store: SnapshotStore | None = None,
         view_store: ViewRefStore | None = None,
+        transaction_store: TransactionStore | None = None,
         inline_limit_bytes: int = CAD_RESULT_INLINE_LIMIT_BYTES,
     ) -> None:
         self._desktop_nodes = desktop_nodes
@@ -204,6 +206,7 @@ class FusionCadService:
         self._ref_registry = ref_registry or EntityRefRegistry()
         self._snapshot_store = snapshot_store or SnapshotStore()
         self._view_store = view_store or ViewRefStore()
+        self._transaction_store = transaction_store or TransactionStore()
         self._selector_engine = SelectorEngine()
         self.inline_limit_bytes = inline_limit_bytes
         self._node_capabilities: dict[str, _CachedNodeCapabilities] = {}
@@ -223,6 +226,10 @@ class FusionCadService:
     @property
     def view_store(self) -> ViewRefStore:
         return self._view_store
+
+    @property
+    def transaction_store(self) -> TransactionStore:
+        return self._transaction_store
 
     @property
     def selector_engine(self) -> SelectorEngine:
@@ -1650,6 +1657,19 @@ class FusionCadService:
                     baseline_revision=rec.revision,
                     baseline_fingerprint=proven_fp.strip(),
                 )
+                latest_snapshot = self._snapshot_store.get_latest(target_doc)
+                baseline_snapshot = (
+                    latest_snapshot.model_dump(mode="json", exclude_none=True)
+                    if latest_snapshot is not None
+                    else {"structural_hash": proven_fp.strip(), "counts": {}, "refs": []}
+                )
+                self._transaction_store.begin(
+                    tx_id,
+                    document_ref=target_doc,
+                    baseline_revision=rec.revision,
+                    baseline_fingerprint=proven_fp.strip(),
+                    baseline_snapshot=baseline_snapshot,
+                )
                 if isinstance(cad_result.data, dict) and tx_id:
                     cad_result.data["transaction_id"] = tx_id
                 cad_result = cad_result.model_copy(
@@ -1665,7 +1685,41 @@ class FusionCadService:
                     }
                 )
 
-            # 3. Transaction commit / abort / rollback: clear stored baseline ONLY after proven terminal execution
+            # 3. Persist the declarative state transition only after terminal
+            # desktop evidence. Preview evidence is explicitly non-durable.
+            if effective_bundle_group == "transaction" and op == "stage":
+                tx_id = payload.get("transaction_id")
+                action = payload.get("action")
+                if isinstance(tx_id, str) and isinstance(action, Mapping):
+                    record = self._transaction_store.stage(tx_id, action)
+                    if isinstance(cad_result.data, dict):
+                        cad_result.data.update(
+                            {"state": record.state.value, "plan_hash": record.plan_hash}
+                        )
+            if effective_bundle_group == "transaction" and op == "preview":
+                tx_id = payload.get("transaction_id")
+                record = self._transaction_store.find(tx_id) if isinstance(tx_id, str) else None
+                if isinstance(tx_id, str) and record is not None and record.plan:
+                    self._transaction_store.begin_preview(
+                        tx_id, record.baseline_fingerprint
+                    )
+                    evidence = cad_result.model_dump(mode="json").get("data", {})
+                    self._transaction_store.finish_preview(tx_id, preview=evidence)
+            if effective_bundle_group == "transaction" and op == "commit":
+                tx_id = payload.get("transaction_id")
+                record = self._transaction_store.find(tx_id) if isinstance(tx_id, str) else None
+                if isinstance(tx_id, str) and record is not None and record.plan:
+                    self._transaction_store.begin_commit(
+                        tx_id, record.baseline_fingerprint
+                    )
+                    evidence = cad_result.model_dump(mode="json").get("data", {})
+                    self._transaction_store.finish_commit(tx_id, evidence)
+            if effective_bundle_group == "transaction" and op in ("abort", "rollback"):
+                tx_id = payload.get("transaction_id")
+                if isinstance(tx_id, str) and self._transaction_store.find(tx_id) is not None:
+                    self._transaction_store.rollback(tx_id)
+
+            # 4. Transaction commit / abort / rollback: clear stored baseline ONLY after proven terminal execution
             if effective_bundle_group == "transaction" and op in (
                 "commit",
                 "abort",
@@ -1677,7 +1731,7 @@ class FusionCadService:
                 if tx_id:
                     self._revision_tracker.clear_transaction(tx_id)
 
-            # 4. Semantic read normalization and snapshot store
+            # 5. Semantic read normalization and snapshot store
             if effective_bundle_group == "read":
                 if op == "model_snapshot":
                     detail = payload.get("detail", "compact")
@@ -2522,6 +2576,22 @@ class FusionCadService:
                     ErrorCode.INVALID_ARGUMENT,
                     f"transaction_id is required for transaction {op}",
                 )
+            try:
+                transaction = self._transaction_store.get(tx_id)
+            except FusionCadError as exc:
+                if exc.code != ErrorCode.INVALID_ARGUMENT:
+                    raise
+                transaction = None
+            if transaction is not None and transaction.state in (
+                TransactionState.COMMITTED,
+                TransactionState.ABORTED,
+                TransactionState.PREVIEWED,
+            ):
+                raise FusionCadError(
+                    ErrorCode.TRANSACTION_CONFLICT,
+                    "Transaction state does not permit this operation",
+                    details={"transaction_id": tx_id, "operation": op},
+                )
             stored_baseline = self._revision_tracker.get_transaction_baseline(tx_id)
             if stored_baseline is None:
                 raise FusionCadError(
@@ -2546,6 +2616,10 @@ class FusionCadService:
             payload["expected_revision"] = stored_baseline["baseline_revision"]
             payload["expected_fingerprint"] = stored_baseline["baseline_fingerprint"]
             payload["document_ref"] = stored_baseline["document_ref"]
+            if transaction is not None and is_transaction_preview_commit:
+                payload["plan"] = [dict(action) for action in transaction.plan]
+                payload["plan_hash"] = transaction.plan_hash
+                payload["baseline_snapshot"] = dict(transaction.baseline_snapshot)
 
         if op in ("abort", "rollback") and effective_bundle_group == "transaction":
             tx_id = payload.get("transaction_id")
@@ -2570,6 +2644,21 @@ class FusionCadService:
                         },
                     )
                 payload["document_ref"] = stored_baseline["document_ref"]
+            try:
+                transaction = self._transaction_store.get(tx_id)
+            except FusionCadError as exc:
+                if exc.code != ErrorCode.INVALID_ARGUMENT:
+                    raise
+                transaction = None
+            if transaction is not None and transaction.state in (
+                TransactionState.COMMITTED,
+                TransactionState.ABORTED,
+            ):
+                raise FusionCadError(
+                    ErrorCode.TRANSACTION_CONFLICT,
+                    "Transaction is already terminal",
+                    details={"transaction_id": tx_id, "operation": op},
+                )
 
         # Bridge revision freshness precheck (fail-fast optimization)
         if is_standalone_mutation or is_transaction_preview_commit:
@@ -2592,6 +2681,31 @@ class FusionCadService:
                     payload.pop("expected_fingerprint", None)
             elif "expected_fingerprint" in payload:
                 payload.pop("expected_fingerprint", None)
+
+        # Task 13 feasibility is intentionally narrower than the public staging
+        # contract. Preserve freshness-error precedence, then require an actually
+        # staged single logical-text spike before preview/commit dispatch.
+        if (
+            is_transaction_preview_commit
+            and transaction is not None
+            and transaction.plan
+        ):
+            if transaction.state is not TransactionState.STAGED:
+                raise FusionCadError(
+                    ErrorCode.TRANSACTION_CONFLICT,
+                    "Transaction state does not permit preview or commit",
+                    details={"transaction_id": transaction.transaction_id, "operation": op},
+                )
+            is_p0_spike = (
+                len(transaction.plan) == 1
+                and transaction.plan[0].get("action_type") == "text_create"
+            )
+            if not is_p0_spike:
+                raise FusionCadError(
+                    ErrorCode.CAPABILITY_UNAVAILABLE,
+                    "P0 transaction preview/commit feasibility is limited to the logical text creation spike",
+                    details={"operation": op, "applied": False},
+                )
 
         # Transaction begin: persist baseline after execution succeeds (below)
         if is_transaction_begin:
@@ -2635,6 +2749,31 @@ class FusionCadService:
             )
         if effective_bundle_group == "mutate" and domain_group == "style":
             self._prepare_style_payload(payload, op, journal_operation_id)
+        if effective_bundle_group == "transaction" and op == "stage":
+            action = payload.get("action")
+            if isinstance(action, dict) and action.get("action_type") == "text_create":
+                tx_id = str(payload["transaction_id"])
+                journal_operation_id = f"op_{uuid.uuid5(uuid.NAMESPACE_URL, tx_id).hex[:12]}"
+                plan_action = dict(action)
+                plan_action.update(
+                    {
+                        "operation": "text_create",
+                        "transaction_id": tx_id,
+                        "document_ref": payload.get("document_ref"),
+                    }
+                )
+                self._prepare_style_payload(
+                    plan_action, "text_create", journal_operation_id
+                )
+                payload["action"] = plan_action
+        if effective_bundle_group == "transaction" and op == "commit":
+            transaction = self._transaction_store.find(str(payload["transaction_id"]))
+            if transaction is not None and transaction.plan:
+                provenance = transaction.plan[0].get("provenance")
+                if isinstance(provenance, Mapping):
+                    operation_id = provenance.get("operation_id")
+                    if isinstance(operation_id, str):
+                        journal_operation_id = operation_id
 
         # Inspection targets known to this service get exact native resolution hints;
         # view zoom/orient target operations reuse the exact Task5/Task7 ref machinery.

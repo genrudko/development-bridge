@@ -98,6 +98,17 @@ def mock_desktop_service() -> DesktopNodeService:
     return service
 
 
+def test_task13_service_owns_isolated_transaction_store(
+    mock_desktop_service: DesktopNodeService,
+):
+    first = FusionCadService(mock_desktop_service)
+    second = FusionCadService(mock_desktop_service)
+    first.transaction_store.begin("tx_local", "doc_1", "rev_1", "fp_1", {})
+    assert first.transaction_store.get("tx_local").document_ref == "doc_1"
+    with pytest.raises(FusionCadError):
+        second.transaction_store.get("tx_local")
+
+
 @pytest.mark.asyncio
 async def test_service_executes_capabilities_read_and_persists_matrix(
     mock_desktop_service: DesktopNodeService,
@@ -1629,20 +1640,40 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
             ]
         )
         cad_service.set_node_capabilities("desk-1", matrix)
+        preview_baseline = {"volume": None}
 
         async def run_rendered_production_script(
             node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
         ):
             script = arguments["script"]
+            def tx_begin(payload):
+                preview_baseline["volume"] = float(fake_adsk.volume)
+
+            def tx_apply(plan):
+                fake_adsk.tx_previewed = True
+                fake_adsk.volume = float(fake_adsk.volume) + 50.0
+                return {
+                    "refs": ["ent_text_spike"],
+                    "provenance": {"transaction_id": plan[0]["transaction_id"]},
+                    "same_operation_provenance": True,
+                }
+
+            def tx_abort(payload):
+                if preview_baseline["volume"] is not None:
+                    fake_adsk.volume = preview_baseline["volume"]
+
             scope = {
                 "__name__": "__main__",
-                "_transaction_commit_primitive": lambda payload: (
-                    setattr(fake_adsk, "tx_committed", True),
-                    setattr(fake_adsk, "volume", float(fake_adsk.volume) + 50.0),
-                ),
-                "_transaction_preview_primitive": lambda payload: setattr(
-                    fake_adsk, "tx_previewed", True
-                ),
+                "_transaction_begin_primitive": tx_begin,
+                "_transaction_apply_plan_primitive": tx_apply,
+                "_transaction_snapshot_primitive": lambda payload: {
+                    "structural_hash": "preview-hash",
+                    "counts": {"bodies": 1, "sketches": 2},
+                    "refs": ["ent_text_spike"],
+                },
+                "_transaction_validate_primitive": lambda payload: {"status": "passed", "errors": []},
+                "_transaction_abort_primitive": tx_abort,
+                "_transaction_commit_primitive": lambda payload: setattr(fake_adsk, "tx_committed", True),
             }
             exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
             return scope["_output"]
@@ -1668,6 +1699,12 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
         stored_bl = cad_service.revision_tracker.get_transaction_baseline("tx_1234")
         assert stored_bl is not None
         assert stored_bl["baseline_revision"] == "rev_1"
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "stage", "transaction_id": "tx_1234",
+             "action": {"action_type": "text_create", "text": "ПЫТОК", "height_mm": 4.0,
+                        "position": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}}}},
+            group="transaction",
+        )
 
         # 2. External change occurs in Fusion
         fake_adsk.volume = 300.0
@@ -1755,6 +1792,12 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
         fresh_bl = cad_service.revision_tracker.get_transaction_baseline("tx_fresh")
         assert fresh_bl is not None
         assert fresh_bl["baseline_revision"] == "rev_3"
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "stage", "transaction_id": "tx_fresh",
+             "action": {"action_type": "text_create", "text": "ПЫТОК", "height_mm": 4.0,
+                        "position": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}}}},
+            group="transaction",
+        )
 
         # 8. Transaction preview on fresh transaction succeeds
         res_preview = await cad_service.execute(
@@ -9588,3 +9631,57 @@ async def test_task12_rendered_validate_unpacks_fingerprint_tuple(fake_desktop):
     assert result.status == "succeeded"
     assert result.data["read_only"] is True
     assert "native_token" not in result.model_dump_json()
+
+@pytest.mark.asyncio
+async def test_task13_non_spike_stage_remains_stageable_but_preview_fails_closed(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [
+                CapabilityRecord(name="transaction.preview_replay", state="supported"),
+                CapabilityRecord(name="design.access", state="supported"),
+                CapabilityRecord(name="revision.external_change_detection", state="supported"),
+            ]
+        ),
+    )
+    cad_service.revision_tracker.observe("doc_1", "fp_non_spike")
+    cad_service.revision_tracker.begin_transaction(
+        "tx_non_spike", "doc_1", "rev_1", "fp_non_spike"
+    )
+    cad_service.transaction_store.begin(
+        "tx_non_spike",
+        "doc_1",
+        "rev_1",
+        "fp_non_spike",
+        {"structural_hash": "fp_non_spike", "counts": {}, "refs": []},
+    )
+    mock_desktop_service.submit = AsyncMock(
+        return_value={"status": "queued", "operation_id": "op_stage_non_spike"}
+    )
+    staged = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "stage",
+            "transaction_id": "tx_non_spike",
+            "action": {"action_type": "show", "target": "ent_1"},
+        },
+        group="transaction",
+    )
+    assert staged["status"] == "queued"
+
+    cad_service.transaction_store.stage(
+        "tx_non_spike", {"action_type": "show", "target": "ent_1"}
+    )
+    with pytest.raises(FusionCadError) as exc:
+        await cad_service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "preview",
+                "transaction_id": "tx_non_spike",
+            },
+            group="transaction",
+        )
+    assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
