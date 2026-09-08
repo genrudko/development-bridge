@@ -72,6 +72,36 @@ def canonicalize_value(val):
     return str(val)
 
 
+def _fusion_design_from_context(app, doc):
+    """Resolve the active Design using the real Fusion Products API shape."""
+    products = getattr(doc, "products", None) if doc else None
+    product = None
+    if products is not None:
+        by_type = getattr(products, "itemByProductType", None)
+        if callable(by_type):
+            product = by_type("DesignProductType")
+        if product is None:
+            legacy_by_class = getattr(products, "itemByClass", None)
+            if callable(legacy_by_class):
+                product = legacy_by_class("adsk::fusion::Design")
+    if product is None and app is not None:
+        product = getattr(app, "activeProduct", None)
+    if product is None:
+        return None
+    try:
+        import adsk.fusion
+        design_type = getattr(adsk.fusion, "Design", None)
+        cast = getattr(design_type, "cast", None) if design_type is not None else None
+    except Exception:
+        cast = None
+    if callable(cast):
+        try:
+            return cast(product)
+        except Exception:
+            return None
+    return product if getattr(product, "rootComponent", None) is not None else None
+
+
 def collect_model_fingerprint(payload=None):
     payload = payload or {}
     import hashlib
@@ -89,9 +119,7 @@ def collect_model_fingerprint(payload=None):
         raise RuntimeError(f"Failed to access adsk.core Application: {exc}") from exc
 
     try:
-        import adsk.fusion
-        if doc and hasattr(doc, "products"):
-            design = doc.products.itemByClass("adsk::fusion::Design")
+        design = _fusion_design_from_context(app, doc)
     except Exception as exc:
         raise RuntimeError(f"Failed to access adsk.fusion Design product: {exc}") from exc
 
@@ -144,20 +172,24 @@ def collect_model_fingerprint(payload=None):
 
     # 2. Timeline feature identity / health / suppression (mandatory when design is active)
     timeline = getattr(design, "timeline", None) if design else None
-    if design and (not timeline or not hasattr(timeline, "count")):
+    if design and (timeline is None or not hasattr(timeline, "count")):
         raise FusionScriptError(
             "CAPABILITY_UNAVAILABLE",
             "Active design lacks accessible timeline collection; "
             "mandatory fingerprint group 'timeline' cannot be omitted",
         )
-    if timeline and hasattr(timeline, "count"):
+    if timeline is not None and hasattr(timeline, "count"):
         t_items = []
         for i in range(timeline.count):
             try:
                 item = timeline.item(i)
+                item_entity = getattr(item, "entity", None)
+                item_id = (getattr(item, "entityToken", None) or getattr(item, "id", None) or (item_entity and getattr(item_entity, "entityToken", None)) or (item_entity and getattr(item_entity, "id", None)))
+                if not item_id or not str(item_id).strip():
+                    raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Timeline item {i} and its associated entity lack stable runtime identity (entityToken or id)", details={"timeline_index": i})
                 t_items.append({
                     "index": i,
-                    "id": str(getattr(item, "entityToken", None) or getattr(item, "id", None) or i),
+                    "id": str(item_id).strip(),
                     "name": str(getattr(item, "name", "")),
                     "is_suppressed": bool(getattr(item, "isSuppressed", False)),
                     "is_valid": bool(getattr(item, "isValid", True)),
@@ -173,7 +205,7 @@ def collect_model_fingerprint(payload=None):
     comps_list = []
     if design:
         all_comps = getattr(design, "allComponents", None)
-        if not all_comps or not hasattr(all_comps, "count"):
+        if all_comps is None or not hasattr(all_comps, "count"):
             raise FusionScriptError(
                 "CAPABILITY_UNAVAILABLE",
                 "Active design lacks allComponents collection; "
@@ -718,7 +750,7 @@ def collect_model_fingerprint(payload=None):
 
         # 6. Parameters (mandatory when design is active)
         params = getattr(design, "allParameters", None)
-        if not params or not hasattr(params, "count"):
+        if params is None or not hasattr(params, "count"):
             raise FusionScriptError(
                 "CAPABILITY_UNAVAILABLE",
                 "Active design lacks allParameters collection; "
@@ -935,15 +967,12 @@ def collect_model_fingerprint(payload=None):
             )
         for t_idx in range(timeline.count):
             t = timeline.item(t_idx)
-            t_id = getattr(t, "entityToken", None) or getattr(t, "id", None)
-            if not t_id or not str(t_id).strip():
-                raise FusionScriptError(
-                    "CAPABILITY_UNAVAILABLE",
-                    f"Timeline item {t_idx} lacks stable runtime identity (entityToken or id); mutable timeline name cannot be used as authoritative identity",
-                    details={"timeline_index": t_idx},
-                )
-            _read_owner_attributes(t, "timeline", str(t_id).strip())
             feat = getattr(t, "entity", None)
+            t_id = (getattr(t, "entityToken", None) or getattr(t, "id", None) or (feat and getattr(feat, "entityToken", None)) or (feat and getattr(feat, "id", None)))
+            if not t_id or not str(t_id).strip():
+                raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Timeline item {t_idx} and its associated entity lack stable runtime identity (entityToken or id)", details={"timeline_index": t_idx})
+            if getattr(t, "attributes", None) is not None:
+                _read_owner_attributes(t, "timeline", str(t_id).strip())
             if feat:
                 f_id = getattr(feat, "entityToken", None) or getattr(feat, "id", None)
                 if not f_id or not str(f_id).strip():
@@ -1115,9 +1144,7 @@ def resolve_fusion_entity(payload=None):
         pass
 
     try:
-        import adsk.fusion
-        if doc and hasattr(doc, "products"):
-            design = doc.products.itemByClass("adsk::fusion::Design")
+        design = _fusion_design_from_context(app, doc)
     except Exception:
         pass
 

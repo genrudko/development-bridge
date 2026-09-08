@@ -663,3 +663,228 @@ def test_contextual_resolver_geometry_signature_participates_in_matching() -> No
         )
         assert res_ambiguous["outcome"] == "ambiguous"
         assert len(res_ambiguous["candidates"]) == 2
+
+
+def test_common_design_context_supports_real_products_item_by_product_type(monkeypatch) -> None:
+    import types
+
+    product = types.SimpleNamespace(rootComponent=types.SimpleNamespace())
+
+    class Products:
+        def itemByProductType(self, product_type: str) -> Any:
+            assert product_type == "DesignProductType"
+            return product
+
+    doc = types.SimpleNamespace(products=Products())
+    app = types.SimpleNamespace(activeDocument=doc, activeProduct=None)
+
+    adsk = types.ModuleType("adsk")
+    core = types.ModuleType("adsk.core")
+    fusion = types.ModuleType("adsk.fusion")
+    core.Application = types.SimpleNamespace(get=lambda: app)
+    fusion.Design = types.SimpleNamespace(cast=lambda value: value if value is product else None)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    script = FusionCadScriptBundle.build("read", {"operation": "echo", "text": "probe"})
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<fusion-design-context>", "exec"), scope)  # noqa: S102
+
+    helper = scope["_fusion_design_from_context"]
+    assert helper(app, doc) is product
+
+
+def test_common_design_context_fails_closed_when_design_cast_rejects_product(monkeypatch) -> None:
+    import types
+
+    product = types.SimpleNamespace(rootComponent=types.SimpleNamespace())
+
+    class Products:
+        def itemByProductType(self, product_type: str) -> Any:
+            assert product_type == "DesignProductType"
+            return product
+
+    doc = types.SimpleNamespace(products=Products())
+    app = types.SimpleNamespace(activeDocument=doc, activeProduct=product)
+
+    adsk = types.ModuleType("adsk")
+    core = types.ModuleType("adsk.core")
+    fusion = types.ModuleType("adsk.fusion")
+    core.Application = types.SimpleNamespace(get=lambda: app)
+    fusion.Design = types.SimpleNamespace(cast=lambda _value: None)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    script = FusionCadScriptBundle.build("read", {"operation": "echo", "text": "probe"})
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<fusion-design-cast-reject>", "exec"), scope)  # noqa: S102
+
+    helper = scope["_fusion_design_from_context"]
+    assert helper(app, doc) is None
+
+
+def test_model_snapshot_accepts_empty_falsey_fusion_collections(monkeypatch) -> None:
+    import types
+
+    class Collection:
+        def __init__(self, items=()):
+            self._items = list(items)
+
+        @property
+        def count(self) -> int:
+            return len(self._items)
+
+        def item(self, index: int) -> Any:
+            return self._items[index]
+
+        def __bool__(self) -> bool:
+            return bool(self._items)
+
+    empty_attrs = lambda: Collection([])  # noqa: E731
+    root = types.SimpleNamespace(
+        name="Root",
+        id="root",
+        entityToken="root-token",
+        allOccurrences=Collection([]),
+        bRepBodies=Collection([]),
+        sketches=Collection([]),
+        attributes=empty_attrs(),
+    )
+    design = types.SimpleNamespace(
+        rootComponent=root,
+        timeline=Collection([]),
+        allComponents=Collection([root]),
+        allParameters=Collection([]),
+    )
+
+    class Products:
+        def itemByProductType(self, product_type: str) -> Any:
+            assert product_type == "DesignProductType"
+            return design
+
+    doc = types.SimpleNamespace(
+        creationId="empty-design",
+        dataId=None,
+        dataFile=None,
+        name="Untitled",
+        isModified=False,
+        savedVersion=None,
+        products=Products(),
+        attributes=empty_attrs(),
+    )
+    app = types.SimpleNamespace(activeDocument=doc, activeProduct=design)
+
+    adsk = types.ModuleType("adsk")
+    core = types.ModuleType("adsk.core")
+    fusion = types.ModuleType("adsk.fusion")
+    core.Application = types.SimpleNamespace(get=lambda: app)
+    fusion.Design = types.SimpleNamespace(cast=lambda value: value if value is design else None)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    script = FusionCadScriptBundle.build("read", {"operation": "model_snapshot", "detail": "compact"})
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<fusion-empty-model-snapshot>", "exec"), scope)  # noqa: S102
+
+    result = scope["_output"]
+    assert result["status"] == "succeeded"
+    assert result["document"]["document_ref"] == "doc_empty-design"
+    assert result["data"]["fingerprint"]
+
+
+def test_model_snapshot_uses_timeline_entity_as_stable_identity(monkeypatch) -> None:
+    import types
+
+    class Collection:
+        def __init__(self, items=()):
+            self._items = list(items)
+
+        @property
+        def count(self) -> int:
+            return len(self._items)
+
+        def item(self, index: int) -> Any:
+            return self._items[index]
+
+        def __bool__(self) -> bool:
+            return bool(self._items)
+
+    feature = types.SimpleNamespace(
+        entityToken="feature-token-1",
+        id=None,
+        objectType="adsk::fusion::BaseFeature",
+        name="Feature1",
+        attributes=Collection([]),
+    )
+    timeline_item = types.SimpleNamespace(
+        index=0,
+        name="Feature1",
+        isSuppressed=False,
+        isRolledBack=False,
+        isValid=True,
+        healthStatus=None,
+        entity=feature,
+        isGroup=False,
+    )
+    root = types.SimpleNamespace(
+        name="Root",
+        id="root",
+        entityToken="root-token",
+        allOccurrences=Collection([]),
+        bRepBodies=Collection([]),
+        sketches=Collection([]),
+        attributes=Collection([]),
+    )
+    design = types.SimpleNamespace(
+        rootComponent=root,
+        timeline=Collection([timeline_item]),
+        allComponents=Collection([root]),
+        allParameters=Collection([]),
+    )
+
+    class Products:
+        def itemByProductType(self, product_type: str) -> Any:
+            assert product_type == "DesignProductType"
+            return design
+
+    doc = types.SimpleNamespace(
+        creationId="timeline-design",
+        dataId=None,
+        dataFile=None,
+        name="Untitled",
+        isModified=False,
+        savedVersion=None,
+        products=Products(),
+        attributes=Collection([]),
+    )
+    app = types.SimpleNamespace(activeDocument=doc, activeProduct=design)
+
+    adsk = types.ModuleType("adsk")
+    core = types.ModuleType("adsk.core")
+    fusion = types.ModuleType("adsk.fusion")
+    core.Application = types.SimpleNamespace(get=lambda: app)
+    fusion.Design = types.SimpleNamespace(cast=lambda value: value if value is design else None)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    script = FusionCadScriptBundle.build(
+        "read", {"operation": "model_snapshot", "detail": "compact"}
+    )
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<fusion-timeline-entity-identity>", "exec"), scope)  # noqa: S102
+
+    result = scope["_output"]
+    assert result["status"] == "succeeded"
+    assert result["data"]["features"][0]["id"] == "feature-token-1"
