@@ -30,6 +30,8 @@ def _production_command_runtime(monkeypatch, *, preview):
     import json
 
     events = []
+    pending_events = []
+    lifecycle = {"in_command_created": False}
 
     class Collection:
         def __init__(self, items=None):
@@ -145,7 +147,11 @@ def _production_command_runtime(monkeypatch, *, preview):
         def __init__(self):
             self.isAutoExecute = True
             self.execute = Event()
+            self.destroy = Event()
         def doExecute(self, terminate):
+            if lifecycle["in_command_created"]:
+                events.append("reentrant_doExecute")
+                raise RuntimeError("doExecute called reentrantly from commandCreated")
             events.append(("doExecute", terminate, self.isAutoExecute))
             before_sketches = list(root.sketches._items)
             before_timeline = list(design.timeline._items)
@@ -157,12 +163,25 @@ def _production_command_runtime(monkeypatch, *, preview):
                 design.timeline._items[:] = before_timeline
                 doc.isModified = before_modified
             events.append(("executeFailed", args.executeFailed))
+            if terminate:
+                pending_events.append(lambda: self.destroy.fire(SimpleNamespace()))
+            return True
 
     class Definition:
         def __init__(self):
             self.commandCreated = Event()
         def execute(self):
-            self.commandCreated.fire(SimpleNamespace(command=Command()))
+            command = Command()
+            def dispatch_created():
+                lifecycle["in_command_created"] = True
+                try:
+                    self.commandCreated.fire(SimpleNamespace(command=command))
+                finally:
+                    lifecycle["in_command_created"] = False
+                events.append("commandCreated.returned")
+            pending_events.append(dispatch_created)
+            events.append("definition.execute.returned")
+            return True
         def deleteMe(self):
             events.append("definition.delete")
             return True
@@ -184,6 +203,11 @@ def _production_command_runtime(monkeypatch, *, preview):
     core.CommandCreatedEventHandler = object
     core.CommandEventHandler = object
     fusion.Design = SimpleNamespace(cast=lambda product: product)
+    def do_events():
+        if pending_events:
+            pending_events.pop(0)()
+
+    adsk.doEvents = do_events
     adsk.core = core
     adsk.fusion = fusion
     monkeypatch.setitem(sys.modules, "adsk", adsk)
@@ -230,6 +254,8 @@ def test_production_preview_uses_command_execute_failed_without_transaction_hook
     assert state["design"].timeline.count == 0
     assert state["doc"].isModified is False
     assert ("doExecute", True, False) in events
+    assert "reentrant_doExecute" not in events
+    assert events.index("commandCreated.returned") < events.index(("doExecute", True, False))
     assert ("executeFailed", True) in events
     assert ("createInput", "ПЫТОК", 0.4, 1.0, 2.0, 0.0) in events
 
@@ -247,6 +273,8 @@ def test_production_commit_persists_and_reads_provenance_and_returns_internal_hi
     assert state["doc"].isModified is True
     assert state["root"].sketches.count == 1
     assert state["design"].timeline.count == 1
+    assert "reentrant_doExecute" not in events
+    assert events.index("commandCreated.returned") < events.index(("doExecute", True, False))
     assert ("executeFailed", False) in events
 
 

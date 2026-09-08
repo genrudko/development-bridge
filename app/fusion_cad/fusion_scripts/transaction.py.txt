@@ -61,7 +61,9 @@ def _transaction_snapshot_from_fingerprint(fingerprint, canonical):
 
 
 def _transaction_native_text_command(plan, preview):
+    import time
     import uuid
+    import adsk
     import adsk.core
     import adsk.fusion
 
@@ -74,7 +76,14 @@ def _transaction_native_text_command(plan, preview):
     if root is None or definitions is None:
         raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Verified Fusion command transaction runtime is unavailable", {"applied": False})
 
-    result = {"error": None, "applied": None, "snapshot": None, "validation": None}
+    result = {
+        "error": None,
+        "applied": None,
+        "snapshot": None,
+        "validation": None,
+        "command": None,
+        "destroyed": False,
+    }
     retained_handlers = []
 
     class ExecuteHandler(adsk.core.CommandEventHandler):
@@ -109,6 +118,13 @@ def _transaction_native_text_command(plan, preview):
                 result["error"] = exc
                 args.executeFailed = True
 
+    class DestroyHandler(adsk.core.CommandEventHandler):
+        def __init__(self):
+            super().__init__()
+
+        def notify(self, _args):
+            result["destroyed"] = True
+
     class CreatedHandler(adsk.core.CommandCreatedEventHandler):
         def __init__(self):
             super().__init__()
@@ -117,19 +133,51 @@ def _transaction_native_text_command(plan, preview):
             command = args.command
             command.isAutoExecute = False
             execute_handler = ExecuteHandler()
-            retained_handlers.append(execute_handler)
+            destroy_handler = DestroyHandler()
+            retained_handlers.extend([execute_handler, destroy_handler])
             command.execute.add(execute_handler)
-            command.doExecute(True)
+            command.destroy.add(destroy_handler)
+            result["command"] = command
 
     command_id = "bridge_tx_text_" + uuid.uuid4().hex
     definition = definitions.addButtonDefinition(command_id, "Bridge transaction text", "Atomic P0 transaction text replay")
+    if definition is None:
+        raise FusionScriptError("FUSION_API_ERROR", "Fusion command definition creation failed", {"applied": False})
+    delete_ok = False
     try:
         created_handler = CreatedHandler()
         retained_handlers.append(created_handler)
         definition.commandCreated.add(created_handler)
-        definition.execute()
+        if definition.execute() is not True:
+            raise FusionScriptError("FUSION_API_ERROR", "Fusion command definition execute failed", {"applied": False})
+
+        # CommandDefinition.execute queues commandCreated. Never call Command.doExecute
+        # re-entrantly from commandCreated; wait until creation has fully returned.
+        for _ in range(200):
+            adsk.doEvents()
+            if result["command"] is not None:
+                break
+            time.sleep(0.005)
+        command = result["command"]
+        if command is None:
+            raise FusionScriptError("FUSION_API_ERROR", "Fusion command creation did not complete", {"applied": False})
+
+        if command.doExecute(True) is not True:
+            raise FusionScriptError("FUSION_API_ERROR", "Fusion command execution failed", {"applied": False})
+
+        # Let Fusion finish commit/abort bookkeeping and command destruction before
+        # inspecting/restoring state or deleting the API-created definition.
+        for _ in range(200):
+            adsk.doEvents()
+            if result["destroyed"]:
+                break
+            time.sleep(0.005)
+        if not result["destroyed"]:
+            raise FusionScriptError("FUSION_API_ERROR", "Fusion command did not terminate cleanly", {"applied": False})
     finally:
-        definition.deleteMe()
+        delete_ok = bool(definition.deleteMe())
+    if not delete_ok:
+        raise FusionScriptError("FUSION_API_ERROR", "Fusion command definition cleanup failed", {"applied": False})
     if result["error"] is not None:
         error = result["error"]
         if isinstance(error, FusionScriptError):
