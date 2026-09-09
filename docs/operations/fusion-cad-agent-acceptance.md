@@ -2,34 +2,54 @@
 
 ## Task 13 transaction preview/replay gate
 
-Status: **deferred live**. The offline fake-runtime implementation and tests do
-not prove Autodesk Fusion command-preview, abort, replay, single-Undo, or ref
-lifecycle behavior. `transaction.preview_replay` must remain `degraded` or
-`unavailable` until the coordinator completes and records the sequence below on
-a disposable real Fusion model.
+Status: **LIVE ACCEPTED** on the disposable Fusion test documents on
+`fusion-workstation` (the same Fusion 2704.1.53 runtime used for the Task 9
+live gate). The acceptance used exact `FusionCadScriptBundle` rendered sources
+from the P0 worktree, verified byte-for-byte by SHA-256 before execution; it
+was not a hand-written substitute for the production transaction script.
 
-Mandatory live sequence, in order:
+### Accepted sequence
 
-1. Capture semantic baseline A, including structural hash, counts, stable
-   pre-existing opaque refs, and relevant Bridge metadata.
-2. Begin a transaction at A and stage the exact Task 13 logical Unicode text
-   creation plan, including its Task 10/11 provenance metadata.
-3. Preview once. Capture semantic preview B, generated opaque preview refs,
-   provenance/metadata, validation, and the minimal semantic preview diff.
-4. Abort the preview. Capture A2 and prove A2 is semantically equal to A.
-5. Resolve the pre-existing refs after abort and prove they remain valid.
-6. Prove every preview-only ref and preview-only metadata/provenance record is
-   absent after abort.
-7. Replay the exact staged declarative plan once and commit C. Prove C is
-   semantically equivalent to the accepted preview B and that geometry plus
-   metadata/provenance used the same Fusion command/transaction, with no hidden
-   post-commit metadata command.
-8. Undo exactly once. Capture A3 and prove A3 is semantically equal to A.
-9. Begin and stage again, make a manual model edit, then commit. Prove commit
-   returns `REVISION_CONFLICT` and applies none of the staged plan.
-10. Prove preview abort left no hidden side state that affects subsequent
-    operations.
+1. Captured semantic baseline A with authoritative model fingerprint, counts,
+   stable pre-existing entity identity, and Bridge metadata state.
+2. Began/staged the deterministic Unicode SketchText plan with the Task 10/11
+   provenance write in the same staged operation.
+3. Preview produced semantic B with exactly one additional sketch/timeline
+   feature and preview-only provenance/ref evidence.
+4. `PTransaction.Abort` restored A2 exactly to A; the authoritative fingerprint
+   and semantic counts matched the original baseline.
+5. Pre-existing identity remained resolvable after abort.
+6. Preview-only entity identity and provenance were absent after abort.
+7. Exact replay commit produced stable C with true Unicode
+   `BRIDGE_PTX_Ω_ТЕСТ`; geometry and provenance were committed by the same
+   PTransaction path, with no post-commit metadata command.
+8. On a clean discriminator run, commit followed immediately by exactly one
+   Undo restored A3 exactly to A. The earlier diagnostic where MCP commands were
+   inserted between commit and Undo was rejected because those commands occupied
+   upper command-stack frames; it is not acceptance evidence.
+9. After a controlled manual edit changed the authoritative fingerprint, replay
+   with the old baseline returned `REVISION_CONFLICT`, `applied=false`, before
+   staged geometry/provenance was applied. The model retained only the manual edit.
+10. Subsequent production reads showed no hidden preview side state.
 
-Only after all ten checks pass may the coordinator change
-`transaction.preview_replay` to `supported`. This document does not claim that
-the live sequence has run.
+### Runtime/API evidence and capability policy
+
+- Primary runtime: `Application.executeTextCommand` using fixed safe commands
+  `PTransaction.Start "bridge_cad_transaction"`, `PTransaction.Abort`, and
+  `PTransaction.Commit`.
+- The real Fusion API corrections discovered by this gate are checkpointed in
+  `9743b71ce36ff3383ed11d3320b2d0e9933e528a`; authoritative fingerprints use
+  the real `Products.itemByProductType("DesignProductType")`/Design cast shape,
+  valid empty collections, and TimelineObject-associated persistent entities.
+- Capability probing now has a per-runtime, empty, fixed-name
+  `PTransaction.Start -> Abort` discriminator. `transaction.preview_replay` is
+  `supported` only when that discriminator succeeds; API presence alone remains
+  `degraded` and the service does not bypass a degraded state.
+- `revision.external_change_detection` is `supported` only when the production
+  authoritative fingerprint is readable and stable twice on the active runtime;
+  mutation/commit paths still re-read and compare the authoritative fingerprint
+  immediately before apply. Task 14 repeats the manual-change conflict invariant
+  on the Schedule copy.
+
+Task 13 is accepted. P0 itself remains open until the Task 14 whole-phase review
+and Schedule-copy golden acceptance are complete.

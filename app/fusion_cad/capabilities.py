@@ -506,13 +506,14 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 11. transaction.preview_replay (Finding 3: load-bearing transaction remains degraded/unavailable until later live feasibility proof)
-        if not probe_failed and facts.get("has_command_preview") and facts.get("has_undo_redo"):
+        # 11. transaction.preview_replay -- load-bearing P0 capability.
+        # Contract-level support requires a successful live PTransaction Start/Abort
+        # discriminator on this exact runtime; API presence alone remains degraded.
+        if not probe_failed and facts.get("transaction_runtime_verified"):
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
-                state="degraded",
-                implementation="command-preview-replay",
-                limitations=("Staged transaction preview and replay semantics require live feasibility proof; load-bearing transaction remains degraded pending live verification",),
+                state="supported",
+                implementation="ptransaction-preview-replay",
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -520,8 +521,8 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
                 state="degraded",
-                implementation="undo-redo-fallback",
-                limitations=("Command preview hooks not available; rollback relies on active transaction undo; load-bearing transaction remains degraded pending live verification",),
+                implementation="ptransaction-preview-replay",
+                limitations=("PTransaction API prerequisites are present but the live feasibility proof (Start/Abort runtime semantics) is not verified for this runtime context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -529,7 +530,7 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
                 state="unavailable",
-                limitations=err_limits("Neither command preview nor undo/redo available for transaction replay"),
+                limitations=err_limits("Verified PTransaction runtime is not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -618,13 +619,23 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 16. revision.external_change_detection (Finding 3: do not claim contract-level supported from hasattr alone)
-        if not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+        # 16. revision.external_change_detection -- contract support requires the
+        # authoritative model fingerprint to be readable and stable twice on the
+        # active runtime. The mutation path still rechecks it immediately before apply.
+        if not probe_failed and facts.get("revision_runtime_verified"):
+            records.append(CapabilityRecord(
+                name="revision.external_change_detection",
+                state="supported",
+                implementation="authoritative-fingerprint-guard",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
             records.append(CapabilityRecord(
                 name="revision.external_change_detection",
                 state="degraded",
                 implementation="timeline-fingerprint-guard",
-                limitations=("Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime atomicity proof",),
+                limitations=("Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime fingerprint proof",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))

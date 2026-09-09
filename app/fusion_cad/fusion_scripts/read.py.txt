@@ -107,6 +107,32 @@ def probe_runtime():
     except Exception:
         pass
 
+    # Task 13: verify the exact primary PTransaction boundary on this runtime.
+    # This is an empty Start/Abort discriminator with a fixed safe name: it does
+    # not mutate model geometry and is never retried if the terminal Abort fails.
+    try:
+        execute_text_command = getattr(app, "executeTextCommand", None) if app else None
+        if callable(execute_text_command):
+            started = execute_text_command('PTransaction.Start "bridge_cad_capability_probe"')
+            if str(started).strip() == "1":
+                aborted = execute_text_command("PTransaction.Abort")
+                if str(aborted).strip() == "1":
+                    facts["transaction_runtime_verified"] = True
+    except Exception:
+        facts["transaction_runtime_verified"] = False
+
+    # Task 14 prerequisite: prove the authoritative fingerprint can be read
+    # deterministically on the active document. Mutation paths still compare a
+    # fresh in-Fusion fingerprint immediately before applying any change.
+    try:
+        if doc is not None and design is not None:
+            fp_a, _canonical_a, doc_ref_a = collect_model_fingerprint(PAYLOAD)
+            fp_b, _canonical_b, doc_ref_b = collect_model_fingerprint(PAYLOAD)
+            if fp_a and fp_a == fp_b and doc_ref_a and doc_ref_a == doc_ref_b:
+                facts["revision_runtime_verified"] = True
+    except Exception:
+        facts["revision_runtime_verified"] = False
+
     # Task 9: prove the selected viewport-raycast contract on the active runtime.
     try:
         import adsk.core
@@ -382,24 +408,25 @@ def probe_runtime():
             "limitations": err_limits("Command execution preview hooks not available"),
         })
 
-    # 11. transaction.preview_replay (Finding 3: load-bearing transaction remains degraded/unavailable until later live feasibility proof)
-    if not probe_failed and facts.get("has_command_preview") and facts.get("has_undo_redo"):
+    # 11. transaction.preview_replay -- supported only after the empty live
+    # PTransaction Start/Abort discriminator succeeds on this runtime.
+    if not probe_failed and facts.get("transaction_runtime_verified"):
         records.append({
             "name": "transaction.preview_replay",
-            "state": "degraded",
-            "implementation": "command-preview-replay",
+            "state": "supported",
+            "implementation": "ptransaction-preview-replay",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Staged transaction preview and replay semantics require live feasibility proof; load-bearing transaction remains degraded pending live verification"],
+            "limitations": [],
         })
     elif not probe_failed and facts.get("has_undo_redo"):
         records.append({
             "name": "transaction.preview_replay",
             "state": "degraded",
-            "implementation": "undo-redo-fallback",
+            "implementation": "ptransaction-preview-replay",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Command preview hooks not available; rollback relies on active transaction undo; load-bearing transaction remains degraded pending live verification"],
+            "limitations": ["PTransaction API prerequisites are present but the live feasibility proof (Start/Abort runtime semantics) is not verified for this runtime context"],
         })
     else:
         records.append({
@@ -408,7 +435,7 @@ def probe_runtime():
             "implementation": None,
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": err_limits("Neither command preview nor undo/redo available for transaction replay"),
+            "limitations": err_limits("Verified PTransaction runtime is not available"),
         })
 
     # 12. metadata.attributes (Finding 2: collection/add/count is insufficient; prefer degraded/unavailable)
@@ -500,15 +527,25 @@ def probe_runtime():
             "limitations": err_limits("Document mutation modified indicator not available"),
         })
 
-    # 16. revision.external_change_detection (Finding 3: do not claim contract-level supported from hasattr alone)
-    if not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+    # 16. revision.external_change_detection -- supported only when the exact
+    # authoritative fingerprint is stable on the active runtime/document.
+    if not probe_failed and facts.get("revision_runtime_verified"):
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "supported",
+            "implementation": "authoritative-fingerprint-guard",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
         records.append({
             "name": "revision.external_change_detection",
             "state": "degraded",
             "implementation": "timeline-fingerprint-guard",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime atomicity proof"],
+            "limitations": ["Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime fingerprint proof"],
         })
     elif not probe_failed and facts.get("has_mutation_indicators"):
         records.append({

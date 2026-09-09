@@ -2789,14 +2789,7 @@ class FusionCadService:
                         "capability": trusted_detail(required_cap),
                     },
                 )
-            allow_internal_transaction_feasibility = (
-                effective_bundle_group == "transaction"
-                and required_cap == "transaction.preview_replay"
-            )
-            matrix.require(
-                required_cap,
-                allow_degraded=allow_internal_transaction_feasibility,
-            )
+            matrix.require(required_cap, allow_degraded=False)
 
         is_async, is_mutation, summary = self._classify_operation(
             effective_bundle_group, payload

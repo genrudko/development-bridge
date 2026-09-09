@@ -9690,7 +9690,7 @@ async def test_task13_non_spike_stage_remains_stageable_but_preview_fails_closed
     assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
 
 @pytest.mark.asyncio
-async def test_task13_degraded_transaction_capability_is_internal_feasibility_only(
+async def test_task13_degraded_transaction_capability_fails_closed(
     mock_desktop_service: DesktopNodeService,
 ):
     cad_service = FusionCadService(mock_desktop_service)
@@ -9711,12 +9711,13 @@ async def test_task13_degraded_transaction_capability_is_internal_feasibility_on
         return_value={"status": "queued", "operation_id": "op_tx_begin"}
     )
 
-    queued = await cad_service.execute(
-        {"node_id": "desk-1", "operation": "begin", "transaction_id": "tx_feas_1"},
-        group="transaction",
-    )
-    assert queued["status"] == "queued"
-    assert mock_desktop_service.submit.call_count == 1
+    with pytest.raises(FusionCadError) as exc_degraded:
+        await cad_service.execute(
+            {"node_id": "desk-1", "operation": "begin", "transaction_id": "tx_feas_1"},
+            group="transaction",
+        )
+    assert exc_degraded.value.code == ErrorCode.CAPABILITY_DEGRADED
+    assert mock_desktop_service.submit.call_count == 0
 
     unavailable = CapabilityMatrix.from_records(
         [
@@ -9733,7 +9734,7 @@ async def test_task13_degraded_transaction_capability_is_internal_feasibility_on
             group="transaction",
         )
     assert exc_unavailable.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
-    assert mock_desktop_service.submit.call_count == 1
+    assert mock_desktop_service.submit.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -9772,7 +9773,7 @@ async def test_task13_degraded_non_spike_preview_still_fails_closed(
             {"node_id": "desk-1", "operation": "preview", "transaction_id": "tx_nonspike"},
             group="transaction",
         )
-    assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert exc.value.code == ErrorCode.CAPABILITY_DEGRADED
     assert mock_desktop_service.submit.call_count == 0
 
 
