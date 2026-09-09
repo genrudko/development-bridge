@@ -1003,13 +1003,18 @@ def normalize_snapshot(
                 if b.get("component_path")
                 else ((str(b_comp),) if b_comp else ())
             )
+            b_native = b.get("entityToken") or b.get("native_token") or b.get("id")
             if ref_registry is not None:
                 iss = ref_registry.issue(
                     document_ref=doc_ref,
                     kind="body",
                     name=b_name,
                     component_path=b_comp_path,
-                    native_token=str(b.get("entityToken") or b.get("id") or b_name),
+                    native_token=(
+                        str(b_native).strip()
+                        if b_native is not None and str(b_native).strip()
+                        else None
+                    ),
                 )
                 b_ref = iss.ref
             else:
@@ -1075,12 +1080,17 @@ def normalize_snapshot(
                 if s.get("component_path")
                 else ((str(s_comp),) if s_comp else ())
             )
+            s_native = s.get("entityToken") or s.get("native_token") or s.get("id")
             if ref_registry is not None:
                 iss = ref_registry.issue(
                     document_ref=doc_ref,
                     kind="sketch",
                     name=s_name,
-                    native_token=str(s.get("entityToken") or s.get("id") or s_name),
+                    native_token=(
+                        str(s_native).strip()
+                        if s_native is not None and str(s_native).strip()
+                        else None
+                    ),
                 )
                 s_ref = iss.ref
             else:

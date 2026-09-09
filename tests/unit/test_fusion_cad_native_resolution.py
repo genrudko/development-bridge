@@ -60,6 +60,33 @@ def test_shared_native_resolver_returns_exact_single_entity():
 
 
 @pytest.mark.parametrize(
+    ("entities", "expected_code"),
+    [
+        ([], "REF_STALE"),
+        ([_Entity("adsk::fusion::BRepBody")], None),
+        (
+            [
+                _Entity("adsk::fusion::BRepBody"),
+                _Entity("adsk::fusion::BRepBody"),
+            ],
+            "REF_SPLIT",
+        ),
+    ],
+)
+def test_shared_native_resolver_supports_python_list_results(entities, expected_code):
+    scope = _scope()
+    if expected_code is None:
+        assert _resolve(scope, _Design(entities)) is entities[0]
+        return
+
+    with pytest.raises(scope["FusionScriptError"]) as exc:
+        _resolve(scope, _Design(entities))
+    assert exc.value.code == expected_code
+    rendered = json.dumps({"message": str(exc.value), "details": exc.value.details})
+    assert "SECRET_NATIVE_TOKEN" not in rendered
+
+
+@pytest.mark.parametrize(
     ("design", "expected_code"),
     [
         (_Design(None), "REF_STALE"),

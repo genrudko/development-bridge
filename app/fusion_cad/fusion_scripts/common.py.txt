@@ -581,6 +581,7 @@ def collect_model_fingerprint(payload=None):
                     is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                     b_items.append({
                         "name": b_name,
+                        "native_token": _stable_runtime_identity(b),
                         "component": c_name,
                         "is_solid": bool(raw_solid),
                         "is_visible": is_local_vis,
@@ -777,6 +778,7 @@ def collect_model_fingerprint(payload=None):
                     is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                     s_items.append({
                         "name": s_name,
+                        "native_token": _stable_runtime_identity(s),
                         "component": c_name,
                         "is_visible": is_local_vis,
                         "effective_visibility": is_eff_vis,
@@ -1119,7 +1121,18 @@ def resolve_exact_native_entity(design, hint, expected_kinds=None):
         ) from None
 
     entity = resolved
-    if resolved is not None:
+    if isinstance(resolved, (list, tuple)):
+        if len(resolved) == 1:
+            entity = resolved[0]
+        elif len(resolved) > 1:
+            raise FusionScriptError(
+                "REF_SPLIT",
+                "Authoritative native entity resolved to multiple split entities",
+                details={"ref": ref},
+            )
+        else:
+            entity = None
+    elif resolved is not None:
         try:
             count_value = getattr(resolved, "count")
         except AttributeError:
