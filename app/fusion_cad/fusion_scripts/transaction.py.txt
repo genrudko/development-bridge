@@ -332,6 +332,22 @@ def _transaction_guard(op):
     return (current_fp, doc_ref), None
 
 
+def _transaction_post_commit_state(current_fp, doc_ref):
+    try:
+        post_fp, _canonical, post_doc = _transaction_fingerprint(PAYLOAD)
+    except BaseException:
+        raise FusionScriptError(
+            "OPERATION_UNCERTAIN",
+            "Transaction commit verification outcome is uncertain",
+        ) from None
+    if post_doc != doc_ref or not isinstance(post_fp, str) or not post_fp.strip() or post_fp == current_fp:
+        raise FusionScriptError(
+            "OPERATION_UNCERTAIN",
+            "Transaction commit verification outcome is uncertain",
+        )
+    return post_fp, post_doc
+
+
 def run():
     op = PAYLOAD.get("operation", "")
     if op not in ("begin", "stage", "status", "preview", "commit", "abort", "rollback"):
@@ -384,9 +400,7 @@ def run():
         if not callable(globals().get("_transaction_begin_primitive")):
             native = _transaction_native_runtime(plan, False)
             applied = native["applied"]
-            post_fp, _, post_doc = _transaction_fingerprint(PAYLOAD)
-            if post_doc != doc_ref or not isinstance(post_fp, str) or not post_fp.strip() or post_fp == current_fp:
-                raise FusionScriptError("MUTATION_FAILED", "Transaction commit lacks truthful changed authoritative state", {"applied": False})
+            post_fp, post_doc = _transaction_post_commit_state(current_fp, doc_ref)
             return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id, "refs": [], "internal_ref_hints": applied["internal_ref_hints"], "provenance": applied["provenance"], "persisted_provenance": applied["persisted_provenance"], "same_command_provenance": True, "same_operation_provenance": True, "replayed_plan": plan}, summary="Committed exact staged transaction plan", changed_refs=[])
         begin = _require_transaction_primitive("_transaction_begin_primitive")
         apply_plan = _require_transaction_primitive("_transaction_apply_plan_primitive")
@@ -397,9 +411,7 @@ def run():
             raise FusionScriptError("FUSION_API_ERROR", "Transaction replay did not prove same-command provenance", {"applied": False})
         refs = _transaction_opaque_refs(applied.get("refs"))
         commit(PAYLOAD)
-        post_fp, _, post_doc = _transaction_fingerprint(PAYLOAD)
-        if post_doc != doc_ref or not isinstance(post_fp, str) or not post_fp.strip() or post_fp == current_fp:
-            raise FusionScriptError("MUTATION_FAILED", "Transaction commit lacks truthful changed authoritative state", {"applied": False})
+        post_fp, post_doc = _transaction_post_commit_state(current_fp, doc_ref)
         return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id, "refs": refs, "provenance": applied.get("provenance"), "same_command_provenance": True, "replayed_plan": plan}, summary="Committed exact staged transaction plan", changed_refs=refs)
 
     if op in ("abort", "rollback"):

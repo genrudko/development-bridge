@@ -668,6 +668,64 @@ def test_commit_rechecks_then_replays_exact_plan_once_with_no_metadata_followup(
     assert result["data"]["same_command_provenance"] is True
 
 
+def test_ptransaction_post_commit_fingerprint_exception_is_uncertain(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    original_fingerprint = runtime["_transaction_fingerprint_primitive"]
+    calls = {"count": 0}
+
+    def fingerprint(payload):
+        calls["count"] += 1
+        if calls["count"] == 3:
+            raise RuntimeError("post-commit fingerprint unavailable")
+        return original_fingerprint(payload)
+
+    runtime["_transaction_fingerprint_primitive"] = fingerprint
+    result = _run(payload, runtime)
+
+    assert state["text_add_count"] == 1
+    commands = [e[1] for e in events if isinstance(e, tuple) and e[0] == "executeTextCommand"]
+    assert commands == ['PTransaction.Start "bridge_cad_transaction"', "PTransaction.Commit"]
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+
+
+def test_primitive_commit_post_commit_unchanged_fingerprint_is_uncertain():
+    events = []
+    plan = [{"action_type": "text_create"}]
+
+    def fingerprint(_payload):
+        events.append("fingerprint")
+        return "fp_base", {}, "doc_1"
+
+    def apply(received):
+        events.append(("apply", received))
+        return {
+            "refs": [],
+            "provenance": {"transaction_id": "tx_spike"},
+            "same_operation_provenance": True,
+        }
+
+    result = _run(
+        {
+            "operation": "commit",
+            "transaction_id": "tx_spike",
+            "document_ref": "doc_1",
+            "expected_fingerprint": "fp_base",
+            "plan": plan,
+        },
+        {
+            "_transaction_fingerprint_primitive": fingerprint,
+            "_transaction_begin_primitive": lambda payload: events.append("begin"),
+            "_transaction_apply_plan_primitive": apply,
+            "_transaction_commit_primitive": lambda payload: events.append("commit"),
+        },
+    )
+
+    assert events == ["fingerprint", "begin", ("apply", plan), "commit", "fingerprint"]
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+
+
 def test_commit_rejects_nonopaque_generated_refs():
     state = {"fingerprint": "fp_base"}
 
