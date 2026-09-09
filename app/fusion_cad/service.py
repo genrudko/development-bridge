@@ -3039,7 +3039,12 @@ class FusionCadService:
             action = payload.get("action")
             if isinstance(action, dict) and action.get("action_type") == "text_create":
                 tx_id = str(payload["transaction_id"])
-                journal_operation_id = f"op_{uuid.uuid5(uuid.NAMESPACE_URL, tx_id).hex[:12]}"
+                provenance_operation_id = (
+                    f"op_{uuid.uuid5(uuid.NAMESPACE_URL, tx_id).hex[:12]}"
+                )
+                journal_operation_id = f"op_{uuid.uuid4().hex[:12]}"
+                while journal_operation_id == provenance_operation_id:
+                    journal_operation_id = f"op_{uuid.uuid4().hex[:12]}"
                 plan_action = dict(action)
                 plan_action.update(
                     {
@@ -3049,7 +3054,7 @@ class FusionCadService:
                     }
                 )
                 self._prepare_style_payload(
-                    plan_action, "text_create", journal_operation_id
+                    plan_action, "text_create", provenance_operation_id
                 )
                 payload["action"] = plan_action
         if effective_bundle_group == "transaction" and op == "commit":

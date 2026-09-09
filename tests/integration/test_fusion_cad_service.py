@@ -2833,6 +2833,111 @@ async def test_falsify_async_transaction_lifecycle_queued_failed_and_succeeded(
 
 
 @pytest.mark.asyncio
+async def test_transaction_stage_does_not_consume_commit_provenance_operation_id(
+    real_desktop_service: DesktopNodeService,
+):
+    await real_desktop_service.register(
+        "desk-1", [{"name": "fusion_mcp_execute"}], True
+    )
+    cad_service = FusionCadService(real_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [
+                CapabilityRecord(
+                    name="transaction.preview_replay", state="supported"
+                ),
+                CapabilityRecord(name="design.access", state="supported"),
+                CapabilityRecord(
+                    name="revision.external_change_detection", state="supported"
+                ),
+            ]
+        ),
+    )
+    tx_id = "tx_distinct_stage_commit_ids"
+
+    begin = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "begin",
+            "transaction_id": tx_id,
+            "document_ref": "doc_1",
+        },
+        group="transaction",
+    )
+    begin_status = real_desktop_service.operation_status(
+        "desk-1", begin["operation_id"]
+    )
+    cad_service.finalize_terminal_operation(
+        {**begin_status, "status": "succeeded"},
+        {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Transaction begin completed",
+            "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+            "data": {
+                "operation": "begin",
+                "applied": True,
+                "transaction_id": tx_id,
+                "fingerprint": "fp_stage_commit_ids",
+            },
+        },
+    )
+
+    stage = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "stage",
+            "transaction_id": tx_id,
+            "action": {
+                "action_type": "text_create",
+                "text": "Schedule",
+                "height_mm": 4.0,
+                "position": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.0,
+                    "frame": {"space": "world"},
+                },
+            },
+        },
+        group="transaction",
+    )
+    stage_operation_id = stage["operation_id"]
+    stage_status = real_desktop_service.operation_status(
+        "desk-1", stage_operation_id
+    )
+    staged_payload = stage_status["checkpoint"]["finalization_payload"]
+    provenance_operation_id = staged_payload["action"]["provenance"]["operation_id"]
+    cad_service.finalize_terminal_operation(
+        {**stage_status, "status": "succeeded"},
+        {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Transaction stage completed",
+            "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+            "data": {
+                "operation": "stage",
+                "applied": False,
+                "transaction_id": tx_id,
+            },
+        },
+    )
+
+    commit = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "commit",
+            "transaction_id": tx_id,
+        },
+        group="transaction",
+    )
+
+    assert stage_operation_id != provenance_operation_id
+    assert commit["operation_id"] == provenance_operation_id
+
+
+@pytest.mark.asyncio
 async def test_falsify_transaction_preview_and_commit_bound_to_begin_baseline_and_wrong_doc_fails_closed(
     mock_desktop_service: DesktopNodeService,
 ):
