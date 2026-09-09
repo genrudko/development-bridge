@@ -107,6 +107,55 @@ def collect_model_fingerprint(payload=None):
     import hashlib
     import re
 
+    def _stable_runtime_identity(entity):
+        if entity is None:
+            return None
+
+        candidates = [entity]
+        try:
+            native = getattr(entity, "nativeObject", None)
+        except Exception:
+            native = None
+        if native is not None and native is not entity:
+            candidates.append(native)
+
+        for candidate in candidates:
+            for field in ("entityToken", "id"):
+                try:
+                    value = getattr(candidate, field, None)
+                except Exception:
+                    value = None
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+
+        try:
+            object_type = str(getattr(entity, "objectType", None) or type(entity).__name__)
+        except Exception:
+            object_type = type(entity).__name__
+        if "Occurrence" in object_type:
+            try:
+                full_path = getattr(entity, "fullPathName", None)
+            except Exception:
+                full_path = None
+            try:
+                component = getattr(entity, "component", None)
+            except Exception:
+                component = None
+            component_id = None
+            if component is not None:
+                for field in ("entityToken", "id"):
+                    try:
+                        value = getattr(component, field, None)
+                    except Exception:
+                        value = None
+                    if value is not None and str(value).strip():
+                        component_id = str(value).strip()
+                        break
+            if component_id and full_path and str(full_path).strip():
+                basis = (component_id + "\0" + str(full_path).strip()).encode("utf-8")
+                return "occproxy_" + hashlib.sha256(basis).hexdigest()
+        return None
+
     app = None
     doc = None
     design = None
@@ -184,7 +233,7 @@ def collect_model_fingerprint(payload=None):
             try:
                 item = timeline.item(i)
                 item_entity = getattr(item, "entity", None)
-                item_id = (getattr(item, "entityToken", None) or getattr(item, "id", None) or (item_entity and getattr(item_entity, "entityToken", None)) or (item_entity and getattr(item_entity, "id", None)))
+                item_id = _stable_runtime_identity(item_entity) or _stable_runtime_identity(item)
                 if not item_id or not str(item_id).strip():
                     raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Timeline item {i} and its associated entity lack stable runtime identity (entityToken or id)", details={"timeline_index": i})
                 t_items.append({
@@ -968,13 +1017,13 @@ def collect_model_fingerprint(payload=None):
         for t_idx in range(timeline.count):
             t = timeline.item(t_idx)
             feat = getattr(t, "entity", None)
-            t_id = (getattr(t, "entityToken", None) or getattr(t, "id", None) or (feat and getattr(feat, "entityToken", None)) or (feat and getattr(feat, "id", None)))
+            t_id = _stable_runtime_identity(feat) or _stable_runtime_identity(t)
             if not t_id or not str(t_id).strip():
                 raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Timeline item {t_idx} and its associated entity lack stable runtime identity (entityToken or id)", details={"timeline_index": t_idx})
             if getattr(t, "attributes", None) is not None:
                 _read_owner_attributes(t, "timeline", str(t_id).strip())
             if feat:
-                f_id = getattr(feat, "entityToken", None) or getattr(feat, "id", None)
+                f_id = _stable_runtime_identity(feat)
                 if not f_id or not str(f_id).strip():
                     raise FusionScriptError(
                         "CAPABILITY_UNAVAILABLE",

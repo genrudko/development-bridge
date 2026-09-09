@@ -890,6 +890,102 @@ def test_model_snapshot_uses_timeline_entity_as_stable_identity(monkeypatch) -> 
     assert result["data"]["features"][0]["id"] == "feature-token-1"
 
 
+
+def test_model_snapshot_accepts_nested_occurrence_proxy_without_entity_token(monkeypatch) -> None:
+    class Collection:
+        def __init__(self, items=()):
+            self._items = list(items)
+
+        @property
+        def count(self) -> int:
+            return len(self._items)
+
+        def item(self, index: int) -> Any:
+            return self._items[index]
+
+        def __bool__(self) -> bool:
+            return bool(self._items)
+
+    class NestedOccurrenceProxy:
+        objectType = "adsk::fusion::Occurrence"
+        name = "NAME_PLATE_NASTYA_B:1"
+        fullPathName = "NAME_PLATE_NASTYA_B:1"
+        id = None
+        attributes = Collection([])
+
+        @property
+        def entityToken(self) -> str:
+            raise RuntimeError(
+                "3 : Tokens can only be created for proxies whose top-level parent is the root component."
+            )
+
+        component = types.SimpleNamespace(entityToken="component-token-1", id=None)
+
+    feature = NestedOccurrenceProxy()
+    timeline_item = types.SimpleNamespace(
+        index=223,
+        name=" NAME_PLATE_NASTYA_B:1",
+        isSuppressed=False,
+        isRolledBack=False,
+        isValid=True,
+        healthStatus=None,
+        entity=feature,
+        isGroup=False,
+    )
+    root = types.SimpleNamespace(
+        name="Root",
+        id="root",
+        entityToken="root-token",
+        allOccurrences=Collection([]),
+        bRepBodies=Collection([]),
+        sketches=Collection([]),
+        attributes=Collection([]),
+    )
+    design = types.SimpleNamespace(
+        rootComponent=root,
+        timeline=Collection([timeline_item]),
+        allComponents=Collection([root]),
+        allParameters=Collection([]),
+    )
+
+    class Products:
+        def itemByProductType(self, product_type: str) -> Any:
+            assert product_type == "DesignProductType"
+            return design
+
+    doc = types.SimpleNamespace(
+        creationId="timeline-proxy-design",
+        dataId=None,
+        dataFile=None,
+        name="Untitled",
+        isModified=False,
+        savedVersion=None,
+        products=Products(),
+        attributes=Collection([]),
+    )
+    app = types.SimpleNamespace(activeDocument=doc, activeProduct=design)
+
+    adsk = types.ModuleType("adsk")
+    core = types.ModuleType("adsk.core")
+    fusion = types.ModuleType("adsk.fusion")
+    core.Application = types.SimpleNamespace(get=lambda: app)
+    fusion.Design = types.SimpleNamespace(cast=lambda value: value if value is design else None)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    script = FusionCadScriptBundle.build(
+        "read", {"operation": "model_snapshot", "detail": "compact"}
+    )
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<fusion-nested-occurrence-proxy>", "exec"), scope)  # noqa: S102
+
+    result = scope["_output"]
+    assert result["status"] == "succeeded"
+    assert result["data"]["features"][0]["id"].startswith("occproxy_")
+
 def test_p0_rendered_bundles_fit_default_desktop_argument_limit() -> None:
     """Default desktop relay must carry every static P0 Fusion script bundle."""
     import json
