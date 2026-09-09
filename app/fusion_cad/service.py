@@ -3071,7 +3071,19 @@ class FusionCadService:
                     payload.get("document_ref")
                     or self._revision_tracker.active_document_ref
                 )
-                record = self._resolve_opaque_inspect_ref(raw_ref, doc_ref)
+                record = (
+                    self._ref_registry.get_internal_record(raw_ref, doc_ref)
+                    if doc_ref is not None
+                    else self._ref_registry.get_internal_record(raw_ref)
+                )
+                if record is None and doc_ref is not None:
+                    other = self._ref_registry.get_internal_record(raw_ref)
+                    if other is not None and other.document_ref != doc_ref:
+                        raise FusionCadError(
+                            ErrorCode.WRONG_DOCUMENT,
+                            "Entity ref belongs to a different document than the effective read context",
+                            details={"ref": raw_ref, "active_document_ref": doc_ref},
+                        )
                 if record is not None:
                     if not record.native_token:
                         raise FusionCadError(
