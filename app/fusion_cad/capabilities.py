@@ -460,33 +460,13 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 8. view.pick (Finding 3: load-bearing pick remains degraded/unavailable until later live feasibility proof)
-        if not probe_failed and facts.get("has_selection_primitives"):
-            records.append(CapabilityRecord(
-                name="view.pick",
-                state="degraded",
-                implementation="native-preselect",
-                limitations=("Visual pick requires live feasibility proof; load-bearing pick remains degraded pending live verification",),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        elif not probe_failed and facts.get("has_viewport_conversion"):
-            records.append(CapabilityRecord(
-                name="view.pick",
-                state="degraded",
-                implementation="viewport-raycast",
-                limitations=("Raycast geometry intersection without native preselection; load-bearing pick remains degraded pending live verification",),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
+        # 8. view.pick -- Task 9 selects one production strategy only: viewport-raycast.
+        if not probe_failed and facts.get("pick_runtime_verified"):
+            records.append(CapabilityRecord(name="view.pick", state="supported", implementation="viewport-raycast", fusion_version=fusion_version, relay_version=relay_version))
+        elif not probe_failed and (facts.get("has_viewport_conversion") or facts.get("has_viewport_conversion_context")):
+            records.append(CapabilityRecord(name="view.pick", state="degraded", implementation="viewport-raycast", limitations=("Viewport raycast prerequisites are present but the live feasibility proof / raycast contract has not been verified for this runtime context",), fusion_version=fusion_version, relay_version=relay_version))
         else:
-            records.append(CapabilityRecord(
-                name="view.pick",
-                state="unavailable",
-                limitations=err_limits("Neither selection primitives nor viewport projection methods available"),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
+            records.append(CapabilityRecord(name="view.pick", state="unavailable", limitations=err_limits("Verified viewport-raycast prerequisites are not available"), fusion_version=fusion_version, relay_version=relay_version))
 
         # 9. selection.primitives (Finding 2: activeSelections/count is insufficient; prefer degraded/unavailable)
         if not probe_failed and (facts.get("has_selection_primitives") or facts.get("has_active_selections_context") or facts.get("selection_runtime_verified")):

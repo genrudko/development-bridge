@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import uuid
 from collections.abc import Mapping
@@ -1213,6 +1214,164 @@ class FusionCadService:
             details={"content_type": "unknown"},
         )
 
+    def _prepare_pick_payload(self, payload: dict[str, Any], node_id: str) -> None:
+        view_ref = payload.get("view_ref")
+        if not isinstance(view_ref, str) or not view_ref:
+            raise FusionCadError(ErrorCode.INVALID_ARGUMENT, "pick requires a bound view_ref")
+        record = self.assert_view_fresh(
+            view_ref,
+            node_id,
+            payload.get("document_ref") if isinstance(payload.get("document_ref"), str) else None,
+        )
+        expected_fp = self._revision_tracker.get_fingerprint(
+            record.document_ref, record.model_revision
+        )
+        if not isinstance(expected_fp, str) or not expected_fp.strip():
+            raise FusionCadError(
+                ErrorCode.VIEW_STALE,
+                "Bound screenshot model revision no longer has an authoritative fingerprint",
+                details={"view_ref": view_ref, "document_ref": record.document_ref},
+            )
+        camera = record.camera
+        payload["document_ref"] = record.document_ref
+        payload["_pick_expected"] = {
+            "document_ref": record.document_ref,
+            "model_fingerprint": expected_fp.strip(),
+            "camera": {
+                "eye": list(camera.eye),
+                "target": list(camera.target),
+                "up": list(camera.up),
+                "projection": camera.projection,
+                "fov_deg": camera.fov_deg,
+                "ortho_extent_width_cm": camera.ortho_extent_width_cm,
+                "ortho_extent_height_cm": camera.ortho_extent_height_cm,
+                "viewport_width": camera.viewport_width,
+                "viewport_height": camera.viewport_height,
+            },
+            "visibility": dict(record.visibility_state),
+            "section": dict(record.section_state),
+            "image_width": record.viewport_width,
+            "image_height": record.viewport_height,
+        }
+
+    def _finalize_pick_execution(
+        self, cad_result: CadResult, *, payload: dict[str, Any]
+    ) -> CadResult:
+        data = dict(cad_result.data) if isinstance(cad_result.data, Mapping) else {}
+        raw_candidates = data.get("candidates")
+        if not isinstance(raw_candidates, (list, tuple)):
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Screen-space pick result lacks an ordered candidate list",
+            )
+        raw_hit = data.get("hit")
+        if not isinstance(raw_hit, bool):
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Screen-space pick result lacks boolean hit state",
+            )
+        if data.get("candidate_count") not in (None, len(raw_candidates)):
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Screen-space pick candidate_count does not match candidate list",
+            )
+        expected = payload.get("_pick_expected")
+        doc_ref = expected.get("document_ref") if isinstance(expected, Mapping) else None
+        if not isinstance(doc_ref, str) or not doc_ref:
+            raise FusionCadError(ErrorCode.VIEW_STALE, "Pick result lost bound document authority")
+
+        public_candidates: list[dict[str, Any]] = []
+        allowed_kinds = {"body", "face", "edge", "vertex"}
+        for idx, raw in enumerate(raw_candidates):
+            if not isinstance(raw, Mapping):
+                raise FusionCadError(ErrorCode.FUSION_API_ERROR, "Pick candidate is not a mapping")
+            kind = str(raw.get("kind") or "").lower()
+            if kind not in allowed_kinds:
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Pick candidate returned an unsupported entity kind",
+                    details={"candidate_index": idx},
+                )
+            native_token = raw.get("native_token") or raw.get("entityToken") or raw.get("token")
+            if not isinstance(native_token, str) or not native_token:
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Pick candidate lacks stable native identity",
+                    details={"candidate_index": idx},
+                )
+            world_point = raw.get("world_point")
+            if not isinstance(world_point, Mapping):
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Pick candidate lacks a world hit point",
+                    details={"candidate_index": idx},
+                )
+            try:
+                coords = [float(world_point[k]) for k in ("x", "y", "z")]
+            except (KeyError, TypeError, ValueError):
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Pick candidate world hit point is invalid",
+                    details={"candidate_index": idx},
+                ) from None
+            if not all(math.isfinite(v) for v in coords):
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Pick candidate world hit point is non-finite",
+                    details={"candidate_index": idx},
+                )
+            try:
+                distance = float(raw.get("distance"))
+            except (TypeError, ValueError):
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Pick candidate distance is invalid",
+                    details={"candidate_index": idx},
+                ) from None
+            if not math.isfinite(distance) or distance < 0.0:
+                raise FusionCadError(
+                    ErrorCode.FUSION_API_ERROR,
+                    "Pick candidate distance is invalid",
+                    details={"candidate_index": idx},
+                )
+            issued = self._ref_registry.issue(
+                document_ref=doc_ref,
+                kind=kind,
+                name=str(raw.get("name")) if raw.get("name") else None,
+                native_token=native_token,
+            )
+            public_candidates.append(
+                {
+                    "ref": issued.ref,
+                    "kind": kind,
+                    "depth": idx,
+                    "world_point": {
+                        "x": coords[0],
+                        "y": coords[1],
+                        "z": coords[2],
+                        "frame": {"space": "world", "ref": None},
+                    },
+                    "distance": distance,
+                }
+            )
+        if raw_hit != bool(public_candidates):
+            raise FusionCadError(
+                ErrorCode.FUSION_API_ERROR,
+                "Screen-space pick hit state contradicts candidate list",
+            )
+        return cad_result.model_copy(
+            update={
+                "data": ImmutableMapping(
+                    {
+                        "hit": raw_hit,
+                        "candidate_count": len(public_candidates),
+                        "candidates": tuple(public_candidates),
+                    }
+                ),
+                "summary": "Screen-space pick resolved to ordered opaque entity refs",
+            }
+        )
+
     def _finalize_view_operation(
         self,
         cad_result: CadResult,
@@ -2136,6 +2295,9 @@ class FusionCadService:
                     cad_result, op=op, payload=payload
                 )
 
+            if effective_bundle_group == "view" and op == "pick":
+                cad_result = self._finalize_pick_execution(cad_result, payload=payload)
+
             # 6. Semantic view normalization: camera/visibility/section + immutable ViewRef
             if effective_bundle_group == "view" and op in _VIEW_FINALIZE_OPS:
                 cad_result = self._finalize_view_operation(
@@ -2892,6 +3054,9 @@ class FusionCadService:
                     operation_id = provenance.get("operation_id")
                     if isinstance(operation_id, str):
                         journal_operation_id = operation_id
+
+        if effective_bundle_group == "view" and op == "pick":
+            self._prepare_pick_payload(payload, node_id)
 
         # Inspection targets known to this service get exact native resolution hints;
         # view zoom/orient target operations reuse the exact Task5/Task7 ref machinery.

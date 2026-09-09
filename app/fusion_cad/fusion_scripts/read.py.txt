@@ -49,7 +49,7 @@ def probe_runtime():
                 except Exception:
                     pass
                 try:
-                    if hasattr(viewport, "modelToScreen") and hasattr(viewport, "screenToModel"):
+                    if hasattr(viewport, "viewToModelSpace"):
                         facts["has_viewport_conversion_context"] = True
                 except Exception:
                     pass
@@ -67,12 +67,7 @@ def probe_runtime():
 
         if app and getattr(app, "activeDocument", None):
             doc = app.activeDocument
-            products = getattr(doc, "products", None)
-            if products:
-                try:
-                    design = products.itemByClass("adsk::fusion::Design")
-                except Exception:
-                    design = None
+            design = _fusion_design_from_context(app, doc)
             if design:
                 facts["has_design_access"] = True
                 facts["has_timeline_access"] = hasattr(design, "timeline")
@@ -95,7 +90,7 @@ def probe_runtime():
     try:
         import adsk.core
         facts["has_camera"] = hasattr(adsk.core, "Camera")
-        facts["has_viewport_conversion"] = hasattr(adsk.core.Viewport, "modelToScreen") and hasattr(adsk.core.Viewport, "screenToModel")
+        facts["has_viewport_conversion"] = hasattr(adsk.core.Viewport, "viewToModelSpace")
     except Exception:
         pass
 
@@ -111,6 +106,35 @@ def probe_runtime():
         facts["has_attributes"] = facts.get("has_attributes", False) or hasattr(adsk.core, "Attributes")
     except Exception:
         pass
+
+    # Task 9: prove the selected viewport-raycast contract on the active runtime.
+    try:
+        import adsk.core
+        import adsk.fusion
+        viewport = getattr(app, "activeViewport", None) if app else None
+        if viewport is not None and design is not None:
+            root = getattr(design, "rootComponent", None)
+            to_model = getattr(viewport, "viewToModelSpace", None)
+            raycast = getattr(root, "findBRepUsingRay", None) if root is not None else None
+            if callable(to_model) and callable(raycast):
+                screen_point = adsk.core.Point2D.create(float(viewport.width)/2.0, float(viewport.height)/2.0)
+                model_point = to_model(screen_point); camera = viewport.camera; camera_types = adsk.core.CameraTypes
+                if camera.cameraType == camera_types.OrthographicCameraType:
+                    origin = model_point
+                    direction = adsk.core.Vector3D.create(camera.target.x-camera.eye.x, camera.target.y-camera.eye.y, camera.target.z-camera.eye.z)
+                elif camera.cameraType in (camera_types.PerspectiveCameraType, camera_types.PerspectiveWithOrthoFacesCameraType):
+                    origin = camera.eye
+                    direction = adsk.core.Vector3D.create(model_point.x-camera.eye.x, model_point.y-camera.eye.y, model_point.z-camera.eye.z)
+                else:
+                    origin = None; direction = None
+                if origin is not None and direction is not None:
+                    hit_points = adsk.core.ObjectCollection.create()
+                    hits = raycast(origin, direction, adsk.fusion.BRepEntityTypes.BRepFaceEntityType, 0.001, True, hit_points)
+                    if hits is not None and hasattr(hits, "count") and hit_points.count == hits.count:
+                        facts["pick_runtime_verified"] = True
+                        facts["viewport_conversion_verified"] = True
+    except Exception:
+        facts["pick_runtime_verified"] = False
 
     if "probe_facts" in PAYLOAD and isinstance(PAYLOAD["probe_facts"], dict):
         facts.update(PAYLOAD["probe_facts"])
@@ -310,34 +334,13 @@ def probe_runtime():
             "limitations": err_limits("Viewport screen/model coordinate conversion methods not available"),
         })
 
-    # 8. view.pick (Finding 3: load-bearing pick remains degraded/unavailable until later live feasibility proof)
-    if not probe_failed and facts.get("has_selection_primitives"):
-        records.append({
-            "name": "view.pick",
-            "state": "degraded",
-            "implementation": "native-preselect",
-            "fusion_version": resolved_version,
-            "relay_version": relay_version,
-            "limitations": ["Visual pick requires live feasibility proof; load-bearing pick remains degraded pending live verification"],
-        })
-    elif not probe_failed and facts.get("has_viewport_conversion"):
-        records.append({
-            "name": "view.pick",
-            "state": "degraded",
-            "implementation": "viewport-raycast",
-            "fusion_version": resolved_version,
-            "relay_version": relay_version,
-            "limitations": ["Raycast geometry intersection without native preselection; load-bearing pick remains degraded pending live verification"],
-        })
+    # 8. view.pick -- Task 9 selects one production strategy only: viewport-raycast.
+    if not probe_failed and facts.get("pick_runtime_verified"):
+        records.append({"name":"view.pick","state":"supported","implementation":"viewport-raycast","fusion_version":resolved_version,"relay_version":relay_version,"limitations":[]})
+    elif not probe_failed and (facts.get("has_viewport_conversion") or facts.get("has_viewport_conversion_context")):
+        records.append({"name":"view.pick","state":"degraded","implementation":"viewport-raycast","fusion_version":resolved_version,"relay_version":relay_version,"limitations":["Viewport raycast prerequisites are present but the live feasibility proof / raycast contract has not been verified for this runtime context"]})
     else:
-        records.append({
-            "name": "view.pick",
-            "state": "unavailable",
-            "implementation": None,
-            "fusion_version": resolved_version,
-            "relay_version": relay_version,
-            "limitations": err_limits("Neither selection primitives nor viewport projection methods available"),
-        })
+        records.append({"name":"view.pick","state":"unavailable","implementation":None,"fusion_version":resolved_version,"relay_version":relay_version,"limitations":err_limits("Verified viewport-raycast prerequisites are not available")})
 
     # 9. selection.primitives (Finding 2: activeSelections/count is insufficient; prefer degraded/unavailable)
     if not probe_failed and (facts.get("has_selection_primitives") or facts.get("has_active_selections_context") or facts.get("selection_runtime_verified")):

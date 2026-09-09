@@ -460,3 +460,39 @@ def test_falsify_finding_3_load_bearing_pick_and_transaction_not_contract_suppor
     assert matrix.get("export.dxf").state == "unavailable"
     assert matrix.get("view.section").state == "unavailable"
     assert matrix.get("assembly.joints").state == "unavailable"
+
+
+def test_pick_becomes_supported_only_after_runtime_raycast_verification():
+    base = {
+        "application": "Autodesk Fusion",
+        "fusion_version": "2.0.18000",
+        "probe_facts": {
+            "has_app": True,
+            "has_adsk_fusion": True,
+            "has_design_access": True,
+            "has_viewport_conversion": True,
+        },
+    }
+    degraded = CapabilityMatrix.from_probe(base).get("view.pick")
+    assert degraded is not None
+    assert degraded.state == "degraded"
+
+    verified = {**base, "probe_facts": {**base["probe_facts"], "pick_runtime_verified": True}}
+    supported = CapabilityMatrix.from_probe(verified).get("view.pick")
+    assert supported is not None
+    assert supported.state == "supported"
+    assert supported.implementation == "viewport-raycast"
+    assert supported.limitations == ()
+
+
+def test_read_capability_probe_reuses_verified_real_fusion_design_resolver():
+    from app.fusion_cad.scripts import FusionCadScriptBundle
+
+    script = FusionCadScriptBundle().build(
+        "read", {"node_id": "desk-1", "operation": "capabilities"}
+    )
+    start = script.index("def probe_runtime():")
+    end = script.index("def run():", start)
+    probe = script[start:end]
+    assert "design = _fusion_design_from_context(app, doc)" in probe
+    assert "products.itemByClass" not in probe

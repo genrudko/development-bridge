@@ -2041,3 +2041,72 @@ async def test_view_screenshot_tool_image_uri_matches_emitted_resource_link(tmp_
     assert summary.height == 480
     # Freshness against the current context still holds after image promotion.
     container.fusion_cad.assert_view_fresh(record.view_ref, "desk-1", "doc_1")
+
+
+# =========================================================================
+# Task 9: screen-space pick service contract
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_view_pick_fresh_view_injects_immutable_authority_and_normalizes_hits(tmp_path):
+    container = _build_view_container(tmp_path)
+    container.desktop_nodes.submit = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps(_screenshot_desktop_result())}],
+        "isError": False,
+    })
+    shot = await container.fusion_cad.execute({"node_id": "desk-1", "operation": "screenshot"})
+    full, _ = container.desktop_nodes.external_result(shot["external_result"])
+    view_ref = full["data"]["view_ref"]
+
+    captured = {}
+    async def pick_call(node_id, tool_name, arguments, journal=None):
+        captured["script"] = arguments["script"]
+        return {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "pick",
+            "data": {
+                "hit": True,
+                "candidate_count": 2,
+                "candidates": [
+                    {"kind":"face","name":"FaceA","native_token":"native_face_a","depth":0,"world_point":{"x":1.0,"y":2.0,"z":3.0,"frame":{"space":"world","ref":None}},"distance":10.0},
+                    {"kind":"face","name":"FaceB","native_token":"native_face_b","depth":1,"world_point":{"x":4.0,"y":5.0,"z":6.0,"frame":{"space":"world","ref":None}},"distance":20.0},
+                ],
+            },
+        }
+    container.desktop_nodes.call = pick_call  # type: ignore[assignment]
+
+    result = await container.fusion_cad.execute({"node_id":"desk-1","operation":"pick","view_ref":view_ref,"x":0.5,"y":0.5,"filters":["face"]})
+    data = result["data"] if isinstance(result, dict) else dict(result.data)
+    assert data["hit"] is True
+    assert data["candidate_count"] == 2
+    assert [c["depth"] for c in data["candidates"]] == [0, 1]
+    assert all(str(c["ref"]).startswith("ent_") for c in data["candidates"])
+    assert "native_face_a" not in repr(data)
+    assert "native_face_b" not in repr(data)
+    payload = _extract_script_payload(captured["script"])
+    expected = payload["_pick_expected"]
+    assert expected["document_ref"] == "doc_1"
+    assert expected["model_fingerprint"] == "hash-desk1-seed"
+    assert expected["image_width"] == 1920
+    assert expected["image_height"] == 1080
+    assert expected["camera"]["viewport_width"] == 1920
+    assert expected["camera"]["viewport_height"] == 1080
+
+
+@pytest.mark.asyncio
+async def test_view_pick_known_stale_view_blocks_before_raycast_dispatch(tmp_path):
+    container = _build_view_container(tmp_path)
+    container.desktop_nodes.submit = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps(_screenshot_desktop_result())}],
+        "isError": False,
+    })
+    shot = await container.fusion_cad.execute({"node_id": "desk-1", "operation": "screenshot"})
+    full, _ = container.desktop_nodes.external_result(shot["external_result"])
+    view_ref = full["data"]["view_ref"]
+    container.fusion_cad.revision_tracker.observe("doc_1", "hash-after-shot")
+    container.desktop_nodes.call = AsyncMock()
+    with pytest.raises(FusionCadError) as exc:
+        await container.fusion_cad.execute({"node_id":"desk-1","operation":"pick","view_ref":view_ref,"x":0.5,"y":0.5})
+    assert exc.value.code == ErrorCode.VIEW_STALE
+    assert container.desktop_nodes.call.call_count == 0

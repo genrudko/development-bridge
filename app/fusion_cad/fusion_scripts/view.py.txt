@@ -321,9 +321,7 @@ def _capture_visibility():
 
     app = adsk.core.Application.get()
     doc = getattr(app, "activeDocument", None)
-    design = None
-    if doc is not None and hasattr(doc, "products"):
-        design = doc.products.itemByClass("adsk::fusion::Design")
+    design = _fusion_design_from_context(app, doc)
     if design is None:
         raise FusionScriptError(
             "NO_ACTIVE_DESIGN",
@@ -380,9 +378,7 @@ def _capture_section():
 
     app = adsk.core.Application.get()
     doc = getattr(app, "activeDocument", None)
-    design = None
-    if doc is not None and hasattr(doc, "products"):
-        design = doc.products.itemByClass("adsk::fusion::Design")
+    design = _fusion_design_from_context(app, doc)
     if design is None:
         raise FusionScriptError(
             "NO_ACTIVE_DESIGN",
@@ -641,9 +637,7 @@ def _resolved_native_entity(payload):
         )
     app = adsk.core.Application.get()
     doc = getattr(app, "activeDocument", None)
-    design = None
-    if doc is not None and hasattr(doc, "products"):
-        design = doc.products.itemByClass("adsk::fusion::Design")
+    design = _fusion_design_from_context(app, doc)
     if design is None:
         raise FusionScriptError(
             "NO_ACTIVE_DESIGN",
@@ -820,6 +814,198 @@ def _zoom_camera_to_entity(entity):
     viewport.camera = camera
 
 
+def _pick_canonical_visibility(raw):
+    if not isinstance(raw, dict):
+        raise FusionScriptError("VIEW_STALE", "Current effective visibility is unreadable for immutable pick")
+    entries = []
+    for item in raw.get("entries") or []:
+        if not isinstance(item, dict):
+            raise FusionScriptError("VIEW_STALE", "Current effective visibility entry is unreadable")
+        path = item.get("full_path_name") or item.get("full_path") or item.get("name") or item.get("ref")
+        local = item.get("is_visible")
+        effective = item.get("effective_visibility")
+        if not path or (local is None and effective is None):
+            raise FusionScriptError("VIEW_STALE", "Current effective visibility entry is incomplete")
+        entry = {
+            "path": str(path),
+            "kind": str(item.get("kind") or "entity"),
+            "is_visible": bool(local if local is not None else effective),
+            "effective_visibility": bool(effective if effective is not None else local),
+        }
+        token = item.get("native_token")
+        if isinstance(token, str) and token.strip():
+            entry["native_token"] = token
+        entries.append(entry)
+    entries.sort(key=lambda e: (e["path"], e["kind"], str(e.get("ref", "")), str(e.get("native_token", ""))))
+    state = {"entries": entries, "count": len(entries)}
+    global_raw = raw.get("global")
+    if isinstance(global_raw, dict) and isinstance(global_raw.get("object_visibility"), dict):
+        flags = {
+            str(k): v
+            for k, v in global_raw["object_visibility"].items()
+            if isinstance(k, str) and isinstance(v, (bool, int, float, str))
+        }
+        if flags:
+            state["global"] = {"object_visibility": dict(sorted(flags.items()))}
+    return state
+
+
+def _pick_canonical_section(raw):
+    if not isinstance(raw, dict):
+        raise FusionScriptError("VIEW_STALE", "Current section state is unreadable for immutable pick")
+    sections = []
+    for item in raw.get("sections") or []:
+        if not isinstance(item, dict):
+            raise FusionScriptError("VIEW_STALE", "Current section item is unreadable")
+        ident = item.get("id") or item.get("name") or item.get("entityToken")
+        visible = item.get("is_visible")
+        if visible is None:
+            visible = item.get("effective_visibility")
+        transform = item.get("transform")
+        if not ident or visible is None or not isinstance(transform, (list, tuple)) or len(transform) != 16:
+            raise FusionScriptError("VIEW_STALE", "Current section item is incomplete")
+        sections.append({
+            "id": str(ident),
+            "name": str(item.get("name") or ""),
+            "is_visible": bool(visible),
+            "transform": [canonicalize_value(float(v)) for v in transform],
+        })
+    sections.sort(key=lambda x: (x["id"], x["name"]))
+    active = any(item["is_visible"] for item in sections) if sections else bool(raw.get("active", False))
+    global_visible = bool(raw.get("global_visible", True if active else False))
+    return {
+        "active": active,
+        "type": raw.get("type"),
+        "global_visible": global_visible,
+        "sections": sections,
+        "count": len(sections),
+    }
+
+
+def _pick_current_context(expected):
+    if not isinstance(expected, dict):
+        raise FusionScriptError("VIEW_STALE", "Pick requires an immutable bound view context")
+    expected_doc = expected.get("document_ref")
+    if not expected_doc:
+        raise FusionScriptError("VIEW_STALE", "Bound view lacks document identity")
+    _verify_doc_identity({"document_ref": expected_doc})
+    expected_fp = expected.get("model_fingerprint")
+    if not isinstance(expected_fp, str) or not expected_fp.strip():
+        raise FusionScriptError("VIEW_STALE", "Bound view lacks authoritative model fingerprint")
+    current_fp, _, _ = collect_model_fingerprint({"document_ref": expected_doc})
+    if current_fp != expected_fp:
+        raise FusionScriptError("VIEW_STALE", "Screenshot view is stale: active model changed", details={"view_ref": PAYLOAD.get("view_ref")})
+    current = _collect_view_context("pick")
+    camera = dict(current["camera"])
+    camera["viewport_width"] = int(current["viewport"]["width"])
+    camera["viewport_height"] = int(current["viewport"]["height"])
+    if camera != expected.get("camera"):
+        raise FusionScriptError("VIEW_STALE", "Screenshot view is stale: camera or viewport changed")
+    if _pick_canonical_visibility(current["visibility"]) != expected.get("visibility"):
+        raise FusionScriptError("VIEW_STALE", "Screenshot view is stale: effective visibility changed")
+    if _pick_canonical_section(current["section"]) != expected.get("section"):
+        raise FusionScriptError("VIEW_STALE", "Screenshot view is stale: section state changed")
+    return current
+
+
+def _pick_view_coordinates(payload, expected, viewport):
+    try:
+        x = float(payload.get("x")); y = float(payload.get("y"))
+    except (TypeError, ValueError):
+        raise FusionScriptError("INVALID_ARGUMENT", "pick x/y coordinates must be numeric") from None
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise FusionScriptError("INVALID_ARGUMENT", "pick x/y coordinates must be finite")
+    coordinate_space = payload.get("coordinate_space", "normalized")
+    if coordinate_space == "normalized":
+        if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+            raise FusionScriptError("INVALID_ARGUMENT", "normalized pick coordinates must be within [0, 1]")
+        return x * float(max(viewport.width - 1, 1)), y * float(max(viewport.height - 1, 1))
+    if coordinate_space == "pixel":
+        image_width = expected.get("image_width"); image_height = expected.get("image_height")
+        if not isinstance(image_width, int) or not isinstance(image_height, int) or image_width <= 0 or image_height <= 0:
+            raise FusionScriptError("VIEW_STALE", "Bound view lacks valid screenshot dimensions")
+        if not (0.0 <= x < image_width and 0.0 <= y < image_height):
+            raise FusionScriptError("INVALID_ARGUMENT", "pixel pick coordinates must lie inside the bound screenshot")
+        nx = x / float(max(image_width - 1, 1)); ny = y / float(max(image_height - 1, 1))
+        return nx * float(max(viewport.width - 1, 1)), ny * float(max(viewport.height - 1, 1))
+    raise FusionScriptError("INVALID_ARGUMENT", f"Unsupported pick coordinate_space '{coordinate_space}'")
+
+
+def _pick_entity_type(kind, adsk_fusion_module):
+    entity_types = getattr(adsk_fusion_module, "BRepEntityTypes", None)
+    if entity_types is None:
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "BRepEntityTypes unavailable for viewport raycast")
+    names = {"body": "BRepBodyEntityType", "face": "BRepFaceEntityType", "edge": "BRepEdgeEntityType", "vertex": "BRepVertexEntityType"}
+    name = names.get(kind)
+    if name is None or not hasattr(entity_types, name):
+        raise FusionScriptError("INVALID_ARGUMENT", f"Unsupported pick filter '{kind}'")
+    return getattr(entity_types, name)
+
+
+def _apply_viewport_pick(payload):
+    import adsk.core
+    import adsk.fusion
+    expected = payload.get("_pick_expected")
+    _pick_current_context(expected)
+    app, viewport = _active_viewport()
+    doc = getattr(app, "activeDocument", None)
+    design = _fusion_design_from_context(app, doc)
+    root = getattr(design, "rootComponent", None) if design is not None else None
+    if root is None or not callable(getattr(root, "findBRepUsingRay", None)):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Component.findBRepUsingRay unavailable for viewport raycast")
+    view_x, view_y = _pick_view_coordinates(payload, expected, viewport)
+    point2d_type = getattr(adsk.core, "Point2D", None)
+    create_point2d = getattr(point2d_type, "create", None) if point2d_type is not None else None
+    if not callable(create_point2d) or not callable(getattr(viewport, "viewToModelSpace", None)):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Viewport.viewToModelSpace unavailable for screen-space pick")
+    model_point = viewport.viewToModelSpace(create_point2d(view_x, view_y))
+    camera = getattr(viewport, "camera", None)
+    if model_point is None or camera is None:
+        raise FusionScriptError("PRECONDITION_FAILED", "Viewport ray origin/direction cannot be derived")
+    camera_types = getattr(adsk.core, "CameraTypes", None)
+    ortho = getattr(camera_types, "OrthographicCameraType", None) if camera_types is not None else None
+    perspective = getattr(camera_types, "PerspectiveCameraType", None) if camera_types is not None else None
+    perspective_ortho = getattr(camera_types, "PerspectiveWithOrthoFacesCameraType", None) if camera_types is not None else None
+    if camera.cameraType == ortho:
+        origin = model_point
+        direction = adsk.core.Vector3D.create(camera.target.x-camera.eye.x, camera.target.y-camera.eye.y, camera.target.z-camera.eye.z)
+    elif camera.cameraType in (perspective, perspective_ortho):
+        origin = camera.eye
+        direction = adsk.core.Vector3D.create(model_point.x-camera.eye.x, model_point.y-camera.eye.y, model_point.z-camera.eye.z)
+    else:
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Unsupported camera type for verified viewport raycast")
+    filters = payload.get("filters") or ["face"]
+    if not isinstance(filters, (list, tuple)) or not filters:
+        filters = ["face"]
+    normalized_filters = []
+    for raw_kind in filters:
+        kind = str(raw_kind).strip().lower(); _pick_entity_type(kind, adsk.fusion)
+        if kind not in normalized_filters: normalized_filters.append(kind)
+    visible_entities_only = True
+    candidates = []
+    for kind in normalized_filters:
+        hit_points = adsk.core.ObjectCollection.create()
+        entities = root.findBRepUsingRay(origin, direction, _pick_entity_type(kind, adsk.fusion), 0.001, visible_entities_only, hit_points)
+        if entities is None or not hasattr(entities, "count") or hit_points.count != entities.count:
+            raise FusionScriptError("FUSION_API_ERROR", "findBRepUsingRay returned inconsistent hit collections")
+        for i in range(entities.count):
+            entity = entities.item(i); hit = hit_points.item(i)
+            token = getattr(entity, "entityToken", None) or getattr(entity, "id", None)
+            if not token or hit is None:
+                raise FusionScriptError("FUSION_API_ERROR", "Raycast hit lacks stable entity identity or hit point")
+            dx=float(hit.x)-float(origin.x); dy=float(hit.y)-float(origin.y); dz=float(hit.z)-float(origin.z)
+            candidates.append({
+                "kind": kind,
+                "name": str(getattr(entity, "name", "") or ""),
+                "native_token": str(token),
+                "world_point": {"x": canonicalize_value(float(hit.x)), "y": canonicalize_value(float(hit.y)), "z": canonicalize_value(float(hit.z)), "frame": {"space": "world", "ref": None}},
+                "distance": canonicalize_value(math.sqrt(dx*dx+dy*dy+dz*dz)),
+            })
+    candidates.sort(key=lambda item: (item["distance"], normalized_filters.index(item["kind"]), item["native_token"]))
+    for depth, item in enumerate(candidates): item["depth"] = depth
+    return {"hit": bool(candidates), "candidates": candidates, "candidate_count": len(candidates)}
+
+
 def _capture_screenshot(viewport, width, height):
     import base64
     import os
@@ -954,6 +1140,12 @@ def run():
         return make_result(
             data=_collect_view_context(op),
             summary="Camera oriented to resolved face",
+        )
+
+    if op == "pick":
+        return make_result(
+            data=_apply_viewport_pick(PAYLOAD),
+            summary="Screen-space pick resolved by verified viewport raycast",
         )
 
     if op == "screenshot":

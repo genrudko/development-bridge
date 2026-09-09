@@ -168,3 +168,84 @@ def test_view_script_always_captures_all_boolean_object_visibility_flags():
     dynamic = script.index("for name in sorted(dir(ov))")
     fallback = script.rfind("if not flags:", 0, dynamic)
     assert fallback == -1
+
+
+# ---------------------------------------------------------------------------
+# Task 9: single verified screen-space pick strategy
+# ---------------------------------------------------------------------------
+
+def test_view_pick_uses_viewport_raycast_only_and_fails_closed_on_stale_view():
+    script = _view_script(
+        "pick",
+        view_ref="view_123",
+        x=0.5,
+        y=0.5,
+        coordinate_space="normalized",
+        filters=["face", "edge", "body"],
+        _pick_expected={
+            "document_ref": "doc_1",
+            "model_fingerprint": "abc",
+            "camera": {},
+            "visibility": {},
+            "section": {},
+            "image_width": 1920,
+            "image_height": 1080,
+        },
+    )
+    assert "viewToModelSpace" in script
+    assert "findBRepUsingRay" in script
+    assert "BRepEntityTypes" in script
+    assert "VIEW_STALE" in script
+    assert "activeSelections" not in script
+    assert "native-preselect" not in script
+    assert "visible_entities_only" in script
+    assert "coordinate_space" in script
+    assert "normalized pick coordinates must be within [0, 1]" in script
+
+
+def test_view_pick_handles_orthographic_and_perspective_rays_explicitly():
+    script = _view_script(
+        "pick",
+        view_ref="view_123",
+        x=100,
+        y=80,
+        coordinate_space="pixel",
+        filters=["face"],
+        _pick_expected={"document_ref": "doc_1", "model_fingerprint": "abc"},
+    )
+    assert "OrthographicCameraType" in script
+    assert "PerspectiveCameraType" in script
+    assert "model_point" in script
+    assert "camera.eye" in script
+    assert "camera.target" in script
+
+
+def test_view_pick_normalized_endpoint_maps_to_last_valid_viewport_pixel():
+    script = _view_script(
+        "pick",
+        view_ref="view_123",
+        x=1.0,
+        y=1.0,
+        coordinate_space="normalized",
+        filters=["face"],
+        _pick_expected={"document_ref":"doc_1","model_fingerprint":"abc"},
+    )
+    assert "max(viewport.width - 1, 1)" in script
+    assert "max(viewport.height - 1, 1)" in script
+    assert "return x * float(viewport.width), y * float(viewport.height)" not in script
+
+
+def test_view_pick_distance_is_measured_from_actual_raycast_origin():
+    script = _view_script(
+        "pick",
+        view_ref="view_123",
+        x=0.5,
+        y=0.5,
+        coordinate_space="normalized",
+        filters=["face"],
+        _pick_expected={"document_ref":"doc_1","model_fingerprint":"abc"},
+    )
+    assert "float(hit.x)-float(origin.x)" in script
+    assert "float(hit.y)-float(origin.y)" in script
+    assert "float(hit.z)-float(origin.z)" in script
+    assert "float(hit.x)-float(camera.eye.x)" not in script
