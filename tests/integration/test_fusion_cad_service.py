@@ -9884,3 +9884,42 @@ def test_task13_commit_native_hint_becomes_opaque_ref_only_after_terminal_succes
         )
     assert failed_service.ref_registry.get_internal_record("ent_missing", "doc_1") is None
     assert not failed_service.ref_registry.has_document("doc_1")
+
+
+@pytest.mark.asyncio
+async def test_sync_externalized_domain_result_rewrites_raw_artifact_with_finalized_public_payload(
+    mock_desktop_service: DesktopNodeService,
+    monkeypatch,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    raw_ref = {"external_result": {"result_id": "raw_result_12345678"}}
+    raw_full = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Raw adapter result",
+        "data": {"native_token": "native::must-not-leak"},
+    }
+    public = CadResult(
+        status="succeeded",
+        summary="Finalized public result",
+        data={"safe": True},
+    )
+    mock_desktop_service.call = AsyncMock(return_value=raw_ref)
+    mock_desktop_service.external_result = MagicMock(return_value=(raw_full, {}))
+    mock_desktop_service.overwrite_external_result = MagicMock()
+    mock_desktop_service.get_session_generation = MagicMock(return_value=1)
+    monkeypatch.setattr(
+        cad_service,
+        "_finalize_completed_execution",
+        MagicMock(return_value=public),
+    )
+
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"}, group="read"
+    )
+
+    assert result == raw_ref
+    mock_desktop_service.overwrite_external_result.assert_called_once_with(
+        raw_ref["external_result"],
+        public.model_dump(mode="python", exclude_none=True),
+    )

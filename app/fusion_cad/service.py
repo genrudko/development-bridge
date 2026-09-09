@@ -3183,11 +3183,13 @@ class FusionCadService:
                 details={"parsed_type": trusted_detail(type(raw_result).__name__)},
             )
 
-        # Handle external_result reference already returned by desktop node
+        # Handle external_result reference already returned by desktop node.
+        # The retained workstation artifact is raw adapter evidence; replace it
+        # with the finalized public payload so native/private fields cannot leak.
         if "external_result" in raw_result:
             full, _ = self._desktop_nodes.external_result(raw_result["external_result"])
             cad_result = self.decode_domain_result(full)
-            self._finalize_completed_execution(
+            finalized = self._finalize_completed_execution(
                 cad_result,
                 effective_bundle_group=effective_bundle_group,
                 op=op,
@@ -3195,6 +3197,19 @@ class FusionCadService:
                 begin_tx_id=_begin_tx_id if is_transaction_begin else None,
                 begin_doc_ref=_begin_doc_ref if is_transaction_begin else None,
                 node_id=node_id,
+            )
+            if (
+                isinstance(finalized, dict)
+                and isinstance(finalized.get("external_result"), dict)
+            ):
+                return finalized
+            public_payload = (
+                finalized.model_dump(mode="python", exclude_none=True)
+                if isinstance(finalized, CadResult)
+                else finalized
+            )
+            self._desktop_nodes.overwrite_external_result(
+                raw_result["external_result"], public_payload
             )
             return raw_result
 

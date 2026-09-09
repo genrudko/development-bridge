@@ -627,6 +627,7 @@ async def test_fusion_tool_renders_external_result(mock_container: ApplicationCo
             "sha256": "abcdef",
         },
     })
+    mock_container.desktop_nodes.overwrite_external_result = MagicMock()
     mock_container.desktop_nodes.external_result = MagicMock(return_value=(
         {
             "api_version": "fusion.cad/v1",
@@ -2130,3 +2131,133 @@ async def test_view_pick_known_stale_view_blocks_before_raycast_dispatch(tmp_pat
         await container.fusion_cad.execute({"node_id":"desk-1","operation":"pick","view_ref":view_ref,"x":0.5,"y":0.5})
     assert exc.value.code == ErrorCode.VIEW_STALE
     assert container.desktop_nodes.call.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_async_domain_operation_result_persists_public_finalized_artifact(tmp_path):
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(tmp_path / "artifacts"),
+        },
+    }))
+    setup_desk1_capabilities(container)
+    registry = build_tool_registry(container)
+    op_result_tool = registry.get("fusion_operation_result")
+    assert op_result_tool is not None
+    await container.desktop_nodes.register(
+        "desk-1", [{"name": "fusion_mcp_execute"}], fusion_available=True
+    )
+
+    submit_res = await container.fusion_cad.execute(
+        {"node_id": "desk-1", "operation": "run"}, group="validate"
+    )
+    op_id = submit_res["operation_id"]
+    claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
+    assert claimed is not None
+    native = "native::feature::must-not-leak"
+    raw_cad_result = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Validation evidence collected",
+        "data": {
+            "document_ref": "doc_1",
+            "features": [{
+                "kind": "feature",
+                "name": "Feature1",
+                "native_token": native,
+                "valid": True,
+                "health": "ok",
+            }],
+            "timeline": {"available": True, "rolled_back": False},
+        },
+    }
+    await container.desktop_nodes.submit_result(
+        "desk-1",
+        claimed["command_id"],
+        {"content": [{"type": "text", "text": json.dumps(raw_cad_result)}], "isError": False},
+    )
+
+    params = types.CallToolRequestParams(
+        name="fusion_operation_result",
+        arguments={"node_id": "desk-1", "operation_id": op_id},
+    )
+    res = await op_result_tool.handler(None, params, RequestContext(request_id="req_public_artifact"))
+    assert not res.is_error
+    retained, _ = container.desktop_nodes.operation_result("desk-1", op_id)
+    assert native not in json.dumps(retained, sort_keys=True)
+    assert retained.get("api_version") == "fusion.cad/v1"
+    assert retained.get("validation") is not None
+    assert container.desktop_nodes.operation_status("desk-1", op_id).get("domain_finalization") == "finalized"
+
+
+@pytest.mark.asyncio
+async def test_async_transaction_begin_operation_result_is_idempotent(tmp_path):
+    container = build_container(BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {
+            "token": "test-token",
+            "journal_path": str(tmp_path / "journal.jsonl"),
+            "result_artifact_directory": str(tmp_path / "artifacts"),
+        },
+    }))
+    setup_desk1_capabilities(container)
+    registry = build_tool_registry(container)
+    tx_tool = registry.get("fusion_transaction")
+    op_result_tool = registry.get("fusion_operation_result")
+    assert tx_tool is not None and op_result_tool is not None
+    await container.desktop_nodes.register(
+        "desk-1", [{"name": "fusion_mcp_execute"}], fusion_available=True
+    )
+
+    tx_id = "tx_idem_begin_1"
+    submit = await tx_tool.handler(
+        None,
+        types.CallToolRequestParams(
+            name="fusion_transaction",
+            arguments={
+                "node_id": "desk-1",
+                "operation": "begin",
+                "transaction_id": tx_id,
+                "document_ref": "doc_1",
+            },
+        ),
+        RequestContext(request_id="req_begin_submit"),
+    )
+    op_id = json.loads(submit.content[0].text)["data"]["operation_id"]
+    claimed = await container.desktop_nodes.claim("desk-1", wait_seconds=1.0)
+    assert claimed is not None
+    raw = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Transaction begin completed",
+        "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+        "data": {
+            "operation": "begin",
+            "applied": True,
+            "transaction_id": tx_id,
+            "document_ref": "doc_1",
+            "fingerprint": "fp_idempotent_begin",
+        },
+    }
+    await container.desktop_nodes.submit_result(
+        "desk-1",
+        claimed["command_id"],
+        {"content": [{"type": "text", "text": json.dumps(raw)}], "isError": False},
+    )
+    params = types.CallToolRequestParams(
+        name="fusion_operation_result",
+        arguments={"node_id": "desk-1", "operation_id": op_id},
+    )
+    first = await op_result_tool.handler(None, params, RequestContext(request_id="req_begin_first"))
+    second = await op_result_tool.handler(None, params, RequestContext(request_id="req_begin_second"))
+    assert not first.is_error and not second.is_error
+    first_payload = json.loads(first.content[0].text)
+    second_payload = json.loads(second.content[0].text)
+    assert first_payload["data"]["external_result"]["sha256"] == second_payload["data"]["external_result"]["sha256"]
+    baseline = container.fusion_cad.revision_tracker.get_transaction_baseline(tx_id)
+    assert baseline is not None
+    assert baseline["baseline_fingerprint"] == "fp_idempotent_begin"
+    assert container.desktop_nodes.operation_status("desk-1", op_id).get("domain_finalization") == "finalized"

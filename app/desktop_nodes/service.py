@@ -777,6 +777,75 @@ class DesktopNodeService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion operation result is unavailable")
         return self.external_result({"result_id": result_id})
 
+    def finalize_operation_result(
+        self,
+        node_id: str,
+        operation_id: str,
+        finalized: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist one public domain-finalized result for a terminal operation.
+
+        The retained workstation artifact is raw adapter evidence until the domain
+        service validates and sanitizes it.  Finalization is durable and idempotent:
+        a public inline result replaces that raw artifact in place, while an already
+        externalized public result becomes the operation's retained result.
+        """
+        snapshot = self.operation_status(node_id, operation_id)
+        status = snapshot.get("status")
+        if status not in self._TERMINAL_OPERATION_STATES:
+            raise BridgeError(
+                ErrorCode.DESKTOP_NODE_BUSY,
+                "Fusion operation is not complete",
+                retryable=True,
+                details={"operation_id": operation_id, "status": status},
+            )
+        if snapshot.get("domain_finalization") == "finalized":
+            result_id = snapshot.get("result_id")
+            if not isinstance(result_id, str):
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion operation result is unavailable")
+            item = self._external_results.get(result_id) or self._recover_external_result(result_id)
+            if item is None:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop result is unavailable")
+            return {
+                "result_id": result_id,
+                "size_bytes": item["size_bytes"],
+                "sha256": item["sha256"],
+            }
+        if not isinstance(finalized, dict):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Finalized Fusion result must be an object")
+
+        external = finalized.get("external_result")
+        if isinstance(external, dict):
+            result_id = external.get("result_id")
+            if not isinstance(result_id, str) or not result_id:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External result reference is invalid")
+            # Validate/recover the service-owned finalized artifact before making
+            # the operation journal point at it.
+            self.external_result(external)
+            item = self._external_results.get(result_id) or self._recover_external_result(result_id)
+        else:
+            result_id = snapshot.get("result_id")
+            if not isinstance(result_id, str):
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion operation result is unavailable")
+            self.overwrite_external_result({"result_id": result_id}, finalized)
+            item = self._external_results.get(result_id) or self._recover_external_result(result_id)
+
+        if item is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop result is unavailable")
+        updated = self._journal.update(
+            operation_id,
+            result_id=result_id,
+            result_sha256=item["sha256"],
+            domain_finalization="finalized",
+        )
+        if updated is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion operation is unknown")
+        return {
+            "result_id": result_id,
+            "size_bytes": item["size_bytes"],
+            "sha256": item["sha256"],
+        }
+
     async def call(self, node_id: str, tool_name: str, arguments: dict[str, Any], journal: dict[str, Any] | None = None) -> dict[str, Any]:
         self._configured()
         if self._json_size(arguments) > self.settings.max_arguments_bytes:
