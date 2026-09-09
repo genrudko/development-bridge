@@ -3064,6 +3064,36 @@ class FusionCadService:
         if effective_bundle_group == "view" and op == "pick":
             self._prepare_pick_payload(payload, node_id)
 
+        if effective_bundle_group == "read" and op == "entity":
+            raw_ref = payload.get("ref")
+            if isinstance(raw_ref, str) and re.match(ENTITY_REF_PATTERN, raw_ref):
+                doc_ref = (
+                    payload.get("document_ref")
+                    or self._revision_tracker.active_document_ref
+                )
+                record = self._resolve_opaque_inspect_ref(raw_ref, doc_ref)
+                if record is not None:
+                    if not record.native_token:
+                        raise FusionCadError(
+                            ErrorCode.CAPABILITY_UNAVAILABLE,
+                            "Entity ref has no native resolution hint; exact read resolution is unavailable",
+                            details={"ref": raw_ref, "document_ref": record.document_ref},
+                        )
+                    payload.update(
+                        {
+                            "ref": record.ref,
+                            "kind": record.kind,
+                            "name": record.name,
+                            "native_token": record.native_token,
+                            "component_path": list(record.component_path),
+                            "geometry_signature": (
+                                dict(record.geometry_signature)
+                                if record.geometry_signature
+                                else None
+                            ),
+                        }
+                    )
+
         # Inspection targets known to this service get exact native resolution hints;
         # view zoom/orient target operations reuse the exact Task5/Task7 ref machinery.
         if effective_bundle_group == "inspect" or (
