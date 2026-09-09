@@ -9923,3 +9923,135 @@ async def test_sync_externalized_domain_result_rewrites_raw_artifact_with_finali
         raw_ref["external_result"],
         public.model_dump(mode="python", exclude_none=True),
     )
+
+
+@pytest.mark.asyncio
+async def test_task14_async_terminal_finalization_preserves_service_prepared_context(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Regression: durable queued mutations must retain the sanitized prepared payload
+    needed to validate their later terminal result, not only routing identifiers."""
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [
+                CapabilityRecord(name="style.sketch_text", state="supported"),
+                CapabilityRecord(name="design.access", state="supported"),
+                CapabilityRecord(
+                    name="revision.external_change_detection", state="supported"
+                ),
+            ]
+        ),
+    )
+    cad_service.revision_tracker.observe("doc_1", "fp_before")
+    captured: dict[str, object] = {}
+
+    async def queued_submit(node_id, tool_name, arguments, journal=None):
+        captured["journal"] = journal
+        return {"operation_id": "op_async_text_create", "status": "queued"}
+
+    mock_desktop_service.submit = AsyncMock(side_effect=queued_submit)
+    queued = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "text_create",
+            "text": "Schedule",
+            "height_mm": 4.0,
+            "position": {
+                "x": 10.0,
+                "y": 20.0,
+                "z": 0.0,
+                "frame": {"space": "world"},
+            },
+            "expected_revision": "rev_1",
+            "document_ref": "doc_1",
+        },
+        group="style",
+    )
+    assert queued == {"operation_id": "op_async_text_create", "status": "queued"}
+
+    journal = captured["journal"]
+    assert isinstance(journal, dict)
+    checkpoint = journal["checkpoint"]
+    assert isinstance(checkpoint, dict)
+    context = checkpoint["finalization_payload"]
+    assert isinstance(context, dict)
+    assert context["logical_object_ref"].startswith("text_")
+    assert context["style_semantic_contract"] == "task11.v1"
+    assert isinstance(context["provenance"], dict)
+    assert "native_token" not in repr(context)
+
+    provenance = context["provenance"]
+    logical_ref = context["logical_object_ref"]
+    finalized = cad_service.finalize_terminal_operation(
+        {
+            **journal,
+            "operation_id": "op_async_text_create",
+            "node_id": "desk-1",
+            "status": "succeeded",
+        },
+        {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Text created",
+            "document": {"document_ref": "doc_1", "model_revision": "rev_2"},
+            "data": {
+                "fingerprint": "fp_after",
+                "applied": True,
+                "lineage": {
+                    "logical_ref": logical_ref,
+                    "generation": 1,
+                    "is_current": True,
+                    "text": "Schedule",
+                    "font_requested": "Arial",
+                    "font_used": "Arial",
+                    "height_mm": 4.0,
+                },
+                "provenance": provenance,
+                "persisted_provenance": provenance,
+                "same_operation_provenance": True,
+            },
+        },
+    )
+    assert isinstance(finalized, CadResult)
+    assert finalized.data["lineage"]["logical_ref"] == logical_ref
+    assert finalized.data["same_operation_provenance"] is True
+
+
+@pytest.mark.asyncio
+async def test_task14_async_full_snapshot_checkpoint_preserves_detail_option(
+    mock_desktop_service: DesktopNodeService,
+):
+    """Regression: async reads must retain finalization options such as full snapshot detail."""
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [CapabilityRecord(name="design.access", state="supported")]
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    async def queued_submit(node_id, tool_name, arguments, journal=None):
+        captured["journal"] = journal
+        return {"operation_id": "op_async_full_snapshot", "status": "queued"}
+
+    mock_desktop_service.submit = AsyncMock(side_effect=queued_submit)
+    queued = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "model_snapshot",
+            "detail": "full",
+            "document_ref": "doc_1",
+        },
+        group="read",
+    )
+    assert queued == {"operation_id": "op_async_full_snapshot", "status": "queued"}
+    journal = captured["journal"]
+    assert isinstance(journal, dict)
+    checkpoint = journal["checkpoint"]
+    assert isinstance(checkpoint, dict)
+    context = checkpoint["finalization_payload"]
+    assert context["detail"] == "full"
+    assert context["operation"] == "model_snapshot"

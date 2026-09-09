@@ -2488,10 +2488,23 @@ class FusionCadService:
 
         cad_result = self.decode_domain_result(full_result)
         checkpoint = op_status.get("checkpoint") or {}
+        if not isinstance(checkpoint, Mapping):
+            checkpoint = {}
+        finalization_payload = checkpoint.get("finalization_payload")
+        payload = (
+            dict(finalization_payload)
+            if isinstance(finalization_payload, Mapping)
+            else dict(checkpoint)
+        )
+        # Core routing/authority fields remain pinned to the durable checkpoint
+        # for compatibility and to prevent a nested context from overriding them.
+        for key in ("operation", "transaction_id", "document_ref"):
+            if checkpoint.get(key) is not None:
+                payload[key] = checkpoint[key]
         summary = str(op_status.get("summary") or "")
 
         group = checkpoint.get("group")
-        op = checkpoint.get("operation")
+        op = checkpoint.get("operation") or payload.get("operation")
         if (not group or not op) and ":" in summary:
             parts = summary.split(":", 1)
             group = group or parts[0]
@@ -2500,19 +2513,19 @@ class FusionCadService:
         effective_bundle_group = (
             "mutate" if group in ("metadata", "style") else (group or "")
         )
-        tx_id = checkpoint.get("transaction_id") or (
+        tx_id = checkpoint.get("transaction_id") or payload.get("transaction_id") or (
             cad_result.data.get("transaction_id")
             if isinstance(cad_result.data, (dict, Mapping))
             else None
         )
-        doc_ref = checkpoint.get("document_ref")
+        doc_ref = checkpoint.get("document_ref") or payload.get("document_ref")
         node_id = checkpoint.get("node_id") or op_status.get("node_id")
 
         return self._finalize_completed_execution(
             cad_result,
             effective_bundle_group=effective_bundle_group,
             op=op or "",
-            payload=checkpoint,
+            payload=payload,
             begin_tx_id=tx_id
             if (effective_bundle_group == "transaction" and op == "begin")
             else None,
@@ -3066,15 +3079,22 @@ class FusionCadService:
         journal_mutation = is_mutation or (
             effective_bundle_group == "read" and op == "capabilities"
         )
+        checkpoint: dict[str, Any] = {
+            "operation": op,
+            "group": effective_bundle_group,
+            "transaction_id": payload.get("transaction_id"),
+            "document_ref": payload.get("document_ref"),
+        }
+        if is_async:
+            # Terminal async finalization must use the same service-prepared
+            # semantic request context that was dispatched. Persist only the
+            # public/sanitized shape so adapter-private native tokens and
+            # secret-like values never enter the durable operation journal.
+            checkpoint["finalization_payload"] = sanitize_public_payload(payload)
         journal = {
             "mutation": journal_mutation,
             "summary": summary,
-            "checkpoint": {
-                "operation": op,
-                "group": effective_bundle_group,
-                "transaction_id": payload.get("transaction_id"),
-                "document_ref": payload.get("document_ref"),
-            },
+            "checkpoint": checkpoint,
         }
         if journal_operation_id is not None:
             journal["operation_id"] = journal_operation_id
