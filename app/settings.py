@@ -4,8 +4,8 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
-
 from urllib.parse import urlsplit
+
 import yaml
 from pydantic import (
     AnyHttpUrl,

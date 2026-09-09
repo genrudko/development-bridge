@@ -746,7 +746,7 @@ def test_model_snapshot_accepts_empty_falsey_fusion_collections(monkeypatch) -> 
         def __bool__(self) -> bool:
             return bool(self._items)
 
-    empty_attrs = lambda: Collection([])  # noqa: E731
+    empty_attrs = lambda: Collection([])
     root = types.SimpleNamespace(
         name="Root",
         id="root",

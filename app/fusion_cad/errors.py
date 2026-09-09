@@ -301,9 +301,7 @@ def _safe_validation_loc(err: Mapping[str, Any]) -> list[str | int]:
     """
     loc_parts: list[str | int] = []
     for item in err.get("loc", ()):
-        if isinstance(item, int):
-            loc_parts.append(item)
-        elif isinstance(item, str) and _SAFE_LOC_PATTERN.match(item):
+        if isinstance(item, int) or isinstance(item, str) and _SAFE_LOC_PATTERN.match(item):
             loc_parts.append(item)
     return loc_parts
 
@@ -515,11 +513,10 @@ def filter_trusted_diagnostics(details: Any) -> dict[str, Any]:
         elif k == "validation_errors":
             if isinstance(v, (list, tuple)):
                 clean[k] = sanitize_validation_errors(v)
-        elif k == "limitations":
+        elif k == "limitations" and trusted and isinstance(v, (list, tuple)):
             # Capability limitations are internal record prose; only explicit
             # trusted provenance may expose them (never identifier-shape pass).
-            if trusted and isinstance(v, (list, tuple)):
-                clean[k] = [str(x) for x in v if isinstance(x, str)]
+            clean[k] = [str(x) for x in v if isinstance(x, str)]
 
     return clean
 
