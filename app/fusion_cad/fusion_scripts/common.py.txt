@@ -198,6 +198,16 @@ def collect_model_fingerprint(payload=None):
         )
 
     doc_id_str = str(doc_id)
+
+    def _timeline_runtime_identity(entity, item, index):
+        identity = _stable_runtime_identity(entity) or _stable_runtime_identity(item)
+        if identity:
+            return identity
+        if getattr(entity, "objectType", None) != "adsk::fusion::Snapshot":
+            return None
+        basis = (doc_id_str + "\0" + str(index) + "\0adsk::fusion::Snapshot").encode("utf-8")
+        return "snapshot_" + hashlib.sha256(basis).hexdigest()
+
     if doc_id_str.startswith("doc_"):
         safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str[4:])
     else:
@@ -233,7 +243,7 @@ def collect_model_fingerprint(payload=None):
             try:
                 item = timeline.item(i)
                 item_entity = getattr(item, "entity", None)
-                item_id = _stable_runtime_identity(item_entity) or _stable_runtime_identity(item)
+                item_id = _timeline_runtime_identity(item_entity, item, i)
                 if not item_id or not str(item_id).strip():
                     raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Timeline item {i} and its associated entity lack stable runtime identity (entityToken or id)", details={"timeline_index": i})
                 t_items.append({
@@ -1019,13 +1029,13 @@ def collect_model_fingerprint(payload=None):
         for t_idx in range(timeline.count):
             t = timeline.item(t_idx)
             feat = getattr(t, "entity", None)
-            t_id = _stable_runtime_identity(feat) or _stable_runtime_identity(t)
+            t_id = _timeline_runtime_identity(feat, t, t_idx)
             if not t_id or not str(t_id).strip():
                 raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Timeline item {t_idx} and its associated entity lack stable runtime identity (entityToken or id)", details={"timeline_index": t_idx})
             if getattr(t, "attributes", None) is not None:
                 _read_owner_attributes(t, "timeline", str(t_id).strip())
             if feat:
-                f_id = _stable_runtime_identity(feat)
+                f_id = _timeline_runtime_identity(feat, None, t_idx)
                 if not f_id or not str(f_id).strip():
                     raise FusionScriptError(
                         "CAPABILITY_UNAVAILABLE",

@@ -997,6 +997,133 @@ def test_model_snapshot_uses_timeline_entity_as_stable_identity(monkeypatch) -> 
     assert result["data"]["features"][0]["id"] == "feature-token-1"
 
 
+def _run_model_snapshot_with_timeline_entities(
+    monkeypatch: pytest.MonkeyPatch, entities: list[Any]
+) -> dict[str, Any]:
+    class Collection:
+        def __init__(self, items=()):
+            self._items = list(items)
+
+        @property
+        def count(self) -> int:
+            return len(self._items)
+
+        def item(self, index: int) -> Any:
+            return self._items[index]
+
+    timeline_items = [
+        types.SimpleNamespace(
+            index=index,
+            name=entity.name,
+            isSuppressed=False,
+            isRolledBack=False,
+            isValid=True,
+            healthStatus=None,
+            entity=entity,
+            isGroup=False,
+        )
+        for index, entity in enumerate(entities)
+    ]
+    root = types.SimpleNamespace(
+        name="Root",
+        id="root",
+        entityToken="root-token",
+        allOccurrences=Collection(),
+        bRepBodies=Collection(),
+        sketches=Collection(),
+        attributes=Collection(),
+    )
+    design = types.SimpleNamespace(
+        rootComponent=root,
+        timeline=Collection(timeline_items),
+        allComponents=Collection([root]),
+        allParameters=Collection(),
+    )
+
+    class Products:
+        def itemByProductType(self, product_type: str) -> Any:
+            assert product_type == "DesignProductType"
+            return design
+
+    doc = types.SimpleNamespace(
+        creationId="snapshot-timeline-design",
+        dataId=None,
+        dataFile=None,
+        name="Untitled",
+        isModified=False,
+        savedVersion=None,
+        products=Products(),
+        attributes=Collection(),
+    )
+    app = types.SimpleNamespace(activeDocument=doc, activeProduct=design)
+
+    adsk = types.ModuleType("adsk")
+    core = types.ModuleType("adsk.core")
+    fusion = types.ModuleType("adsk.fusion")
+    core.Application = types.SimpleNamespace(get=lambda: app)
+    fusion.Design = types.SimpleNamespace(cast=lambda value: value if value is design else None)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    script = FusionCadScriptBundle.build(
+        "read", {"operation": "model_snapshot", "detail": "compact"}
+    )
+    scope = {"__name__": "__main__"}
+    exec(compile(script, "<fusion-snapshot-timeline>", "exec"), scope)  # noqa: S102
+    return scope["_output"]
+
+
+def test_model_snapshot_uses_stable_position_identity_for_tokenless_snapshots(
+    monkeypatch,
+) -> None:
+    snapshots = [
+        types.SimpleNamespace(
+            entityToken=None,
+            id=None,
+            objectType="adsk::fusion::Snapshot",
+            name="Position1",
+            attributes=types.SimpleNamespace(count=0, item=lambda _index: None),
+        ),
+        types.SimpleNamespace(
+            entityToken=None,
+            id=None,
+            objectType="adsk::fusion::Snapshot",
+            name="Position2",
+            attributes=types.SimpleNamespace(count=0, item=lambda _index: None),
+        ),
+    ]
+
+    first = _run_model_snapshot_with_timeline_entities(monkeypatch, snapshots)
+    repeated = _run_model_snapshot_with_timeline_entities(monkeypatch, snapshots)
+
+    assert first["status"] == "succeeded"
+    first_ids = [feature["id"] for feature in first["data"]["features"]]
+    assert first_ids == [feature["id"] for feature in repeated["data"]["features"]]
+    assert first_ids[0] != first_ids[1]
+    assert first["data"]["fingerprint"] == repeated["data"]["fingerprint"]
+
+    snapshots[0].name = "Renamed Position"
+    renamed = _run_model_snapshot_with_timeline_entities(monkeypatch, snapshots)
+    assert renamed["data"]["features"][0]["id"] == first_ids[0]
+
+
+def test_model_snapshot_rejects_arbitrary_tokenless_timeline_entity(monkeypatch) -> None:
+    entity = types.SimpleNamespace(
+        entityToken=None,
+        id=None,
+        objectType="adsk::fusion::BaseFeature",
+        name="Feature1",
+    )
+
+    result = _run_model_snapshot_with_timeline_entities(monkeypatch, [entity])
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "FUSION_API_ERROR"
+    assert "lack stable runtime identity" in result["error"]["message"]
+
 
 def test_model_snapshot_accepts_nested_occurrence_proxy_without_entity_token(monkeypatch) -> None:
     class Collection:
