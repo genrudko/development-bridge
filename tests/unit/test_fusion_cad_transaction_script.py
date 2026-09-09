@@ -276,7 +276,12 @@ def _ptransaction_runtime(monkeypatch, *, preview):
         "provenance": None,
         "text_add_count": 0,
         "fail_on_text_add": False,
+        "fail_on_start": False,
+        "fail_on_abort": False,
         "fail_on_commit": False,
+        "start_result": "1",
+        "abort_result": "1",
+        "commit_result": "1",
     }
 
     class Collection:
@@ -417,31 +422,41 @@ def _ptransaction_runtime(monkeypatch, *, preview):
         def executeTextCommand(self, command):
             events.append(("executeTextCommand", command))
             if command.startswith("PTransaction.Start"):
-                assert state["in_transaction"] is False, f"nested PTransaction.Start ({command})"
-                state["in_transaction"] = True
-                state["fp_at_start"] = state["fp"]
-                state["start"] = {
-                    "sketches": list(state["sketches"]),
-                    "timeline": list(state["timeline"]),
-                    "doc_is_modified": state["doc_is_modified"],
-                    "provenance": state["provenance"],
-                }
+                if state["fail_on_start"]:
+                    raise RuntimeError("boom during ptransaction start")
+                if state["start_result"] == "1":
+                    assert state["in_transaction"] is False, f"nested PTransaction.Start ({command})"
+                    state["in_transaction"] = True
+                    state["fp_at_start"] = state["fp"]
+                    state["start"] = {
+                        "sketches": list(state["sketches"]),
+                        "timeline": list(state["timeline"]),
+                        "doc_is_modified": state["doc_is_modified"],
+                        "provenance": state["provenance"],
+                    }
+                return state["start_result"]
             elif command == "PTransaction.Abort":
-                assert state["in_transaction"] is True, "PTransaction.Abort without an active transaction"
-                state["in_transaction"] = False
-                start = state["start"]
-                if start is not None:
-                    state["sketches"][:] = start["sketches"]
-                    state["timeline"][:] = start["timeline"]
-                    state["doc_is_modified"] = start["doc_is_modified"]
-                    state["provenance"] = start["provenance"]
-                state["fp"] = state["fp_at_start"]
+                if state["fail_on_abort"]:
+                    raise RuntimeError("boom during ptransaction abort")
+                if state["abort_result"] == "1":
+                    assert state["in_transaction"] is True, "PTransaction.Abort without an active transaction"
+                    state["in_transaction"] = False
+                    start = state["start"]
+                    if start is not None:
+                        state["sketches"][:] = start["sketches"]
+                        state["timeline"][:] = start["timeline"]
+                        state["doc_is_modified"] = start["doc_is_modified"]
+                        state["provenance"] = start["provenance"]
+                    state["fp"] = state["fp_at_start"]
+                return state["abort_result"]
             elif command == "PTransaction.Commit":
                 assert state["in_transaction"] is True, "PTransaction.Commit without an active transaction"
                 if state["fail_on_commit"]:
                     raise RuntimeError("boom during ptransaction commit")
-                state["in_transaction"] = False
-                state["start"] = None
+                if state["commit_result"] == "1":
+                    state["in_transaction"] = False
+                    state["start"] = None
+                return state["commit_result"]
             else:
                 raise AssertionError(f"Unexpected text command {command!r}")
 
@@ -871,14 +886,14 @@ def test_ptransaction_exception_between_start_and_terminal_aborts_fail_closed(mo
     assert state["in_transaction"] is False
 
 
-def test_ptransaction_commit_failure_attempts_abort_and_preserves_original_error(monkeypatch):
+def test_ptransaction_commit_exception_attempts_abort_and_reports_uncertain(monkeypatch):
     payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
     state["fail_on_commit"] = True
     result = _run(payload, runtime)
 
     assert result["status"] == "failed"
-    assert result["error"]["code"] == "FUSION_API_ERROR"
-    assert "boom during ptransaction commit" in result["error"]["message"]
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+    assert "commit outcome is uncertain" in result["error"]["message"]
     text_commands = [
         entry[1]
         for entry in events
@@ -909,3 +924,65 @@ def test_ptransaction_rendered_script_compiles_for_all_seven_operations():
         compiled = compile(script, f"<tx-{op}>", "exec")
         assert compiled is not None
         assert "_transaction_runtime" in script
+
+
+def test_ptransaction_failed_start_never_mutates(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    state["start_result"] = "0"
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert state["text_add_count"] == 0
+    assert state["sketches"] == []
+    assert state["in_transaction"] is False
+    commands = [e[1] for e in events if isinstance(e, tuple) and e[0] == "executeTextCommand"]
+    assert commands == ['PTransaction.Start "bridge_cad_transaction"']
+
+
+def test_ptransaction_start_exception_is_uncertain_and_never_mutates(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    state["fail_on_start"] = True
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+    assert state["text_add_count"] == 0
+    commands = [e[1] for e in events if isinstance(e, tuple) and e[0] == "executeTextCommand"]
+    assert commands == ['PTransaction.Start "bridge_cad_transaction"']
+
+
+def test_ptransaction_preview_failed_abort_is_uncertain_without_retry(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=True)
+    state["abort_result"] = "0"
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+    assert state["text_add_count"] == 1
+    commands = [e[1] for e in events if isinstance(e, tuple) and e[0] == "executeTextCommand"]
+    assert commands == ['PTransaction.Start "bridge_cad_transaction"', "PTransaction.Abort"]
+
+
+def test_ptransaction_commit_failed_response_is_uncertain(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    state["commit_result"] = "0"
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+    assert state["text_add_count"] == 1
+    commands = [e[1] for e in events if isinstance(e, tuple) and e[0] == "executeTextCommand"]
+    assert commands.count("PTransaction.Commit") == 1
+
+
+def test_ptransaction_mutation_error_with_failed_cleanup_abort_is_uncertain(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
+    state["fail_on_text_add"] = True
+    state["abort_result"] = "0"
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+    commands = [e[1] for e in events if isinstance(e, tuple) and e[0] == "executeTextCommand"]
+    assert commands == ['PTransaction.Start "bridge_cad_transaction"', "PTransaction.Abort"]

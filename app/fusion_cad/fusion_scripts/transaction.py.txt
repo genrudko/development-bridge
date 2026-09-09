@@ -222,19 +222,14 @@ _PTRANSACTION_STATIC_NAME = "bridge_cad_transaction"
 
 
 def _transaction_ptx_command(plan, preview):
-    """Apply the exact staged plan inside a PTransaction text-command boundary.
+    """Apply the exact staged plan inside a proven PTransaction boundary.
 
-    Primary internal runtime after bounded live acceptance; it remains an
-    implementation detail, not a public capability. Donor provenance (dterracino/f360mcp)
-    drives transaction boundaries through Application.executeTextCommand:
-      start  -> PTransaction.Start "<fixed-safe-name>"
-      abort  -> PTransaction.Abort
-      commit -> PTransaction.Commit
-    This primary path deliberately removes the CommandDefinition/doExecute
-    lifecycle (no button definition, no commandCreated, no executeFailed
-    rollback). Any exception between Start and the terminal action attempts
-    Abort fail-closed and re-raises the original error; the authoritative
-    post-abort/post-commit fingerprint checks remain at the caller.
+    Every native boundary command must return the live-proven success marker
+    ``"1"``. A rejected Start fails before mutation. Once Start has been
+    proven successful, any terminal action whose outcome cannot also be proven
+    is OPERATION_UNCERTAIN and is never retried. Mutation failures get exactly
+    one cleanup Abort; the original error is re-raised only when that Abort is
+    proven successful.
     """
     import adsk
     import adsk.core
@@ -248,19 +243,57 @@ def _transaction_ptx_command(plan, preview):
     if root is None or not callable(execute_text_command):
         raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Verified PTransaction runtime is unavailable", {"applied": False})
 
-    execute_text_command('PTransaction.Start "' + _PTRANSACTION_STATIC_NAME + '"')
+    try:
+        started = execute_text_command('PTransaction.Start "' + _PTRANSACTION_STATIC_NAME + '"')
+    except BaseException:
+        raise FusionScriptError(
+            "OPERATION_UNCERTAIN",
+            "PTransaction start outcome is uncertain",
+        ) from None
+    if str(started).strip() != "1":
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "PTransaction start was not accepted",
+            {"applied": False},
+        )
+
+    def abort_once():
+        try:
+            return str(execute_text_command("PTransaction.Abort")).strip() == "1"
+        except BaseException:
+            return False
+
     try:
         result = _transaction_apply_text_create_mutation(root, action, preview)
-        if preview:
-            execute_text_command("PTransaction.Abort")
-        else:
-            execute_text_command("PTransaction.Commit")
     except BaseException:
-        try:
-            execute_text_command("PTransaction.Abort")
-        except BaseException:
-            pass
+        if not abort_once():
+            raise FusionScriptError(
+                "OPERATION_UNCERTAIN",
+                "PTransaction cleanup abort outcome is uncertain",
+            ) from None
         raise
+
+    if preview:
+        if not abort_once():
+            raise FusionScriptError(
+                "OPERATION_UNCERTAIN",
+                "PTransaction preview abort outcome is uncertain",
+            )
+    else:
+        try:
+            committed = execute_text_command("PTransaction.Commit")
+        except BaseException:
+            abort_once()
+            raise FusionScriptError(
+                "OPERATION_UNCERTAIN",
+                "PTransaction commit outcome is uncertain",
+            ) from None
+        if str(committed).strip() != "1":
+            abort_once()
+            raise FusionScriptError(
+                "OPERATION_UNCERTAIN",
+                "PTransaction commit outcome is uncertain",
+            )
     return result
 
 
