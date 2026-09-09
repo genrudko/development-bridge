@@ -1245,6 +1245,22 @@ async def test_async_transaction_mutations_lifecycle_operation_result_and_uncert
         fusion_available=True,
     )
 
+    # stage/abort represent an already-begun transaction. The helper above
+    # seeds the RevisionTracker baseline; seed the matching declarative record
+    # too so terminal finalization has the same valid precondition as runtime.
+    if operation in {"stage", "abort"}:
+        container.fusion_cad.transaction_store.begin(
+            "tx_1234",
+            document_ref="doc_1",
+            baseline_revision="rev_1",
+            baseline_fingerprint="hash-desk1-seed",
+            baseline_snapshot={
+                "structural_hash": "hash-desk1-seed",
+                "counts": {},
+                "refs": [],
+            },
+        )
+
     # 1. Asynchronous dispatch via submit with mutation journal
     req_ctx = RequestContext(request_id=f"req_tx_{operation}")
     params = types.CallToolRequestParams(name="fusion_transaction", arguments=payload)
