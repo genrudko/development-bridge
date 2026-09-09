@@ -1085,6 +1085,33 @@ def _shared_native_entity_kind(entity):
     return "other"
 
 
+def _native_entity_candidates(resolved, ref):
+    """Normalize Fusion/Python native lookup results without exposing tokens."""
+    if resolved is None:
+        return []
+    if isinstance(resolved, (list, tuple)):
+        return list(resolved)
+    try:
+        count_value = getattr(resolved, "count")
+    except AttributeError:
+        return [resolved]
+    except Exception:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity collection could not be inspected safely",
+            details={"ref": ref},
+        ) from None
+    try:
+        count = int(count_value)
+        return [resolved.item(index) for index in range(count)]
+    except Exception:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity collection could not be inspected safely",
+            details={"ref": ref},
+        ) from None
+
+
 def resolve_exact_native_entity(design, hint, expected_kinds=None):
     """Resolve one authoritative native token without contextual substitution.
 
@@ -1120,57 +1147,20 @@ def resolve_exact_native_entity(design, hint, expected_kinds=None):
             details={"ref": ref},
         ) from None
 
-    entity = resolved
-    if isinstance(resolved, (list, tuple)):
-        if len(resolved) == 1:
-            entity = resolved[0]
-        elif len(resolved) > 1:
-            raise FusionScriptError(
-                "REF_SPLIT",
-                "Authoritative native entity resolved to multiple split entities",
-                details={"ref": ref},
-            )
-        else:
-            entity = None
-    elif resolved is not None:
-        try:
-            count_value = getattr(resolved, "count")
-        except AttributeError:
-            count_value = None
-        except Exception:
-            raise FusionScriptError(
-                "REF_STALE",
-                "Authoritative native entity collection could not be inspected safely",
-                details={"ref": ref},
-            ) from None
-        if count_value is not None:
-            try:
-                count = int(count_value)
-                if count == 1:
-                    entity = resolved.item(0)
-                elif count > 1:
-                    raise FusionScriptError(
-                        "REF_SPLIT",
-                        "Authoritative native entity resolved to multiple split entities",
-                        details={"ref": ref},
-                    )
-                else:
-                    entity = None
-            except FusionScriptError:
-                raise
-            except Exception:
-                raise FusionScriptError(
-                    "REF_STALE",
-                    "Authoritative native entity collection could not be inspected safely",
-                    details={"ref": ref},
-                ) from None
-
-    if entity is None:
+    matches = _native_entity_candidates(resolved, ref)
+    if len(matches) > 1:
+        raise FusionScriptError(
+            "REF_SPLIT",
+            "Authoritative native entity resolved to multiple split entities",
+            details={"ref": ref},
+        )
+    if not matches or matches[0] is None:
         raise FusionScriptError(
             "REF_STALE",
             "Authoritative native entity could not be resolved in the active document",
             details={"ref": ref},
         )
+    entity = matches[0]
 
     allowed = tuple(str(kind) for kind in (expected_kinds or ()) if kind)
     if allowed:
@@ -1254,30 +1244,27 @@ def resolve_fusion_entity(payload=None):
     if native_token and hasattr(design, "findEntityByToken"):
         try:
             resolved = design.findEntityByToken(native_token)
-            if resolved is not None:
-                if hasattr(resolved, "count"):
-                    if resolved.count == 1:
-                        return {
-                            "outcome": "exact",
-                            "ref": ref,
-                            "candidates": [_extract_candidate_info(resolved.item(0))],
-                            "document_ref": safe_doc_ref,
-                        }
-                    elif resolved.count > 1:
-                        cands = [_extract_candidate_info(resolved.item(i)) for i in range(resolved.count)]
-                        return {
-                            "outcome": "split",
-                            "ref": ref,
-                            "candidates": cands,
-                            "document_ref": safe_doc_ref,
-                        }
-                else:
-                    return {
-                        "outcome": "exact",
-                        "ref": ref,
-                        "candidates": [_extract_candidate_info(resolved)],
-                        "document_ref": safe_doc_ref,
-                    }
+            matches = _native_entity_candidates(resolved, ref)
+            if len(matches) == 1 and matches[0] is not None:
+                return {
+                    "outcome": "exact",
+                    "ref": ref,
+                    "candidates": [_extract_candidate_info(matches[0])],
+                    "document_ref": safe_doc_ref,
+                }
+            if len(matches) > 1:
+                return {
+                    "outcome": "split",
+                    "ref": ref,
+                    "candidates": [_extract_candidate_info(item) for item in matches],
+                    "document_ref": safe_doc_ref,
+                }
+            return {
+                "outcome": "stale",
+                "ref": ref,
+                "candidates": [],
+                "document_ref": safe_doc_ref,
+            }
         except Exception:
             pass
 

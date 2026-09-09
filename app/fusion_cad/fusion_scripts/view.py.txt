@@ -643,20 +643,7 @@ def _resolved_native_entity(payload):
             "NO_ACTIVE_DESIGN",
             "Active design required to resolve view target",
         )
-    token = hint.get("native_token")
-    entity = None
-    if token and hasattr(design, "findEntityByToken"):
-        try:
-            entity = design.findEntityByToken(token)
-        except Exception:
-            entity = None
-    if entity is None:
-        raise FusionScriptError(
-            "REF_STALE",
-            "View target resolved exact but its native entity is no longer resolvable",
-            details={"ref": resolved.get("ref")},
-        )
-    return entity
+    return resolve_exact_native_entity(design, hint)
 
 
 def _orient_camera_to_face(entity):

@@ -122,28 +122,16 @@ def run():
                     details={"ref": target.get("ref")},
                 )
             try:
-                resolved = design.findEntityByToken(token)
-            except Exception:
-                resolved = None
-            matches = []
-            if resolved is not None:
-                if hasattr(resolved, "count"):
-                    matches = [resolved.item(i) for i in range(resolved.count)]
-                else:
-                    matches = [resolved]
-            if len(matches) == 1:
-                return matches[0], target.get("ref")
-            if len(matches) > 1:
+                owner = resolve_exact_native_entity(design, target)
+            except FusionScriptError as exc:
+                if exc.code != "REF_SPLIT":
+                    raise
                 raise FusionScriptError(
                     "REF_AMBIGUOUS",
                     "Metadata target resolves to multiple current entities; refusing to pick one",
                     details={"ref": target.get("ref")},
-                )
-            raise FusionScriptError(
-                "REF_STALE",
-                "Metadata target no longer resolves to a current entity",
-                details={"ref": target.get("ref")},
-            )
+                ) from None
+            return owner, target.get("ref")
         raise FusionScriptError(
             "REF_STALE",
             "Metadata target is an unresolved opaque entity ref; unknown or stale refs fail closed and never fall back to the document owner",

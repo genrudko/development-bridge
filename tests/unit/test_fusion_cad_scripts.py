@@ -520,6 +520,113 @@ def test_resolve_fusion_entity_candidates_never_leak_native_tokens() -> None:
         assert secret_tok_b not in json.dumps(res_split["candidates"])
 
 
+@pytest.mark.parametrize("cardinality", [0, 1, 2])
+def test_read_entity_raw_python_list_native_resolution_cardinality(cardinality: int) -> None:
+    secret_token = "SECRET_RAW_LIST_READ_TOKEN"
+    entities = [
+        _FakeEntity(f"Body{index}", f"private_entity_token_{index}")
+        for index in range(cardinality)
+    ]
+    root = _FakeComponent("Root")
+
+    with _mock_adsk_env(
+        doc_id="doc1", find_token_fn=lambda _token: entities, root_component=root
+    ):
+        scope: dict = {}
+        script = FusionCadScriptBundle().build("read", {"operation": "echo"})
+        exec(compile(script, "<raw-list-read-resolution>", "exec"), scope)  # noqa: S102
+        result = scope["resolve_fusion_entity"](
+            {
+                "ref": "ent_raw_list_read",
+                "native_token": secret_token,
+                "document_ref": "doc_doc1",
+            }
+        )
+
+    assert result["outcome"] == {0: "stale", 1: "exact", 2: "split"}[cardinality]
+    assert len(result["candidates"]) == cardinality
+    if cardinality == 1:
+        assert result["candidates"][0]["name"] == entities[0].name
+    rendered = json.dumps(result)
+    assert secret_token not in rendered
+    assert "private_entity_token_" not in rendered
+
+
+@pytest.mark.parametrize("cardinality", [0, 1, 2])
+def test_metadata_target_raw_python_list_native_resolution_cardinality(
+    cardinality: int,
+) -> None:
+    secret_token = "SECRET_RAW_LIST_METADATA_TOKEN"
+    attribute = types.SimpleNamespace(
+        groupName="bridge.cad/v1", name="marker", value="actual-owner"
+    )
+    owners = [
+        types.SimpleNamespace(attributes=_FakeCollection([attribute]))
+        for _index in range(cardinality)
+    ]
+
+    with _mock_adsk_env(
+        doc_id="doc1", find_token_fn=lambda _token: owners, root_component=_FakeComponent("Root")
+    ):
+        scope: dict = {}
+        script = FusionCadScriptBundle().build(
+            "mutate",
+            {
+                "operation": "get",
+                "document_ref": "doc_doc1",
+                "target": {
+                    "ref": "ent_raw_list_metadata",
+                    "native_token": secret_token,
+                },
+            },
+        )
+        exec(compile(script, "<raw-list-metadata-resolution>", "exec"), scope)  # noqa: S102
+        output = scope["_output"]
+
+    if cardinality == 1:
+        assert output["status"] == "succeeded"
+        assert output["data"]["records"][0]["value"] == "actual-owner"
+    else:
+        assert output["status"] == "failed"
+        assert output["error"]["code"] == {0: "REF_STALE", 2: "REF_AMBIGUOUS"}[
+            cardinality
+        ]
+    assert secret_token not in json.dumps(output)
+
+
+@pytest.mark.parametrize("cardinality", [0, 1, 2])
+def test_view_target_raw_python_list_native_resolution_cardinality(cardinality: int) -> None:
+    secret_token = "SECRET_RAW_LIST_VIEW_TOKEN"
+    entities = [
+        _FakeEntity(f"Face{index}", f"private_face_token_{index}", "adsk::fusion::BRepFace")
+        for index in range(cardinality)
+    ]
+
+    with _mock_adsk_env(
+        doc_id="doc1", find_token_fn=lambda _token: entities, root_component=_FakeComponent("Root")
+    ):
+        scope: dict = {}
+        script = FusionCadScriptBundle().build("view", {"operation": "camera_read"})
+        exec(compile(script, "<raw-list-view-resolution>", "exec"), scope)  # noqa: S102
+        payload = {
+            "target": {
+                "ref": "ent_raw_list_view",
+                "native_token": secret_token,
+                "document_ref": "doc_doc1",
+            }
+        }
+        if cardinality == 1:
+            assert scope["_resolved_native_entity"](payload) is entities[0]
+        else:
+            with pytest.raises(scope["FusionScriptError"]) as exc:
+                scope["_resolved_native_entity"](payload)
+            assert exc.value.code == {0: "REF_STALE", 2: "REF_SPLIT"}[cardinality]
+            rendered = json.dumps(
+                {"message": str(exc.value), "details": exc.value.details}
+            )
+            assert secret_token not in rendered
+
+
 def test_contextual_resolver_fails_closed_on_missing_or_partial_component_path() -> (
     None
 ):
