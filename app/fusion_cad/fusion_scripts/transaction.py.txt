@@ -283,13 +283,11 @@ def _transaction_ptx_command(plan, preview):
         try:
             committed = execute_text_command("PTransaction.Commit")
         except BaseException:
-            abort_once()
             raise FusionScriptError(
                 "OPERATION_UNCERTAIN",
                 "PTransaction commit outcome is uncertain",
             ) from None
         if str(committed).strip() != "1":
-            abort_once()
             raise FusionScriptError(
                 "OPERATION_UNCERTAIN",
                 "PTransaction commit outcome is uncertain",

@@ -886,7 +886,7 @@ def test_ptransaction_exception_between_start_and_terminal_aborts_fail_closed(mo
     assert state["in_transaction"] is False
 
 
-def test_ptransaction_commit_exception_attempts_abort_and_reports_uncertain(monkeypatch):
+def test_ptransaction_commit_exception_stops_immediately_and_reports_uncertain(monkeypatch):
     payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
     state["fail_on_commit"] = True
     result = _run(payload, runtime)
@@ -902,9 +902,8 @@ def test_ptransaction_commit_exception_attempts_abort_and_reports_uncertain(monk
     assert text_commands == [
         'PTransaction.Start "bridge_cad_transaction"',
         "PTransaction.Commit",
-        "PTransaction.Abort",
     ]
-    assert state["in_transaction"] is False
+    assert state["in_transaction"] is True
 
 
 def test_ptransaction_rendered_script_compiles_for_all_seven_operations():
@@ -973,7 +972,8 @@ def test_ptransaction_commit_failed_response_is_uncertain(monkeypatch):
     assert result["error"]["code"] == "OPERATION_UNCERTAIN"
     assert state["text_add_count"] == 1
     commands = [e[1] for e in events if isinstance(e, tuple) and e[0] == "executeTextCommand"]
-    assert commands.count("PTransaction.Commit") == 1
+    assert commands == ['PTransaction.Start "bridge_cad_transaction"', "PTransaction.Commit"]
+    assert state["in_transaction"] is True
 
 
 def test_ptransaction_mutation_error_with_failed_cleanup_abort_is_uncertain(monkeypatch):
