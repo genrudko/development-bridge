@@ -888,3 +888,24 @@ def test_model_snapshot_uses_timeline_entity_as_stable_identity(monkeypatch) -> 
     result = scope["_output"]
     assert result["status"] == "succeeded"
     assert result["data"]["features"][0]["id"] == "feature-token-1"
+
+
+def test_p0_rendered_bundles_fit_default_desktop_argument_limit() -> None:
+    """Default desktop relay must carry every static P0 Fusion script bundle."""
+    import json
+
+    from app.settings import DesktopNodeSettings
+
+    bundle = FusionCadScriptBundle()
+    payloads = (
+        ("read", {"operation": "model_snapshot", "document_ref": "doc_x"}),
+        ("inspect", {"operation": "describe", "target": {"ref": "ent_x", "native_token": "tok", "kind": "body"}}),
+        ("view", {"operation": "camera_read", "document_ref": "doc_x"}),
+        ("mutate", {"operation": "set", "target": {"ref": "ent_x", "native_token": "tok", "kind": "body"}, "name": "k", "value": "v", "expected_revision": "rev_1"}),
+        ("transaction", {"operation": "begin", "transaction_id": "tx_x"}),
+    )
+    sizes = {
+        group: len(json.dumps({"script": bundle.build(group, payload)}, separators=(",", ":")).encode("utf-8"))
+        for group, payload in payloads
+    }
+    assert max(sizes.values()) <= DesktopNodeSettings().max_arguments_bytes, sizes

@@ -177,6 +177,23 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
                 "area": {"quantity": "area", "value": 42.0, "unit": "mm^2"}
             },
         }
+    elif valid_payload["operation"] == "text_read":
+        result_data = {
+            "lineage": {
+                "logical_ref": valid_payload["text_ref"],
+                "generation": 1,
+                "is_current": True,
+                "sketch": None,
+                "sketch_text_id": None,
+                "feature": None,
+                "outputs": [],
+                "text": "РАСПИСАНИЕ ПЫТОК 😈",
+                "font_requested": "Arial",
+                "font_used": "Arial",
+                "fallback_reason": None,
+                "height_mm": 5.0,
+            }
+        }
     elif is_camera_read:
         result_data = {
             "camera": {
@@ -230,6 +247,9 @@ async def test_fast_reads_execute_sync_with_read_only_journal(
         assert parsed["data"]["data"]["kind"] == "face"
         assert parsed["data"]["data"]["frame"]["space"] == "world"
         assert parsed["data"]["data"]["measures"]["area"]["unit"] == "mm^2"
+    elif valid_payload["operation"] == "text_read":
+        assert parsed["data"]["data"]["lineage"]["logical_ref"] == valid_payload["text_ref"]
+        assert parsed["data"]["data"]["lineage"]["text"] == "РАСПИСАНИЕ ПЫТОК 😈"
     elif is_camera_read:
         assert parsed["data"]["data"]["camera_revision"].startswith("cam_")
         assert parsed["data"]["data"]["visibility_revision"].startswith("vis_")
