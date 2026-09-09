@@ -16,6 +16,30 @@ from app.fusion_cad.snapshots import (
 )
 
 
+def test_normalize_snapshot_preserves_text_parameter_without_numeric_value() -> None:
+    snapshot = normalize_snapshot(
+        {
+            "document_ref": "doc_text_parameter",
+            "model_revision": "rev_1",
+            "parameters": [
+                {
+                    "name": "d274",
+                    "expression": "'УРОКОВ'",
+                    "value": None,
+                    "unit": "Text",
+                }
+            ],
+        }
+    )
+
+    assert len(snapshot.parameters) == 1
+    parameter = snapshot.parameters[0]
+    assert parameter.name == "d274"
+    assert parameter.expression == "'УРОКОВ'"
+    assert parameter.value is None
+    assert parameter.unit == "Text"
+
+
 @pytest.fixture
 def raw_fixture() -> dict:
     """Raw Fusion model fixture containing 240 faces across bodies, features, sketches, and parameters."""

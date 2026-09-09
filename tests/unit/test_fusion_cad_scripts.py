@@ -998,7 +998,7 @@ def test_model_snapshot_uses_timeline_entity_as_stable_identity(monkeypatch) -> 
 
 
 def _run_model_snapshot_with_timeline_entities(
-    monkeypatch: pytest.MonkeyPatch, entities: list[Any]
+    monkeypatch: pytest.MonkeyPatch, entities: list[Any], parameters: list[Any] | None = None
 ) -> dict[str, Any]:
     class Collection:
         def __init__(self, items=()):
@@ -1037,7 +1037,7 @@ def _run_model_snapshot_with_timeline_entities(
         rootComponent=root,
         timeline=Collection(timeline_items),
         allComponents=Collection([root]),
-        allParameters=Collection(),
+        allParameters=Collection(parameters or []),
     )
 
     class Products:
@@ -1123,6 +1123,33 @@ def test_model_snapshot_rejects_arbitrary_tokenless_timeline_entity(monkeypatch)
     assert result["status"] == "failed"
     assert result["error"]["code"] == "FUSION_API_ERROR"
     assert "lack stable runtime identity" in result["error"]["message"]
+
+
+def test_model_snapshot_preserves_text_parameter_without_numeric_value(monkeypatch) -> None:
+    class TextParameter:
+        name = "d274"
+        expression = "'УРОКОВ'"
+        unit = "Text"
+        isFavorite = False
+
+        @property
+        def value(self) -> float:
+            raise RuntimeError("3 : Parameter is not numeric type")
+
+    result = _run_model_snapshot_with_timeline_entities(
+        monkeypatch, [], [TextParameter()]
+    )
+
+    assert result["status"] == "succeeded"
+    assert result["data"]["parameters"] == [
+        {
+            "name": "d274",
+            "expression": "'УРОКОВ'",
+            "value": None,
+            "unit": "Text",
+            "is_favorite": False,
+        }
+    ]
 
 
 def test_model_snapshot_accepts_nested_occurrence_proxy_without_entity_token(monkeypatch) -> None:

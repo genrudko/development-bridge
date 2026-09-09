@@ -309,7 +309,7 @@ class ParameterSummary(BaseModel):
     ref: str | None = Field(default=None, pattern=ENTITY_REF_PATTERN)
     name: str = Field(..., min_length=1)
     kind: str = "parameter"
-    value: float
+    value: float | None
     expression: str | None = None
     unit: str | None = "mm"
     is_user: bool = False
@@ -1137,7 +1137,8 @@ def normalize_snapshot(
             for p in params_raw.get(p_cat, []):
                 if isinstance(p, Mapping):
                     p_name = str(p.get("name", ""))
-                    p_val = float(p.get("value", 0.0))
+                    raw_value = p.get("value", 0.0)
+                    p_val = float(raw_value) if raw_value is not None else None
                     p_expr = (
                         str(p.get("expression", ""))
                         if p.get("expression") is not None
@@ -1167,7 +1168,8 @@ def normalize_snapshot(
         for p in params_raw:
             if isinstance(p, Mapping):
                 p_name = str(p.get("name", ""))
-                p_val = float(p.get("value", 0.0))
+                raw_value = p.get("value", 0.0)
+                p_val = float(raw_value) if raw_value is not None else None
                 p_expr = (
                     str(p.get("expression", ""))
                     if p.get("expression") is not None

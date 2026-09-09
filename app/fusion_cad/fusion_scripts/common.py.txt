@@ -821,11 +821,17 @@ def collect_model_fingerprint(payload=None):
         for i in range(params.count):
             try:
                 p = params.item(i)
+                p_unit = str(getattr(p, "unit", ""))
+                p_value = (
+                    None
+                    if p_unit.lower() == "text"
+                    else canonicalize_value(float(getattr(p, "value", 0.0)))
+                )
                 p_items.append({
                     "name": str(getattr(p, "name", "")),
                     "expression": str(getattr(p, "expression", "")),
-                    "value": canonicalize_value(float(getattr(p, "value", 0.0))),
-                    "unit": str(getattr(p, "unit", "")),
+                    "value": p_value,
+                    "unit": p_unit,
                     "is_favorite": bool(getattr(p, "isFavorite", False)),
                 })
             except Exception as exc:
