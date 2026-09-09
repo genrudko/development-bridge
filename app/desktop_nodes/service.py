@@ -958,24 +958,36 @@ class DesktopNodeService:
             else self._json_hash(result)
         )
         has_is_error = "isError" in result and result.get("isError") is not False
+
+        def _explicit_operation_uncertain(payload: Any) -> bool:
+            if not isinstance(payload, dict):
+                return False
+            error = payload.get("error")
+            return (
+                isinstance(error, dict)
+                and error.get("code") == ErrorCode.OPERATION_UNCERTAIN.value
+            )
+
+        result_uncertain = _explicit_operation_uncertain(result)
         result_failed = bool(
             has_is_error
             or result.get("status") in ("failed", "error")
             or "error" in result
         )
-        if not result_failed and isinstance(result.get("content"), list):
+        if isinstance(result.get("content"), list):
             for block in result["content"]:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = block.get("text", "")
                     try:
                         parsed = json.loads(text)
-                        if isinstance(parsed, dict) and (
-                            ("isError" in parsed and parsed.get("isError") is not False)
-                            or parsed.get("status") in ("failed", "error")
-                            or "error" in parsed
-                        ):
-                            result_failed = True
-                            break
+                        if isinstance(parsed, dict):
+                            result_uncertain = result_uncertain or _explicit_operation_uncertain(parsed)
+                            if (
+                                ("isError" in parsed and parsed.get("isError") is not False)
+                                or parsed.get("status") in ("failed", "error")
+                                or "error" in parsed
+                            ):
+                                result_failed = True
                     except (ValueError, TypeError):
                         pass
         external_result_id = (
@@ -997,9 +1009,14 @@ class DesktopNodeService:
                     retained_result_id = external_result_id
                     if archived.get("retain_result") and retained_result_id is None:
                         retained_result_id = self._store_result_value(node_id, command_id, result)
+                    late_status = (
+                        "uncertain"
+                        if result_uncertain and archived.get("mutation") is True
+                        else ("late_failed" if result_failed else "late_succeeded")
+                    )
                     self._journal.update(
                         archived["operation_id"],
-                        status="late_failed" if result_failed else "late_succeeded",
+                        status=late_status,
                         completed_at=time.time(),
                         result_sha256=result_hash,
                         result_id=retained_result_id,
@@ -1013,9 +1030,14 @@ class DesktopNodeService:
             retained_result_id = external_result_id
             if command.retain_result and retained_result_id is None:
                 retained_result_id = self._store_result_value(node_id, command_id, result)
+            result_status = (
+                "uncertain"
+                if result_uncertain and command.mutation
+                else ("failed" if result_failed else "succeeded")
+            )
             self._journal.update(
                 command.operation_id,
-                status="failed" if result_failed else "succeeded",
+                status=result_status,
                 completed_at=time.time(),
                 result_sha256=result_hash,
                 result_id=retained_result_id,

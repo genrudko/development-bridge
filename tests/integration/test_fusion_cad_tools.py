@@ -513,6 +513,39 @@ def test_exhaustive_operation_classification(
     assert summary == f"{group}:{operation}"
 
 
+@pytest.mark.asyncio
+async def test_capabilities_read_is_publicly_nonmutating_but_transport_is_uncertainty_sensitive(
+    mock_container: ApplicationContainer,
+):
+    service = mock_container.fusion_cad
+    is_async, is_mutation, summary = service._classify_operation(
+        "read", {"operation": "capabilities"}
+    )
+    assert is_async is False
+    assert is_mutation is False
+    assert summary == "read:capabilities"
+
+    captured = {}
+
+    async def fail_after_dispatch(node_id, tool_name, arguments, journal=None):
+        captured["journal"] = journal
+        raise BridgeError(
+            ErrorCode.DESKTOP_NODE_TIMEOUT,
+            "capability probe dispatch sentinel",
+            retryable=False,
+        )
+
+    mock_container.desktop_nodes.call = AsyncMock(side_effect=fail_after_dispatch)
+    with pytest.raises(BridgeError) as exc_info:
+        await service.execute(
+            {"node_id": "desk-1", "operation": "capabilities"},
+            group="read",
+        )
+    assert exc_info.value.code == ErrorCode.DESKTOP_NODE_TIMEOUT
+    assert captured["journal"]["mutation"] is True
+    assert captured["journal"]["summary"] == "read:capabilities"
+
+
 @pytest.mark.parametrize("tool_name, payload", [
     ("fusion_view", {"node_id": "desk-1", "operation": "camera_set", "fov": 45.0}),
     ("fusion_view", {"node_id": "desk-1", "operation": "fit"}),

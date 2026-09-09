@@ -667,12 +667,14 @@ def test_rendered_capability_probe_failed_ptransaction_start_stays_degraded(monk
     assert tx["implementation"] == "ptransaction-preview-replay"
 
 
-def test_rendered_capability_probe_failed_ptransaction_abort_stays_degraded_no_retry(
+def test_rendered_capability_probe_failed_ptransaction_abort_is_operation_uncertain_no_retry(
     monkeypatch,
 ):
-    """Falsification: a successful PTransaction.Start followed by a failed
-    PTransaction.Abort must NOT set transaction_runtime_verified, must NOT
-    advertise supported preview_replay, and must never retry Start or Abort."""
+    """A started native PTransaction whose Abort reports failure is uncertain.
+
+    The capability probe must fail closed instead of returning a degraded matrix,
+    and it must never retry either native command.
+    """
     class FakeApplication:
         version = "2.0.test"
         activeDocument = None
@@ -693,20 +695,42 @@ def test_rendered_capability_probe_failed_ptransaction_abort_stays_degraded_no_r
             raise AssertionError(f"unexpected command: {command}")
 
     result, commands = _exec_rendered_read_capabilities(monkeypatch, FakeApplication)
-    facts = result["data"]["probe_facts"]
-    tx = next(
-        record
-        for record in result["capabilities"]
-        if record["name"] == "transaction.preview_replay"
-    )
-    assert facts.get("transaction_runtime_verified") is not True
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
     assert commands == [
         'PTransaction.Start "bridge_cad_capability_probe"',
         "PTransaction.Abort",
     ]
     assert commands.count("PTransaction.Abort") == 1
-    assert tx["state"] == "degraded"
-    assert tx["implementation"] == "ptransaction-preview-replay"
+
+
+def test_rendered_capability_probe_abort_exception_is_operation_uncertain_no_retry(monkeypatch):
+    class FakeApplication:
+        version = "2.0.test"
+        activeDocument = None
+        activeViewport = None
+        userInterface = None
+        measureManager = None
+
+        @classmethod
+        def get(cls):
+            return cls()
+
+        def executeTextCommand(self, command):
+            type(self)._commands.append(command)
+            if command.startswith("PTransaction.Start "):
+                return "1"
+            if command == "PTransaction.Abort":
+                raise RuntimeError("native abort state unknown")
+            raise AssertionError(f"unexpected command: {command}")
+
+    result, commands = _exec_rendered_read_capabilities(monkeypatch, FakeApplication)
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+    assert commands == [
+        'PTransaction.Start "bridge_cad_capability_probe"',
+        "PTransaction.Abort",
+    ]
 
 
 def test_rendered_capability_probe_divergent_authoritative_fingerprints_stay_degraded(

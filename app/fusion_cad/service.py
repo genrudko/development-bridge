@@ -3059,8 +3059,15 @@ class FusionCadService:
             self._inject_inspect_target_hints(payload)
 
         script = self._script_bundle.build(effective_bundle_group, payload)
+        # `read:capabilities` is publicly non-mutating, but its runtime probe
+        # contains an empty PTransaction Start/Abort discriminator.  Treat only
+        # the durable transport/journal entry as mutation-sensitive so an
+        # uncertain Start/Abort outcome is never replayed as an ordinary read.
+        journal_mutation = is_mutation or (
+            effective_bundle_group == "read" and op == "capabilities"
+        )
         journal = {
-            "mutation": is_mutation,
+            "mutation": journal_mutation,
             "summary": summary,
             "checkpoint": {
                 "operation": op,

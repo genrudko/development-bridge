@@ -107,17 +107,39 @@ def probe_runtime():
     except Exception:
         pass
 
-    # Task 13: verify the exact primary PTransaction boundary on this runtime.
-    # This is an empty Start/Abort discriminator with a fixed safe name: it does
-    # not mutate model geometry and is never retried if the terminal Abort fails.
+    # Task 13/14: verify the exact primary PTransaction boundary on this runtime.
+    # This is an empty Start/Abort discriminator with a fixed safe name.  Once
+    # Start succeeds, Abort is the only allowed terminal action and is NEVER
+    # retried.  If Start raises (outcome unknown), or a started transaction cannot
+    # be proven aborted, fail the whole probe as OPERATION_UNCERTAIN instead of
+    # returning an ordinary degraded capability matrix.  The service journals
+    # read:capabilities as mutation-sensitive/non-replayable for this reason.
     try:
         execute_text_command = getattr(app, "executeTextCommand", None) if app else None
         if callable(execute_text_command):
-            started = execute_text_command('PTransaction.Start "bridge_cad_capability_probe"')
+            try:
+                started = execute_text_command('PTransaction.Start "bridge_cad_capability_probe"')
+            except Exception:
+                raise FusionScriptError(
+                    "OPERATION_UNCERTAIN",
+                    "Capability probe transaction start outcome is uncertain",
+                ) from None
             if str(started).strip() == "1":
-                aborted = execute_text_command("PTransaction.Abort")
-                if str(aborted).strip() == "1":
-                    facts["transaction_runtime_verified"] = True
+                try:
+                    aborted = execute_text_command("PTransaction.Abort")
+                except Exception:
+                    raise FusionScriptError(
+                        "OPERATION_UNCERTAIN",
+                        "Capability probe transaction abort outcome is uncertain",
+                    ) from None
+                if str(aborted).strip() != "1":
+                    raise FusionScriptError(
+                        "OPERATION_UNCERTAIN",
+                        "Capability probe transaction abort outcome is uncertain",
+                    )
+                facts["transaction_runtime_verified"] = True
+    except FusionScriptError:
+        raise
     except Exception:
         facts["transaction_runtime_verified"] = False
 

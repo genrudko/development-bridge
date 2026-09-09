@@ -261,3 +261,32 @@ async def test_completed_async_operation_status_and_result_survive_bridge_restar
     restarted = DesktopNodeService(settings)
     assert restarted.operation_status("desk-1", "op-durable-result-01")["status"] == "succeeded"
     assert restarted.operation_result("desk-1", "op-durable-result-01")[0] == result
+
+
+@pytest.mark.asyncio
+async def test_explicit_uncertain_mutation_result_remains_uncertain(tmp_path):
+    service = DesktopNodeService(configured(tmp_path, call_timeout_seconds=1))
+    await service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    call = asyncio.create_task(service.call(
+        "desk-1",
+        "fusion_mcp_execute",
+        {},
+        {"operation_id": "op-cap-probe-uncertain", "summary": "read:capabilities", "mutation": True},
+    ))
+    command = await service.claim("desk-1", 0.2)
+    assert command is not None
+    result = {
+        "content": [{
+            "type": "text",
+            "text": '{"api_version":"fusion.cad/v1","status":"failed","error":{"code":"OPERATION_UNCERTAIN","message":"CAD operation state uncertain"}}',
+        }],
+        "isError": True,
+    }
+    await service.submit_result("desk-1", command["command_id"], result)
+    assert await call == result
+    status = service.operation_status("desk-1", "op-cap-probe-uncertain")
+    assert status["status"] == "uncertain"
+    assert status["mutation"] is True
+    assert [item["operation_id"] for item in service.status("desk-1")["uncertain_operations"]] == [
+        "op-cap-probe-uncertain"
+    ]
