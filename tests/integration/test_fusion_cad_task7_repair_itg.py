@@ -73,6 +73,7 @@ class _CircleGeom:
 class _Face:
     def __init__(self, idx=0, geometry=None, vertices=None, loops=None):
         self.entityToken = f"face_token_{idx}"
+        self.objectType = "adsk::fusion::BRepFace"
         self.area = 10.0
         self.centroid = _P(5.0, 5.0, 5.0)
         self.body = None
@@ -88,6 +89,7 @@ class _Face:
 class _Edge:
     def __init__(self, idx=0, geometry=None):
         self.entityToken = f"edge_token_{idx}"
+        self.objectType = "adsk::fusion::BRepEdge"
         self.length = 10.0
         self.geometry = geometry
         self.startVertex = _Vertex(0.0, 0.0, 0.0)
@@ -98,6 +100,7 @@ class _Body:
     def __init__(self):
         self.name = "Body1"
         self.entityToken = "body_token_1"
+        self.objectType = "adsk::fusion::BRepBody"
         self.isSolid = True
         self.area = 50.0
         self._faces = [_Face(0), _Face(1), _Face(2), _Face(3), _Face(4), _Face(5)]

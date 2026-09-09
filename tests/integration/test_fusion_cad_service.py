@@ -1111,6 +1111,7 @@ class AdskFakeContext:
         class FakeFace:
             def __init__(self, idx=0, area=10.0, centroid=None, body=None):
                 self.entityToken = f"face_token_{idx}"
+                self.objectType = "adsk::fusion::BRepFace"
                 self.area = area
                 self.centroid = centroid or FakePoint(5.0, 5.0, 5.0)
                 self.body = body
@@ -1153,6 +1154,7 @@ class AdskFakeContext:
         class FakeEdge:
             def __init__(self, idx=0, length=10.0):
                 self.entityToken = f"edge_token_{idx}"
+                self.objectType = "adsk::fusion::BRepEdge"
                 self.length = length
                 self.geometry = type(
                     "EdgeGeom",
@@ -1184,6 +1186,7 @@ class AdskFakeContext:
                 self._ctx = ctx
                 self.name = "Body1"
                 self.entityToken = "body_token_1"
+                self.objectType = "adsk::fusion::BRepBody"
                 self.isSolid = True
                 self.isVisible = True
                 self.isLightBulbOn = True
@@ -3114,7 +3117,7 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
         "missing_component_entityToken",
         "missing_occurrence_attributes",
         "missing_occurrence_entityToken",
-        "missing_timeline_attributes",
+        "missing_timeline_feature_attributes",
         "missing_timeline_entityToken",
         "unreadable_doc_attributes",
     ]
@@ -3218,8 +3221,8 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
                 root.allOccurrences = type(
                     "FakeColl", (), {"count": 1, "item": lambda s, idx: BadOccToken()}
                 )()
-            elif case == "missing_timeline_attributes":
-                design.timeline.item(0).attributes = None
+            elif case == "missing_timeline_feature_attributes":
+                design.timeline.item(0).entity.attributes = None
             elif case == "missing_timeline_entityToken":
                 design.timeline.item(0).entityToken = ""
                 design.timeline.item(0).entity.entityToken = ""

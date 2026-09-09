@@ -83,6 +83,7 @@ def _default_face(idx, token):
 class _Face:
     def __init__(self, token="face_token_x"):
         self.entityToken = token
+        self.objectType = "adsk::fusion::BRepFace"
         self.area = 10.0
         self.centroid = _P(5.0, 5.0, 5.0)
         self.body = None
@@ -102,6 +103,7 @@ class _ThicknessBody:
     def __init__(self):
         self.name = "WallBody"
         self.entityToken = "wall_body_token"
+        self.objectType = "adsk::fusion::BRepBody"
         self.isSolid = True
         self.volume = 500.0
         self.area = 50.0
@@ -118,6 +120,7 @@ class _ThicknessBody:
 class _Body:
     def __init__(self, token, name, area=50.0):
         self.entityToken = token
+        self.objectType = "adsk::fusion::BRepBody"
         self.name = name
         self.isSolid = True
         self.volume = 500.0
