@@ -1,4 +1,5 @@
 # fusion.cad/v1 runtime prelude
+import base64
 import json
 import traceback
 
@@ -1809,17 +1810,21 @@ def resolve_fusion_entity(payload=None):
 
 
 
+def _bridge_emit_result(value):
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if PAYLOAD.get("_bridge_result_transport") == "fusion_mcp_exception_v1":
+        token = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+        raise RuntimeError("BRIDGE_CAD_RESULT_V1:" + token)
+    print(raw)
+
+
 if __name__ == "__main__" or True:
     try:
         if "run" not in globals() or not callable(globals()["run"]):
             raise RuntimeError("Group script must define callable run()")
         _output = run()
-        print(json.dumps(_output, ensure_ascii=False, separators=(",", ":")))
     except FusionScriptError as _exc:
-        _err = make_error(_exc.code, _exc.message, _exc.details)
-        _output = _err
-        print(json.dumps(_err, ensure_ascii=False, separators=(",", ":")))
+        _output = make_error(_exc.code, _exc.message, _exc.details)
     except Exception as _exc:
-        _err = make_error("FUSION_API_ERROR", str(_exc), {"traceback": traceback.format_exc()})
-        _output = _err
-        print(json.dumps(_err, ensure_ascii=False, separators=(",", ":")))
+        _output = make_error("FUSION_API_ERROR", str(_exc), {"traceback": traceback.format_exc()})
+    _bridge_emit_result(_output)

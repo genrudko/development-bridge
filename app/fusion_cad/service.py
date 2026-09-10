@@ -11,6 +11,10 @@ from typing import Any
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from app.api.errors import BridgeError, ErrorCode
+from app.desktop_nodes.fusion_script_transport import (
+    BRIDGE_CAD_TRANSPORT_MODE,
+    extract_bridge_cad_result,
+)
 from app.desktop_nodes.service import DesktopNodeService, has_binary_data
 from app.fusion_cad.capabilities import (
     CapabilityMatrix,
@@ -1068,6 +1072,9 @@ class FusionCadService:
 
     @classmethod
     def _is_error_payload(cls, payload: Any) -> bool:
+        transported = extract_bridge_cad_result(payload)
+        if transported is not None:
+            payload = transported
         if not isinstance(payload, dict):
             return True
         if "isError" in payload and payload["isError"] is not False:
@@ -1104,6 +1111,9 @@ class FusionCadService:
     def _extract_error_info(
         cls, payload: dict[str, Any]
     ) -> tuple[ErrorCode, str, dict[str, Any]]:
+        transported = extract_bridge_cad_result(payload)
+        if transported is not None:
+            payload = transported
         err_code = ErrorCode.FUSION_API_ERROR
         raw_details: Any = None
 
@@ -1179,6 +1189,10 @@ class FusionCadService:
         Fails closed on malformed JSON, isError=True, non-bool isError, failed/error status,
         missing or incorrect api_version, invalid CadResult schema, or non-dict structures.
         """
+        transported = extract_bridge_cad_result(raw_result)
+        if transported is not None:
+            raw_result = transported
+
         if not isinstance(raw_result, dict):
             raise FusionCadError(
                 ErrorCode.FUSION_API_ERROR,
@@ -3309,7 +3323,28 @@ class FusionCadService:
         ):
             self._inject_inspect_target_hints(payload)
 
-        script = self._script_bundle.build(effective_bundle_group, payload)
+        script_payload = dict(payload)
+        try:
+            node_tools = self._desktop_nodes.tools(node_id)
+        except (BridgeError, AttributeError):
+            node_tools = {}
+        discovered_tools = node_tools.get("tools", []) if isinstance(node_tools, Mapping) else []
+        current_execute_schema = False
+        if isinstance(discovered_tools, list):
+            for discovered_tool in discovered_tools:
+                if not isinstance(discovered_tool, Mapping) or discovered_tool.get("name") != "fusion_mcp_execute":
+                    continue
+                input_schema = discovered_tool.get("input_schema") or discovered_tool.get("inputSchema")
+                properties = input_schema.get("properties", {}) if isinstance(input_schema, Mapping) else {}
+                current_execute_schema = (
+                    isinstance(properties, Mapping)
+                    and "featureType" in properties
+                    and "object" in properties
+                )
+                break
+        if current_execute_schema:
+            script_payload["_bridge_result_transport"] = BRIDGE_CAD_TRANSPORT_MODE
+        script = self._script_bundle.build(effective_bundle_group, script_payload)
         # `read:capabilities` is publicly non-mutating, but its runtime probe
         # contains an empty PTransaction Start/Abort discriminator.  Treat only
         # the durable transport/journal entry as mutation-sensitive so an

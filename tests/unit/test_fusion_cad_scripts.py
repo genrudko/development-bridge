@@ -1272,3 +1272,28 @@ def test_production_group_entrypoints_accept_fusion_context_argument() -> None:
     for group in ("read", "inspect", "view", "mutate", "transaction", "validate"):
         rendered = bundle.build(group, {"operation": "test_op"})
         assert "def run(_context=None):" in rendered, group
+
+
+def test_exception_transport_emits_strict_encoded_domain_result() -> None:
+    import base64
+    import json
+    import re
+
+    bundle = FusionCadScriptBundle()
+    rendered = bundle.build(
+        "read",
+        {
+            "operation": "capabilities",
+            "_bridge_result_transport": "fusion_mcp_exception_v1",
+        },
+    )
+    scope = {"__name__": "__main__"}
+    with pytest.raises(RuntimeError) as exc_info:
+        exec(compile(rendered, "<fusion-transport>", "exec"), scope)  # noqa: S102
+    match = re.search(r"BRIDGE_CAD_RESULT_V1:([A-Za-z0-9_-]+)$", str(exc_info.value))
+    assert match is not None
+    token = match.group(1)
+    decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    payload = json.loads(decoded)
+    assert payload["api_version"] == "fusion.cad/v1"
+    assert payload["status"] in {"succeeded", "failed"}

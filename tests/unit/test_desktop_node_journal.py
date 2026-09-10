@@ -290,3 +290,43 @@ async def test_explicit_uncertain_mutation_result_remains_uncertain(tmp_path):
     assert [item["operation_id"] for item in service.status("desk-1")["uncertain_operations"]] == [
         "op-cap-probe-uncertain"
     ]
+
+
+@pytest.mark.asyncio
+async def test_bridge_cad_exception_transport_success_is_journal_success(tmp_path):
+    import base64
+    import json
+
+    service = DesktopNodeService(configured(tmp_path, call_timeout_seconds=1.0))
+    await service.register("desk-1", [{"name": "fusion_mcp_execute"}], True)
+    call = asyncio.create_task(service.call(
+        "desk-1",
+        "fusion_mcp_execute",
+        {"featureType": "script", "object": {"script": "# bridge-owned"}},
+        {"operation_id": "op-domain-transport-success", "mutation": False},
+    ))
+    command = await service.claim("desk-1", 0.2)
+    assert command is not None
+    payload = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "ok",
+        "data": {},
+        "changed_refs": [],
+        "warnings": [],
+        "artifacts": [],
+    }
+    token = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    raw = {
+        "content": [{"type": "text", "text": json.dumps({
+            "error": "Traceback\nRuntimeError: BRIDGE_CAD_RESULT_V1:" + token + "\n",
+            "success": False,
+        })}],
+        "is_error": False,
+        "result_type": "complete",
+    }
+    await service.submit_result("desk-1", command["command_id"], raw)
+    await call
+    assert service.operation_status("desk-1", "op-domain-transport-success")["status"] == "succeeded"

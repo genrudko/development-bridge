@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from app.api.capability_exports import CapabilityExportRegistry
 from app.api.errors import BridgeError, ErrorCode
+from app.desktop_nodes.fusion_script_transport import extract_bridge_cad_result
 from app.desktop_nodes.journal import OperationJournal
 from app.settings import DesktopNodeSettings
 
@@ -968,13 +969,15 @@ class DesktopNodeService:
                 and error.get("code") == ErrorCode.OPERATION_UNCERTAIN.value
             )
 
-        result_uncertain = _explicit_operation_uncertain(result)
+        transported = extract_bridge_cad_result(result)
+        classification_payload = transported if transported is not None else result
+        result_uncertain = _explicit_operation_uncertain(classification_payload)
         result_failed = bool(
-            has_is_error
-            or result.get("status") in ("failed", "error")
-            or "error" in result
+            (has_is_error if transported is None else False)
+            or classification_payload.get("status") in ("failed", "error")
+            or "error" in classification_payload
         )
-        if isinstance(result.get("content"), list):
+        if transported is None and isinstance(result.get("content"), list):
             for block in result["content"]:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = block.get("text", "")

@@ -115,6 +115,12 @@ async def test_service_executes_capabilities_read_and_persists_matrix(
     mock_desktop_service: DesktopNodeService,
 ):
     cad_service = FusionCadService(mock_desktop_service)
+    mock_desktop_service.tools.return_value = {
+        "tools": [{
+            "name": "fusion_mcp_execute",
+            "input_schema": {"properties": {"featureType": {}, "object": {}}},
+        }]
+    }
 
     records = [
         CapabilityRecord(
@@ -186,6 +192,12 @@ async def test_service_executes_capabilities_read_and_persists_matrix(
     assert dispatched[2]["featureType"] == "script"
     assert dispatched[2]["object"]["script"]
     assert "script" not in {k for k in dispatched[2] if k != "object"}
+    payload_line = next(
+        line for line in dispatched[2]["object"]["script"].splitlines()
+        if line.startswith("PAYLOAD_RAW = ")
+    )
+    transport_payload = json.loads(json.loads(payload_line[len("PAYLOAD_RAW = "):]))
+    assert transport_payload["_bridge_result_transport"] == "fusion_mcp_exception_v1"
 
 
 @pytest.mark.asyncio
@@ -10117,3 +10129,36 @@ async def test_final_p0_commit_is_reserved_before_async_submit_and_duplicate_is_
     assert mock_desktop_service.submit.await_count==1
     release.set(); assert await first=={'status':'queued','operation_id':'op_first'}
     assert service.transaction_store.get('tx_reserve').state is TransactionState.COMMITTING
+
+
+def test_decode_domain_result_accepts_strict_fusion_mcp_exception_transport() -> None:
+    import base64
+
+    payload = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "transport ok",
+        "data": {"probe": True},
+        "changed_refs": [],
+        "warnings": [],
+        "artifacts": [],
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    raw = {
+        "content": [{
+            "type": "text",
+            "text": json.dumps({
+                "error": "Traceback (most recent call last):\nRuntimeError: BRIDGE_CAD_RESULT_V1:" + encoded + "\n",
+                "success": False,
+            }),
+        }],
+        "is_error": False,
+        "result_type": "complete",
+    }
+
+    result = FusionCadService.decode_domain_result(raw)
+    assert result.status == "succeeded"
+    assert result.summary == "transport ok"
+    assert result.data["probe"] is True
