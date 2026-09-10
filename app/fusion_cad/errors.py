@@ -13,6 +13,7 @@ from app.fusion_cad.models import (
     SNAPSHOT_ID_PATTERN,
     TRANSACTION_ID_PATTERN,
     ImmutableMapping,
+    ValidationReport,
 )
 
 CAD_NON_RETRYABLE_CODES: frozenset[ErrorCode] = frozenset(
@@ -513,6 +514,14 @@ def filter_trusted_diagnostics(details: Any) -> dict[str, Any]:
         elif k == "validation_errors":
             if isinstance(v, (list, tuple)):
                 clean[k] = sanitize_validation_errors(v)
+        elif k == "validation" and isinstance(v, Mapping):
+            try:
+                report = ValidationReport.model_validate(v)
+            except (TypeError, ValueError):
+                continue
+            clean[k] = sanitize_public_payload(
+                report.model_dump(mode="python", exclude_none=True)
+            )
         elif k == "limitations" and trusted and isinstance(v, (list, tuple)):
             # Capability limitations are internal record prose; only explicit
             # trusted provenance may expose them (never identifier-shape pass).

@@ -317,6 +317,10 @@ class FusionCadService:
             keys.update(
                 {
                     "detail",
+                    "include_bodies",
+                    "include_sketches",
+                    "include_features",
+                    "include_parameters",
                     "include_profiles",
                     "include_constraints",
                     "include_model_params",
@@ -328,7 +332,9 @@ class FusionCadService:
         elif group == "view" and operation == "pick":
             keys.add("_pick_expected")
         elif group == "validate" and operation == "run":
-            keys.update({"profiles", "checks"})
+            keys.update({"profiles", "checks", "fail_on"})
+        elif group == "transaction" and operation == "preview":
+            keys.update({"include_diff", "include_validation"})
         return dict(
             sanitize_public_payload(
                 {key: payload[key] for key in keys if key in payload}
@@ -2046,6 +2052,13 @@ class FusionCadService:
                     )
                     evidence = cad_result.model_dump(mode="json").get("data", {})
                     self._transaction_store.finish_preview(tx_id, preview=evidence)
+                public_update: dict[str, Any] = {}
+                if payload.get("include_diff", True) is False:
+                    public_update["diff"] = None
+                if payload.get("include_validation", True) is False:
+                    public_update["validation"] = None
+                if public_update:
+                    cad_result = cad_result.model_copy(update=public_update)
             if effective_bundle_group == "transaction" and op == "commit":
                 tx_id = payload.get("transaction_id")
                 record = self._transaction_store.find(tx_id) if isinstance(tx_id, str) else None
@@ -2094,6 +2107,17 @@ class FusionCadService:
                         ref_registry=self._ref_registry,
                     )
                     self._snapshot_store.put(snapshot)
+                    public_snapshot = snapshot.model_dump(
+                        mode="python", exclude_none=True
+                    )
+                    for include_key, category in (
+                        ("include_bodies", "bodies"),
+                        ("include_sketches", "sketches"),
+                        ("include_features", "features"),
+                        ("include_parameters", "parameters"),
+                    ):
+                        if payload.get(include_key, True) is False:
+                            public_snapshot.pop(category, None)
                     doc_state = cad_result.document
                     if doc_state:
                         doc_state = doc_state.model_copy(
@@ -2104,9 +2128,7 @@ class FusionCadService:
                             "document": doc_state,
                             "data": ImmutableMapping(
                                 sanitize_public_payload(
-                                    snapshot.model_dump(
-                                        mode="python", exclude_none=True
-                                    )
+                                    public_snapshot
                                 )
                             ),
                         }
@@ -2435,6 +2457,24 @@ class FusionCadService:
                         ),
                     }
                 )
+                fail_on = payload.get("fail_on")
+                verdict = report.verdict
+                threshold_failed = (fail_on == "WARN" and verdict in {"WARN", "RED"}) or (
+                    fail_on == "RED" and verdict == "RED"
+                )
+                if threshold_failed:
+                    public_report = sanitize_public_payload(
+                        report.model_dump(mode="python", exclude_none=True)
+                    )
+                    raise FusionCadError(
+                        ErrorCode.VALIDATION_FAILED,
+                        report.summary,
+                        details={
+                            "validation": public_report,
+                            "read_only": True,
+                            "document_ref": validation_doc,
+                        },
+                    )
 
             domain_payload = cad_result.model_dump(mode="python", exclude_none=True)
             if node_id and (
@@ -2863,6 +2903,24 @@ class FusionCadService:
 
         # Enforce capability-first dispatch before script generation or execution
         op = str(payload.get("operation", ""))
+        if domain_group == "style" and op == "text_update" and payload.get("position") is not None:
+            raise FusionCadError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Native sketch-text position update semantics are unavailable",
+                details={"operation": op, "field": "position", "applied": False},
+            )
+        if effective_bundle_group == "read" and op == "model_snapshot" and payload.get("include_views") is True:
+            raise FusionCadError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Model snapshot view summaries are unavailable",
+                details={"operation": op, "field": "include_views"},
+            )
+        if effective_bundle_group == "transaction" and op == "preview" and payload.get("include_screenshot") is True:
+            raise FusionCadError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Same-preview screenshot capture is unavailable",
+                details={"operation": op, "field": "include_screenshot", "applied": False},
+            )
         if effective_bundle_group == "validate" and op == "run":
             requested_profiles = tuple(payload.get("profiles") or ())
             if not requested_profiles or any(
