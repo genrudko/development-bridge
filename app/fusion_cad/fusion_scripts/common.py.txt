@@ -49,6 +49,24 @@ class FusionScriptError(RuntimeError):
         self.details = details or {}
 
 
+def _finite_number(value, label):
+    """Return a deterministic finite float for authoritative fingerprint data."""
+    import math
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            f"{label} must be numeric for authoritative fingerprinting",
+        )
+    number = float(value)
+    if not math.isfinite(number):
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            f"{label} must be finite for authoritative fingerprinting",
+        )
+    return number
+
+
 def canonicalize_value(val):
     if val is None or isinstance(val, (bool, int, str)):
         return val

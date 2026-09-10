@@ -1,11 +1,15 @@
 from __future__ import annotations
+
 import json
 from types import SimpleNamespace
+
 import pytest
+
 from app.api.errors import ErrorCode
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.scripts import FusionCadScriptBundle
 from app.fusion_cad.transactions import TransactionState, TransactionStore
+
 
 def _scope():
     s=FusionCadScriptBundle.build('transaction',{'operation':'test_op'}); d={'__name__':'__main__'}
@@ -46,7 +50,8 @@ def test_commit_reservation_blocks_replay_until_terminal_equivalence():
     assert store.get('tx').state is TransactionState.COMMITTING
 
 def test_validation_uses_timeline_entity_and_health_state(monkeypatch):
-    import sys, types
+    import sys
+    import types
     scope=_scope(); collect=scope['collect_p0_validation_evidence']
     class C:
         def __init__(self,x=()): self.x=list(x)
@@ -76,3 +81,11 @@ def test_proven_not_applied_commit_reservation_can_be_released():
     store.begin_commit('tx_release','fp_1')
     assert store.release_commit_reservation('tx_release').state is TransactionState.STAGED
     assert store.begin_commit('tx_release','fp_1').state is TransactionState.COMMITTING
+
+
+def test_authoritative_fingerprint_defines_sketch_text_finite_number_helper():
+    from app.fusion_cad.scripts import FusionCadScriptBundle
+
+    source = FusionCadScriptBundle().build("read", {"operation": "model_snapshot"})
+    assert "_finite_number(" in source
+    assert "def _finite_number(" in source
