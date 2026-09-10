@@ -130,3 +130,67 @@ def test_sketch_text_semantics_prefer_parameter_api_when_it_works():
     assert height_parameter.value == pytest.approx(0.5)
     assert text.text == "legacy-text"
     assert text.height == pytest.approx(9.9)
+
+
+def test_validation_tolerates_occurrence_proxy_entity_token_runtime_error(monkeypatch):
+    import sys
+    import types
+
+    scope = _scope()
+    collect = scope["collect_p0_validation_evidence"]
+
+    class C:
+        def __init__(self, values=()):
+            self.values = list(values)
+
+        @property
+        def count(self):
+            return len(self.values)
+
+        def item(self, index):
+            return self.values[index]
+
+    class ProxyOccurrence:
+        objectType = "adsk::fusion::Occurrence"
+        name = "Nested:1"
+        isValid = True
+        nativeObject = SimpleNamespace(entityToken="native-occ-1")
+
+        @property
+        def entityToken(self):
+            raise RuntimeError("3 : Tokens can only be created for proxies whose top-level parent is the root component.")
+
+    row = SimpleNamespace(
+        index=0,
+        entity=ProxyOccurrence(),
+        healthState="HealthyFeatureHealthState",
+        isRolledBack=False,
+    )
+    design = SimpleNamespace(timeline=C([row]), allComponents=C([]), rootComponent=SimpleNamespace())
+
+    class Products:
+        def itemByProductType(self, _product_type):
+            return design
+
+    doc = SimpleNamespace(products=Products())
+    app = SimpleNamespace(activeDocument=doc, activeProduct=design)
+    adsk = types.ModuleType("adsk")
+    core = types.ModuleType("adsk.core")
+    fusion = types.ModuleType("adsk.fusion")
+    core.Application = SimpleNamespace(get=lambda: app)
+    fusion.Design = SimpleNamespace(cast=lambda value: value if value is design else None)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    facts = collect({}, {"bodies": [], "sketches": []}, "doc_cloud")
+
+    assert facts["features"] == [{
+        "kind": "feature",
+        "native_token": "native-occ-1",
+        "name": "Nested:1",
+        "valid": True,
+        "health": "healthy",
+    }]

@@ -311,6 +311,28 @@ def _p0_validation_bbox(raw):
     return list(minimum) + list(maximum)
 
 
+def _runtime_identity_from_entity_or_native(entity):
+    """Read stable runtime identity without trusting proxy token getters."""
+    if entity is None:
+        return None
+    candidates = [entity]
+    try:
+        native = getattr(entity, "nativeObject", None)
+    except Exception:
+        native = None
+    if native is not None and native is not entity:
+        candidates.append(native)
+    for candidate in candidates:
+        for field in ("entityToken", "id"):
+            try:
+                value = getattr(candidate, field, None)
+            except Exception:
+                value = None
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
+
 def collect_p0_validation_evidence(payload=None, canonical=None, document_ref=None):
     """Collect the live P0 health/reference evidence used by validation and preview."""
     if canonical is None or document_ref is None:
@@ -340,7 +362,7 @@ def collect_p0_validation_evidence(payload=None, canonical=None, document_ref=No
         if entity is None:
             facts["limitations"].append("timeline_row_without_entity")
             continue
-        native_id = getattr(entity, "entityToken", None) or getattr(entity, "id", None)
+        native_id = _runtime_identity_from_entity_or_native(entity)
         if not native_id:
             facts["limitations"].append("timeline_entity_without_stable_identity")
             continue
@@ -406,22 +428,9 @@ def collect_model_fingerprint(payload=None):
         if entity is None:
             return None
 
-        candidates = [entity]
-        try:
-            native = getattr(entity, "nativeObject", None)
-        except Exception:
-            native = None
-        if native is not None and native is not entity:
-            candidates.append(native)
-
-        for candidate in candidates:
-            for field in ("entityToken", "id"):
-                try:
-                    value = getattr(candidate, field, None)
-                except Exception:
-                    value = None
-                if value is not None and str(value).strip():
-                    return str(value).strip()
+        native_identity = _runtime_identity_from_entity_or_native(entity)
+        if native_identity:
+            return native_identity
 
         try:
             object_type = str(getattr(entity, "objectType", None) or type(entity).__name__)
