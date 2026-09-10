@@ -1048,6 +1048,12 @@ def collect_model_fingerprint(payload=None):
                         f"Timeline feature on item {t_idx} lacks stable runtime identity (entityToken or id); mutable feature name cannot be used as authoritative identity",
                         details={"timeline_index": t_idx},
                     )
+                feat_attrs = getattr(feat, "attributes", None)
+                if (
+                    getattr(feat, "objectType", None) == "adsk::fusion::Snapshot"
+                    and feat_attrs is None
+                ):
+                    continue
                 _read_owner_attributes(feat, "feature", str(f_id).strip())
 
     attr_items.sort(key=lambda x: (x["owner_type"], x["owner_id"], x["group"], x["name"], x.get("value", "")))

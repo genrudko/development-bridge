@@ -1085,14 +1085,12 @@ def test_model_snapshot_uses_stable_position_identity_for_tokenless_snapshots(
             id=None,
             objectType="adsk::fusion::Snapshot",
             name="Position1",
-            attributes=types.SimpleNamespace(count=0, item=lambda _index: None),
         ),
         types.SimpleNamespace(
             entityToken=None,
             id=None,
             objectType="adsk::fusion::Snapshot",
             name="Position2",
-            attributes=types.SimpleNamespace(count=0, item=lambda _index: None),
         ),
     ]
 
