@@ -287,6 +287,47 @@ Sources:
 - https://github.com/gumyr/build123d
 - https://github.com/CadQuery/cadquery
 
+## Live Shimmer qualification — 2026-09-11
+
+The pinned Shimmer provider has now passed the required live qualification on the installed Fusion runtime rather than only mock/offline tests.
+
+Measured deployment/topology:
+
+- pinned Shimmer add-in/server qualification track: `97a06e76…`;
+- in-Fusion add-in `Fusion360MCP` installed and started with Run on Startup enabled;
+- local add-in bridge: `127.0.0.1:9000`;
+- local Shimmer streamable-HTTP MCP sidecar: `127.0.0.1:18768/mcp`;
+- a second **unchanged** `windows_fusion_agent.py` instance registered in Development Bridge as `fusion-shimmer`;
+- Bridge reported `online=true`, `fusion_available=true`, `tool_count=103`, `pending_commands=0`, `uncertain_operations=[]`, `result_delivery_degraded=false`, `result_outbox_count=0`.
+
+Important runtime observation: leaving Fusion's **Scripts and Add-Ins** dialog open blocked the add-in/main-thread path. After the dialog was closed, `fusion_document_info` succeeded end-to-end through `fusion-shimmer -> Shimmer MCP sidecar -> add-in bridge -> Fusion main thread`. Treat that dialog as a modal/blocking UI context during live automation.
+
+Representative live CAD proof in a separate unsaved disposable document:
+
+- created a 30 x 20 mm rectangle in `Sketch1`;
+- applied `horizontal` and `perpendicular` geometric constraints successfully;
+- added a 30 mm driving distance dimension;
+- extruded 10 mm as `Extrude1`;
+- applied a 1 mm all-edge fillet as `Fillet1`;
+- timeline readback returned exactly `Sketch1 -> Extrude1 -> Fillet1`;
+- body readback returned one solid body with a 30 x 20 x 10 mm bounding box, volume `5949.834793498634 mm^3`, 26 faces, 48 edges and 24 vertices;
+- `fusion_screenshot` returned a PNG result artifact;
+- the disposable document was closed with `save=false`.
+
+Representative live assembly/export proof in a second unsaved disposable document:
+
+- created components `A` and `B` as separate occurrences with one body in each;
+- created an as-built rigid joint (`Rigid 1`) between them;
+- readback returned `as_built_joints=1`;
+- exported the disposable design successfully as STEP to a Windows temp path;
+- closed the disposable document with `save=false`.
+
+Original-document safety was rechecked after both disposable tests: `Schedule` was the only remaining open document, remained saved, and reported `is_modified=false`. No qualification operation saved or mutated the original `Schedule`.
+
+One provider contract defect was found and is now a required wrapper rule: Shimmer's MCP schema makes `entity_two` optional for `fusion_sketch_dimension`, but the live implementation requires it for `distance`, `horizontal`, `vertical` (and angular) dimensions. An initial call without `entity_two` correctly failed before mutation; the same distance dimension succeeded once `entity_two` was supplied. The `fusion.cad/v1` provider adapter must validate/normalize this requirement instead of forwarding the misleading optional schema.
+
+**Verdict:** Shimmer is qualified as the preferred rich P1 runtime provider for representative sketch/constraint/dimension, feature, assembly, readback, screenshot and STEP-export operations on the current Fusion installation. This does not replace the accepted official Autodesk P0 provider; it validates the dual-provider architecture and closes adoption-order steps 1 and 2.
+
 ## Recommended rewrite of the phase boundaries
 
 ### P0.5 — thin operator shell, not another agent platform
@@ -336,9 +377,9 @@ Autodesk Assistant, Adam AI CAD Copilot, CADAgent and Bevell remain useful bench
 
 The remaining pre-implementation work is now narrow and ordered:
 
-1. live-install a **pinned Shimmer sidecar** on the current Fusion runtime and prove representative operations through its own add-in bridge;
-2. if green, prove a second unchanged Windows Relay instance can register that provider under a distinct node ID and coexist with `fusion-workstation`;
-3. spike only the facade/provider-routing seam plus representative transaction/revision verification — do not build the full P1 tool set;
+1. **DONE 2026-09-11:** live-install a **pinned Shimmer sidecar** on the current Fusion runtime and prove representative sketch/constraint/dimension, feature, assembly, screenshot and STEP-export operations through its own add-in bridge;
+2. **DONE 2026-09-11:** prove a second unchanged Windows Relay instance can register that provider as `fusion-shimmer` and coexist with `fusion-workstation`;
+3. **NEXT:** spike only the facade/provider-routing seam plus representative transaction/revision verification — do not build the full P1 tool set;
 4. spike `jhk` Command IR/proof concepts against our transaction planner;
 5. spike Fusion Palette using only existing Bridge durable state;
 6. run Trimesh on representative exported real parts for accuracy/performance, not API existence;
