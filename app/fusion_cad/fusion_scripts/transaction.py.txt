@@ -37,6 +37,8 @@ def _transaction_exact_text_create_plan(plan):
     frame = position.get("frame") if isinstance(position, dict) else None
     if not isinstance(position, dict) or not isinstance(frame, dict) or frame.get("space") != "world" or abs(float(position.get("z", 0.0))) > 1e-6:
         raise FusionScriptError("CAPABILITY_UNAVAILABLE", "P0 transaction text_create supports only the verified world XY plane (z=0)", {"applied": False})
+    if action.get("font", "Arial") != "Arial" or action.get("alignment", "left") != "left" or action.get("flip_x", False) is not False or action.get("flip_y", False) is not False or action.get("target_plane_or_face") is not None:
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "P0 transaction text_create supports only default font, alignment, flips, and target plane options", {"applied": False})
     writes = action.get("metadata_writes")
     provenance = action.get("provenance")
     if not isinstance(writes, list) or len(writes) != 1 or not isinstance(writes[0], dict) or writes[0].get("name") != "provenance" or not isinstance(writes[0].get("value"), str) or not isinstance(provenance, dict):

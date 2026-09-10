@@ -10125,6 +10125,99 @@ async def test_task14_async_terminal_finalization_preserves_service_prepared_con
 
 
 @pytest.mark.asyncio
+async def test_transaction_preview_with_large_baseline_uses_bounded_finalization_checkpoint(
+    real_desktop_service: DesktopNodeService,
+):
+    await real_desktop_service.register(
+        "desk-1", [{"name": "fusion_mcp_execute"}], True
+    )
+    cad_service = FusionCadService(real_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [
+                CapabilityRecord(name="transaction.preview_replay", state="supported"),
+                CapabilityRecord(
+                    name="revision.external_change_detection", state="supported"
+                ),
+            ]
+        ),
+    )
+    baseline = {
+        "structural_hash": "fp_large_baseline",
+        "counts": {"bodies": 180},
+        "bodies": [
+            {"ref": f"ent_body_{index:04d}", "name": "Bracket-" + ("x" * 64)}
+            for index in range(180)
+        ],
+    }
+    assert len(json.dumps(baseline).encode("utf-8")) > 8192
+    rec = cad_service.revision_tracker.observe("doc_1", "fp_large_baseline")
+    cad_service.revision_tracker.begin_transaction(
+        "tx_large_baseline", "doc_1", rec.revision, rec.fingerprint
+    )
+    cad_service.transaction_store.begin(
+        "tx_large_baseline",
+        "doc_1",
+        rec.revision,
+        rec.fingerprint,
+        baseline,
+    )
+    cad_service.transaction_store.stage(
+        "tx_large_baseline",
+        {
+            "action_type": "text_create",
+            "text": "Schedule",
+            "height_mm": 4.0,
+            "position": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "frame": {"space": "world"},
+            },
+        },
+    )
+
+    queued = await cad_service.execute(
+        {
+            "node_id": "desk-1",
+            "operation": "preview",
+            "transaction_id": "tx_large_baseline",
+        },
+        group="transaction",
+    )
+    status = real_desktop_service.operation_status(
+        "desk-1", queued["operation_id"]
+    )
+    checkpoint = status["checkpoint"]
+    assert "baseline_snapshot" not in checkpoint["finalization_payload"]
+    assert len(json.dumps(checkpoint).encode("utf-8")) < 8192
+
+    finalized = cad_service.finalize_terminal_operation(
+        {**status, "status": "succeeded"},
+        {
+            "api_version": "fusion.cad/v1",
+            "status": "succeeded",
+            "summary": "Previewed transaction",
+            "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+            "data": {
+                "operation": "preview",
+                "transaction_id": "tx_large_baseline",
+                "document_ref": "doc_1",
+                "applied": False,
+                "fingerprint": "fp_large_baseline",
+            },
+        },
+    )
+
+    assert isinstance(finalized, CadResult)
+    transaction = cad_service.transaction_store.get("tx_large_baseline")
+    assert transaction.state.value == "STAGED"
+    assert transaction.preview_evidence is not None
+    assert transaction.preview_evidence["durable"] is False
+
+
+@pytest.mark.asyncio
 async def test_task14_async_full_snapshot_checkpoint_preserves_detail_option(
     mock_desktop_service: DesktopNodeService,
 ):

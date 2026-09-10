@@ -211,6 +211,7 @@ class FusionCadService:
         self._selector_engine = SelectorEngine()
         self.inline_limit_bytes = inline_limit_bytes
         self._node_capabilities: dict[str, _CachedNodeCapabilities] = {}
+        self._active_document_refs_by_node: dict[str, str] = {}
 
     @property
     def revision_tracker(self) -> RevisionTracker:
@@ -290,6 +291,48 @@ class FusionCadService:
             return len(raw.encode("utf-8")) > self.inline_limit_bytes
         except (TypeError, ValueError, OverflowError):
             return False
+
+    @staticmethod
+    def _finalization_context(
+        payload: Mapping[str, Any], *, group: str, operation: str
+    ) -> dict[str, Any]:
+        """Return only semantic fields consumed after async terminal delivery."""
+        keys = {"operation", "transaction_id", "document_ref"}
+        if group == "transaction" and operation == "stage":
+            keys.add("action")
+        elif group == "mutate":
+            keys.update(
+                {
+                    "logical_object_ref",
+                    "text_ref",
+                    "provenance",
+                    "style_semantic_contract",
+                    "target",
+                    "visible",
+                    "name",
+                }
+            )
+        elif group == "read":
+            keys.update(
+                {
+                    "detail",
+                    "include_profiles",
+                    "include_constraints",
+                    "include_model_params",
+                    "include_user_params",
+                    "selector",
+                    "limit",
+                }
+            )
+        elif group == "view" and operation == "pick":
+            keys.add("_pick_expected")
+        elif group == "validate" and operation == "run":
+            keys.update({"profiles", "checks"})
+        return dict(
+            sanitize_public_payload(
+                {key: payload[key] for key in keys if key in payload}
+            )
+        )
 
     def _snapshot_selector_candidates(self, snapshot: Any) -> list[Any]:
         """Collect the current/latest Task5 semantic snapshot candidate records
@@ -2384,11 +2427,15 @@ class FusionCadService:
                 self._register_transaction_commit_refs(
                     pending_transaction_refs, document_ref=target_doc
                 )
+                if node_id and target_doc:
+                    self._active_document_refs_by_node[node_id] = target_doc
                 return external_ref
 
             self._register_transaction_commit_refs(
                 pending_transaction_refs, document_ref=target_doc
             )
+            if node_id and target_doc:
+                self._active_document_refs_by_node[node_id] = target_doc
             if isinstance(result, dict) and not isinstance(result, CadResult):
                 return cad_result.model_dump(mode="python", exclude_none=True)
             return cad_result
@@ -2775,6 +2822,10 @@ class FusionCadService:
                 ErrorCode.INVALID_ARGUMENT,
                 "node_id is required for Fusion CAD operations",
             )
+        if "document_ref" not in payload:
+            node_document_ref = self._active_document_refs_by_node.get(node_id)
+            if node_document_ref is not None:
+                payload["document_ref"] = node_document_ref
 
         # Enforce capability-first dispatch before script generation or execution
         op = str(payload.get("operation", ""))
@@ -3137,7 +3188,9 @@ class FusionCadService:
             # semantic request context that was dispatched. Persist only the
             # public/sanitized shape so adapter-private native tokens and
             # secret-like values never enter the durable operation journal.
-            checkpoint["finalization_payload"] = sanitize_public_payload(payload)
+            checkpoint["finalization_payload"] = self._finalization_context(
+                payload, group=effective_bundle_group, operation=op
+            )
         journal = {
             "mutation": journal_mutation,
             "summary": summary,

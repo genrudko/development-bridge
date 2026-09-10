@@ -668,6 +668,18 @@ def test_commit_rechecks_then_replays_exact_plan_once_with_no_metadata_followup(
     assert result["data"]["same_command_provenance"] is True
 
 
+def test_preview_rejects_nondefault_text_option_before_apply(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=True)
+    payload["plan"][0]["font"] = "Comic Sans MS"
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    assert result["error"]["details"]["applied"] is False
+    assert events == []
+    assert state["text_add_count"] == 0
+
+
 def test_ptransaction_post_commit_fingerprint_exception_is_uncertain(monkeypatch):
     payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=False)
     original_fingerprint = runtime["_transaction_fingerprint_primitive"]
