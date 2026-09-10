@@ -97,6 +97,37 @@ def test_supported_capability_succeeds():
     assert result.implementation == "native-preselect"
 
 
+def test_task14_native_style_capabilities_are_operation_specific():
+    probe = {
+        "probe_facts": {
+            "has_app": True,
+            "has_adsk_fusion": True,
+            "has_design_access": True,
+            "sketch_text_read_runtime_verified": True,
+            "transaction_runtime_verified": True,
+            "visibility_runtime_verified": True,
+        }
+    }
+    matrix = CapabilityMatrix.from_probe(probe)
+
+    assert matrix.require("style.text_read").implementation == "native-sketch-text-v1"
+    assert matrix.require("style.text_update").implementation == "native-sketch-text-v1"
+    assert matrix.require("style.visibility").implementation == "native-entity-visibility-v1"
+    assert matrix.get("style.text_create").state == "unavailable"
+    assert matrix.get("style.text_delete").state == "unavailable"
+    assert matrix.get("style.text_extrude").state == "unavailable"
+    assert matrix.get("style.text_cut").state == "unavailable"
+
+
+def test_task14_style_operation_mapping_does_not_overclaim_unimplemented_text():
+    from app.fusion_cad.capabilities import get_required_capability
+
+    assert get_required_capability("style", "text_read") == "style.text_read"
+    assert get_required_capability("style", "text_update") == "style.text_update"
+    assert get_required_capability("style", "text_create") == "style.text_create"
+    assert get_required_capability("style", "show_only") == "style.visibility"
+
+
 def test_matrix_records_deterministically_sorted():
     r1 = CapabilityRecord(name="view.pick", state="supported")
     r2 = CapabilityRecord(name="export.dxf", state="unavailable")
@@ -409,7 +440,7 @@ def test_falsify_finding_2_probe_failure_yields_unavailable_with_limitations():
         },
     }
     matrix = CapabilityMatrix.from_probe(probe_failed)
-    assert len(matrix.records) == 19
+    assert len(matrix.records) == 26
 
     for rec in matrix.records:
         assert rec.state == "unavailable", f"Expected {rec.name} to be unavailable on probe failure"

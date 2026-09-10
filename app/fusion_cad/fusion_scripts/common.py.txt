@@ -970,7 +970,10 @@ def collect_model_fingerprint(payload=None):
                     )
                 _read_owner_attributes(e, "edge", str(e_id).strip())
 
-    # Sketch attributes, Sketch-curve attributes, and Sketch-point attributes
+    # Sketch attributes, SketchText semantic values/attributes, sketch-curve
+    # attributes, and Sketch-point attributes. Text content and its Bridge
+    # provenance are mutation-sensitive inputs to the authoritative guard.
+    sketch_text_items = []
     for c in comps_list:
         sketches = getattr(c, "sketches", None)
         if sketches is None or not hasattr(sketches, "count"):
@@ -988,6 +991,26 @@ def collect_model_fingerprint(payload=None):
                     details={"sketch_name": getattr(s, "name", None)},
                 )
             _read_owner_attributes(s, "sketch", str(s_id).strip())
+
+            texts = getattr(s, "sketchTexts", None)
+            if texts is not None and hasattr(texts, "count"):
+                for text_idx in range(texts.count):
+                    sketch_text = texts.item(text_idx)
+                    text_id = getattr(sketch_text, "entityToken", None) or getattr(sketch_text, "id", None)
+                    text_parameter = getattr(sketch_text, "textParameter", None)
+                    height_parameter = getattr(sketch_text, "heightParameter", None)
+                    if not text_id or text_parameter is None or height_parameter is None:
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "SketchText lacks stable identity or semantic parameters for authoritative fingerprinting",
+                        )
+                    sketch_text_items.append({
+                        "id": str(text_id),
+                        "text": str(text_parameter.textValue),
+                        "font": str(getattr(sketch_text, "fontName", "") or ""),
+                        "height": _finite_number(height_parameter.value, "SketchText height"),
+                    })
+                    _read_owner_attributes(sketch_text, "sketch_text", str(text_id).strip())
 
             # Sketch curves
             curves = getattr(s, "sketchCurves", None)
@@ -1024,6 +1047,8 @@ def collect_model_fingerprint(payload=None):
                         details={"sketch_name": getattr(s, "name", None), "point_index": pt_idx},
                     )
                 _read_owner_attributes(pt, "sketch_point", str(pt_id).strip())
+
+    canonical["sketch_texts"] = sorted(sketch_text_items, key=lambda item: item["id"])
 
     # Timeline / Feature entity attributes
     if design:

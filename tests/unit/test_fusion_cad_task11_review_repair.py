@@ -6,6 +6,7 @@ from app.api.errors import ErrorCode
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.models import CadResult, ImmutableMapping
 from app.fusion_cad.revisions import RevisionTracker
+from app.fusion_cad.scripts import FusionCadScriptBundle
 from app.fusion_cad.service import FusionCadService
 
 
@@ -229,3 +230,71 @@ def test_task11_restore_requires_exact_matching_scoped_state():
     with pytest.raises(FusionCadError) as exc:
         service._finalize_style_execution(_result(data), op="restore", payload={})
     assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+
+
+def test_task14_production_script_contains_native_sketch_text_path():
+    script = FusionCadScriptBundle().build(
+        "mutate", {"operation": "text_read", "text_ref": "text_expected_01"}
+    )
+    assert "itemByProductType(\"DesignProductType\")" in script
+    assert "textParameter" in script
+    assert "textValue" in script
+    assert "_resolve_current_sketch_text" in script
+
+
+def test_task14_native_mutations_use_one_ptransaction_not_compensation_hooks():
+    script = FusionCadScriptBundle().build(
+        "mutate",
+        {
+            "operation": "text_update",
+            "text_ref": "text_expected_01",
+            "text": "РАСПИСАНИЕ ПЫТОК 😈",
+            "style_semantic_contract": "task11.v1",
+        },
+    )
+    assert "_run_native_style_transaction" in script
+    assert 'PTransaction.Start "bridge_cad_style_mutation"' in script
+    assert "PTransaction.Commit" in script
+    assert "PTransaction.Abort" in script
+
+
+def test_task14_service_keeps_native_restore_tokens_private_and_reinjects_them():
+    service = object.__new__(FusionCadService)
+    service._revision_tracker = RevisionTracker()
+    service._revision_tracker.observe("doc_1", "fingerprint-1")
+    service._visibility_restore_states = {}
+    evidence = {
+        "visibility": {
+            "operation": "isolate",
+            "target_ref": "ent_body_01",
+            "state_ref": "visibility_state_rev_1",
+            "requested_visible": True,
+            "local_visible": True,
+            "parent_visible": True,
+            "effective_visible": True,
+        },
+        "scope_evidence": {
+            "scope": "own_mutation",
+            "operation": "isolate",
+            "target_ref": "ent_body_01",
+            "state_ref": "visibility_state_rev_1",
+            "captured": [
+                {
+                    "ref": "ent_visibility_1",
+                    "local_visible": True,
+                    "native_token": "private-token",
+                }
+            ],
+            "changed_refs": ["ent_visibility_1"],
+        },
+    }
+    public = service._finalize_style_execution(
+        _result(evidence),
+        op="isolate",
+        payload={"target": "ent_body_01", "document_ref": "doc_1"},
+    )
+    assert "private-token" not in public.model_dump_json()
+
+    restore = {"document_ref": "doc_1"}
+    service._prepare_style_payload(restore, "restore", "op_restore")
+    assert restore["visibility_state"]["captured"][0]["native_token"] == "private-token"

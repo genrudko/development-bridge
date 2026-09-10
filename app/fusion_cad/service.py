@@ -212,6 +212,7 @@ class FusionCadService:
         self.inline_limit_bytes = inline_limit_bytes
         self._node_capabilities: dict[str, _CachedNodeCapabilities] = {}
         self._active_document_refs_by_node: dict[str, str] = {}
+        self._visibility_restore_states: dict[str, dict[str, Any]] = {}
 
     @property
     def revision_tracker(self) -> RevisionTracker:
@@ -650,6 +651,15 @@ class FusionCadService:
         """Bind Task 11 requests to opaque refs and same-command provenance."""
         if "target" in payload:
             self._inject_metadata_target_hint(payload)
+        if op == "restore":
+            doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+            state = self._visibility_restore_states.get(str(doc_ref))
+            if state is None:
+                raise FusionCadError(
+                    ErrorCode.REF_STALE,
+                    "No service-owned visibility state is available for this document",
+                )
+            payload["visibility_state"] = state
         if not op.startswith("text_") or op == "text_read":
             return
         logical_ref = payload.get("text_ref")
@@ -925,6 +935,30 @@ class FusionCadService:
                 public["scope_evidence"] = public_scope
                 if op == "restore":
                     public["restoration_verified"] = True
+                    doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+                    self._visibility_restore_states.pop(str(doc_ref), None)
+                else:
+                    if not hasattr(self, "_visibility_restore_states"):
+                        return cad_result.model_copy(
+                            update={"data": ImmutableMapping(sanitize_public_payload(public))}
+                        )
+                    private_entries = []
+                    for entry in captured:
+                        if not isinstance(entry, Mapping) or not isinstance(entry.get("native_token"), str):
+                            raise FusionCadError(
+                                ErrorCode.CAPABILITY_UNAVAILABLE,
+                                "Scoped visibility capture lacks exact native restore identity",
+                                details={"operation": op, "applied": False},
+                            )
+                        private_entries.append(
+                            {"ref": entry["ref"], "native_token": entry["native_token"], "local_visible": entry["local_visible"]}
+                        )
+                    doc_ref = payload.get("document_ref") or self._revision_tracker.active_document_ref
+                    self._visibility_restore_states[str(doc_ref)] = {
+                        "scope": "own_mutation", "operation": op,
+                        "target_ref": expected_target, "state_ref": scope.get("state_ref"),
+                        "captured": private_entries, "changed_refs": list(changed_refs),
+                    }
         return cad_result.model_copy(
             update={
                 "data": ImmutableMapping(sanitize_public_payload(public)),
@@ -2853,7 +2887,19 @@ class FusionCadService:
                         "capability": trusted_detail(required_cap),
                     },
                 )
-            matrix.require(required_cap, allow_degraded=False)
+            legacy_capabilities = {
+                "style.text_read": "style.sketch_text",
+                "style.text_create": "style.sketch_text",
+                "style.text_update": "style.sketch_text",
+                "style.text_delete": "style.sketch_text",
+                "style.text_extrude": "style.sketch_text",
+                "style.text_cut": "style.sketch_text",
+                "style.visibility": "design.access",
+            }
+            effective_cap = required_cap
+            if matrix.get(required_cap) is None:
+                effective_cap = legacy_capabilities.get(required_cap, required_cap)
+            matrix.require(effective_cap, allow_degraded=False)
 
         is_async, is_mutation, summary = self._classify_operation(
             effective_bundle_group, payload

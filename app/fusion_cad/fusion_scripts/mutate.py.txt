@@ -18,9 +18,12 @@ def run():
         design = None
         if doc is not None and hasattr(doc, "products"):
             try:
-                design = doc.products.itemByClass("adsk::fusion::Design")
+                design = doc.products.itemByProductType("DesignProductType")
             except Exception:
-                design = None
+                try:
+                    design = doc.products.itemByClass("adsk::fusion::Design")
+                except Exception:
+                    design = None
         if not doc or not design:
             raise FusionScriptError(
                 "NO_ACTIVE_DESIGN",
@@ -961,7 +964,127 @@ def run():
             document=_doc_state(safe_doc, doc),
         )
 
-    # Task 11 uses one explicitly injected, operation-scoped primitive.  The
+    def _parse_text_provenance(sketch_text):
+        records = _read_records(sketch_text, "sketch_text", _RESERVED_GROUP, _PROVENANCE_NAME)
+        if len(records) != 1:
+            return None
+        try:
+            record = json.loads(records[0]["value"])
+        except Exception:
+            return None
+        logical_ref = record.get("logical_object_ref") if isinstance(record, dict) else None
+        created_revision = record.get("created_revision") if isinstance(record, dict) else None
+        if not isinstance(logical_ref, str) or not isinstance(created_revision, str):
+            return None
+        match = re.fullmatch(r"rev_([1-9][0-9]*)", created_revision)
+        if match is None:
+            raise FusionScriptError("FUSION_API_ERROR", "Logical text provenance has malformed created_revision")
+        return record, int(match.group(1))
+
+    def _all_sketch_texts(design):
+        result = []
+        components = getattr(design, "allComponents", None)
+        if components is None:
+            components = [getattr(design, "rootComponent", None)]
+        count = getattr(components, "count", None)
+        iterable = (components.item(i) for i in range(count)) if isinstance(count, int) else components
+        for component in iterable:
+            sketches = getattr(component, "sketches", None)
+            for si in range(getattr(sketches, "count", 0)):
+                sketch = sketches.item(si)
+                texts = getattr(sketch, "sketchTexts", None)
+                for ti in range(getattr(texts, "count", 0)):
+                    sketch_text = texts.item(ti)
+                    if sketch_text is not None:
+                        result.append((sketch, sketch_text))
+        return result
+
+    def _resolve_current_sketch_text(design, logical_ref):
+        matches = []
+        for sketch, sketch_text in _all_sketch_texts(design):
+            parsed = _parse_text_provenance(sketch_text)
+            if parsed is not None and parsed[0].get("logical_object_ref") == logical_ref:
+                matches.append((sketch, sketch_text, parsed[0], parsed[1]))
+        if not matches:
+            raise FusionScriptError("REF_STALE", "Logical TextRef has no current persisted SketchText", details={"ref": logical_ref})
+        if len(matches) != 1:
+            raise FusionScriptError("REF_AMBIGUOUS", "Logical TextRef resolves to multiple current SketchText objects", details={"ref": logical_ref, "count": len(matches)})
+        return matches[0]
+
+    def _native_text_lineage(sketch, sketch_text, provenance, generation, requested_font=None):
+        text_parameter = getattr(sketch_text, "textParameter", None)
+        height_parameter = getattr(sketch_text, "heightParameter", None)
+        if text_parameter is None or not hasattr(text_parameter, "textValue"):
+            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "SketchText textParameter.textValue is unavailable")
+        font_used = str(getattr(sketch_text, "fontName", "") or "")
+        font_requested = str(requested_font or font_used)
+        fallback = None if font_requested == font_used else "Fusion substituted the requested font"
+        height_cm = getattr(height_parameter, "value", None)
+        if not isinstance(height_cm, (int, float)):
+            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "SketchText heightParameter.value is unavailable")
+        logical_ref = provenance["logical_object_ref"]
+        return {
+            "logical_ref": logical_ref, "generation": generation, "is_current": True,
+            "sketch": "ent_sketch_" + logical_ref, "sketch_text_id": "ent_sketch_text_" + logical_ref,
+            "feature": None, "outputs": [], "text": str(text_parameter.textValue),
+            "font_requested": font_requested, "font_used": font_used,
+            "fallback_reason": fallback, "height_mm": float(height_cm) * 10.0,
+        }
+
+    def _run_native_style_transaction(app, mutation):
+        command = getattr(app, "executeTextCommand", None)
+        if not callable(command):
+            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Verified PTransaction command boundary is unavailable", details={"applied": False})
+        try:
+            started = command('PTransaction.Start "bridge_cad_style_mutation"')
+        except Exception:
+            raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction start outcome is uncertain") from None
+        if str(started).strip() != "1":
+            raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction start outcome is uncertain")
+        try:
+            result = mutation()
+            post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+            if not post_fp or post_fp == current_fp:
+                raise FusionScriptError("MUTATION_FAILED", "Style mutation did not produce a distinct authoritative model state")
+            result.update({"fingerprint": post_fp, "document_ref": post_doc_ref or doc_ref})
+            try:
+                committed = command("PTransaction.Commit")
+            except Exception:
+                raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction commit outcome is uncertain") from None
+            if str(committed).strip() != "1":
+                raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction commit outcome is uncertain")
+            return result
+        except Exception as exc:
+            if isinstance(exc, FusionScriptError) and exc.code == "OPERATION_UNCERTAIN":
+                raise
+            try:
+                aborted = command("PTransaction.Abort")
+            except Exception:
+                raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction abort outcome is uncertain") from None
+            if str(aborted).strip() != "1":
+                raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction abort outcome is uncertain")
+            raise
+
+    def _visibility_value(entity):
+        if hasattr(entity, "isLightBulbOn"):
+            return bool(entity.isLightBulbOn), "isLightBulbOn"
+        if hasattr(entity, "isVisible"):
+            return bool(entity.isVisible), "isVisible"
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Resolved entity has no supported local visibility property")
+
+    def _visibility_evidence(entity, operation, target_ref, requested):
+        local, _property = _visibility_value(entity)
+        parent_visible = True
+        parent = getattr(entity, "assemblyContext", None)
+        while parent is not None:
+            parent_visible = parent_visible and bool(getattr(parent, "isVisible", True))
+            parent = getattr(parent, "assemblyContext", None)
+        return {"operation": operation, "target_ref": target_ref, "requested_visible": requested,
+                "local_visible": local, "parent_visible": parent_visible,
+                "effective_visible": local and parent_visible}
+
+    # Native Task 14 path. Unsupported text geometry operations retain the
+    # injected adapter compatibility path below but are capability-gated off.
     # verified Fusion API surface for creating SketchText and reversible
     # hierarchy visibility is not assumed here: a live relay that has not
     # supplied this adapter fails closed before changing the model.  The adapter
@@ -980,6 +1103,104 @@ def run():
             and isinstance(PAYLOAD.get("metadata_removals"), list)
         )
     ):
+        if op == "text_read":
+            _app, doc, _design, safe_doc = _open_runtime()
+            sketch, sketch_text, provenance, generation = _resolve_current_sketch_text(_design, PAYLOAD.get("text_ref"))
+            return make_result(data={"lineage": _native_text_lineage(sketch, sketch_text, provenance, generation)}, summary="Read logical text lineage", document=_doc_state(safe_doc, doc))
+
+        native_ops = ("text_update", "show", "hide", "set", "show_only", "isolate", "restore")
+        if op in native_ops:
+            _app, doc, _design, safe_doc = _open_runtime()
+            expected_fp = PAYLOAD.get("expected_fingerprint")
+            current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
+            if expected_fp is None or expected_fp != current_fp:
+                return make_error("REVISION_CONFLICT", "Authoritative Fusion-side guard: model fingerprint diverged from baseline", details={"document_ref": doc_ref, "expected_revision": PAYLOAD.get("expected_revision"), "expected_fingerprint": expected_fp, "current_fingerprint": current_fp, "applied": False})
+
+            def _mutate_native():
+                if op == "text_update":
+                    sketch, sketch_text, old_provenance, previous_generation = _resolve_current_sketch_text(_design, PAYLOAD.get("text_ref"))
+                    if PAYLOAD.get("text") is not None:
+                        sketch_text.textParameter.textValue = PAYLOAD["text"]
+                    if PAYLOAD.get("font") is not None:
+                        sketch_text.fontName = PAYLOAD["font"]
+                    if PAYLOAD.get("height_mm") is not None:
+                        sketch_text.heightParameter.value = float(PAYLOAD["height_mm"]) / 10.0
+                    expected_provenance = PAYLOAD.get("provenance")
+                    writes = PAYLOAD.get("metadata_writes")
+                    if not isinstance(expected_provenance, dict) or not isinstance(writes, list) or len(writes) != 1:
+                        raise FusionScriptError("INVALID_ARGUMENT", "Logical text update lacks service-prepared provenance")
+                    _preflight_metadata_plan(sketch_text, writes, [])
+                    _apply_metadata_plan(sketch_text, writes, [])
+                    sketch2, current, persisted, generation = _resolve_current_sketch_text(_design, PAYLOAD.get("text_ref"))
+                    if current is not sketch_text or generation <= previous_generation or persisted != expected_provenance:
+                        raise FusionScriptError("FUSION_API_ERROR", "Logical text update failed same-owner lineage verification")
+                    return {"lineage": _native_text_lineage(sketch2, current, persisted, generation, PAYLOAD.get("font")),
+                            "provenance": expected_provenance, "persisted_provenance": persisted, "same_operation_provenance": True,
+                            "replacement_evidence": {"logical_ref": PAYLOAD.get("text_ref"), "previous_generation": previous_generation,
+                            "current_generation": generation, "previous_generation_is_current": False, "current_generation_count": 1,
+                            "replacement_or_rebind_verified": True, "unrelated_legacy_preserved": True}}
+                state = PAYLOAD.get("visibility_state") if op == "restore" else None
+                entries = state.get("captured") if isinstance(state, dict) else None
+                target = PAYLOAD.get("target")
+                target_ref = target.get("ref") if isinstance(target, dict) else None
+                if op == "restore":
+                    if not isinstance(entries, list) or not isinstance(state.get("state_ref"), str):
+                        raise FusionScriptError("REF_STALE", "Visibility restore state is missing or stale")
+                    restored = []
+                    for entry in entries:
+                        entity = resolve_exact_native_entity(_design, entry)
+                        _old, prop = _visibility_value(entity)
+                        setattr(entity, prop, entry["local_visible"])
+                        now, _ = _visibility_value(entity)
+                        if now is not entry["local_visible"]:
+                            raise FusionScriptError("MUTATION_FAILED", "Visibility restoration did not read back exactly")
+                        restored.append({"ref": entry["ref"], "local_visible": now, "native_token": entry["native_token"]})
+                    scope = dict(state); scope["restored"] = restored
+                    first = restored[0] if restored else {"local_visible": True}
+                    return {"visibility": {"operation": "restore", "state_ref": state["state_ref"], "local_visible": first["local_visible"], "parent_visible": True, "effective_visible": first["local_visible"]}, "scope_evidence": scope, "restoration_verified": True}
+                entity = resolve_exact_native_entity(_design, target)
+                desired = PAYLOAD.get("visible") if op == "set" else op in ("show", "show_only", "isolate")
+                changed = []
+                candidates = [(target_ref, entity, target.get("native_token"))]
+                if op in ("show_only", "isolate"):
+                    candidates = [(target_ref, entity, target.get("native_token"))]
+                    seen_tokens = {target.get("native_token")}
+                    root = getattr(_design, "rootComponent")
+                    collections = []
+                    components = getattr(_design, "allComponents", None)
+                    for component_index in range(getattr(components, "count", 0)):
+                        component = components.item(component_index)
+                        collections.extend((component.bRepBodies, component.sketches))
+                    collections.append(getattr(root, "allOccurrences", root.occurrences))
+                    for collection in collections:
+                        for ci in range(collection.count):
+                            candidate = collection.item(ci)
+                            token = getattr(candidate, "entityToken", None)
+                            if token not in seen_tokens:
+                                seen_tokens.add(token)
+                                candidates.append((None, candidate, token))
+                for ref, candidate, token in candidates:
+                    if not isinstance(token, str) or not token:
+                        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Visibility scope entity lacks stable entityToken identity")
+                    current, prop = _visibility_value(candidate)
+                    candidate_is_target = candidate is entity or token == target.get("native_token")
+                    wanted = desired if op not in ("show_only", "isolate") or candidate_is_target else False
+                    if current != wanted:
+                        public_ref = target_ref if candidate_is_target else "ent_visibility_" + str(len(changed) + 1)
+                        changed.append({"ref": public_ref, "local_visible": current, "native_token": token})
+                        setattr(candidate, prop, wanted)
+                evidence = _visibility_evidence(entity, op, target_ref, desired)
+                result = {"visibility": evidence}
+                if op in ("show_only", "isolate"):
+                    state_ref = "visibility_state_" + str(PAYLOAD.get("expected_revision") or "current")
+                    evidence["state_ref"] = state_ref
+                    result["scope_evidence"] = {"scope": "own_mutation", "operation": op, "target_ref": target_ref, "state_ref": state_ref, "captured": changed, "changed_refs": [entry["ref"] for entry in changed]}
+                return result
+
+            style_data = _run_native_style_transaction(_app, _mutate_native)
+            style_data.update({"operation": op, "applied": True})
+            return make_result(data=style_data, summary=f"Executed mutate:{op}", document=_doc_state(safe_doc, doc))
+
         style_hook = globals().get("_style_primitive")
         if not callable(style_hook):
             raise FusionScriptError(
@@ -989,29 +1210,6 @@ def run():
             )
 
         _app, doc, _design, safe_doc = _open_runtime()
-        if op == "text_read":
-            style_data = style_hook(PAYLOAD)
-            if not isinstance(style_data, dict):
-                raise FusionScriptError(
-                    "FUSION_API_ERROR",
-                    "Verified style adapter returned no semantic text lineage",
-                    details={"operation": op},
-                )
-            lineage = style_data.get("lineage")
-            if not isinstance(lineage, dict) or (
-                lineage.get("logical_ref") != PAYLOAD.get("text_ref")
-                or lineage.get("is_current") is not True
-            ):
-                raise FusionScriptError(
-                    "FUSION_API_ERROR",
-                    "Logical text read did not return the requested current lineage",
-                    details={"operation": op},
-                )
-            return make_result(
-                data=style_data,
-                summary="Read logical text lineage",
-                document=_doc_state(safe_doc, doc),
-            )
 
         expected_fp = PAYLOAD.get("expected_fingerprint")
         current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)

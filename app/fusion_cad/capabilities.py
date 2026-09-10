@@ -101,18 +101,18 @@ OPERATION_REQUIRED_CAPABILITIES: dict[tuple[str, str], str | None] = {
     ("metadata", "clear_role"): "metadata.attributes",
 
     # 5. fusion_style
-    ("style", "text_read"): "style.sketch_text",
-    ("style", "text_create"): "style.sketch_text",
-    ("style", "text_update"): "style.sketch_text",
-    ("style", "text_delete"): "style.sketch_text",
-    ("style", "text_extrude"): "style.sketch_text",
-    ("style", "text_cut"): "style.sketch_text",
-    ("style", "show"): "design.access",
-    ("style", "hide"): "design.access",
-    ("style", "show_only"): "design.access",
-    ("style", "isolate"): "design.access",
-    ("style", "restore"): "design.access",
-    ("style", "set"): "design.access",
+    ("style", "text_read"): "style.text_read",
+    ("style", "text_create"): "style.text_create",
+    ("style", "text_update"): "style.text_update",
+    ("style", "text_delete"): "style.text_delete",
+    ("style", "text_extrude"): "style.text_extrude",
+    ("style", "text_cut"): "style.text_cut",
+    ("style", "show"): "style.visibility",
+    ("style", "hide"): "style.visibility",
+    ("style", "show_only"): "style.visibility",
+    ("style", "isolate"): "style.visibility",
+    ("style", "restore"): "style.visibility",
+    ("style", "set"): "style.visibility",
 
     # 6. fusion_validate
     ("validate", "run"): "design.access",
@@ -138,18 +138,18 @@ def get_required_capability(
 
     if group == "mutate":
         if operation in ("text_read", "text_create", "text_update", "text_delete", "text_extrude", "text_cut"):
-            return "style.sketch_text"
+            return f"style.{operation}"
         if operation in ("show", "hide", "show_only", "isolate", "restore"):
-            return "design.access"
+            return "style.visibility"
         if operation in ("get", "remove", "tag", "untag", "set_role", "clear_role", "provenance"):
             return "metadata.attributes"
         if operation == "set":
             if payload and "visible" in payload:
-                return "design.access"
+                return "style.visibility"
             return "metadata.attributes"
         if operation == "query":
             if payload and "selector" in payload:
-                return "design.access"
+                return "style.visibility"
             return "metadata.attributes"
 
     return None
@@ -573,6 +573,43 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
+        text_read_verified = bool(facts.get("sketch_text_read_runtime_verified"))
+        transaction_verified = bool(facts.get("transaction_runtime_verified"))
+        for name in ("style.text_read", "style.text_update"):
+            supported = text_read_verified and (
+                name == "style.text_read" or transaction_verified
+            )
+            records.append(CapabilityRecord(
+                name=name,
+                state="supported" if supported else "unavailable",
+                implementation="native-sketch-text-v1" if supported else None,
+                limitations=() if supported else err_limits(
+                    "Native SketchText read prerequisites are not verified"
+                    if name == "style.text_read" or not text_read_verified
+                    else "Verified PTransaction Start/Abort support is required"
+                ),
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        for name in ("style.text_create", "style.text_delete", "style.text_extrude", "style.text_cut"):
+            records.append(CapabilityRecord(
+                name=name,
+                state="unavailable",
+                limitations=err_limits("Native P0 semantics are not implemented and verified"),
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        visibility_verified = bool(facts.get("visibility_runtime_verified")) and transaction_verified
+        records.append(CapabilityRecord(
+            name="style.visibility",
+            state="supported" if visibility_verified else "unavailable",
+            implementation="native-entity-visibility-v1" if visibility_verified else None,
+            limitations=() if visibility_verified else err_limits(
+                "Native entity visibility and verified PTransaction support are required"
+            ),
+            fusion_version=fusion_version,
+            relay_version=relay_version,
+        ))
         # 14. transaction.undo_redo (Finding 2: undo API presence is insufficient; prefer degraded/unavailable)
         if not probe_failed and (facts.get("has_undo_redo") or facts.get("has_undo_redo_context") or facts.get("undo_redo_verified")):
             records.append(CapabilityRecord(
