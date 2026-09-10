@@ -1,5 +1,9 @@
 # Fusion CAD Agent API v1 Implementation Plan
 
+> [!WARNING]
+> **FROZEN — DO NOT IMPLEMENT P1/P2 AS WRITTEN.** Post-P0 reuse qualification on 2026-09-10 supersedes the greenfield implementation assumptions in this document. Read `docs/research/fusion-cad-reuse-landscape-2026-09-10.md` before planning or coding P0.5/P1/P2. The accepted `fusion.cad/v1` P0 contract and safety invariants remain authoritative; provider strategy and later phase boundaries are pending canonical rewrite after the live pinned-Shimmer sidecar gate.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the accepted `fusion.cad/v1` contract from P0 semantic/visual foundations through P1 safe high-level modeling and P2 advanced engineering workflows.

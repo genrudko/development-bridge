@@ -91,3 +91,27 @@ Final deployed evidence on 2026-09-10:
 P0 is closed. Do not rerun Task 14 or reopen P0 without new evidence or an
 explicit owner request. Executor operating rules for subsequent Fusion work are
 in `docs/operations/fusion-cad-executor-guide.md`.
+
+## Post-acceptance research note — 2026-09-10
+
+The Task14 statements above describe **historical acceptance evidence at the time
+of acceptance**. During later post-P0 reuse research, the disposable
+`Schedule Task14 Golden 224313` (F41 lineage) was intentionally reused as a
+test stand. A recovery step closed that disposable document without saving
+while it was dirty. That discarded its then-current unsaved state, so the
+accepted authoritative fingerprint
+`248783b462f770f57d12ccbea18080e410ef03b7acd946d81dfb57362f90e0d5` is
+no longer the fingerprint of the reopened cloud-saved F41 file.
+
+After reopening, the F41 document remained healthy with the same high-level
+entity counts but reported fingerprint
+`bda887acc9636b14d1a472ff572cb0f7d0c13c2aca8566ab24ae08c546574fa5`. A
+secondary saved copy in the Task14 folder reported
+`a033306c12f19df5f9d60343ca01bf3d96fcea62e9c172a2e904f0a9bffac8a6`.
+
+This later test-stand incident does **not** invalidate the retained Task14
+acceptance evidence or reopen P0. The protected original `Schedule` was not a
+mutation target and no save command was issued to it. Future work must not use
+the current F41 cloud file as if it were a reproducible copy of the historical
+`248783…` golden state. Create/use a fresh disposable baseline for new live
+acceptance work.

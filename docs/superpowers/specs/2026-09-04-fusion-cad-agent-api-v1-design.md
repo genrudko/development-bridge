@@ -1,5 +1,9 @@
 # Fusion CAD Agent API v1 — Canonical Design Spec
 
+> [!WARNING]
+> **FROZEN — DO NOT IMPLEMENT P1/P2 AS WRITTEN.** Post-P0 reuse qualification on 2026-09-10 supersedes the greenfield implementation assumptions in this document. Read `docs/research/fusion-cad-reuse-landscape-2026-09-10.md` before planning or coding P0.5/P1/P2. The accepted `fusion.cad/v1` P0 contract and safety invariants remain authoritative; provider strategy and later phase boundaries are pending canonical rewrite after the live pinned-Shimmer sidecar gate.
+
+
 **Status:** accepted Release Candidate; canonical architecture for P0/P1/P2 implementation.
 
 **Contract version:** `fusion.cad/v1`
