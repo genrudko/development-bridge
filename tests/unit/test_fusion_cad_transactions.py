@@ -32,14 +32,14 @@ def test_state_machine_preview_returns_to_staged_and_commit_is_single_use():
     assert previewed.state is TransactionState.PREVIEWED
     restored = store.finish_preview(
         "tx_spike",
-        preview={"refs": ["ref_text_preview"], "structural_hash": "h8"},
+        preview={"refs": ["ref_text_preview"], "structural_hash": "h8", "replay_signature": {"plan_hash": plan_hash, "structural_hash": "h8"}},
     )
     assert restored.state is TransactionState.STAGED
     assert restored.plan_hash == plan_hash
 
     committing = store.begin_commit("tx_spike", "fp_7")
     assert committing.plan == (SPIKE_ACTION,)
-    committed = store.finish_commit("tx_spike", {"refs": ["ref_text_final"]})
+    committed = store.finish_commit("tx_spike", {"refs": ["ref_text_final"], "replay_signature": {"plan_hash": plan_hash, "structural_hash": "h8"}})
     assert committed.state is TransactionState.COMMITTED
     with pytest.raises(FusionCadError) as exc:
         store.begin_commit("tx_spike", "fp_7")
@@ -69,3 +69,38 @@ def test_plan_and_evidence_are_defensively_copied_for_exact_replay_identity():
     action["text"] = "changed-after-stage"
     assert staged.plan[0]["text"] == "ПЫТОК"
     assert store.get("tx_copy").plan_hash == staged.plan_hash
+
+
+def test_commit_requires_semantic_equivalence_to_accepted_preview():
+    store = TransactionStore()
+    store.begin("tx_equiv", "doc_1", "rev_1", "fp_1", {})
+    staged = store.stage("tx_equiv", SPIKE_ACTION)
+    signature = {
+        "plan_hash": staged.plan_hash,
+        "structural_hash": "fp_preview",
+        "mutation_counts": {"sketches": 1, "timeline": 1},
+        "provenance": {"transaction_id": "tx_equiv", "same_operation": True},
+    }
+    store.begin_preview("tx_equiv", "fp_1")
+    store.finish_preview("tx_equiv", preview={"replay_signature": signature})
+    store.begin_commit("tx_equiv", "fp_1")
+    committed = store.finish_commit(
+        "tx_equiv", {"replay_signature": dict(signature), "applied": True}
+    )
+    assert committed.state is TransactionState.COMMITTED
+
+    mismatch = TransactionStore()
+    mismatch.begin("tx_mismatch", "doc_1", "rev_1", "fp_1", {})
+    staged = mismatch.stage("tx_mismatch", SPIKE_ACTION)
+    accepted = dict(signature, plan_hash=staged.plan_hash)
+    mismatch.begin_preview("tx_mismatch", "fp_1")
+    mismatch.finish_preview("tx_mismatch", preview={"replay_signature": accepted})
+    mismatch.begin_commit("tx_mismatch", "fp_1")
+    divergent = dict(accepted, structural_hash="fp_different")
+    with pytest.raises(FusionCadError) as exc:
+        mismatch.finish_commit(
+            "tx_mismatch", {"replay_signature": divergent, "applied": True}
+        )
+    assert exc.value.code == ErrorCode.TRANSACTION_CONFLICT
+    assert exc.value.details["applied"] is True
+    assert mismatch.get("tx_mismatch").state is TransactionState.STAGED

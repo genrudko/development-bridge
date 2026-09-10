@@ -154,6 +154,14 @@ class TransactionStore:
             raise FusionCadError(
                 ErrorCode.TRANSACTION_CONFLICT, "Transaction cannot be committed"
             )
+        preview_signature = (record.preview_evidence or {}).get("replay_signature")
+        commit_signature = evidence.get("replay_signature")
+        if not isinstance(preview_signature, Mapping) or not isinstance(commit_signature, Mapping) or dict(preview_signature) != dict(commit_signature):
+            raise FusionCadError(
+                ErrorCode.TRANSACTION_CONFLICT,
+                "Committed replay is not semantically equivalent to the accepted preview",
+                details={"transaction_id": transaction_id, "applied": True, "replayed": False},
+            )
         self._records[transaction_id] = replace(
             record,
             state=TransactionState.COMMITTED,

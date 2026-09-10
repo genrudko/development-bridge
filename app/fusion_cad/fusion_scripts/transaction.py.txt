@@ -62,6 +62,20 @@ def _transaction_snapshot_from_fingerprint(fingerprint, canonical):
     return {"structural_hash": fingerprint, "counts": counts, "refs": []}
 
 
+def _transaction_replay_signature(snapshot, applied):
+    diff = _minimal_preview_diff(PAYLOAD.get("baseline_snapshot") or {}, snapshot)
+    return {
+        "plan_hash": PAYLOAD.get("plan_hash"),
+        "structural_hash": snapshot.get("structural_hash"),
+        "mutation_counts": diff["counts"],
+        "provenance": {
+            "identity": applied.get("provenance"),
+            "persisted": applied.get("persisted_provenance", applied.get("provenance")),
+            "same_operation": applied.get("same_operation_provenance") is True,
+        },
+    }
+
+
 def _transaction_apply_text_create_mutation(root, action, preview):
     """Apply the exact P0 text_create mutation with same-operation provenance.
 
@@ -87,6 +101,10 @@ def _transaction_apply_text_create_mutation(root, action, preview):
     if actual_value != write["value"] or json.loads(actual_value) != action["provenance"]:
         raise FusionScriptError("FUSION_API_ERROR", "Persisted SketchText provenance read-back did not match the service-prepared value", {"applied": False})
     during_fp, during_canonical, _during_doc = _transaction_fingerprint(PAYLOAD)
+    collector = globals().get("_transaction_validation_evidence_primitive")
+    validation = collector(PAYLOAD) if callable(collector) else collect_p0_validation_evidence(PAYLOAD, during_canonical, _during_doc)
+    if not isinstance(validation, dict):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Validation evidence is unavailable", {"applied": False})
     applied = {
         "provenance": action["provenance"],
         "persisted_provenance": json.loads(actual_value),
@@ -96,7 +114,7 @@ def _transaction_apply_text_create_mutation(root, action, preview):
         applied["internal_ref_hints"] = [{"kind": "sketch_text", "native_token": str(text.entityToken)}]
     return {
         "snapshot": _transaction_snapshot_from_fingerprint(during_fp, during_canonical),
-        "validation": {"status": "passed", "errors": []},
+        "validation": validation,
         "applied": applied,
     }
 
@@ -379,7 +397,8 @@ def run():
             restored_fp, _, restored_doc = _transaction_fingerprint(PAYLOAD)
             if restored_fp != current_fp or restored_doc != doc_ref:
                 raise FusionScriptError("TRANSACTION_CONFLICT", "Preview command abort did not restore the authoritative baseline", {"applied": False})
-            return make_result(data={"operation": op, "applied": False, "preview": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id, "preview_snapshot": native["snapshot"], "preview_refs": [], "preview_refs_durable": False, "provenance": native["applied"].get("provenance"), "provenance_durable": False}, summary="Previewed and aborted exact staged transaction plan", diff=_minimal_preview_diff(PAYLOAD.get("baseline_snapshot") or {}, native["snapshot"]), validation=native["validation"])
+            signature = _transaction_replay_signature(native["snapshot"], native["applied"])
+            return make_result(data={"operation": op, "applied": False, "preview": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id, "preview_snapshot": native["snapshot"], "replay_signature": signature, "preview_refs": [], "preview_refs_durable": False, "provenance": native["applied"].get("provenance"), "provenance_durable": False}, summary="Previewed and aborted exact staged transaction plan", diff=_minimal_preview_diff(PAYLOAD.get("baseline_snapshot") or {}, native["snapshot"]), validation=native["validation"])
         begin = _require_transaction_primitive("_transaction_begin_primitive")
         apply_plan = _require_transaction_primitive("_transaction_apply_plan_primitive")
         snapshot = _require_transaction_primitive("_transaction_snapshot_primitive")
@@ -396,14 +415,15 @@ def run():
         if restored_fp != current_fp or restored_doc != doc_ref:
             raise FusionScriptError("TRANSACTION_CONFLICT", "Preview abort did not restore the authoritative baseline", {"applied": False})
         preview_refs = _transaction_opaque_refs(applied.get("refs")) if isinstance(applied, dict) else []
-        return make_result(data={"operation": op, "applied": False, "preview": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id, "preview_snapshot": preview_snapshot, "preview_refs": preview_refs, "preview_refs_durable": False, "provenance": applied.get("provenance") if isinstance(applied, dict) else None, "provenance_durable": False}, summary="Previewed and aborted exact staged transaction plan", diff=_minimal_preview_diff(PAYLOAD.get("baseline_snapshot") or {}, preview_snapshot), validation=validation)
+        return make_result(data={"operation": op, "applied": False, "preview": True, "fingerprint": current_fp, "document_ref": doc_ref, "transaction_id": tx_id, "preview_snapshot": preview_snapshot, "replay_signature": _transaction_replay_signature(preview_snapshot, applied), "preview_refs": preview_refs, "preview_refs_durable": False, "provenance": applied.get("provenance") if isinstance(applied, dict) else None, "provenance_durable": False}, summary="Previewed and aborted exact staged transaction plan", diff=_minimal_preview_diff(PAYLOAD.get("baseline_snapshot") or {}, preview_snapshot), validation=validation)
 
     if op == "commit":
         if not callable(globals().get("_transaction_begin_primitive")):
             native = _transaction_native_runtime(plan, False)
             applied = native["applied"]
             post_fp, post_doc = _transaction_post_commit_state(current_fp, doc_ref)
-            return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id, "refs": [], "internal_ref_hints": applied["internal_ref_hints"], "provenance": applied["provenance"], "persisted_provenance": applied["persisted_provenance"], "same_command_provenance": True, "same_operation_provenance": True, "replayed_plan": plan}, summary="Committed exact staged transaction plan", changed_refs=[])
+            signature = _transaction_replay_signature(native["snapshot"], applied)
+            return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id, "refs": [], "internal_ref_hints": applied["internal_ref_hints"], "provenance": applied["provenance"], "persisted_provenance": applied["persisted_provenance"], "same_command_provenance": True, "same_operation_provenance": True, "replay_signature": signature, "replayed_plan": plan}, summary="Committed exact staged transaction plan", changed_refs=[])
         begin = _require_transaction_primitive("_transaction_begin_primitive")
         apply_plan = _require_transaction_primitive("_transaction_apply_plan_primitive")
         commit = _require_transaction_primitive("_transaction_commit_primitive")
@@ -412,9 +432,10 @@ def run():
         if not isinstance(applied, dict) or applied.get("same_operation_provenance") is not True:
             raise FusionScriptError("FUSION_API_ERROR", "Transaction replay did not prove same-command provenance", {"applied": False})
         refs = _transaction_opaque_refs(applied.get("refs"))
+        snapshot = _require_transaction_primitive("_transaction_snapshot_primitive")(PAYLOAD)
         commit(PAYLOAD)
         post_fp, post_doc = _transaction_post_commit_state(current_fp, doc_ref)
-        return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id, "refs": refs, "provenance": applied.get("provenance"), "same_command_provenance": True, "replayed_plan": plan}, summary="Committed exact staged transaction plan", changed_refs=refs)
+        return make_result(data={"operation": op, "applied": True, "fingerprint": post_fp, "document_ref": post_doc, "transaction_id": tx_id, "refs": refs, "provenance": applied.get("provenance"), "same_command_provenance": True, "replay_signature": _transaction_replay_signature(snapshot, applied), "replayed_plan": plan}, summary="Committed exact staged transaction plan", changed_refs=refs)
 
     if op in ("abort", "rollback"):
         primitive = globals().get("_transaction_" + op + "_primitive")

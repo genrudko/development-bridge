@@ -12,6 +12,7 @@ from app.fusion_cad.capabilities import CapabilityMatrix
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.models import CadResult, CapabilityRecord
 from app.fusion_cad.service import FusionCadService
+from app.fusion_cad.transactions import TransactionState
 from app.settings import DesktopNodeSettings
 
 
@@ -9912,6 +9913,16 @@ def test_task13_commit_native_hint_becomes_opaque_ref_only_after_terminal_succes
             "provenance": provenance,
         },
     )
+    signature = {
+        "plan_hash": cad_service.transaction_store.get("tx_ref_1").plan_hash,
+        "structural_hash": "fp_after",
+        "mutation_counts": {"sketches": 1},
+        "provenance": {"identity": provenance, "persisted": provenance, "same_operation": True},
+    }
+    cad_service.transaction_store.begin_preview("tx_ref_1", "fp_base")
+    cad_service.transaction_store.finish_preview(
+        "tx_ref_1", preview={"replay_signature": signature}
+    )
     native = "native::text::secret"
     result = CadResult(
         status="succeeded",
@@ -9925,6 +9936,7 @@ def test_task13_commit_native_hint_becomes_opaque_ref_only_after_terminal_succes
             "internal_ref_hints": [{"kind": "sketch_text", "native_token": native}],
             "provenance": provenance,
             "persisted_provenance": provenance,
+            "replay_signature": signature,
         },
     )
     finalized = cad_service._finalize_completed_execution(
@@ -9989,6 +10001,29 @@ def test_task13_commit_native_hint_becomes_opaque_ref_only_after_terminal_succes
         )
     assert failed_service.ref_registry.get_internal_record("ent_missing", "doc_1") is None
     assert not failed_service.ref_registry.has_document("doc_1")
+
+
+def test_task13_mismatching_commit_signature_fails_without_second_dispatch():
+    mock_desktop_service = MagicMock(spec=DesktopNodeService)
+    mock_desktop_service.call.call_count = 1  # the already-completed native commit dispatch
+    service = FusionCadService(mock_desktop_service)
+    rec = service.revision_tracker.observe("doc_1", "fp_base")
+    service.revision_tracker.begin_transaction("tx_mismatch", "doc_1", rec.revision, "fp_base")
+    service.transaction_store.begin("tx_mismatch", "doc_1", rec.revision, "fp_base", {})
+    staged = service.transaction_store.stage("tx_mismatch", {"action_type": "text_create"})
+    accepted = {"plan_hash": staged.plan_hash, "structural_hash": "preview-b", "mutation_counts": {"sketches": 1}, "provenance": {"identity": {"transaction_id": "tx_mismatch"}, "persisted": {"transaction_id": "tx_mismatch"}, "same_operation": True}}
+    service.transaction_store.begin_preview("tx_mismatch", "fp_base")
+    service.transaction_store.finish_preview("tx_mismatch", preview={"replay_signature": accepted})
+    divergent = dict(accepted, structural_hash="commit-c-different")
+    result = CadResult(status="succeeded", summary="native commit returned", data={"transaction_id": "tx_mismatch", "operation": "commit", "applied": True, "document_ref": "doc_1", "fingerprint": "fp_after", "replay_signature": divergent})
+
+    with pytest.raises(FusionCadError) as exc:
+        service._finalize_completed_execution(result, effective_bundle_group="transaction", op="commit", payload={"transaction_id": "tx_mismatch", "document_ref": "doc_1"}, node_id="desk-1")
+
+    assert exc.value.code == ErrorCode.TRANSACTION_CONFLICT
+    assert exc.value.details["applied"] is True
+    assert mock_desktop_service.call.call_count == 1
+    assert service.transaction_store.get("tx_mismatch").state is TransactionState.STAGED
 
 
 @pytest.mark.asyncio
@@ -10205,9 +10240,20 @@ async def test_transaction_preview_with_large_baseline_uses_bounded_finalization
                 "transaction_id": "tx_large_baseline",
                 "document_ref": "doc_1",
                 "applied": False,
-                "fingerprint": "fp_large_baseline",
+                    "fingerprint": "fp_large_baseline",
+                    "replay_signature": {
+                        "plan_hash": cad_service.transaction_store.get("tx_large_baseline").plan_hash,
+                        "structural_hash": "fp_preview",
+                        "mutation_counts": {"sketches": 1},
+                        "provenance": {"identity": None, "persisted": None, "same_operation": True},
+                    },
+                },
+                "validation": {
+                    "document_ref": "doc_1", "features": [], "sketches": [],
+                    "references": [], "bodies": [], "text_outputs": [],
+                    "timeline": {"available": True, "rolled_back": False}, "limitations": [],
+                },
             },
-        },
     )
 
     assert isinstance(finalized, CadResult)

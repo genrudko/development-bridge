@@ -2044,6 +2044,19 @@ class FusionCadService:
                             {"state": record.state.value, "plan_hash": record.plan_hash}
                         )
             if effective_bundle_group == "transaction" and op == "preview":
+                raw_preview_validation = cad_result.validation
+                if not isinstance(raw_preview_validation, Mapping):
+                    raise FusionCadError(
+                        ErrorCode.VALIDATION_FAILED,
+                        "Transaction preview did not return live validation evidence",
+                        details={"applied": False},
+                    )
+                preview_report = validate_model_evidence(
+                    raw_preview_validation, profiles=("pre_mutation",)
+                )
+                cad_result = cad_result.model_copy(
+                    update={"validation": preview_report.model_dump(mode="json")}
+                )
                 tx_id = payload.get("transaction_id")
                 record = self._transaction_store.find(tx_id) if isinstance(tx_id, str) else None
                 if isinstance(tx_id, str) and record is not None and record.plan:

@@ -47,6 +47,11 @@ def run():
     if PAYLOAD.get("operation") != "run":
         raise FusionScriptError("INVALID_ARGUMENT", "Unsupported validation operation")
 
+    return make_result(
+        data=collect_p0_validation_evidence(PAYLOAD),
+        summary="Validation evidence collected",
+    )
+
     _fingerprint, canonical, document_ref = collect_model_fingerprint(PAYLOAD)
     import adsk.core
     import adsk.fusion

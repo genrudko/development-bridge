@@ -356,9 +356,9 @@ def _ptransaction_runtime(monkeypatch, *, preview):
 
     root = SimpleNamespace(
         name="Root", id="comp_root", entityToken="comp_root",
-        xYConstructionPlane="world-xy", sketches=None,
+        xYConstructionPlane="world-xy", sketches=None, bRepBodies=Collection([]),
     )
-    design = SimpleNamespace(rootComponent=root, timeline=Timeline())
+    design = SimpleNamespace(rootComponent=root, timeline=Timeline(), allComponents=Collection([root]))
     root.sketches = Sketches(state["sketches"])
 
     class Products:
@@ -661,6 +661,7 @@ def test_commit_rechecks_then_replays_exact_plan_once_with_no_metadata_followup(
             "_transaction_fingerprint_primitive": fingerprint,
             "_transaction_begin_primitive": begin,
             "_transaction_apply_plan_primitive": apply,
+            "_transaction_snapshot_primitive": lambda payload: {"structural_hash": "fp_committed", "counts": {}, "refs": ["ent_text_committed"]},
             "_transaction_commit_primitive": finish,
         },
     )
@@ -730,6 +731,7 @@ def test_primitive_commit_post_commit_unchanged_fingerprint_is_uncertain():
             "_transaction_fingerprint_primitive": fingerprint,
             "_transaction_begin_primitive": lambda payload: events.append("begin"),
             "_transaction_apply_plan_primitive": apply,
+            "_transaction_snapshot_primitive": lambda payload: {"structural_hash": "fp_base", "counts": {}, "refs": []},
             "_transaction_commit_primitive": lambda payload: events.append("commit"),
         },
     )
@@ -806,6 +808,46 @@ def test_ptransaction_preview_orders_start_mutation_abort_and_restores_baseline(
     assert state["in_transaction"] is False
     assert state["provenance"] is None
     assert result["data"]["provenance"] == payload["plan"][0]["provenance"]
+
+
+def test_ptransaction_preview_collects_mutated_validation_before_abort(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=True)
+
+    def collect_validation(_payload):
+        events.append("validation.collect")
+        assert state["in_transaction"] is True
+        assert len(state["sketches"]) == 1
+        return {
+            "document_ref": "doc_1", "features": [],
+            "sketches": [{"kind": "sketch", "valid": False, "health": "error"}],
+            "references": [{"kind": "sketch", "state": "broken"}],
+            "bodies": [], "text_outputs": [],
+            "timeline": {"available": True, "rolled_back": False}, "limitations": [],
+        }
+
+    runtime["_transaction_validation_evidence_primitive"] = collect_validation
+    result = _run(payload, runtime)
+
+    assert result["status"] == "succeeded"
+    assert result["validation"]["sketches"][0]["health"] == "error"
+    abort_event = ("executeTextCommand", "PTransaction.Abort")
+    assert events.index("text.add") < events.index("validation.collect") < events.index(abort_event)
+
+
+def test_ptransaction_preview_fails_closed_when_validation_evidence_unavailable(monkeypatch):
+    payload, runtime, state, events = _ptransaction_runtime(monkeypatch, preview=True)
+
+    def unavailable(_payload):
+        events.append("validation.collect")
+
+    runtime["_transaction_validation_evidence_primitive"] = unavailable
+    result = _run(payload, runtime)
+
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "CAPABILITY_UNAVAILABLE"
+    commands = [e[1] for e in events if isinstance(e, tuple) and e[0] == "executeTextCommand"]
+    assert commands == ['PTransaction.Start "bridge_cad_transaction"', "PTransaction.Abort"]
+    assert state["in_transaction"] is False
 
 
 def test_ptransaction_commit_orders_start_mutation_commit_and_persists_once(monkeypatch):
