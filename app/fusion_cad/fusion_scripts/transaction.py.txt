@@ -52,6 +52,33 @@ def _transaction_exact_text_create_plan(plan):
     return action
 
 
+def _transaction_semantic_hash(canonical):
+    """Token-insensitive deterministic hash for preview/commit equivalence only."""
+    import hashlib
+
+    volatile = {"id", "native_token", "owner_id", "document_ref"}
+    unordered_top = {"timeline", "components", "occurrences", "bodies", "sketches", "parameters", "attributes", "sketch_texts"}
+
+    def scrub(value):
+        if isinstance(value, dict):
+            return {key: scrub(val) for key, val in sorted(value.items()) if key not in volatile}
+        if isinstance(value, tuple):
+            return [scrub(item) for item in value]
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return canonicalize_value(value)
+
+    source = canonical if isinstance(canonical, dict) else {}
+    semantic = {}
+    for key, value in sorted(source.items()):
+        clean = scrub(value)
+        if key in unordered_top and isinstance(clean, list):
+            clean = sorted(clean, key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
+        semantic[key] = clean
+    raw = json.dumps(semantic, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def _transaction_snapshot_from_fingerprint(fingerprint, canonical):
     canonical = canonical if isinstance(canonical, dict) else {}
     counts = {}
@@ -59,7 +86,7 @@ def _transaction_snapshot_from_fingerprint(fingerprint, canonical):
         value = canonical.get(key)
         if isinstance(value, (list, tuple, dict)):
             counts[key] = len(value)
-    return {"structural_hash": fingerprint, "counts": counts, "refs": []}
+    return {"structural_hash": _transaction_semantic_hash(canonical), "counts": counts, "refs": []}
 
 
 def _transaction_replay_signature(snapshot, applied):

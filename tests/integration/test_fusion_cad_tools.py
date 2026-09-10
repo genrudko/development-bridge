@@ -71,6 +71,28 @@ def setup_desk1_capabilities(container: ApplicationContainer) -> None:
     )
 
 
+def prime_commit_ready(container: ApplicationContainer, tx_id: str) -> None:
+    service = container.fusion_cad
+    baseline = service.revision_tracker.get_transaction_baseline(tx_id)
+    assert baseline is not None
+    record = service.transaction_store.find(tx_id)
+    if record is None:
+        record = service.transaction_store.begin(
+            tx_id,
+            baseline["document_ref"],
+            baseline["baseline_revision"],
+            baseline["baseline_fingerprint"],
+            {},
+        )
+    if not record.plan:
+        record = service.transaction_store.stage(tx_id, {"action_type": "text_create"})
+    if record.preview_evidence is None:
+        service.transaction_store.begin_preview(tx_id, record.baseline_fingerprint)
+        service.transaction_store.finish_preview(
+            tx_id, preview={"replay_signature": {"plan_hash": record.plan_hash}}
+        )
+
+
 @pytest.fixture
 def mock_container() -> ApplicationContainer:
     container = build_container(BridgeSettings.model_validate({
@@ -300,6 +322,9 @@ async def test_mutations_and_long_ops_use_async_submit_lifecycle(
         "operation_id": "op_987654321",
         "status": "queued",
     })
+
+    if tool_name == "fusion_transaction" and valid_payload.get("operation") == "commit":
+        prime_commit_ready(mock_container, valid_payload["transaction_id"])
 
     req_ctx = RequestContext(request_id="req_async_1")
     params = types.CallToolRequestParams(
@@ -609,6 +634,9 @@ async def test_state_changing_operations_marked_mutating_and_non_replayable_on_t
         [{"name": "fusion_mcp_execute"}],
         fusion_available=True,
     )
+
+    if tool_name == "fusion_transaction" and payload.get("operation") == "commit":
+        prime_commit_ready(container, payload["transaction_id"])
 
     group = tool_to_group[tool_name]
     is_async, is_mutation, _ = container.fusion_cad._classify_operation(

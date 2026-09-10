@@ -18,6 +18,7 @@ class TransactionState(StrEnum):
     NEW = "NEW"
     STAGED = "STAGED"
     PREVIEWED = "PREVIEWED"
+    COMMITTING = "COMMITTING"
     COMMITTED = "COMMITTED"
     ABORTED = "ABORTED"
 
@@ -158,15 +159,30 @@ class TransactionStore:
                 details={"transaction_id": transaction_id, "applied": False},
             )
         self._assert_fresh(record, fingerprint)
-        return record
+        self._records[transaction_id] = replace(record, state=TransactionState.COMMITTING)
+        return self.get(transaction_id)
+
+    def release_commit_reservation(self, transaction_id: str) -> TransactionRecord:
+        """Return a proven-not-applied commit reservation to STAGED.
+
+        Callers must only use this after authoritative evidence proves the native
+        commit never applied. Uncertain or post-apply failures remain COMMITTING.
+        """
+        record = self.get(transaction_id)
+        if record.state is not TransactionState.COMMITTING:
+            raise FusionCadError(
+                ErrorCode.TRANSACTION_CONFLICT, "Transaction commit is not reserved"
+            )
+        self._records[transaction_id] = replace(record, state=TransactionState.STAGED)
+        return self.get(transaction_id)
 
     def finish_commit(
         self, transaction_id: str, evidence: Mapping[str, Any]
     ) -> TransactionRecord:
         record = self.get(transaction_id)
-        if record.state is not TransactionState.STAGED:
+        if record.state is not TransactionState.COMMITTING:
             raise FusionCadError(
-                ErrorCode.TRANSACTION_CONFLICT, "Transaction cannot be committed"
+                ErrorCode.TRANSACTION_CONFLICT, "Transaction commit is not reserved"
             )
         preview_signature = (record.preview_evidence or {}).get("replay_signature")
         commit_signature = evidence.get("replay_signature")
@@ -185,9 +201,9 @@ class TransactionStore:
 
     def rollback(self, transaction_id: str) -> TransactionRecord:
         record = self.get(transaction_id)
-        if record.state in (TransactionState.COMMITTED, TransactionState.ABORTED):
+        if record.state in (TransactionState.COMMITTING, TransactionState.COMMITTED, TransactionState.ABORTED):
             raise FusionCadError(
-                ErrorCode.TRANSACTION_CONFLICT, "Transaction is terminal"
+                ErrorCode.TRANSACTION_CONFLICT, "Transaction is terminal or commit outcome may be in flight"
             )
         self._records[transaction_id] = replace(record, state=TransactionState.ABORTED)
         return self.get(transaction_id)

@@ -30,19 +30,7 @@ def run():
                 "Active document and design required for metadata operation",
                 details={"has_doc": bool(doc), "has_design": bool(design)},
             )
-        doc_id = (
-            getattr(doc, "dataId", None)
-            or getattr(doc, "creationId", None)
-            or getattr(getattr(doc, "dataFile", None), "id", None)
-        )
-        if not doc_id or not str(doc_id).strip():
-            raise FusionScriptError(
-                "NO_ACTIVE_DESIGN",
-                "Document lacks stable runtime identity; mutable document name cannot be used as authoritative identity",
-                details={"name": getattr(doc, "name", None)},
-            )
-        clean = _re.sub(r"[^A-Za-z0-9._-]", "_", str(doc_id).strip())
-        safe_doc = clean if clean.startswith("doc_") else f"doc_{clean}"
+        safe_doc = _fusion_document_identity(doc)["document_ref"]
         req_doc = PAYLOAD.get("document_ref")
         if req_doc and req_doc != safe_doc:
             raise FusionScriptError(

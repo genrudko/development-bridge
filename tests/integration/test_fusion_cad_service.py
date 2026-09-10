@@ -990,6 +990,47 @@ import sys
 import types
 
 
+def _prime_commit_ready_transaction(
+    service: FusionCadService, transaction_id: str, document_ref: str = "doc_1"
+) -> dict:
+    """Make an existing authoritative transaction eligible for P0 commit tests."""
+    baseline = service.revision_tracker.get_transaction_baseline(transaction_id)
+    if baseline is None:
+        current = service.revision_tracker.current(document_ref)
+        if current is None:
+            current = service.revision_tracker.observe(document_ref, "fp_test_baseline")
+        service.revision_tracker.begin_transaction(
+            transaction_id, document_ref, current.revision, current.fingerprint
+        )
+        baseline = service.revision_tracker.get_transaction_baseline(transaction_id)
+    assert baseline is not None
+    record = service.transaction_store.find(transaction_id)
+    if record is None:
+        record = service.transaction_store.begin(
+            transaction_id,
+            document_ref,
+            baseline["baseline_revision"],
+            baseline["baseline_fingerprint"],
+            {},
+        )
+    if record.state is TransactionState.NEW:
+        record = service.transaction_store.stage(
+            transaction_id, {"action_type": "text_create"}
+        )
+    if record.state is TransactionState.STAGED and record.preview_evidence is None:
+        service.transaction_store.begin_preview(
+            transaction_id, baseline["baseline_fingerprint"]
+        )
+        service.transaction_store.finish_preview(
+            transaction_id,
+            preview={"replay_signature": {"plan_hash": record.plan_hash}},
+        )
+    ready = service.transaction_store.get(transaction_id)
+    assert ready.state is TransactionState.STAGED
+    assert ready.preview_evidence is not None
+    return dict(ready.preview_evidence["replay_signature"])
+
+
 class AdskFakeContext:
     """Sets up a realistic fake Autodesk Fusion runtime in sys.modules for rendered script execution."""
 
@@ -2275,6 +2316,17 @@ async def test_falsify_transaction_baseline_bypass_and_staging_bounds(
         )
         assert stored_bl is not None
         assert stored_bl["baseline_revision"] == "rev_1"
+        # Commit eligibility is part of the current P0 contract: a stored plan
+        # must have an accepted preview before any commit can be dispatched.
+        staged = cad_service.transaction_store.stage(
+            "tx_bypass_test", {"action_type": "text_create"}
+        )
+        cad_service.transaction_store.begin_preview(
+            "tx_bypass_test", staged.baseline_fingerprint
+        )
+        cad_service.transaction_store.finish_preview(
+            "tx_bypass_test", preview={"replay_signature": {"plan_hash": staged.plan_hash}}
+        )
 
         # 3. External change occurs in Fusion (volume 100.0 -> 250.0)
         fake_adsk.volume = 250.0
@@ -2656,25 +2708,21 @@ async def test_falsify_async_transaction_lifecycle_queued_failed_and_succeeded(
     assert stored["baseline_revision"] == "rev_1"
     assert stored["baseline_fingerprint"] == "proven_fp_123"
 
-    # 5. Async commit queued acknowledgment MUST NOT clear stored baseline
+    # 5. A valid queued commit reserves the transaction before submit returns.
+    _prime_commit_ready_transaction(cad_service, "tx_async_1")
     mock_desktop_service.submit = AsyncMock(
         return_value={"operation_id": "op_async_commit", "status": "queued"}
     )
     comm_sub_res = await cad_service.execute(
-        {
-            "node_id": "desk-1",
-            "operation": "commit",
-            "transaction_id": "tx_async_1",
-        },
+        {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_async_1"},
         group="transaction",
     )
     assert comm_sub_res == {"operation_id": "op_async_commit", "status": "queued"}
-    # Stored baseline must STILL exist
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
-    )
+    assert cad_service.transaction_store.get("tx_async_1").state is TransactionState.COMMITTING
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
 
-    # 6. Failed or uncertain commit MUST NOT clear stored baseline
+    # 6. A terminal failure without authoritative applied=False evidence keeps
+    # the reservation: native completion is not safely replayable.
     op_status_comm_fail = {
         "operation_id": "op_async_commit",
         "node_id": "desk-1",
@@ -2691,152 +2739,56 @@ async def test_falsify_async_transaction_lifecycle_queued_failed_and_succeeded(
             op_status_comm_fail,
             {"status": "failed", "error": {"code": "FUSION_API_ERROR"}},
         )
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
-    )
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
+    assert cad_service.transaction_store.get("tx_async_1").state is TransactionState.COMMITTING
 
-    # 7. Commit success verification:
-    # 7a. Lacking stable runtime document identity MUST NOT clear stored baseline
-    op_status_comm_succ = {
-        "operation_id": "op_async_commit",
-        "node_id": "desk-1",
-        "status": "succeeded",
-        "summary": "Transaction commit completed",
-        "checkpoint": {
-            "operation": "commit",
-            "group": "transaction",
-            "transaction_id": "tx_async_1",
-        },
-    }
-    with pytest.raises(FusionCadError) as exc_no_doc:
-        cad_service.finalize_terminal_operation(
-            op_status_comm_succ,
-            {
-                "api_version": "fusion.cad/v1",
-                "status": "succeeded",
-                "summary": "Transaction commit completed",
-                "document": None,
-                "data": {
-                    "operation": "commit",
-                    "applied": True,
-                    "transaction_id": "tx_async_1",
-                    "fingerprint": "proven_post_fp_456",
-                },
-            },
-        )
-    assert exc_no_doc.value.code == ErrorCode.NO_ACTIVE_DESIGN
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
+    # 7. A separate valid queued commit with proven terminal success may advance
+    # revision and clear only its own stored baseline.
+    current = cad_service.revision_tracker.current("doc_1")
+    assert current is not None
+    cad_service.revision_tracker.begin_transaction(
+        "tx_async_2", "doc_1", current.revision, current.fingerprint
     )
-
-    # 7b. Wrong document identity MUST NOT clear stored baseline
-    with pytest.raises(FusionCadError) as exc_wrong_doc:
-        cad_service.finalize_terminal_operation(
-            op_status_comm_succ,
-            {
-                "api_version": "fusion.cad/v1",
-                "status": "succeeded",
-                "summary": "Transaction commit completed",
-                "document": {"document_ref": "doc_other", "model_revision": "rev_1"},
-                "data": {
-                    "operation": "commit",
-                    "applied": True,
-                    "transaction_id": "tx_async_1",
-                    "fingerprint": "proven_post_fp_456",
-                },
-            },
-        )
-    assert exc_wrong_doc.value.code == ErrorCode.WRONG_DOCUMENT
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
+    accepted2 = _prime_commit_ready_transaction(cad_service, "tx_async_2")
+    mock_desktop_service.submit = AsyncMock(
+        return_value={"operation_id": "op_async_commit_2", "status": "queued"}
     )
-
-    # 7b2. Diverged document identity between document state and payload data MUST NOT clear stored baseline
-    with pytest.raises(FusionCadError) as exc_diverged_doc:
-        cad_service.finalize_terminal_operation(
-            op_status_comm_succ,
-            {
-                "api_version": "fusion.cad/v1",
-                "status": "succeeded",
-                "summary": "Transaction commit completed",
-                "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
-                "data": {
-                    "operation": "commit",
-                    "applied": True,
-                    "transaction_id": "tx_async_1",
-                    "document_ref": "doc_diverged",
-                    "fingerprint": "proven_post_fp_456",
-                },
-            },
-        )
-    assert exc_diverged_doc.value.code == ErrorCode.WRONG_DOCUMENT
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
+    queued2 = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_async_2"},
+        group="transaction",
     )
-
-    # 7c. Missing or empty authoritative fingerprint MUST NOT clear stored baseline
-    with pytest.raises(FusionCadError) as exc_no_fp:
-        cad_service.finalize_terminal_operation(
-            op_status_comm_succ,
-            {
-                "api_version": "fusion.cad/v1",
-                "status": "succeeded",
-                "summary": "Transaction commit completed",
-                "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
-                "data": {
-                    "operation": "commit",
-                    "applied": True,
-                    "transaction_id": "tx_async_1",
-                    "fingerprint": "   ",
-                },
-            },
-        )
-    assert exc_no_fp.value.code == ErrorCode.FUSION_API_ERROR
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
-    )
-
-    # 7d. Succeeded commit lacking doc identity and fingerprint (the old buggy payload) MUST NOT clear stored baseline
-    with pytest.raises(FusionCadError):
-        cad_service.finalize_terminal_operation(
-            op_status_comm_succ,
-            {
-                "api_version": "fusion.cad/v1",
-                "status": "succeeded",
-                "summary": "Transaction commit completed",
-                "data": {
-                    "operation": "commit",
-                    "applied": True,
-                    "transaction_id": "tx_async_1",
-                },
-            },
-        )
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
-    )
-
-    # 7e. Proven terminal succeeded commit with matching document and real fingerprint clears stored baseline and advances revision
+    assert queued2["status"] == "queued"
     cad_service.finalize_terminal_operation(
-        op_status_comm_succ,
+        {
+            "operation_id": "op_async_commit_2",
+            "node_id": "desk-1",
+            "status": "succeeded",
+            "summary": "transaction:commit",
+            "checkpoint": {
+                "operation": "commit",
+                "group": "transaction",
+                "transaction_id": "tx_async_2",
+                "document_ref": "doc_1",
+            },
+        },
         {
             "api_version": "fusion.cad/v1",
             "status": "succeeded",
             "summary": "Transaction commit completed",
-            "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+            "document": {"document_ref": "doc_1", "model_revision": current.revision},
             "data": {
                 "operation": "commit",
                 "applied": True,
-                "transaction_id": "tx_async_1",
+                "transaction_id": "tx_async_2",
                 "fingerprint": "proven_post_fp_456",
+                "replay_signature": accepted2,
             },
         },
     )
-    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is None
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_2") is None
+    assert cad_service.revision_tracker.get_transaction_baseline("tx_async_1") is not None
     assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
-    assert (
-        cad_service.revision_tracker.current("doc_1").fingerprint
-        == "proven_post_fp_456"
-    )
+    assert cad_service.revision_tracker.current("doc_1").fingerprint == "proven_post_fp_456"
 
 
 @pytest.mark.asyncio
@@ -3861,248 +3813,100 @@ async def test_falsify_abort_rollback_preserves_baseline_on_failure_uncertain_or
 async def test_falsify_commit_preserves_baseline_on_failure_uncertain_or_inconsistency(
     mock_desktop_service: DesktopNodeService,
 ):
-    """Proves commit clears baseline only after proven successful terminal result with stable runtime doc identity and authoritative fingerprint."""
+    """Commit only clears authority after one reserved, proven-equivalent success."""
     cad_service = FusionCadService(mock_desktop_service)
-    matrix = CapabilityMatrix.from_records(
-        [
-            CapabilityRecord(name="transaction.preview_replay", state="supported"),
-            CapabilityRecord(name="design.access", state="supported"),
-            CapabilityRecord(
-                name="revision.external_change_detection", state="supported"
-            ),
-        ]
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [
+                CapabilityRecord(name="transaction.preview_replay", state="supported"),
+                CapabilityRecord(name="design.access", state="supported"),
+                CapabilityRecord(name="revision.external_change_detection", state="supported"),
+            ]
+        ),
     )
-    cad_service.set_node_capabilities("desk-1", matrix)
-
-    # 1. Seed baseline for tx_commit
     cad_service.revision_tracker.observe("doc_1", "baseline_fp_1")
-    cad_service.revision_tracker.begin_transaction(
-        "tx_commit", "doc_1", "rev_1", "baseline_fp_1"
-    )
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit") is not None
-    )
 
-    def set_mock_resp(val):
-        mock_desktop_service.call = AsyncMock(return_value=val)
-        mock_desktop_service.submit = AsyncMock(return_value=val)
+    def ready(tx_id: str) -> dict:
+        current = cad_service.revision_tracker.current("doc_1")
+        assert current is not None
+        cad_service.revision_tracker.begin_transaction(
+            tx_id, "doc_1", current.revision, current.fingerprint
+        )
+        return _prime_commit_ready_transaction(cad_service, tx_id)
 
-    # Case A: Desktop node execution fails or returns non-succeeded status -> baseline preserved
-    set_mock_resp(
-        {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "api_version": "fusion.cad/v1",
-                            "status": "failed",
-                            "summary": "transaction:commit failed",
-                            "error": {
-                                "code": "FUSION_API_ERROR",
-                                "message": "Failed to commit",
-                            },
-                        }
-                    ),
-                }
-            ],
-            "isError": True,
+    def response(tx_id: str, *, document="doc_1", data_document=None, fingerprint="new_fp_post", signature=None):
+        data = {
+            "transaction_id": tx_id,
+            "operation": "commit",
+            "applied": True,
+            "fingerprint": fingerprint,
         }
-    )
+        if data_document is not None:
+            data["document_ref"] = data_document
+        if signature is not None:
+            data["replay_signature"] = signature
+        return {
+            "content": [{"type": "text", "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "transaction:commit",
+                "document": None if document is None else {"document_ref": document, "model_revision": "rev_1"},
+                "data": data,
+            })}],
+            "isError": False,
+        }
+
+    # Explicit failure with no proof of non-application preserves baseline and
+    # leaves COMMITTING, preventing a dangerous replay.
+    tx_fail = "tx_commit_fail"
+    ready(tx_fail)
+    mock_desktop_service.submit = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps({
+            "api_version": "fusion.cad/v1",
+            "status": "failed",
+            "error": {"code": "FUSION_API_ERROR", "message": "Failed to commit"},
+        })}],
+        "isError": True,
+    })
     with pytest.raises(BridgeError):
         await cad_service.execute(
-            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit"},
+            {"node_id": "desk-1", "operation": "commit", "transaction_id": tx_fail},
             group="transaction",
         )
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit") is not None
-    )
+    assert cad_service.revision_tracker.get_transaction_baseline(tx_fail) is not None
+    assert cad_service.transaction_store.get(tx_fail).state is TransactionState.COMMITTING
 
-    # Case B: Commit returns without stable runtime document identity -> baseline preserved
-    set_mock_resp(
-        {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "api_version": "fusion.cad/v1",
-                            "status": "succeeded",
-                            "summary": "transaction:commit",
-                            "document": None,
-                            "data": {
-                                "transaction_id": "tx_commit",
-                                "operation": "commit",
-                                "applied": True,
-                                "fingerprint": "new_fp_post",
-                            },
-                        }
-                    ),
-                }
-            ],
-            "isError": False,
-        }
-    )
-    with pytest.raises(FusionCadError) as exc_no_doc:
-        await cad_service.execute(
-            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit"},
-            group="transaction",
-        )
-    assert exc_no_doc.value.code == ErrorCode.NO_ACTIVE_DESIGN
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit") is not None
-    )
+    cases = [
+        ("tx_commit_no_doc", response("tx_commit_no_doc", document=None), ErrorCode.NO_ACTIVE_DESIGN),
+        ("tx_commit_wrong_doc", response("tx_commit_wrong_doc", document="doc_other"), ErrorCode.WRONG_DOCUMENT),
+        ("tx_commit_diverged_doc", response("tx_commit_diverged_doc", data_document="doc_diverged"), ErrorCode.WRONG_DOCUMENT),
+        ("tx_commit_empty_fp", response("tx_commit_empty_fp", fingerprint="   "), ErrorCode.FUSION_API_ERROR),
+    ]
+    for tx_id, raw, expected_code in cases:
+        ready(tx_id)
+        mock_desktop_service.submit = AsyncMock(return_value=raw)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {"node_id": "desk-1", "operation": "commit", "transaction_id": tx_id},
+                group="transaction",
+            )
+        assert exc.value.code == expected_code
+        assert cad_service.revision_tracker.get_transaction_baseline(tx_id) is not None
+        assert cad_service.transaction_store.get(tx_id).state is TransactionState.COMMITTING
 
-    # Case C: Commit returns document mismatch -> baseline preserved
-    set_mock_resp(
-        {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "api_version": "fusion.cad/v1",
-                            "status": "succeeded",
-                            "summary": "transaction:commit",
-                            "document": {
-                                "document_ref": "doc_other",
-                                "model_revision": "rev_1",
-                            },
-                            "data": {
-                                "transaction_id": "tx_commit",
-                                "operation": "commit",
-                                "applied": True,
-                                "fingerprint": "new_fp_post",
-                            },
-                        }
-                    ),
-                }
-            ],
-            "isError": False,
-        }
+    tx_ok = "tx_commit_ok"
+    signature = ready(tx_ok)
+    mock_desktop_service.submit = AsyncMock(
+        return_value=response(tx_ok, signature=signature)
     )
-    with pytest.raises(FusionCadError) as exc_wrong_doc:
-        await cad_service.execute(
-            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit"},
-            group="transaction",
-        )
-    assert exc_wrong_doc.value.code == ErrorCode.WRONG_DOCUMENT
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit") is not None
-    )
-
-    # Case C2: Commit returns diverged document identity between document state and payload data -> baseline preserved
-    set_mock_resp(
-        {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "api_version": "fusion.cad/v1",
-                            "status": "succeeded",
-                            "summary": "transaction:commit",
-                            "document": {
-                                "document_ref": "doc_1",
-                                "model_revision": "rev_1",
-                            },
-                            "data": {
-                                "transaction_id": "tx_commit",
-                                "operation": "commit",
-                                "applied": True,
-                                "document_ref": "doc_diverged",
-                                "fingerprint": "new_fp_post",
-                            },
-                        }
-                    ),
-                }
-            ],
-            "isError": False,
-        }
-    )
-    with pytest.raises(FusionCadError) as exc_diverged_doc:
-        await cad_service.execute(
-            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit"},
-            group="transaction",
-        )
-    assert exc_diverged_doc.value.code == ErrorCode.WRONG_DOCUMENT
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit") is not None
-    )
-
-    # Case D: Commit returns empty/whitespace fingerprint -> baseline preserved
-    set_mock_resp(
-        {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "api_version": "fusion.cad/v1",
-                            "status": "succeeded",
-                            "summary": "transaction:commit",
-                            "document": {
-                                "document_ref": "doc_1",
-                                "model_revision": "rev_1",
-                            },
-                            "data": {
-                                "transaction_id": "tx_commit",
-                                "operation": "commit",
-                                "applied": True,
-                                "fingerprint": "   ",
-                            },
-                        }
-                    ),
-                }
-            ],
-            "isError": False,
-        }
-    )
-    with pytest.raises(FusionCadError) as exc_empty_fp:
-        await cad_service.execute(
-            {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit"},
-            group="transaction",
-        )
-    assert exc_empty_fp.value.code == ErrorCode.FUSION_API_ERROR
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit") is not None
-    )
-
-    # Case E: Proven successful commit with valid document identity and real fingerprint clears baseline and advances revision
-    set_mock_resp(
-        {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "api_version": "fusion.cad/v1",
-                            "status": "succeeded",
-                            "summary": "transaction:commit",
-                            "document": {
-                                "document_ref": "doc_1",
-                                "model_revision": "rev_1",
-                            },
-                            "data": {
-                                "transaction_id": "tx_commit",
-                                "operation": "commit",
-                                "applied": True,
-                                "fingerprint": "new_fp_post",
-                            },
-                        }
-                    ),
-                }
-            ],
-            "isError": False,
-        }
-    )
-    res_commit = await cad_service.execute(
-        {"node_id": "desk-1", "operation": "commit", "transaction_id": "tx_commit"},
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "commit", "transaction_id": tx_ok},
         group="transaction",
     )
-    assert res_commit is not None
-    assert cad_service.revision_tracker.get_transaction_baseline("tx_commit") is None
-    assert cad_service.revision_tracker.current("doc_1").revision == "rev_2"
+    assert result is not None
+    assert cad_service.transaction_store.get(tx_ok).state is TransactionState.COMMITTED
+    assert cad_service.revision_tracker.get_transaction_baseline(tx_ok) is None
     assert cad_service.revision_tracker.current("doc_1").fingerprint == "new_fp_post"
 
 
@@ -4456,171 +4260,84 @@ async def test_falsify_mandatory_attribute_collections_fail_closed(
 async def test_falsify_commit_abort_rollback_require_applied_is_true(
     mock_desktop_service: DesktopNodeService,
 ):
-    """Proves commit/abort/rollback fails closed and preserves baseline and tracker when applied is missing, False, or non-bool."""
+    """Non-boolean/false applied evidence never advances transaction authority."""
     cad_service = FusionCadService(mock_desktop_service)
-    matrix = CapabilityMatrix.from_records(
-        [
-            CapabilityRecord(name="transaction.preview_replay", state="supported"),
-            CapabilityRecord(name="design.access", state="supported"),
-            CapabilityRecord(
-                name="revision.external_change_detection", state="supported"
-            ),
-        ]
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [
+                CapabilityRecord(name="transaction.preview_replay", state="supported"),
+                CapabilityRecord(name="design.access", state="supported"),
+                CapabilityRecord(name="revision.external_change_detection", state="supported"),
+            ]
+        ),
     )
-    cad_service.set_node_capabilities("desk-1", matrix)
+    cad_service.revision_tracker.observe("doc_1", "base_fp")
 
-    def set_mock_resp(data_payload):
+    def set_mock_resp(tx_id: str, operation: str, applied_marker, *, include_applied=True):
+        data = {
+            "transaction_id": tx_id,
+            "operation": operation,
+            "fingerprint": "base_fp" if operation != "commit" else "new_fp",
+        }
+        if include_applied:
+            data["applied"] = applied_marker
         resp = {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "api_version": "fusion.cad/v1",
-                            "status": "succeeded",
-                            "summary": "transaction execution",
-                            "document": {
-                                "document_ref": "doc_1",
-                                "model_revision": "rev_1",
-                            },
-                            "data": data_payload,
-                        }
-                    ),
-                }
-            ],
+            "content": [{"type": "text", "text": json.dumps({
+                "api_version": "fusion.cad/v1",
+                "status": "succeeded",
+                "summary": "transaction execution",
+                "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+                "data": data,
+            })}],
             "isError": False,
         }
         mock_desktop_service.call = AsyncMock(return_value=resp)
         mock_desktop_service.submit = AsyncMock(return_value=resp)
 
-    # 1. Commit with applied=False preserves baseline and does not advance tracker
-    cad_service.revision_tracker.observe("doc_1", "base_fp")
-    cad_service.revision_tracker.begin_transaction(
-        "tx_commit_1", "doc_1", "rev_1", "base_fp"
-    )
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit_1") is not None
-    )
-    set_mock_resp(
-        {
-            "transaction_id": "tx_commit_1",
-            "operation": "commit",
-            "applied": False,
-            "fingerprint": "new_fp",
-        }
-    )
-    with pytest.raises(FusionCadError) as exc_false:
-        await cad_service.execute(
-            {
-                "node_id": "desk-1",
-                "operation": "commit",
-                "transaction_id": "tx_commit_1",
-            },
-            group="transaction",
+    invalid_commit_values = [False, "__missing__", "true", 1, None, [True]]
+    for index, marker in enumerate(invalid_commit_values):
+        tx_id = f"tx_commit_invalid_{index}"
+        current = cad_service.revision_tracker.current("doc_1")
+        assert current is not None
+        cad_service.revision_tracker.begin_transaction(
+            tx_id, "doc_1", current.revision, current.fingerprint
         )
-    assert exc_false.value.code == ErrorCode.FUSION_API_ERROR
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit_1") is not None
-    )
-    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
-    assert cad_service.revision_tracker.current("doc_1").fingerprint == "base_fp"
-
-    # 2. Commit with missing applied preserves baseline and does not advance tracker
-    set_mock_resp(
-        {
-            "transaction_id": "tx_commit_1",
-            "operation": "commit",
-            "fingerprint": "new_fp",
-        }
-    )
-    with pytest.raises(FusionCadError) as exc_missing:
-        await cad_service.execute(
-            {
-                "node_id": "desk-1",
-                "operation": "commit",
-                "transaction_id": "tx_commit_1",
-            },
-            group="transaction",
-        )
-    assert exc_missing.value.code == ErrorCode.FUSION_API_ERROR
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_commit_1") is not None
-    )
-    assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
-
-    # 3. Commit with non-bool applied ("true", 1, None) preserves baseline and tracker
-    for non_bool in ["true", 1, None, [True]]:
+        _prime_commit_ready_transaction(cad_service, tx_id)
         set_mock_resp(
-            {
-                "transaction_id": "tx_commit_1",
-                "operation": "commit",
-                "applied": non_bool,
-                "fingerprint": "new_fp",
-            }
+            tx_id,
+            "commit",
+            marker,
+            include_applied=marker != "__missing__",
         )
-        with pytest.raises(FusionCadError) as exc_non_bool:
+        with pytest.raises(FusionCadError) as exc:
             await cad_service.execute(
-                {
-                    "node_id": "desk-1",
-                    "operation": "commit",
-                    "transaction_id": "tx_commit_1",
-                },
+                {"node_id": "desk-1", "operation": "commit", "transaction_id": tx_id},
                 group="transaction",
             )
-        assert exc_non_bool.value.code == ErrorCode.FUSION_API_ERROR
-        assert (
-            cad_service.revision_tracker.get_transaction_baseline("tx_commit_1")
-            is not None
-        )
-        assert cad_service.revision_tracker.current("doc_1").revision == "rev_1"
+        assert exc.value.code == ErrorCode.FUSION_API_ERROR
+        assert cad_service.revision_tracker.get_transaction_baseline(tx_id) is not None
+        assert cad_service.transaction_store.get(tx_id).state is TransactionState.COMMITTING
+        assert cad_service.revision_tracker.current("doc_1").fingerprint == "base_fp"
 
-    # 4. Abort and rollback with applied=False preserve baseline
-    cad_service.revision_tracker.begin_transaction(
-        "tx_abort_1", "doc_1", "rev_1", "base_fp"
-    )
-    set_mock_resp(
-        {
-            "transaction_id": "tx_abort_1",
-            "operation": "abort",
-            "applied": False,
-            "fingerprint": "base_fp",
-        }
-    )
-    with pytest.raises(FusionCadError) as exc_abort:
-        await cad_service.execute(
-            {"node_id": "desk-1", "operation": "abort", "transaction_id": "tx_abort_1"},
-            group="transaction",
+    for tx_id, operation, marker in [
+        ("tx_abort_1", "abort", False),
+        ("tx_rollback_1", "rollback", "true"),
+    ]:
+        current = cad_service.revision_tracker.current("doc_1")
+        assert current is not None
+        cad_service.revision_tracker.begin_transaction(
+            tx_id, "doc_1", current.revision, current.fingerprint
         )
-    assert exc_abort.value.code == ErrorCode.FUSION_API_ERROR
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_abort_1") is not None
-    )
-
-    cad_service.revision_tracker.begin_transaction(
-        "tx_rollback_1", "doc_1", "rev_1", "base_fp"
-    )
-    set_mock_resp(
-        {
-            "transaction_id": "tx_rollback_1",
-            "operation": "rollback",
-            "applied": "true",
-            "fingerprint": "base_fp",
-        }
-    )
-    with pytest.raises(FusionCadError) as exc_rollback:
-        await cad_service.execute(
-            {
-                "node_id": "desk-1",
-                "operation": "rollback",
-                "transaction_id": "tx_rollback_1",
-            },
-            group="transaction",
-        )
-    assert exc_rollback.value.code == ErrorCode.FUSION_API_ERROR
-    assert (
-        cad_service.revision_tracker.get_transaction_baseline("tx_rollback_1")
-        is not None
-    )
+        set_mock_resp(tx_id, operation, marker)
+        with pytest.raises(FusionCadError) as exc:
+            await cad_service.execute(
+                {"node_id": "desk-1", "operation": operation, "transaction_id": tx_id},
+                group="transaction",
+            )
+        assert exc.value.code == ErrorCode.FUSION_API_ERROR
+        assert cad_service.revision_tracker.get_transaction_baseline(tx_id) is not None
+        assert cad_service.revision_tracker.current("doc_1").fingerprint == "base_fp"
 
 
 @pytest.mark.asyncio
@@ -4751,6 +4468,7 @@ async def test_falsify_externalization_failure_preserves_baseline_and_tracker_au
     assert (
         cad_service.revision_tracker.get_transaction_baseline("tx_ext_fail") is not None
     )
+    accepted_signature = _prime_commit_ready_transaction(cad_service, "tx_ext_fail")
 
     # 2. Return a successful commit result containing binary data
     resp = {
@@ -4771,6 +4489,7 @@ async def test_falsify_externalization_failure_preserves_baseline_and_tracker_au
                             "operation": "commit",
                             "applied": True,
                             "fingerprint": "post_fp",
+                            "replay_signature": accepted_signature,
                             "screenshot_bytes": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                         },
                     }
@@ -9937,6 +9656,7 @@ def test_task13_commit_native_hint_becomes_opaque_ref_only_after_terminal_succes
     cad_service.transaction_store.finish_preview(
         "tx_ref_1", preview={"replay_signature": signature}
     )
+    cad_service.transaction_store.begin_commit("tx_ref_1", "fp_base")
     native = "native::text::secret"
     result = CadResult(
         status="succeeded",
@@ -10028,6 +9748,7 @@ def test_task13_mismatching_commit_signature_fails_without_second_dispatch():
     accepted = {"plan_hash": staged.plan_hash, "structural_hash": "preview-b", "mutation_counts": {"sketches": 1}, "provenance": {"identity": {"transaction_id": "tx_mismatch"}, "persisted": {"transaction_id": "tx_mismatch"}, "same_operation": True}}
     service.transaction_store.begin_preview("tx_mismatch", "fp_base")
     service.transaction_store.finish_preview("tx_mismatch", preview={"replay_signature": accepted})
+    service.transaction_store.begin_commit("tx_mismatch", "fp_base")
     divergent = dict(accepted, structural_hash="commit-c-different")
     result = CadResult(status="succeeded", summary="native commit returned", data={"transaction_id": "tx_mismatch", "operation": "commit", "applied": True, "document_ref": "doc_1", "fingerprint": "fp_after", "replay_signature": divergent})
 
@@ -10037,7 +9758,7 @@ def test_task13_mismatching_commit_signature_fails_without_second_dispatch():
     assert exc.value.code == ErrorCode.TRANSACTION_CONFLICT
     assert exc.value.details["applied"] is True
     assert mock_desktop_service.call.call_count == 1
-    assert service.transaction_store.get("tx_mismatch").state is TransactionState.STAGED
+    assert service.transaction_store.get("tx_mismatch").state is TransactionState.COMMITTING
 
 
 @pytest.mark.asyncio
@@ -10360,3 +10081,33 @@ async def test_task14_async_full_snapshot_checkpoint_preserves_detail_option(
     context = checkpoint["finalization_payload"]
     assert context["detail"] == "full"
     assert context["operation"] == "model_snapshot"
+
+@pytest.mark.asyncio
+async def test_final_p0_commit_is_reserved_before_async_submit_and_duplicate_is_blocked(mock_desktop_service: DesktopNodeService):
+    import asyncio
+    service=FusionCadService(mock_desktop_service)
+    service.set_node_capabilities('desk-1', CapabilityMatrix.from_records([
+        CapabilityRecord(name='transaction.preview_replay',state='supported'),
+        CapabilityRecord(name='revision.external_change_detection',state='supported'),
+        CapabilityRecord(name='design.access',state='supported'),
+    ]))
+    cur=service.revision_tracker.observe('doc_1','fp_base')
+    service.revision_tracker.begin_transaction('tx_reserve','doc_1',cur.revision,cur.fingerprint)
+    service.transaction_store.begin('tx_reserve','doc_1',cur.revision,cur.fingerprint,{})
+    staged=service.transaction_store.stage('tx_reserve',{'action_type':'text_create'})
+    service.transaction_store.begin_preview('tx_reserve',cur.fingerprint)
+    service.transaction_store.finish_preview('tx_reserve',preview={'replay_signature':{'plan_hash':staged.plan_hash}})
+    entered=asyncio.Event(); release=asyncio.Event()
+    async def delayed(*_a,**_kw):
+        entered.set(); await release.wait()
+        return {'status':'queued','operation_id':'op_first'}
+    mock_desktop_service.submit=AsyncMock(side_effect=delayed)
+    first=asyncio.create_task(service.execute({'node_id':'desk-1','operation':'commit','transaction_id':'tx_reserve'},group='transaction'))
+    await asyncio.wait_for(entered.wait(),1.0)
+    assert service.transaction_store.get('tx_reserve').state is TransactionState.COMMITTING
+    with pytest.raises(FusionCadError) as exc:
+        await service.execute({'node_id':'desk-1','operation':'commit','transaction_id':'tx_reserve'},group='transaction')
+    assert exc.value.code==ErrorCode.TRANSACTION_CONFLICT
+    assert mock_desktop_service.submit.await_count==1
+    release.set(); assert await first=={'status':'queued','operation_id':'op_first'}
+    assert service.transaction_store.get('tx_reserve').state is TransactionState.COMMITTING

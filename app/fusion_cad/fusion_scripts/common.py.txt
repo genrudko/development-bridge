@@ -102,6 +102,46 @@ def _fusion_design_from_context(app, doc):
     return product if getattr(product, "rootComponent", None) is not None else None
 
 
+def _fusion_document_identity(doc):
+    """Return one copy-safe authoritative runtime document identity."""
+    import re
+    if doc is None:
+        raise FusionScriptError("NO_ACTIVE_DESIGN", "Active document required for stable runtime identity")
+    try:
+        data_file = getattr(doc, "dataFile", None)
+    except Exception:
+        data_file = None
+    if data_file is not None:
+        try:
+            value = getattr(data_file, "id", None)
+        except Exception:
+            value = None
+        if value is None or not str(value).strip():
+            raise FusionScriptError("NO_ACTIVE_DESIGN", "Saved/cloud document lacks DataFile.id; copy-safe identity is unavailable", details={"name": getattr(doc, "name", None)})
+        raw, source = str(value).strip(), "dataFile.id"
+    else:
+        try:
+            value = getattr(doc, "dataId", None)
+        except Exception:
+            value = None
+        if value is not None and str(value).strip():
+            raw, source = str(value).strip(), "dataId"
+        else:
+            try:
+                creation = getattr(doc, "creationId", None)
+                saved_version = getattr(doc, "savedVersion", None)
+            except Exception:
+                creation, saved_version = None, None
+            if saved_version is not None:
+                raise FusionScriptError("NO_ACTIVE_DESIGN", "Saved document lacks copy-safe DataFile.id/dataId identity; creationId is not authoritative for saved copies", details={"name": getattr(doc, "name", None)})
+            if creation is None or not str(creation).strip():
+                raise FusionScriptError("NO_ACTIVE_DESIGN", "Document lacks stable runtime identity (DataFile.id/dataId/unsaved creationId)", details={"name": getattr(doc, "name", None)})
+            raw, source = "unsaved_" + str(creation).strip(), "creationId.unsaved"
+    clean = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+    safe = clean if clean.startswith("doc_") else "doc_" + clean
+    return {"document_ref": safe, "identity_source": source, "runtime_id": raw, "name": getattr(doc, "name", None)}
+
+
 def _p0_validation_attributes(owner):
     values = {}
     attrs = getattr(owner, "attributes", None)
@@ -157,14 +197,31 @@ def collect_p0_validation_evidence(payload=None, canonical=None, document_ref=No
         raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Timeline evidence is unavailable")
     for index in range(timeline.count):
         item = timeline.item(index)
-        native_id = getattr(item, "entityToken", None) or getattr(item, "id", None)
-        if not native_id:
-            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Timeline item lacks stable runtime identity")
-        valid = bool(getattr(item, "isValid", True))
-        health = str(getattr(item, "healthStatus", "unknown"))
         facts["timeline"]["rolled_back"] = facts["timeline"]["rolled_back"] or bool(getattr(item, "isRolledBack", False))
-        facts["features"].append({"kind": "feature", "native_token": str(native_id), "name": str(getattr(item, "name", "")), "valid": valid, "health": health})
-        if not valid or health.lower() in ("error", "failed", "broken"):
+        # Fusion TimelineObject is a timeline wrapper, not the feature itself.
+        # Public feature identity/validity live on TimelineObject.entity and health
+        # is exposed by TimelineObject.healthState.
+        entity = getattr(item, "entity", None)
+        if entity is None:
+            facts["limitations"].append("timeline_row_without_entity")
+            continue
+        native_id = getattr(entity, "entityToken", None) or getattr(entity, "id", None)
+        if not native_id:
+            facts["limitations"].append("timeline_entity_without_stable_identity")
+            continue
+        valid = bool(getattr(entity, "isValid", True))
+        raw_health = str(getattr(item, "healthState", "unknown"))
+        health_key = raw_health.lower()
+        if "error" in health_key or "failed" in health_key or "broken" in health_key:
+            health = "error"
+        elif "warning" in health_key:
+            health = "warning"
+        elif "healthy" in health_key or "good" in health_key:
+            health = "healthy"
+        else:
+            health = health_key
+        facts["features"].append({"kind": "feature", "native_token": str(native_id), "name": str(getattr(entity, "name", getattr(item, "name", ""))), "valid": valid, "health": health})
+        if not valid or health == "error":
             facts["references"].append({"kind": "feature", "native_token": str(native_id), "state": "broken"})
     components = getattr(design, "allComponents", None)
     if components is None or not hasattr(components, "count"):
@@ -285,22 +342,10 @@ def collect_model_fingerprint(payload=None):
 
     canonical = {}
 
-    # 1. Document identity / modified marker (stable identity required, fail closed on mutable name)
-    data_file = getattr(doc, "dataFile", None)
-    doc_id = (
-        getattr(doc, "dataId", None)
-        or getattr(doc, "creationId", None)
-        or (data_file and getattr(data_file, "id", None))
-    )
-    if not doc_id:
-        raise FusionScriptError(
-            "NO_ACTIVE_DESIGN",
-            "Document lacks stable runtime identity (dataId/creationId/dataFile.id); "
-            "mutable document name and payload.document_ref cannot be used as authoritative identity",
-            details={"name": getattr(doc, "name", None)},
-        )
-
-    doc_id_str = str(doc_id)
+    # 1. Document identity / modified marker (copy-safe and shared by all domains)
+    identity = _fusion_document_identity(doc)
+    safe_doc_ref = identity["document_ref"]
+    doc_id_str = identity["runtime_id"]
 
     def _timeline_runtime_identity(entity, item, index):
         identity = _stable_runtime_identity(entity) or _stable_runtime_identity(item)
@@ -310,11 +355,6 @@ def collect_model_fingerprint(payload=None):
             return None
         basis = (doc_id_str + "\0" + str(index) + "\0adsk::fusion::Snapshot").encode("utf-8")
         return "snapshot_" + hashlib.sha256(basis).hexdigest()
-
-    if doc_id_str.startswith("doc_"):
-        safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str[4:])
-    else:
-        safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str)
 
     req_doc_ref = payload.get("document_ref") if isinstance(payload, dict) else None
     if req_doc_ref and req_doc_ref != safe_doc_ref:
@@ -1358,13 +1398,7 @@ def resolve_fusion_entity(payload=None):
         )
 
     # 1. Document identity check - fails BEFORE native lookup
-    doc_id = (
-        getattr(doc, "creationId", None)
-        or getattr(doc, "dataId", None)
-        or getattr(getattr(doc, "dataFile", None), "id", None)
-    )
-    clean_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(doc_id).strip()) if doc_id else "unknown"
-    safe_doc_ref = f"doc_{clean_id}"
+    safe_doc_ref = _fusion_document_identity(doc)["document_ref"]
 
     req_doc = payload.get("document_ref") or payload.get("document")
     if req_doc and req_doc != safe_doc_ref:

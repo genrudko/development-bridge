@@ -2076,9 +2076,6 @@ class FusionCadService:
                 tx_id = payload.get("transaction_id")
                 record = self._transaction_store.find(tx_id) if isinstance(tx_id, str) else None
                 if isinstance(tx_id, str) and record is not None and record.plan:
-                    self._transaction_store.begin_commit(
-                        tx_id, record.baseline_fingerprint
-                    )
                     evidence = cad_result.model_dump(mode="json").get("data", {})
                     self._transaction_store.finish_commit(tx_id, evidence)
             if effective_bundle_group == "transaction" and op in ("abort", "rollback"):
@@ -2842,6 +2839,30 @@ class FusionCadService:
         if val_err is not None:
             raise val_err
 
+    def _release_commit_reservation_if_proven_not_applied(
+        self,
+        effective_bundle_group: str,
+        op: str,
+        payload: Mapping[str, Any],
+        code: ErrorCode,
+        details: Mapping[str, Any] | None,
+    ) -> None:
+        """Release COMMITTING only for authoritative pre-apply stale rejection."""
+        if (
+            effective_bundle_group != "transaction"
+            or op != "commit"
+            or code != ErrorCode.REVISION_CONFLICT
+            or not isinstance(details, Mapping)
+            or details.get("applied") is not False
+        ):
+            return
+        tx_id = payload.get("transaction_id")
+        if not isinstance(tx_id, str):
+            return
+        record = self._transaction_store.find(tx_id)
+        if record is not None and record.state is TransactionState.COMMITTING:
+            self._transaction_store.release_commit_reservation(tx_id)
+
     def _classify_operation(
         self, group: str, payload: dict[str, Any]
     ) -> tuple[bool, bool, str]:
@@ -3037,6 +3058,7 @@ class FusionCadService:
                     raise
                 transaction = None
             if transaction is not None and transaction.state in (
+                TransactionState.COMMITTING,
                 TransactionState.COMMITTED,
                 TransactionState.ABORTED,
                 TransactionState.PREVIEWED,
@@ -3105,12 +3127,13 @@ class FusionCadService:
                     raise
                 transaction = None
             if transaction is not None and transaction.state in (
+                TransactionState.COMMITTING,
                 TransactionState.COMMITTED,
                 TransactionState.ABORTED,
             ):
                 raise FusionCadError(
                     ErrorCode.TRANSACTION_CONFLICT,
-                    "Transaction is already terminal",
+                    "Transaction is terminal or commit outcome may be in flight",
                     details={"transaction_id": tx_id, "operation": op},
                 )
 
@@ -3159,11 +3182,6 @@ class FusionCadService:
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                     "P0 transaction preview/commit feasibility is limited to the logical text creation spike",
                     details={"operation": op, "applied": False},
-                )
-            if op == "commit":
-                self._transaction_store.begin_commit(
-                    transaction.transaction_id,
-                    transaction.baseline_fingerprint,
                 )
 
         # Transaction begin: persist baseline after execution succeeds (below)
@@ -3329,6 +3347,13 @@ class FusionCadService:
             except (BridgeError, AttributeError):
                 probe_generation = None
 
+        if effective_bundle_group == "transaction" and op == "commit":
+            tx_id = payload.get("transaction_id")
+            record = self._transaction_store.find(tx_id) if isinstance(tx_id, str) else None
+            if not isinstance(tx_id, str) or record is None or not record.plan:
+                raise FusionCadError(ErrorCode.TRANSACTION_CONFLICT, "Transaction cannot be reserved for commit")
+            self._transaction_store.begin_commit(tx_id, record.baseline_fingerprint)
+
         if is_async:
             try:
                 sub_result = await self._desktop_nodes.submit(
@@ -3338,6 +3363,9 @@ class FusionCadService:
                     journal=journal,
                 )
             except FusionCadError as exc:
+                self._release_commit_reservation_if_proven_not_applied(
+                    effective_bundle_group, op, payload, exc.code, exc.details
+                )
                 if exc.code == ErrorCode.REVISION_CONFLICT:
                     cur_fp = (
                         exc.details.get("current_fingerprint")
@@ -3358,6 +3386,9 @@ class FusionCadService:
                 if self._is_error_payload(sub_result):
                     err_code, err_msg, err_details = self._extract_error_info(
                         sub_result
+                    )
+                    self._release_commit_reservation_if_proven_not_applied(
+                        effective_bundle_group, op, payload, err_code, err_details
                     )
                     if err_code == ErrorCode.REVISION_CONFLICT:
                         cur_fp = (
@@ -3409,6 +3440,9 @@ class FusionCadService:
                 journal=journal,
             )
         except FusionCadError as exc:
+            self._release_commit_reservation_if_proven_not_applied(
+                effective_bundle_group, op, payload, exc.code, exc.details
+            )
             if exc.code == ErrorCode.REVISION_CONFLICT:
                 cur_fp = (
                     exc.details.get("current_fingerprint")
@@ -3465,6 +3499,9 @@ class FusionCadService:
         try:
             cad_result = self.decode_domain_result(raw_result)
         except FusionCadError as exc:
+            self._release_commit_reservation_if_proven_not_applied(
+                effective_bundle_group, op, payload, exc.code, exc.details
+            )
             if exc.code == ErrorCode.REVISION_CONFLICT:
                 cur_fp = (
                     exc.details.get("current_fingerprint")

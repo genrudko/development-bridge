@@ -373,6 +373,7 @@ def _mock_adsk_env(
 
     class FakeDoc:
         def __init__(self) -> None:
+            self.dataId = doc_id
             self.creationId = doc_id
             self.products = self
 
@@ -904,7 +905,7 @@ def test_model_snapshot_accepts_empty_falsey_fusion_collections(monkeypatch) -> 
 
     result = scope["_output"]
     assert result["status"] == "succeeded"
-    assert result["document"]["document_ref"] == "doc_empty-design"
+    assert result["document"]["document_ref"] == "doc_unsaved_empty-design"
     assert result["data"]["fingerprint"]
 
 

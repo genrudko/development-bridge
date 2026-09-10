@@ -103,7 +103,7 @@ def test_commit_requires_semantic_equivalence_to_accepted_preview():
         )
     assert exc.value.code == ErrorCode.TRANSACTION_CONFLICT
     assert exc.value.details["applied"] is True
-    assert mismatch.get("tx_mismatch").state is TransactionState.STAGED
+    assert mismatch.get("tx_mismatch").state is TransactionState.COMMITTING
 
 
 def test_begin_commit_requires_accepted_preview_for_current_plan():

@@ -66,20 +66,8 @@ def _doc_identity():
             "NO_ACTIVE_DESIGN",
             "Active document required for view operations",
         )
-    data_file = getattr(doc, "dataFile", None)
-    doc_id = (
-        getattr(doc, "dataId", None)
-        or getattr(doc, "creationId", None)
-        or (data_file and getattr(data_file, "id", None))
-    )
-    if not doc_id:
-        raise FusionScriptError(
-            "NO_ACTIVE_DESIGN",
-            "Document lacks stable runtime identity (dataId/creationId/dataFile.id); "
-            "mutable document name cannot be used for view identity",
-        )
-    clean_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(doc_id).strip())
-    return {"document_ref": f"doc_{clean_id}", "name": getattr(doc, "name", None)}
+    identity = _fusion_document_identity(doc)
+    return {"document_ref": identity["document_ref"], "name": getattr(doc, "name", None)}
 
 
 def _verify_doc_identity(payload):
