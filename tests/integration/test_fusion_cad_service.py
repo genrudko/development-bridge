@@ -181,6 +181,12 @@ async def test_service_executes_capabilities_read_and_persists_matrix(
     assert saved_matrix.get("view.pick").state == "degraded"
     assert saved_matrix.get("export.dxf").state == "unavailable"
 
+    dispatched = mock_desktop_service.call.call_args.args
+    assert dispatched[1] == "fusion_mcp_execute"
+    assert dispatched[2]["featureType"] == "script"
+    assert dispatched[2]["object"]["script"]
+    assert "script" not in {k for k in dispatched[2] if k != "object"}
+
 
 @pytest.mark.asyncio
 async def test_falsify_finding_1_unprobed_node_fails_closed_before_script_dispatch(
@@ -1527,7 +1533,7 @@ async def test_falsify_rendered_script_standalone_mutation_stale_blocks_fresh_ap
         async def run_rendered_production_script(
             node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
         ):
-            script = arguments["script"]
+            script = arguments["object"]["script"]
             # Pure metadata mutation: do not inject the internal geometry hook.
             # Geometry-bearing operations must provide the explicit compensation
             # contract covered by the Task 10 atomicity regressions below.
@@ -1690,7 +1696,7 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
         async def run_rendered_production_script(
             node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
         ):
-            script = arguments["script"]
+            script = arguments["object"]["script"]
             def tx_begin(payload):
                 preview_baseline["volume"] = float(fake_adsk.volume)
 
@@ -2255,7 +2261,7 @@ async def test_falsify_transaction_baseline_bypass_and_staging_bounds(
         async def run_rendered_production_script(
             node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
         ):
-            script = arguments["script"]
+            script = arguments["object"]["script"]
             scope = {
                 "__name__": "__main__",
                 "_transaction_commit_primitive": lambda payload: (
@@ -2386,7 +2392,7 @@ async def test_falsify_missing_required_fingerprint_groups_fail_closed(
         node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
     ):
         nonlocal primitive_reached
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {
             "__name__": "__main__",
             "_mutation_primitive": lambda payload: globals().update(
@@ -2480,7 +2486,7 @@ async def test_falsify_wrong_or_absent_document_identity_fails_closed(
         node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
     ):
         nonlocal primitive_reached
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {
             "__name__": "__main__",
             "_mutation_primitive": lambda payload: globals().update(
@@ -2934,7 +2940,7 @@ async def test_falsify_transaction_preview_and_commit_bound_to_begin_baseline_an
         nonlocal captured_payload
         import json
 
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         # extract PAYLOAD_RAW
         for line in script.splitlines():
             if line.startswith("PAYLOAD_RAW = "):
@@ -3003,7 +3009,7 @@ async def test_falsify_rendered_script_attribute_owner_relocation_changes_finger
     async def run_rendered_production_script(
         node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
     ):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -3150,7 +3156,7 @@ async def test_falsify_rendered_script_unreadable_mandatory_fingerprint_data_fai
         node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
     ):
         nonlocal primitive_reached
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {
             "__name__": "__main__",
             "_mutation_primitive": lambda payload: globals().update(
@@ -3343,7 +3349,7 @@ async def test_falsify_sketch_geometry_movement_triggers_revision_conflict_in_re
         async def run_rendered_production_script(
             node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
         ):
-            script = arguments["script"]
+            script = arguments["object"]["script"]
             scope = {
                 "__name__": "__main__",
                 "_mutation_primitive": lambda payload: None,
@@ -3503,7 +3509,7 @@ async def test_falsify_rendered_mutation_returns_real_fusion_post_apply_fingerpr
         async def run_rendered_production_script(
             node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
         ):
-            script = arguments["script"]
+            script = arguments["object"]["script"]
             # Pure metadata mutation; no geometry hook is present.
             scope = {"__name__": "__main__"}
             exec(compile(script, "<rendered-production-script>", "exec"), scope)  # noqa: S102
@@ -3985,7 +3991,7 @@ async def test_falsify_rendered_face_edge_unreadable_attributes_or_tokens_fail_c
         node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
     ):
         nonlocal primitive_reached
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {
             "__name__": "__main__",
             "_mutation_primitive": lambda payload: globals().update(
@@ -4087,7 +4093,7 @@ async def test_falsify_face_edge_and_sketch_geometry_topology_fail_closed(
         node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
     ):
         nonlocal primitive_reached
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {
             "__name__": "__main__",
             "_mutation_primitive": lambda payload: globals().update(
@@ -4179,7 +4185,7 @@ async def test_falsify_mandatory_attribute_collections_fail_closed(
         node_id: str, tool_name: str, arguments: dict, journal: dict | None = None
     ):
         nonlocal primitive_reached
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {
             "__name__": "__main__",
             "_mutation_primitive": lambda payload: globals().update(
@@ -5585,7 +5591,7 @@ async def test_fusion_inspect_describe_area_volume_perimeter_centroid(
 ):
     """Proves inspect describe/scalar measures normalize exact units and frames."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -5660,7 +5666,7 @@ async def test_fusion_inspect_bounding_box_oriented_bbox_and_edge(
     (the axis-aligned body.boundingBox is never relabeled as an oriented_bbox),
     and edge length is exact."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -5716,7 +5722,7 @@ async def test_fusion_inspect_distance_minimum_distance_and_angle(
 ):
     """Proves distance/minimum_distance return mm with explicit points and angle is deg."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -5778,7 +5784,7 @@ async def test_fusion_inspect_relation_contracts(
 ):
     """Proves parallel/perpendicular/coplanar/concentric return matches, measured deviation, and explicit tolerance."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -5882,7 +5888,7 @@ async def test_fusion_inspect_face_to_face_thickness_exact_only(
 ):
     """Proves face_to_face_thickness returns exact unambiguous thickness and rejects ambiguous geometry."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -5943,7 +5949,7 @@ async def test_fusion_inspect_unsupported_targets_fail_closed(
 ):
     """Proves unsupported target types return TYPE_MISMATCH/UNSUPPORTED_GEOMETRY, never guessed values."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6009,7 +6015,7 @@ async def test_fusion_inspect_centroid_no_bbox_fallback(
 ):
     """Falsify Finding 2: body centroid must NOT fall back to bounding-box center."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6047,7 +6053,7 @@ async def test_fusion_inspect_sketch_centroid_unsupported(
 ):
     """Falsify Finding 2: sketch centroid must NOT fall back to bounding-box center."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6078,7 +6084,7 @@ async def test_fusion_inspect_curved_edge_centroid_unsupported(
 ):
     """Falsify Finding 2: curved-edge centroid must not use endpoint midpoint."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6118,7 +6124,7 @@ async def test_fusion_inspect_distance_missing_witness_fails_closed(
 ):
     """Falsify Finding 2: distance must not fall back to centroids when witness points are missing."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6150,7 +6156,7 @@ async def test_fusion_inspect_distance_no_measure_manager_fails_closed(
 ):
     """Falsify Finding 2: distance must not fall back to centroid math when measureManager is unavailable."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6186,7 +6192,7 @@ async def test_fusion_inspect_thickness_different_bodies_fails_closed(
 ):
     """Falsify Finding 3: thickness requires provably same-solid faces."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6231,7 +6237,7 @@ async def test_fusion_inspect_thickness_disjoint_faces_fails_closed(
 ):
     """Falsify Finding 3: thickness requires projected overlap proving a material path."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6277,7 +6283,7 @@ async def test_fusion_inspect_concentric_non_parallel_axes_reports_angle(
 ):
     """Falsify Finding 4: concentric requires angular parallelism within tolerance."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6327,7 +6333,7 @@ async def test_fusion_inspect_concentric_offset_exceeds_tolerance(
 ):
     """Falsify Finding 4: parallel but offset axes are not concentric."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6375,7 +6381,7 @@ async def test_fusion_inspect_face_oriented_bbox_straight_edges_exact_curved_edg
     """Proves face oriented_bbox is exact only for positively verified
     straight-edged polygonal boundaries and fails closed for curved edges."""
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]
@@ -6465,7 +6471,7 @@ class FakeFusionDesktop:
         self.mutation_compensation_rollback = None
 
     def _dispatch(self, arguments):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         op = _payload_operation(script)
         if op in _METADATA_MUTATION_OPS:
             self.mutation_calls += 1

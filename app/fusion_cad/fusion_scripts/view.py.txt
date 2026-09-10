@@ -1057,7 +1057,7 @@ def _apply_standard_view(view_type):
     viewport.camera = camera
 
 
-def run():
+def run(_context=None):
     op = PAYLOAD.get("operation", "")
 
     if op == "camera_read":

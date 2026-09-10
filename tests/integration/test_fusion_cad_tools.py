@@ -2009,7 +2009,7 @@ async def test_view_zoom_entity_injects_exact_resolution_hint(tmp_path):
     captured_script = {}
 
     async def capture_submit(node_id, tool_name, arguments, journal=None):
-        captured_script["script"] = arguments["script"]
+        captured_script["script"] = arguments["object"]["script"]
         return _camera_desktop_result("zoom_entity")
 
     container.desktop_nodes.submit = capture_submit  # type: ignore[assignment]
@@ -2158,7 +2158,7 @@ async def test_view_pick_fresh_view_injects_immutable_authority_and_normalizes_h
 
     captured = {}
     async def pick_call(node_id, tool_name, arguments, journal=None):
-        captured["script"] = arguments["script"]
+        captured["script"] = arguments["object"]["script"]
         return {
             "api_version": "fusion.cad/v1",
             "status": "succeeded",

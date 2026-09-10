@@ -214,7 +214,7 @@ def _make_service(mock_desktop_service):
     cad_service.set_node_capabilities("desk-1", _inspect_matrix())
 
     async def run_rendered_inspect(node_id, tool_name, arguments, journal=None):
-        script = arguments["script"]
+        script = arguments["object"]["script"]
         scope = {"__name__": "__main__"}
         exec(compile(script, "<rendered-inspect-script>", "exec"), scope)  # noqa: S102
         return scope["_output"]

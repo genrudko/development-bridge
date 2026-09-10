@@ -395,7 +395,7 @@ def _transaction_post_commit_state(current_fp, doc_ref):
     return post_fp, post_doc
 
 
-def run():
+def run(_context=None):
     op = PAYLOAD.get("operation", "")
     if op not in ("begin", "stage", "status", "preview", "commit", "abort", "rollback"):
         return make_result(data={"operation": op}, summary="Executed transaction:" + str(op))

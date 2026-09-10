@@ -41,7 +41,7 @@ def _validation_bbox(raw):
     return list(minimum) + list(maximum)
 
 
-def run():
+def run(_context=None):
     if PAYLOAD.get("operation") == "test_op":
         return make_result(data={"operation": "test_op"}, summary="Executed validate:test_op")
     if PAYLOAD.get("operation") != "run":

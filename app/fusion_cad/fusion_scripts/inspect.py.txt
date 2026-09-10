@@ -1151,7 +1151,7 @@ def _face_to_face_thickness(face_a, face_b, ref_a, ref_b):
     }
 
 
-def run():
+def run(_context=None):
     op = PAYLOAD.get("operation", "")
     if op == "test_op":
         return make_result(data={"operation": op}, summary=f"Executed inspect:{op}")

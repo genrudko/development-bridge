@@ -1261,7 +1261,14 @@ def test_p0_rendered_bundles_fit_default_desktop_argument_limit() -> None:
         ("transaction", {"operation": "begin", "transaction_id": "tx_x"}),
     )
     sizes = {
-        group: len(json.dumps({"script": bundle.build(group, payload)}, separators=(",", ":")).encode("utf-8"))
+        group: len(json.dumps({"featureType": "script", "object": {"script": bundle.build(group, payload)}}, separators=(",", ":")).encode("utf-8"))
         for group, payload in payloads
     }
     assert max(sizes.values()) <= DesktopNodeSettings().max_arguments_bytes, sizes
+
+
+def test_production_group_entrypoints_accept_fusion_context_argument() -> None:
+    bundle = FusionCadScriptBundle()
+    for group in ("read", "inspect", "view", "mutate", "transaction", "validate"):
+        rendered = bundle.build(group, {"operation": "test_op"})
+        assert "def run(_context=None):" in rendered, group

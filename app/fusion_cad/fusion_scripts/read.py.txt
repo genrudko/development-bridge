@@ -684,7 +684,7 @@ def probe_runtime():
     return make_result(data=data_payload, summary="Runtime capabilities probed", capabilities=records)
 
 
-def run():
+def run(_context=None):
     op = PAYLOAD.get("operation", "")
     if op == "capabilities":
         return probe_runtime()

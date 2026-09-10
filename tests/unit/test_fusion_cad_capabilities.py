@@ -902,7 +902,7 @@ def test_read_capability_probe_reuses_verified_real_fusion_design_resolver():
         "read", {"node_id": "desk-1", "operation": "capabilities"}
     )
     start = script.index("def probe_runtime():")
-    end = script.index("def run():", start)
+    end = script.index("def run(_context=None):", start)
     probe = script[start:end]
     assert "design = _fusion_design_from_context(app, doc)" in probe
     assert "products.itemByClass" not in probe

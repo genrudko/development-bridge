@@ -1,4 +1,4 @@
-def run():
+def run(_context=None):
     op = PAYLOAD.get("operation", "")
     if op == "test_op":
         return make_result(data={"operation": op}, summary=f"Executed mutate:{op}")

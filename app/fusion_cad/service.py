@@ -3359,7 +3359,7 @@ class FusionCadService:
                 sub_result = await self._desktop_nodes.submit(
                     node_id,
                     "fusion_mcp_execute",
-                    {"script": script},
+                    {"featureType": "script", "object": {"script": script}},
                     journal=journal,
                 )
             except FusionCadError as exc:
@@ -3436,7 +3436,7 @@ class FusionCadService:
             raw_result = await self._desktop_nodes.call(
                 node_id,
                 "fusion_mcp_execute",
-                {"script": script},
+                {"featureType": "script", "object": {"script": script}},
                 journal=journal,
             )
         except FusionCadError as exc:
