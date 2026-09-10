@@ -51,5 +51,43 @@ was not a hand-written substitute for the production transaction script.
   immediately before apply. Task 14 repeats the manual-change conflict invariant
   on the Schedule copy.
 
-Task 13 is accepted. P0 itself remains open until the Task 14 whole-phase review
-and Schedule-copy golden acceptance are complete.
+Task 13 is accepted.
+
+## Task 14 Schedule-copy golden and P0 final status
+
+Status: **P0 LIVE ACCEPTED, DEPLOYED, AND CLOSED**.
+
+Task 14 used the disposable `Schedule Task14 Golden 224313` document, not the
+protected original `Schedule`, and completed the required preview/abort,
+commit/immediate-Undo, revision-conflict, stale-view, capability-honesty, and
+final authoritative-fingerprint checks. The golden copy returned to its
+baseline authoritative fingerprint after cleanup. No save command was issued.
+
+The independent whole-phase re-review requirement was explicitly replaced by
+owner-authorized coordinator self-review. That self-review must not be described
+as an independent review.
+
+After P0 integration, deployment smoke exposed two compatibility seams with the
+installed Autodesk Fusion MCP: the structured `featureType/object.script` input
+shape and the fact that the current script runner does not reliably return
+Python stdout/return values. Both were repaired without rewriting the Windows
+Relay. The final server-side repair uses a strict reserved Bridge-owned result
+transport and preserves normal native-error fail-closed behavior.
+
+Final deployed evidence on 2026-09-10:
+
+- deployed `main` and `origin/main`: `93ddfcf6cac767f1db9ba4c1fe4c750cb19fdc20`;
+- full repository suite: `2108 passed`;
+- public `fusion_read(capabilities)`: succeeded through `fusion.cad/v1` on
+  Fusion `2704.1.53`;
+- public `fusion_read(feature_tree)`: succeeded, including retained
+  external-result spill for the large result;
+- a degraded selection path failed closed consistently with the capability
+  matrix rather than silently bypassing the limitation;
+- final Fusion node state: online, `pending_commands=0`,
+  `uncertain_operations=[]`, result delivery healthy, outbox `0`;
+- no P0 push/merge/deploy work remains pending.
+
+P0 is closed. Do not rerun Task 14 or reopen P0 without new evidence or an
+explicit owner request. Executor operating rules for subsequent Fusion work are
+in `docs/operations/fusion-cad-executor-guide.md`.

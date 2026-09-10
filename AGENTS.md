@@ -39,6 +39,7 @@ Treat model/tool round-trips, coordinator chat context, and live ChatGPT Web tra
 - Treat the debug sweep as an attempt to falsify the fix. If it exposes a defect, repair it and repeat only the affected offline checks before the final full bounded verification. Do not hand a known flaky or partially diagnosed result to the coordinator as complete.
 - Executor output is evidence, not acceptance. The coordinator reviews the diff, verification evidence, and permissions before any privileged Bridge-native write.
 - Detailed executor guidance is in `docs/operations/executor-operating-contract.md`.
+- Fusion CAD executors must also read and follow `docs/operations/fusion-cad-executor-guide.md`; public `fusion_*` semantic tools are the default interface and raw Fusion MCP is an escape hatch, not the normal modeling path.
 
 ### Coordinator routing and mount discipline
 
