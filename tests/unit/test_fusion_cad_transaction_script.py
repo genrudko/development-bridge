@@ -224,7 +224,7 @@ def _production_command_runtime(monkeypatch, *, preview):
     canonical = {
         "document": {"document_ref": "doc_1", "name": "TestDoc", "is_modified": False, "saved_version": 1},
         "timeline": [], "components": [{"name": "Root", "id": "comp_root"}],
-        "occurrences": [], "bodies": [], "sketches": [], "parameters": [], "attributes": [],
+        "occurrences": [], "bodies": [], "sketches": [], "sketch_texts": [], "parameters": [], "attributes": [],
     }
     baseline_fp = hashlib.sha256(json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     provenance = {
@@ -407,6 +407,7 @@ def _ptransaction_runtime(monkeypatch, *, preview):
             "occurrences": [],
             "bodies": [],
             "sketches": [{"name": s.name, "id": s.entityToken} for s in state["sketches"]],
+            "sketch_texts": [],
             "parameters": [],
             "attributes": [],
         }
