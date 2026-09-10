@@ -49,6 +49,141 @@ class FusionScriptError(RuntimeError):
         self.details = details or {}
 
 
+def _finite_number(value, label):
+    """Return a deterministic finite float for authoritative fingerprint data."""
+    import math
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            f"{label} must be numeric for authoritative fingerprinting",
+        )
+    number = float(value)
+    if not math.isfinite(number):
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            f"{label} must be finite for authoritative fingerprinting",
+        )
+    return number
+
+
+def _sketch_text_text_value(sketch_text):
+    """Read SketchText text via parameter API with a runtime legacy fallback."""
+    parameter_error = None
+    try:
+        parameter = getattr(sketch_text, "textParameter", None)
+    except Exception as exc:
+        parameter, parameter_error = None, exc
+    if parameter is not None:
+        try:
+            value = getattr(parameter, "textValue")
+        except Exception as exc:
+            parameter_error = exc
+        else:
+            if value is not None:
+                return str(value)
+    try:
+        value = getattr(sketch_text, "text")
+    except Exception as exc:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText text is unreadable through parameter and legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None, "legacy_error": str(exc)},
+        ) from exc
+    if value is None:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText text is unavailable through parameter and legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None},
+        )
+    return str(value)
+
+
+def _sketch_text_height_value(sketch_text):
+    """Read SketchText height in Fusion internal length units with runtime fallback."""
+    parameter_error = None
+    try:
+        parameter = getattr(sketch_text, "heightParameter", None)
+    except Exception as exc:
+        parameter, parameter_error = None, exc
+    if parameter is not None:
+        try:
+            value = getattr(parameter, "value")
+        except Exception as exc:
+            parameter_error = exc
+        else:
+            return _finite_number(value, "SketchText height")
+    try:
+        value = getattr(sketch_text, "height")
+    except Exception as exc:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText height is unreadable through parameter and legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None, "legacy_error": str(exc)},
+        ) from exc
+    return _finite_number(value, "SketchText height")
+
+
+def _sketch_text_set_text_value(sketch_text, value):
+    requested = str(value)
+    parameter_error = None
+    try:
+        parameter = getattr(sketch_text, "textParameter", None)
+    except Exception as exc:
+        parameter, parameter_error = None, exc
+    if parameter is not None:
+        try:
+            parameter.textValue = requested
+            actual = parameter.textValue
+        except Exception as exc:
+            parameter_error = exc
+        else:
+            if str(actual) != requested:
+                raise FusionScriptError("FUSION_API_ERROR", "SketchText parameter text read-back mismatch")
+            return
+    try:
+        sketch_text.text = requested
+        actual = sketch_text.text
+    except Exception as exc:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText text is not writable through parameter or legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None, "legacy_error": str(exc)},
+        ) from exc
+    if str(actual) != requested:
+        raise FusionScriptError("FUSION_API_ERROR", "SketchText legacy text read-back mismatch")
+
+
+def _sketch_text_set_height_value(sketch_text, value):
+    requested = _finite_number(value, "SketchText height")
+    parameter_error = None
+    try:
+        parameter = getattr(sketch_text, "heightParameter", None)
+    except Exception as exc:
+        parameter, parameter_error = None, exc
+    if parameter is not None:
+        try:
+            parameter.value = requested
+            actual = parameter.value
+        except Exception as exc:
+            parameter_error = exc
+        else:
+            if _finite_number(actual, "SketchText height") != requested:
+                raise FusionScriptError("FUSION_API_ERROR", "SketchText parameter height read-back mismatch")
+            return
+    try:
+        sketch_text.height = requested
+        actual = sketch_text.height
+    except Exception as exc:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText height is not writable through parameter or legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None, "legacy_error": str(exc)},
+        ) from exc
+    if _finite_number(actual, "SketchText height") != requested:
+        raise FusionScriptError("FUSION_API_ERROR", "SketchText legacy height read-back mismatch")
+
+
 def canonicalize_value(val):
     if val is None or isinstance(val, (bool, int, str)):
         return val
@@ -72,10 +207,258 @@ def canonicalize_value(val):
     return str(val)
 
 
+def _fusion_design_from_context(app, doc):
+    """Resolve the active Design using the real Fusion Products API shape."""
+    products = getattr(doc, "products", None) if doc else None
+    product = None
+    if products is not None:
+        by_type = getattr(products, "itemByProductType", None)
+        if callable(by_type):
+            product = by_type("DesignProductType")
+        if product is None:
+            legacy_by_class = getattr(products, "itemByClass", None)
+            if callable(legacy_by_class):
+                product = legacy_by_class("adsk::fusion::Design")
+    if product is None and app is not None:
+        product = getattr(app, "activeProduct", None)
+    if product is None:
+        return None
+    try:
+        import adsk.fusion
+        design_type = getattr(adsk.fusion, "Design", None)
+        cast = getattr(design_type, "cast", None) if design_type is not None else None
+    except Exception:
+        cast = None
+    if callable(cast):
+        try:
+            return cast(product)
+        except Exception:
+            return None
+    return product if getattr(product, "rootComponent", None) is not None else None
+
+
+def _fusion_document_identity(doc):
+    """Return one copy-safe authoritative runtime document identity."""
+    import re
+    if doc is None:
+        raise FusionScriptError("NO_ACTIVE_DESIGN", "Active document required for stable runtime identity")
+    try:
+        data_file = getattr(doc, "dataFile", None)
+    except Exception:
+        data_file = None
+    if data_file is not None:
+        try:
+            value = getattr(data_file, "id", None)
+        except Exception:
+            value = None
+        if value is None or not str(value).strip():
+            raise FusionScriptError("NO_ACTIVE_DESIGN", "Saved/cloud document lacks DataFile.id; copy-safe identity is unavailable", details={"name": getattr(doc, "name", None)})
+        raw, source = str(value).strip(), "dataFile.id"
+    else:
+        try:
+            value = getattr(doc, "dataId", None)
+        except Exception:
+            value = None
+        if value is not None and str(value).strip():
+            raw, source = str(value).strip(), "dataId"
+        else:
+            try:
+                creation = getattr(doc, "creationId", None)
+                saved_version = getattr(doc, "savedVersion", None)
+            except Exception:
+                creation, saved_version = None, None
+            if saved_version is not None:
+                raise FusionScriptError("NO_ACTIVE_DESIGN", "Saved document lacks copy-safe DataFile.id/dataId identity; creationId is not authoritative for saved copies", details={"name": getattr(doc, "name", None)})
+            if creation is None or not str(creation).strip():
+                raise FusionScriptError("NO_ACTIVE_DESIGN", "Document lacks stable runtime identity (DataFile.id/dataId/unsaved creationId)", details={"name": getattr(doc, "name", None)})
+            raw, source = "unsaved_" + str(creation).strip(), "creationId.unsaved"
+    clean = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+    safe = clean if clean.startswith("doc_") else "doc_" + clean
+    return {"document_ref": safe, "identity_source": source, "runtime_id": raw, "name": getattr(doc, "name", None)}
+
+
+def _p0_validation_attributes(owner):
+    values = {}
+    attrs = getattr(owner, "attributes", None)
+    if attrs is None or not hasattr(attrs, "count"):
+        return values
+    for index in range(attrs.count):
+        attribute = attrs.item(index)
+        if getattr(attribute, "groupName", "") == "bridge.cad/v1":
+            values[str(getattr(attribute, "name", ""))] = str(getattr(attribute, "value", ""))
+    return values
+
+
+def _p0_validation_provenance(attributes):
+    raw = attributes.get("provenance")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {"valid": False}
+    if not isinstance(parsed, dict):
+        return {"valid": False}
+    return {"valid": bool(parsed.get("creator_tool") and parsed.get("operation_id") and parsed.get("created_revision")), "logical_id": parsed.get("logical_object_ref"), "role": parsed.get("role"), "generation": parsed.get("generation"), "current": parsed.get("is_current")}
+
+
+def _p0_validation_bbox(raw):
+    if not isinstance(raw, dict):
+        return None
+    minimum, maximum = raw.get("min"), raw.get("max")
+    if not isinstance(minimum, (list, tuple)) or not isinstance(maximum, (list, tuple)) or len(minimum) != 3 or len(maximum) != 3:
+        return None
+    return list(minimum) + list(maximum)
+
+
+def _runtime_identity_from_entity_or_native(entity):
+    """Read stable runtime identity without trusting proxy token getters."""
+    if entity is None:
+        return None
+    candidates = [entity]
+    try:
+        native = getattr(entity, "nativeObject", None)
+    except Exception:
+        native = None
+    if native is not None and native is not entity:
+        candidates.append(native)
+    for candidate in candidates:
+        for field in ("entityToken", "id"):
+            try:
+                value = getattr(candidate, field, None)
+            except Exception:
+                value = None
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
+
+def collect_p0_validation_evidence(payload=None, canonical=None, document_ref=None):
+    """Collect the live P0 health/reference evidence used by validation and preview."""
+    if canonical is None or document_ref is None:
+        _fingerprint, canonical, document_ref = collect_model_fingerprint(payload)
+    import adsk.core
+
+    app = adsk.core.Application.get()
+    doc = getattr(app, "activeDocument", None) if app else None
+    design = _fusion_design_from_context(app, doc)
+    if not doc or not design:
+        raise FusionScriptError("NO_ACTIVE_DESIGN", "Validation requires an active Fusion design")
+    facts = {
+        "document_ref": document_ref, "features": [], "sketches": [],
+        "references": [], "bodies": [], "text_outputs": [],
+        "timeline": {"available": True, "rolled_back": False}, "limitations": [],
+    }
+    timeline = getattr(design, "timeline", None)
+    if timeline is None or not hasattr(timeline, "count"):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Timeline evidence is unavailable")
+    for index in range(timeline.count):
+        item = timeline.item(index)
+        facts["timeline"]["rolled_back"] = facts["timeline"]["rolled_back"] or bool(getattr(item, "isRolledBack", False))
+        # Fusion TimelineObject is a timeline wrapper, not the feature itself.
+        # Public feature identity/validity live on TimelineObject.entity and health
+        # is exposed by TimelineObject.healthState.
+        entity = getattr(item, "entity", None)
+        if entity is None:
+            facts["limitations"].append("timeline_row_without_entity")
+            continue
+        native_id = _runtime_identity_from_entity_or_native(entity)
+        if not native_id:
+            facts["limitations"].append("timeline_entity_without_stable_identity")
+            continue
+        valid = bool(getattr(entity, "isValid", True))
+        raw_health = str(getattr(item, "healthState", "unknown"))
+        health_key = raw_health.lower()
+        if "error" in health_key or "failed" in health_key or "broken" in health_key:
+            health = "error"
+        elif "warning" in health_key:
+            health = "warning"
+        elif "healthy" in health_key or "good" in health_key:
+            health = "healthy"
+        else:
+            health = health_key
+        facts["features"].append({"kind": "feature", "native_token": str(native_id), "name": str(getattr(entity, "name", getattr(item, "name", ""))), "valid": valid, "health": health})
+        if not valid or health == "error":
+            facts["references"].append({"kind": "feature", "native_token": str(native_id), "state": "broken"})
+    components = getattr(design, "allComponents", None)
+    if components is None or not hasattr(components, "count"):
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Component evidence is unavailable")
+    canonical_bodies = {(x.get("component", ""), x.get("name", "")): x for x in canonical.get("bodies", [])}
+    canonical_sketches = {(x.get("component", ""), x.get("name", "")): x for x in canonical.get("sketches", [])}
+    for component_index in range(components.count):
+        component = components.item(component_index)
+        component_name = str(getattr(component, "name", ""))
+        bodies, sketches = getattr(component, "bRepBodies", None), getattr(component, "sketches", None)
+        if bodies is None or not hasattr(bodies, "count") or sketches is None or not hasattr(sketches, "count"):
+            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Body or sketch evidence collection is unavailable")
+        for body_index in range(bodies.count):
+            body = bodies.item(body_index)
+            native_id = getattr(body, "entityToken", None) or getattr(body, "id", None)
+            if not native_id:
+                raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Body lacks stable runtime identity")
+            name = str(getattr(body, "name", "")); raw = canonical_bodies.get((component_name, name), {})
+            attributes = _p0_validation_attributes(body); provenance = _p0_validation_provenance(attributes)
+            legacy_name = name.startswith("AZURE_LEFT_TEXT_"); suffix = name[len("AZURE_LEFT_TEXT_"):] if legacy_name else ""
+            generation = int(suffix) if suffix.isdigit() else None; logical_id = "AZURE_LEFT_TEXT" if legacy_name else None; current = None
+            if provenance:
+                logical_id = provenance.get("logical_id") or logical_id
+                generation = provenance.get("generation") if provenance.get("generation") is not None else generation
+                current = provenance.get("current")
+            role = attributes.get("role") or (provenance and provenance.get("role"))
+            facts["bodies"].append({"kind": "body", "native_token": str(native_id), "name": name, "valid": bool(getattr(body, "isValid", True)), "empty": int(raw.get("faces_count", 0)) == 0, "volume": raw.get("volume"), "bbox": _p0_validation_bbox(raw.get("bounding_box")), "bridge_generated": bool(provenance), "orphaned": bool(provenance and not provenance.get("logical_id")), "role": role, "provenance_valid": None if provenance is None else provenance.get("valid"), "logical_id": logical_id, "generation": generation, "current": current, "legacy_generated": legacy_name and provenance is None})
+            if provenance and ("text" in str(role).lower() or provenance.get("logical_id")):
+                facts["text_outputs"].append({"kind": "body", "native_token": str(native_id), "source_ref": provenance.get("logical_id"), "output_refs": [str(native_id)]})
+        for sketch_index in range(sketches.count):
+            sketch = sketches.item(sketch_index)
+            native_id = getattr(sketch, "entityToken", None) or getattr(sketch, "id", None)
+            if not native_id:
+                raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Sketch lacks stable runtime identity")
+            name = str(getattr(sketch, "name", "")); raw = canonical_sketches.get((component_name, name), {})
+            facts["sketches"].append({"kind": "sketch", "native_token": str(native_id), "name": name, "valid": bool(getattr(sketch, "isValid", True)), "health": str(getattr(sketch, "healthStatus", "unknown")), "fully_constrained": None, "constraints_count": raw.get("constraints_count", 0), "profiles_count": raw.get("profiles_count", 0), "open_profiles_count": None})
+    facts["limitations"].append("constraint_and_open_profile_state_unavailable")
+    return facts
+
+
 def collect_model_fingerprint(payload=None):
     payload = payload or {}
     import hashlib
     import re
+
+    def _stable_runtime_identity(entity):
+        if entity is None:
+            return None
+
+        native_identity = _runtime_identity_from_entity_or_native(entity)
+        if native_identity:
+            return native_identity
+
+        try:
+            object_type = str(getattr(entity, "objectType", None) or type(entity).__name__)
+        except Exception:
+            object_type = type(entity).__name__
+        if "Occurrence" in object_type:
+            try:
+                full_path = getattr(entity, "fullPathName", None)
+            except Exception:
+                full_path = None
+            try:
+                component = getattr(entity, "component", None)
+            except Exception:
+                component = None
+            component_id = None
+            if component is not None:
+                for field in ("entityToken", "id"):
+                    try:
+                        value = getattr(component, field, None)
+                    except Exception:
+                        value = None
+                    if value is not None and str(value).strip():
+                        component_id = str(value).strip()
+                        break
+            if component_id and full_path and str(full_path).strip():
+                basis = (component_id + "\0" + str(full_path).strip()).encode("utf-8")
+                return "occproxy_" + hashlib.sha256(basis).hexdigest()
+        return None
 
     app = None
     doc = None
@@ -89,9 +472,7 @@ def collect_model_fingerprint(payload=None):
         raise RuntimeError(f"Failed to access adsk.core Application: {exc}") from exc
 
     try:
-        import adsk.fusion
-        if doc and hasattr(doc, "products"):
-            design = doc.products.itemByClass("adsk::fusion::Design")
+        design = _fusion_design_from_context(app, doc)
     except Exception as exc:
         raise RuntimeError(f"Failed to access adsk.fusion Design product: {exc}") from exc
 
@@ -105,26 +486,19 @@ def collect_model_fingerprint(payload=None):
 
     canonical = {}
 
-    # 1. Document identity / modified marker (stable identity required, fail closed on mutable name)
-    data_file = getattr(doc, "dataFile", None)
-    doc_id = (
-        getattr(doc, "dataId", None)
-        or getattr(doc, "creationId", None)
-        or (data_file and getattr(data_file, "id", None))
-    )
-    if not doc_id:
-        raise FusionScriptError(
-            "NO_ACTIVE_DESIGN",
-            "Document lacks stable runtime identity (dataId/creationId/dataFile.id); "
-            "mutable document name and payload.document_ref cannot be used as authoritative identity",
-            details={"name": getattr(doc, "name", None)},
-        )
+    # 1. Document identity / modified marker (copy-safe and shared by all domains)
+    identity = _fusion_document_identity(doc)
+    safe_doc_ref = identity["document_ref"]
+    doc_id_str = identity["runtime_id"]
 
-    doc_id_str = str(doc_id)
-    if doc_id_str.startswith("doc_"):
-        safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str[4:])
-    else:
-        safe_doc_ref = "doc_" + re.sub(r"[^A-Za-z0-9._-]", "_", doc_id_str)
+    def _timeline_runtime_identity(entity, item, index):
+        identity = _stable_runtime_identity(entity) or _stable_runtime_identity(item)
+        if identity:
+            return identity
+        if getattr(entity, "objectType", None) != "adsk::fusion::Snapshot":
+            return None
+        basis = (doc_id_str + "\0" + str(index) + "\0adsk::fusion::Snapshot").encode("utf-8")
+        return "snapshot_" + hashlib.sha256(basis).hexdigest()
 
     req_doc_ref = payload.get("document_ref") if isinstance(payload, dict) else None
     if req_doc_ref and req_doc_ref != safe_doc_ref:
@@ -144,20 +518,24 @@ def collect_model_fingerprint(payload=None):
 
     # 2. Timeline feature identity / health / suppression (mandatory when design is active)
     timeline = getattr(design, "timeline", None) if design else None
-    if design and (not timeline or not hasattr(timeline, "count")):
+    if design and (timeline is None or not hasattr(timeline, "count")):
         raise FusionScriptError(
             "CAPABILITY_UNAVAILABLE",
             "Active design lacks accessible timeline collection; "
             "mandatory fingerprint group 'timeline' cannot be omitted",
         )
-    if timeline and hasattr(timeline, "count"):
+    if timeline is not None and hasattr(timeline, "count"):
         t_items = []
         for i in range(timeline.count):
             try:
                 item = timeline.item(i)
+                item_entity = getattr(item, "entity", None)
+                item_id = _timeline_runtime_identity(item_entity, item, i)
+                if not item_id or not str(item_id).strip():
+                    raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Timeline item {i} and its associated entity lack stable runtime identity (entityToken or id)", details={"timeline_index": i})
                 t_items.append({
                     "index": i,
-                    "id": str(getattr(item, "entityToken", None) or getattr(item, "id", None) or i),
+                    "id": str(item_id).strip(),
                     "name": str(getattr(item, "name", "")),
                     "is_suppressed": bool(getattr(item, "isSuppressed", False)),
                     "is_valid": bool(getattr(item, "isValid", True)),
@@ -173,7 +551,7 @@ def collect_model_fingerprint(payload=None):
     comps_list = []
     if design:
         all_comps = getattr(design, "allComponents", None)
-        if not all_comps or not hasattr(all_comps, "count"):
+        if all_comps is None or not hasattr(all_comps, "count"):
             raise FusionScriptError(
                 "CAPABILITY_UNAVAILABLE",
                 "Active design lacks allComponents collection; "
@@ -500,6 +878,7 @@ def collect_model_fingerprint(payload=None):
                     is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                     b_items.append({
                         "name": b_name,
+                        "native_token": _stable_runtime_identity(b),
                         "component": c_name,
                         "is_solid": bool(raw_solid),
                         "is_visible": is_local_vis,
@@ -696,6 +1075,7 @@ def collect_model_fingerprint(payload=None):
                     is_eff_vis = bool(raw_eff if raw_eff is not None else raw_local)
                     s_items.append({
                         "name": s_name,
+                        "native_token": _stable_runtime_identity(s),
                         "component": c_name,
                         "is_visible": is_local_vis,
                         "effective_visibility": is_eff_vis,
@@ -718,7 +1098,7 @@ def collect_model_fingerprint(payload=None):
 
         # 6. Parameters (mandatory when design is active)
         params = getattr(design, "allParameters", None)
-        if not params or not hasattr(params, "count"):
+        if params is None or not hasattr(params, "count"):
             raise FusionScriptError(
                 "CAPABILITY_UNAVAILABLE",
                 "Active design lacks allParameters collection; "
@@ -728,11 +1108,17 @@ def collect_model_fingerprint(payload=None):
         for i in range(params.count):
             try:
                 p = params.item(i)
+                p_unit = str(getattr(p, "unit", ""))
+                p_value = (
+                    None
+                    if p_unit.lower() == "text"
+                    else canonicalize_value(float(getattr(p, "value", 0.0)))
+                )
                 p_items.append({
                     "name": str(getattr(p, "name", "")),
                     "expression": str(getattr(p, "expression", "")),
-                    "value": canonicalize_value(float(getattr(p, "value", 0.0))),
-                    "unit": str(getattr(p, "unit", "")),
+                    "value": p_value,
+                    "unit": p_unit,
                     "is_favorite": bool(getattr(p, "isFavorite", False)),
                 })
             except Exception as exc:
@@ -871,7 +1257,10 @@ def collect_model_fingerprint(payload=None):
                     )
                 _read_owner_attributes(e, "edge", str(e_id).strip())
 
-    # Sketch attributes, Sketch-curve attributes, and Sketch-point attributes
+    # Sketch attributes, SketchText semantic values/attributes, sketch-curve
+    # attributes, and Sketch-point attributes. Text content and its Bridge
+    # provenance are mutation-sensitive inputs to the authoritative guard.
+    sketch_text_items = []
     for c in comps_list:
         sketches = getattr(c, "sketches", None)
         if sketches is None or not hasattr(sketches, "count"):
@@ -889,6 +1278,24 @@ def collect_model_fingerprint(payload=None):
                     details={"sketch_name": getattr(s, "name", None)},
                 )
             _read_owner_attributes(s, "sketch", str(s_id).strip())
+
+            texts = getattr(s, "sketchTexts", None)
+            if texts is not None and hasattr(texts, "count"):
+                for text_idx in range(texts.count):
+                    sketch_text = texts.item(text_idx)
+                    text_id = getattr(sketch_text, "entityToken", None) or getattr(sketch_text, "id", None)
+                    if not text_id:
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "SketchText lacks stable identity for authoritative fingerprinting",
+                        )
+                    sketch_text_items.append({
+                        "id": str(text_id),
+                        "text": _sketch_text_text_value(sketch_text),
+                        "font": str(getattr(sketch_text, "fontName", "") or ""),
+                        "height": _sketch_text_height_value(sketch_text),
+                    })
+                    _read_owner_attributes(sketch_text, "sketch_text", str(text_id).strip())
 
             # Sketch curves
             curves = getattr(s, "sketchCurves", None)
@@ -926,6 +1333,8 @@ def collect_model_fingerprint(payload=None):
                     )
                 _read_owner_attributes(pt, "sketch_point", str(pt_id).strip())
 
+    canonical["sketch_texts"] = sorted(sketch_text_items, key=lambda item: item["id"])
+
     # Timeline / Feature entity attributes
     if design:
         if timeline is None or not hasattr(timeline, "count"):
@@ -935,23 +1344,26 @@ def collect_model_fingerprint(payload=None):
             )
         for t_idx in range(timeline.count):
             t = timeline.item(t_idx)
-            t_id = getattr(t, "entityToken", None) or getattr(t, "id", None)
-            if not t_id or not str(t_id).strip():
-                raise FusionScriptError(
-                    "CAPABILITY_UNAVAILABLE",
-                    f"Timeline item {t_idx} lacks stable runtime identity (entityToken or id); mutable timeline name cannot be used as authoritative identity",
-                    details={"timeline_index": t_idx},
-                )
-            _read_owner_attributes(t, "timeline", str(t_id).strip())
             feat = getattr(t, "entity", None)
+            t_id = _timeline_runtime_identity(feat, t, t_idx)
+            if not t_id or not str(t_id).strip():
+                raise FusionScriptError("CAPABILITY_UNAVAILABLE", f"Timeline item {t_idx} and its associated entity lack stable runtime identity (entityToken or id)", details={"timeline_index": t_idx})
+            if getattr(t, "attributes", None) is not None:
+                _read_owner_attributes(t, "timeline", str(t_id).strip())
             if feat:
-                f_id = getattr(feat, "entityToken", None) or getattr(feat, "id", None)
+                f_id = _timeline_runtime_identity(feat, None, t_idx)
                 if not f_id or not str(f_id).strip():
                     raise FusionScriptError(
                         "CAPABILITY_UNAVAILABLE",
                         f"Timeline feature on item {t_idx} lacks stable runtime identity (entityToken or id); mutable feature name cannot be used as authoritative identity",
                         details={"timeline_index": t_idx},
                     )
+                feat_attrs = getattr(feat, "attributes", None)
+                if (
+                    getattr(feat, "objectType", None) == "adsk::fusion::Snapshot"
+                    and feat_attrs is None
+                ):
+                    continue
                 _read_owner_attributes(feat, "feature", str(f_id).strip())
 
     attr_items.sort(key=lambda x: (x["owner_type"], x["owner_id"], x["group"], x["name"], x.get("value", "")))
@@ -973,6 +1385,133 @@ def collect_model_fingerprint(payload=None):
     return fp, canonical, safe_doc_ref
 
 
+
+def _shared_native_entity_kind(entity):
+    object_type = str(getattr(entity, "objectType", None) or type(entity).__name__)
+    if "BRepBody" in object_type:
+        return "body"
+    if "BRepFace" in object_type:
+        return "face"
+    if "BRepEdge" in object_type:
+        return "edge"
+    sketch_curve_types = (
+        "SketchCurve",
+        "SketchLine",
+        "SketchArc",
+        "SketchCircle",
+        "SketchEllipse",
+        "SketchEllipticalArc",
+        "SketchConicCurve",
+        "SketchFittedSpline",
+        "SketchControlPointSpline",
+        "SketchFixedSpline",
+    )
+    if any(type_name in object_type for type_name in sketch_curve_types):
+        return "sketch_curve"
+    if object_type.endswith("Sketch") or object_type == "Sketch":
+        return "sketch"
+    if "Occurrence" in object_type:
+        return "occurrence"
+    if "Component" in object_type:
+        return "component"
+    return "other"
+
+
+def _native_entity_candidates(resolved, ref):
+    """Normalize Fusion/Python native lookup results without exposing tokens."""
+    if resolved is None:
+        return []
+    if isinstance(resolved, (list, tuple)):
+        return list(resolved)
+    try:
+        count_value = getattr(resolved, "count")
+    except AttributeError:
+        return [resolved]
+    except Exception:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity collection could not be inspected safely",
+            details={"ref": ref},
+        ) from None
+    try:
+        count = int(count_value)
+        return [resolved.item(index) for index in range(count)]
+    except Exception:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity collection could not be inspected safely",
+            details={"ref": ref},
+        ) from None
+
+
+def resolve_exact_native_entity(design, hint, expected_kinds=None):
+    """Resolve one authoritative native token without contextual substitution.
+
+    The helper is intentionally narrow: it never performs kind/name traversal and
+    never includes the native token or native exception text in public error
+    details. Operation-specific adapters may retain their own contextual fallback
+    only for non-authoritative targets.
+    """
+    hint = hint if isinstance(hint, dict) else {}
+    ref = hint.get("ref")
+    native_token = hint.get("native_token")
+    try:
+        resolver = getattr(design, "findEntityByToken", None) if design is not None else None
+    except Exception:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity resolver could not be inspected safely",
+            details={"ref": ref},
+        ) from None
+    if not native_token or not callable(resolver):
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity could not be resolved in the active document",
+            details={"ref": ref},
+        )
+
+    try:
+        resolved = resolver(native_token)
+    except Exception:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity lookup failed in the active document",
+            details={"ref": ref},
+        ) from None
+
+    matches = _native_entity_candidates(resolved, ref)
+    if len(matches) > 1:
+        raise FusionScriptError(
+            "REF_SPLIT",
+            "Authoritative native entity resolved to multiple split entities",
+            details={"ref": ref},
+        )
+    if not matches or matches[0] is None:
+        raise FusionScriptError(
+            "REF_STALE",
+            "Authoritative native entity could not be resolved in the active document",
+            details={"ref": ref},
+        )
+    entity = matches[0]
+
+    allowed = tuple(str(kind) for kind in (expected_kinds or ()) if kind)
+    if allowed:
+        try:
+            actual_kind = _shared_native_entity_kind(entity)
+        except Exception:
+            raise FusionScriptError(
+                "REF_STALE",
+                "Resolved native entity kind could not be inspected safely",
+                details={"ref": ref, "expected_kinds": list(allowed)},
+            ) from None
+        if actual_kind not in allowed:
+            raise FusionScriptError(
+                "REF_STALE",
+                "Resolved native entity kind did not match the expected target kind",
+                details={"ref": ref, "expected_kinds": list(allowed), "actual_kind": actual_kind},
+            )
+    return entity
+
 def resolve_fusion_entity(payload=None):
     payload = payload or {}
     import re
@@ -989,9 +1528,7 @@ def resolve_fusion_entity(payload=None):
         pass
 
     try:
-        import adsk.fusion
-        if doc and hasattr(doc, "products"):
-            design = doc.products.itemByClass("adsk::fusion::Design")
+        design = _fusion_design_from_context(app, doc)
     except Exception:
         pass
 
@@ -1003,13 +1540,7 @@ def resolve_fusion_entity(payload=None):
         )
 
     # 1. Document identity check - fails BEFORE native lookup
-    doc_id = (
-        getattr(doc, "creationId", None)
-        or getattr(doc, "dataId", None)
-        or getattr(getattr(doc, "dataFile", None), "id", None)
-    )
-    clean_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(doc_id).strip()) if doc_id else "unknown"
-    safe_doc_ref = f"doc_{clean_id}"
+    safe_doc_ref = _fusion_document_identity(doc)["document_ref"]
 
     req_doc = payload.get("document_ref") or payload.get("document")
     if req_doc and req_doc != safe_doc_ref:
@@ -1039,30 +1570,27 @@ def resolve_fusion_entity(payload=None):
     if native_token and hasattr(design, "findEntityByToken"):
         try:
             resolved = design.findEntityByToken(native_token)
-            if resolved is not None:
-                if hasattr(resolved, "count"):
-                    if resolved.count == 1:
-                        return {
-                            "outcome": "exact",
-                            "ref": ref,
-                            "candidates": [_extract_candidate_info(resolved.item(0))],
-                            "document_ref": safe_doc_ref,
-                        }
-                    elif resolved.count > 1:
-                        cands = [_extract_candidate_info(resolved.item(i)) for i in range(resolved.count)]
-                        return {
-                            "outcome": "split",
-                            "ref": ref,
-                            "candidates": cands,
-                            "document_ref": safe_doc_ref,
-                        }
-                else:
-                    return {
-                        "outcome": "exact",
-                        "ref": ref,
-                        "candidates": [_extract_candidate_info(resolved)],
-                        "document_ref": safe_doc_ref,
-                    }
+            matches = _native_entity_candidates(resolved, ref)
+            if len(matches) == 1 and matches[0] is not None:
+                return {
+                    "outcome": "exact",
+                    "ref": ref,
+                    "candidates": [_extract_candidate_info(matches[0])],
+                    "document_ref": safe_doc_ref,
+                }
+            if len(matches) > 1:
+                return {
+                    "outcome": "split",
+                    "ref": ref,
+                    "candidates": [_extract_candidate_info(item) for item in matches],
+                    "document_ref": safe_doc_ref,
+                }
+            return {
+                "outcome": "stale",
+                "ref": ref,
+                "candidates": [],
+                "document_ref": safe_doc_ref,
+            }
         except Exception:
             pass
 

@@ -641,3 +641,26 @@ class RevisionTracker:
         self._transactions = {
             tx_id: dict(data) for tx_id, data in snapshot["transactions"].items()
         }
+    def next_revision(self, document_ref: str) -> str:
+        """Truthful post-mutation revision for the next successful mutation.
+
+        A successful standalone mutation always produces a post-apply
+        fingerprint that differs from the pre-apply one (the authoritative
+        Fusion-side guard fails any command whose post-apply fingerprint equals
+        the pre-apply one), and :meth:`observe` advances the sequence by exactly
+        one per distinct fingerprint. The entity created/changed by the next
+        successful mutation on this document therefore deterministically exists
+        in ``rev_{sequence + 1}``.
+
+        Fails closed with NO_ACTIVE_DESIGN when the document has no observed
+        revision: the post-mutation revision cannot be known truthfully before
+        mutation in that case, and provenance must never fabricate one.
+        """
+        rec = self._documents.get(document_ref) if isinstance(document_ref, str) else None
+        if rec is None:
+            raise FusionCadError(
+                ErrorCode.NO_ACTIVE_DESIGN,
+                f"No observed revision for document '{document_ref}'; the post-mutation created_revision cannot be known truthfully before mutation",
+                details={"document_ref": document_ref},
+            )
+        return f"rev_{rec.sequence + 1}"

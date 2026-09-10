@@ -16,6 +16,30 @@ from app.fusion_cad.snapshots import (
 )
 
 
+def test_normalize_snapshot_preserves_text_parameter_without_numeric_value() -> None:
+    snapshot = normalize_snapshot(
+        {
+            "document_ref": "doc_text_parameter",
+            "model_revision": "rev_1",
+            "parameters": [
+                {
+                    "name": "d274",
+                    "expression": "'УРОКОВ'",
+                    "value": None,
+                    "unit": "Text",
+                }
+            ],
+        }
+    )
+
+    assert len(snapshot.parameters) == 1
+    parameter = snapshot.parameters[0]
+    assert parameter.name == "d274"
+    assert parameter.expression == "'УРОКОВ'"
+    assert parameter.value is None
+    assert parameter.unit == "Text"
+
+
 @pytest.fixture
 def raw_fixture() -> dict:
     """Raw Fusion model fixture containing 240 faces across bodies, features, sketches, and parameters."""
@@ -394,6 +418,140 @@ def test_falsify_finding_1_native_token_never_exposed_in_component_summary_or_sn
         assert getattr(comp, "id", None) != "AQAAAB4AAAAxMjM0NTY3ODkwYWJjZGVm"
         assert getattr(comp, "entityToken", None) is None
         assert "AQAA" not in str(comp.model_dump())
+
+
+def test_rendered_model_snapshot_preserves_body_and_sketch_tokens_only_in_registry(
+    monkeypatch,
+):
+    import sys
+    import types
+
+    from app.fusion_cad.refs import EntityRefRegistry
+    from app.fusion_cad.scripts import FusionCadScriptBundle
+
+    class Collection:
+        def __init__(self, items=()):
+            self._items = list(items)
+
+        @property
+        def count(self):
+            return len(self._items)
+
+        def item(self, index):
+            return self._items[index]
+
+    point = lambda x=0.0, y=0.0, z=0.0: types.SimpleNamespace(x=x, y=y, z=z)
+    bbox = types.SimpleNamespace(minPoint=point(), maxPoint=point(1.0, 1.0, 1.0))
+    body_token = "SECRET_BODY_NATIVE_TOKEN"
+    sketch_token = "SECRET_SKETCH_NATIVE_TOKEN"
+    body = types.SimpleNamespace(
+        name="Mutable Body Name",
+        entityToken=body_token,
+        id=None,
+        isSolid=True,
+        volume=1.0,
+        area=2.0,
+        isLightBulbOn=True,
+        isVisible=True,
+        boundingBox=bbox,
+        faces=Collection(),
+        edges=Collection(),
+        vertices=Collection(),
+        physicalProperties=None,
+        attributes=Collection(),
+    )
+    sketch = types.SimpleNamespace(
+        name="Mutable Sketch Name",
+        entityToken=sketch_token,
+        id=None,
+        isLightBulbOn=True,
+        isVisible=True,
+        profiles=Collection(),
+        sketchCurves=Collection(),
+        geometricConstraints=Collection(),
+        sketchDimensions=Collection(),
+        sketchPoints=Collection(),
+        boundingBox=bbox,
+        attributes=Collection(),
+    )
+    root = types.SimpleNamespace(
+        name="Root",
+        id="root-id",
+        entityToken="root-token",
+        allOccurrences=Collection(),
+        bRepBodies=Collection([body]),
+        sketches=Collection([sketch]),
+        attributes=Collection(),
+    )
+    design = types.SimpleNamespace(
+        rootComponent=root,
+        timeline=Collection(),
+        allComponents=Collection([root]),
+        allParameters=Collection(),
+    )
+
+    class Products:
+        def itemByProductType(self, product_type):
+            assert product_type == "DesignProductType"
+            return design
+
+    doc = types.SimpleNamespace(
+        creationId="token-design",
+        dataId=None,
+        dataFile=None,
+        name="Token Design",
+        isModified=False,
+        savedVersion=None,
+        products=Products(),
+        attributes=Collection(),
+    )
+    app = types.SimpleNamespace(activeDocument=doc, activeProduct=design)
+    adsk = types.ModuleType("adsk")
+    core = types.ModuleType("adsk.core")
+    fusion = types.ModuleType("adsk.fusion")
+    core.Application = types.SimpleNamespace(get=lambda: app)
+    fusion.Design = types.SimpleNamespace(cast=lambda value: value if value is design else None)
+    adsk.core = core
+    adsk.fusion = fusion
+    monkeypatch.setitem(sys.modules, "adsk", adsk)
+    monkeypatch.setitem(sys.modules, "adsk.core", core)
+    monkeypatch.setitem(sys.modules, "adsk.fusion", fusion)
+
+    rendered = FusionCadScriptBundle.build(
+        "read", {"operation": "model_snapshot", "detail": "compact"}
+    )
+    scope = {"__name__": "__main__"}
+    exec(compile(rendered, "<body-sketch-token-snapshot>", "exec"), scope)  # noqa: S102
+    raw_snapshot = scope["_output"]["data"]
+
+    registry = EntityRefRegistry()
+    snapshot = normalize_snapshot(raw_snapshot, ref_registry=registry)
+    body_record = registry.get_internal_record(snapshot.bodies[0].ref)
+    sketch_record = registry.get_internal_record(snapshot.sketches[0].ref)
+    assert body_record is not None and body_record.native_token == body_token
+    assert sketch_record is not None and sketch_record.native_token == sketch_token
+    public_snapshot = snapshot.model_dump(mode="json")
+    assert body_token not in str(public_snapshot)
+    assert sketch_token not in str(public_snapshot)
+
+
+def test_snapshot_missing_body_and_sketch_tokens_never_uses_names_as_native_authority():
+    from app.fusion_cad.refs import EntityRefRegistry
+
+    registry = EntityRefRegistry()
+    snapshot = normalize_snapshot(
+        {
+            "document": {"document_ref": "doc_missing_tokens"},
+            "bodies": [{"name": "Mutable Body Name"}],
+            "sketches": [{"name": "Mutable Sketch Name"}],
+        },
+        ref_registry=registry,
+    )
+
+    body_record = registry.get_internal_record(snapshot.bodies[0].ref)
+    sketch_record = registry.get_internal_record(snapshot.sketches[0].ref)
+    assert body_record is not None and body_record.native_token is None
+    assert sketch_record is not None and sketch_record.native_token is None
 
 
 def test_falsify_finding_3_structural_hash_deterministic_across_fresh_registries():

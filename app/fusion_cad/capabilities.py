@@ -101,18 +101,18 @@ OPERATION_REQUIRED_CAPABILITIES: dict[tuple[str, str], str | None] = {
     ("metadata", "clear_role"): "metadata.attributes",
 
     # 5. fusion_style
-    ("style", "text_read"): "style.sketch_text",
-    ("style", "text_create"): "style.sketch_text",
-    ("style", "text_update"): "style.sketch_text",
-    ("style", "text_delete"): "style.sketch_text",
-    ("style", "text_extrude"): "style.sketch_text",
-    ("style", "text_cut"): "style.sketch_text",
-    ("style", "show"): "design.access",
-    ("style", "hide"): "design.access",
-    ("style", "show_only"): "design.access",
-    ("style", "isolate"): "design.access",
-    ("style", "restore"): "design.access",
-    ("style", "set"): "design.access",
+    ("style", "text_read"): "style.text_read",
+    ("style", "text_create"): "style.text_create",
+    ("style", "text_update"): "style.text_update",
+    ("style", "text_delete"): "style.text_delete",
+    ("style", "text_extrude"): "style.text_extrude",
+    ("style", "text_cut"): "style.text_cut",
+    ("style", "show"): "style.visibility",
+    ("style", "hide"): "style.visibility",
+    ("style", "show_only"): "style.visibility",
+    ("style", "isolate"): "style.visibility",
+    ("style", "restore"): "style.visibility",
+    ("style", "set"): "style.visibility",
 
     # 6. fusion_validate
     ("validate", "run"): "design.access",
@@ -138,18 +138,18 @@ def get_required_capability(
 
     if group == "mutate":
         if operation in ("text_read", "text_create", "text_update", "text_delete", "text_extrude", "text_cut"):
-            return "style.sketch_text"
+            return f"style.{operation}"
         if operation in ("show", "hide", "show_only", "isolate", "restore"):
-            return "design.access"
+            return "style.visibility"
         if operation in ("get", "remove", "tag", "untag", "set_role", "clear_role", "provenance"):
             return "metadata.attributes"
         if operation == "set":
             if payload and "visible" in payload:
-                return "design.access"
+                return "style.visibility"
             return "metadata.attributes"
         if operation == "query":
             if payload and "selector" in payload:
-                return "design.access"
+                return "style.visibility"
             return "metadata.attributes"
 
     return None
@@ -460,33 +460,13 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 8. view.pick (Finding 3: load-bearing pick remains degraded/unavailable until later live feasibility proof)
-        if not probe_failed and facts.get("has_selection_primitives"):
-            records.append(CapabilityRecord(
-                name="view.pick",
-                state="degraded",
-                implementation="native-preselect",
-                limitations=("Visual pick requires live feasibility proof; load-bearing pick remains degraded pending live verification",),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
-        elif not probe_failed and facts.get("has_viewport_conversion"):
-            records.append(CapabilityRecord(
-                name="view.pick",
-                state="degraded",
-                implementation="viewport-raycast",
-                limitations=("Raycast geometry intersection without native preselection; load-bearing pick remains degraded pending live verification",),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
+        # 8. view.pick -- Task 9 selects one production strategy only: viewport-raycast.
+        if not probe_failed and facts.get("pick_runtime_verified"):
+            records.append(CapabilityRecord(name="view.pick", state="supported", implementation="viewport-raycast", fusion_version=fusion_version, relay_version=relay_version))
+        elif not probe_failed and (facts.get("has_viewport_conversion") or facts.get("has_viewport_conversion_context")):
+            records.append(CapabilityRecord(name="view.pick", state="degraded", implementation="viewport-raycast", limitations=("Viewport raycast prerequisites are present but the live feasibility proof / raycast contract has not been verified for this runtime context",), fusion_version=fusion_version, relay_version=relay_version))
         else:
-            records.append(CapabilityRecord(
-                name="view.pick",
-                state="unavailable",
-                limitations=err_limits("Neither selection primitives nor viewport projection methods available"),
-                fusion_version=fusion_version,
-                relay_version=relay_version,
-            ))
+            records.append(CapabilityRecord(name="view.pick", state="unavailable", limitations=err_limits("Verified viewport-raycast prerequisites are not available"), fusion_version=fusion_version, relay_version=relay_version))
 
         # 9. selection.primitives (Finding 2: activeSelections/count is insufficient; prefer degraded/unavailable)
         if not probe_failed and (facts.get("has_selection_primitives") or facts.get("has_active_selections_context") or facts.get("selection_runtime_verified")):
@@ -526,13 +506,14 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 11. transaction.preview_replay (Finding 3: load-bearing transaction remains degraded/unavailable until later live feasibility proof)
-        if not probe_failed and facts.get("has_command_preview") and facts.get("has_undo_redo"):
+        # 11. transaction.preview_replay -- load-bearing P0 capability.
+        # Contract-level support requires a successful live PTransaction Start/Abort
+        # discriminator on this exact runtime; API presence alone remains degraded.
+        if not probe_failed and facts.get("transaction_runtime_verified"):
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
-                state="degraded",
-                implementation="command-preview-replay",
-                limitations=("Staged transaction preview and replay semantics require live feasibility proof; load-bearing transaction remains degraded pending live verification",),
+                state="supported",
+                implementation="ptransaction-preview-replay",
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -540,8 +521,8 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
                 state="degraded",
-                implementation="undo-redo-fallback",
-                limitations=("Command preview hooks not available; rollback relies on active transaction undo; load-bearing transaction remains degraded pending live verification",),
+                implementation="ptransaction-preview-replay",
+                limitations=("PTransaction API prerequisites are present but the live feasibility proof (Start/Abort runtime semantics) is not verified for this runtime context",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -549,7 +530,7 @@ class CapabilityMatrix:
             records.append(CapabilityRecord(
                 name="transaction.preview_replay",
                 state="unavailable",
-                limitations=err_limits("Neither command preview nor undo/redo available for transaction replay"),
+                limitations=err_limits("Verified PTransaction runtime is not available"),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))
@@ -592,6 +573,43 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
+        text_read_verified = bool(facts.get("sketch_text_read_runtime_verified"))
+        transaction_verified = bool(facts.get("transaction_runtime_verified"))
+        for name in ("style.text_read", "style.text_update"):
+            supported = text_read_verified and (
+                name == "style.text_read" or transaction_verified
+            )
+            records.append(CapabilityRecord(
+                name=name,
+                state="supported" if supported else "unavailable",
+                implementation="native-sketch-text-v1" if supported else None,
+                limitations=() if supported else err_limits(
+                    "Native SketchText read prerequisites are not verified"
+                    if name == "style.text_read" or not text_read_verified
+                    else "Verified PTransaction Start/Abort support is required"
+                ),
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        for name in ("style.text_create", "style.text_delete", "style.text_extrude", "style.text_cut"):
+            records.append(CapabilityRecord(
+                name=name,
+                state="unavailable",
+                limitations=err_limits("Native P0 semantics are not implemented and verified"),
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        visibility_verified = bool(facts.get("visibility_runtime_verified")) and transaction_verified
+        records.append(CapabilityRecord(
+            name="style.visibility",
+            state="supported" if visibility_verified else "unavailable",
+            implementation="native-entity-visibility-v1" if visibility_verified else None,
+            limitations=() if visibility_verified else err_limits(
+                "Native entity visibility and verified PTransaction support are required"
+            ),
+            fusion_version=fusion_version,
+            relay_version=relay_version,
+        ))
         # 14. transaction.undo_redo (Finding 2: undo API presence is insufficient; prefer degraded/unavailable)
         if not probe_failed and (facts.get("has_undo_redo") or facts.get("has_undo_redo_context") or facts.get("undo_redo_verified")):
             records.append(CapabilityRecord(
@@ -638,13 +656,23 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 16. revision.external_change_detection (Finding 3: do not claim contract-level supported from hasattr alone)
-        if not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+        # 16. revision.external_change_detection -- contract support requires the
+        # authoritative model fingerprint to be readable and stable twice on the
+        # active runtime. The mutation path still rechecks it immediately before apply.
+        if not probe_failed and facts.get("revision_runtime_verified"):
+            records.append(CapabilityRecord(
+                name="revision.external_change_detection",
+                state="supported",
+                implementation="authoritative-fingerprint-guard",
+                fusion_version=fusion_version,
+                relay_version=relay_version,
+            ))
+        elif not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
             records.append(CapabilityRecord(
                 name="revision.external_change_detection",
                 state="degraded",
                 implementation="timeline-fingerprint-guard",
-                limitations=("Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime atomicity proof",),
+                limitations=("Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime fingerprint proof",),
                 fusion_version=fusion_version,
                 relay_version=relay_version,
             ))

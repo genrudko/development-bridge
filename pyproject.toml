@@ -28,6 +28,9 @@ dev = ["pytest>=8,<9", "pytest-asyncio>=0.24,<2"]
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+"app.fusion_cad" = ["fusion_scripts/*.py.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

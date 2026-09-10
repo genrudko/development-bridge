@@ -309,7 +309,7 @@ class ParameterSummary(BaseModel):
     ref: str | None = Field(default=None, pattern=ENTITY_REF_PATTERN)
     name: str = Field(..., min_length=1)
     kind: str = "parameter"
-    value: float
+    value: float | None
     expression: str | None = None
     unit: str | None = "mm"
     is_user: bool = False
@@ -1003,13 +1003,18 @@ def normalize_snapshot(
                 if b.get("component_path")
                 else ((str(b_comp),) if b_comp else ())
             )
+            b_native = b.get("entityToken") or b.get("native_token") or b.get("id")
             if ref_registry is not None:
                 iss = ref_registry.issue(
                     document_ref=doc_ref,
                     kind="body",
                     name=b_name,
                     component_path=b_comp_path,
-                    native_token=str(b.get("entityToken") or b.get("id") or b_name),
+                    native_token=(
+                        str(b_native).strip()
+                        if b_native is not None and str(b_native).strip()
+                        else None
+                    ),
                 )
                 b_ref = iss.ref
             else:
@@ -1075,12 +1080,17 @@ def normalize_snapshot(
                 if s.get("component_path")
                 else ((str(s_comp),) if s_comp else ())
             )
+            s_native = s.get("entityToken") or s.get("native_token") or s.get("id")
             if ref_registry is not None:
                 iss = ref_registry.issue(
                     document_ref=doc_ref,
                     kind="sketch",
                     name=s_name,
-                    native_token=str(s.get("entityToken") or s.get("id") or s_name),
+                    native_token=(
+                        str(s_native).strip()
+                        if s_native is not None and str(s_native).strip()
+                        else None
+                    ),
                 )
                 s_ref = iss.ref
             else:
@@ -1127,7 +1137,8 @@ def normalize_snapshot(
             for p in params_raw.get(p_cat, []):
                 if isinstance(p, Mapping):
                     p_name = str(p.get("name", ""))
-                    p_val = float(p.get("value", 0.0))
+                    raw_value = p.get("value", 0.0)
+                    p_val = float(raw_value) if raw_value is not None else None
                     p_expr = (
                         str(p.get("expression", ""))
                         if p.get("expression") is not None
@@ -1157,7 +1168,8 @@ def normalize_snapshot(
         for p in params_raw:
             if isinstance(p, Mapping):
                 p_name = str(p.get("name", ""))
-                p_val = float(p.get("value", 0.0))
+                raw_value = p.get("value", 0.0)
+                p_val = float(raw_value) if raw_value is not None else None
                 p_expr = (
                     str(p.get("expression", ""))
                     if p.get("expression") is not None

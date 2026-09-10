@@ -4,8 +4,8 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
-
 from urllib.parse import urlsplit
+
 import yaml
 from pydantic import (
     AnyHttpUrl,
@@ -305,7 +305,7 @@ class DesktopNodeSettings(BaseModel):
     call_timeout_seconds: float = Field(default=300, gt=0, le=300)
     max_pending_commands: int = Field(default=32, ge=1, le=256)
     max_request_bytes: int = Field(default=262_144, ge=4096, le=2_097_152)
-    max_arguments_bytes: int = Field(default=131_072, ge=1024, le=1_048_576)
+    max_arguments_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
     max_result_bytes: int = Field(default=1_048_576, ge=4096, le=8_388_608)
     result_artifact_directory: Path = Field(
         default_factory=lambda: Path.home() / ".local" / "state" / "development-bridge" / "desktop-results"

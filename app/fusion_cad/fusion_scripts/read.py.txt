@@ -49,7 +49,7 @@ def probe_runtime():
                 except Exception:
                     pass
                 try:
-                    if hasattr(viewport, "modelToScreen") and hasattr(viewport, "screenToModel"):
+                    if hasattr(viewport, "viewToModelSpace"):
                         facts["has_viewport_conversion_context"] = True
                 except Exception:
                     pass
@@ -67,18 +67,44 @@ def probe_runtime():
 
         if app and getattr(app, "activeDocument", None):
             doc = app.activeDocument
-            products = getattr(doc, "products", None)
-            if products:
-                try:
-                    design = products.itemByClass("adsk::fusion::Design")
-                except Exception:
-                    design = None
+            design = _fusion_design_from_context(app, doc)
             if design:
                 facts["has_design_access"] = True
                 facts["has_timeline_access"] = hasattr(design, "timeline")
                 facts["has_entity_token_resolver"] = hasattr(design, "findEntityByToken")
                 root = getattr(design, "rootComponent", None)
                 facts["has_sketch_access"] = hasattr(root, "sketches") if root else False
+                try:
+                    readable = True
+                    seen_text = False
+                    components = design.allComponents
+                    for ci in range(components.count):
+                        sketches = components.item(ci).sketches
+                        for si in range(sketches.count):
+                            texts = sketches.item(si).sketchTexts
+                            for ti in range(texts.count):
+                                text = texts.item(ti)
+                                seen_text = True
+                                readable = readable and hasattr(text, "textParameter") and hasattr(text.textParameter, "textValue") and hasattr(text, "fontName") and hasattr(text, "heightParameter") and hasattr(text.heightParameter, "value") and hasattr(text, "attributes") and hasattr(text, "entityToken")
+                    facts["sketch_text_read_runtime_verified"] = bool(seen_text and readable)
+                except Exception:
+                    facts["sketch_text_read_runtime_verified"] = False
+                try:
+                    visibility_count = 0
+                    visibility_verified = True
+                    visibility_collections = []
+                    for ci in range(design.allComponents.count):
+                        component = design.allComponents.item(ci)
+                        visibility_collections.extend((component.bRepBodies, component.sketches))
+                    visibility_collections.append(getattr(root, "allOccurrences", root.occurrences))
+                    for collection in visibility_collections:
+                        for vi in range(collection.count):
+                            entity = collection.item(vi)
+                            visibility_count += 1
+                            visibility_verified = visibility_verified and (hasattr(entity, "isLightBulbOn") or hasattr(entity, "isVisible")) and hasattr(entity, "entityToken")
+                    facts["visibility_runtime_verified"] = bool(visibility_count and visibility_verified)
+                except Exception:
+                    facts["visibility_runtime_verified"] = False
             else:
                 facts["has_design_access"] = False
                 facts["has_timeline_access"] = False
@@ -95,7 +121,7 @@ def probe_runtime():
     try:
         import adsk.core
         facts["has_camera"] = hasattr(adsk.core, "Camera")
-        facts["has_viewport_conversion"] = hasattr(adsk.core.Viewport, "modelToScreen") and hasattr(adsk.core.Viewport, "screenToModel")
+        facts["has_viewport_conversion"] = hasattr(adsk.core.Viewport, "viewToModelSpace")
     except Exception:
         pass
 
@@ -111,6 +137,83 @@ def probe_runtime():
         facts["has_attributes"] = facts.get("has_attributes", False) or hasattr(adsk.core, "Attributes")
     except Exception:
         pass
+
+    # Task 13/14: verify the exact primary PTransaction boundary on this runtime.
+    # This is an empty Start/Abort discriminator with a fixed safe name.  Once
+    # Start succeeds, Abort is the only allowed terminal action and is NEVER
+    # retried.  If Start raises (outcome unknown), or a started transaction cannot
+    # be proven aborted, fail the whole probe as OPERATION_UNCERTAIN instead of
+    # returning an ordinary degraded capability matrix.  The service journals
+    # read:capabilities as mutation-sensitive/non-replayable for this reason.
+    try:
+        execute_text_command = getattr(app, "executeTextCommand", None) if app else None
+        if callable(execute_text_command):
+            try:
+                started = execute_text_command('PTransaction.Start "bridge_cad_capability_probe"')
+            except Exception:
+                raise FusionScriptError(
+                    "OPERATION_UNCERTAIN",
+                    "Capability probe transaction start outcome is uncertain",
+                ) from None
+            if str(started).strip() == "1":
+                try:
+                    aborted = execute_text_command("PTransaction.Abort")
+                except Exception:
+                    raise FusionScriptError(
+                        "OPERATION_UNCERTAIN",
+                        "Capability probe transaction abort outcome is uncertain",
+                    ) from None
+                if str(aborted).strip() != "1":
+                    raise FusionScriptError(
+                        "OPERATION_UNCERTAIN",
+                        "Capability probe transaction abort outcome is uncertain",
+                    )
+                facts["transaction_runtime_verified"] = True
+    except FusionScriptError:
+        raise
+    except Exception:
+        facts["transaction_runtime_verified"] = False
+
+    # Task 14 prerequisite: prove the authoritative fingerprint can be read
+    # deterministically on the active document. Mutation paths still compare a
+    # fresh in-Fusion fingerprint immediately before applying any change.
+    try:
+        if doc is not None and design is not None:
+            fp_a, _canonical_a, doc_ref_a = collect_model_fingerprint(PAYLOAD)
+            fp_b, _canonical_b, doc_ref_b = collect_model_fingerprint(PAYLOAD)
+            if fp_a and fp_a == fp_b and doc_ref_a and doc_ref_a == doc_ref_b:
+                facts["revision_runtime_verified"] = True
+    except Exception:
+        facts["revision_runtime_verified"] = False
+
+    # Task 9: prove the selected viewport-raycast contract on the active runtime.
+    try:
+        import adsk.core
+        import adsk.fusion
+        viewport = getattr(app, "activeViewport", None) if app else None
+        if viewport is not None and design is not None:
+            root = getattr(design, "rootComponent", None)
+            to_model = getattr(viewport, "viewToModelSpace", None)
+            raycast = getattr(root, "findBRepUsingRay", None) if root is not None else None
+            if callable(to_model) and callable(raycast):
+                screen_point = adsk.core.Point2D.create(float(viewport.width)/2.0, float(viewport.height)/2.0)
+                model_point = to_model(screen_point); camera = viewport.camera; camera_types = adsk.core.CameraTypes
+                if camera.cameraType == camera_types.OrthographicCameraType:
+                    origin = model_point
+                    direction = adsk.core.Vector3D.create(camera.target.x-camera.eye.x, camera.target.y-camera.eye.y, camera.target.z-camera.eye.z)
+                elif camera.cameraType in (camera_types.PerspectiveCameraType, camera_types.PerspectiveWithOrthoFacesCameraType):
+                    origin = camera.eye
+                    direction = adsk.core.Vector3D.create(model_point.x-camera.eye.x, model_point.y-camera.eye.y, model_point.z-camera.eye.z)
+                else:
+                    origin = None; direction = None
+                if origin is not None and direction is not None:
+                    hit_points = adsk.core.ObjectCollection.create()
+                    hits = raycast(origin, direction, adsk.fusion.BRepEntityTypes.BRepFaceEntityType, 0.001, True, hit_points)
+                    if hits is not None and hasattr(hits, "count") and hit_points.count == hits.count:
+                        facts["pick_runtime_verified"] = True
+                        facts["viewport_conversion_verified"] = True
+    except Exception:
+        facts["pick_runtime_verified"] = False
 
     if "probe_facts" in PAYLOAD and isinstance(PAYLOAD["probe_facts"], dict):
         facts.update(PAYLOAD["probe_facts"])
@@ -310,34 +413,13 @@ def probe_runtime():
             "limitations": err_limits("Viewport screen/model coordinate conversion methods not available"),
         })
 
-    # 8. view.pick (Finding 3: load-bearing pick remains degraded/unavailable until later live feasibility proof)
-    if not probe_failed and facts.get("has_selection_primitives"):
-        records.append({
-            "name": "view.pick",
-            "state": "degraded",
-            "implementation": "native-preselect",
-            "fusion_version": resolved_version,
-            "relay_version": relay_version,
-            "limitations": ["Visual pick requires live feasibility proof; load-bearing pick remains degraded pending live verification"],
-        })
-    elif not probe_failed and facts.get("has_viewport_conversion"):
-        records.append({
-            "name": "view.pick",
-            "state": "degraded",
-            "implementation": "viewport-raycast",
-            "fusion_version": resolved_version,
-            "relay_version": relay_version,
-            "limitations": ["Raycast geometry intersection without native preselection; load-bearing pick remains degraded pending live verification"],
-        })
+    # 8. view.pick -- Task 9 selects one production strategy only: viewport-raycast.
+    if not probe_failed and facts.get("pick_runtime_verified"):
+        records.append({"name":"view.pick","state":"supported","implementation":"viewport-raycast","fusion_version":resolved_version,"relay_version":relay_version,"limitations":[]})
+    elif not probe_failed and (facts.get("has_viewport_conversion") or facts.get("has_viewport_conversion_context")):
+        records.append({"name":"view.pick","state":"degraded","implementation":"viewport-raycast","fusion_version":resolved_version,"relay_version":relay_version,"limitations":["Viewport raycast prerequisites are present but the live feasibility proof / raycast contract has not been verified for this runtime context"]})
     else:
-        records.append({
-            "name": "view.pick",
-            "state": "unavailable",
-            "implementation": None,
-            "fusion_version": resolved_version,
-            "relay_version": relay_version,
-            "limitations": err_limits("Neither selection primitives nor viewport projection methods available"),
-        })
+        records.append({"name":"view.pick","state":"unavailable","implementation":None,"fusion_version":resolved_version,"relay_version":relay_version,"limitations":err_limits("Verified viewport-raycast prerequisites are not available")})
 
     # 9. selection.primitives (Finding 2: activeSelections/count is insufficient; prefer degraded/unavailable)
     if not probe_failed and (facts.get("has_selection_primitives") or facts.get("has_active_selections_context") or facts.get("selection_runtime_verified")):
@@ -379,24 +461,25 @@ def probe_runtime():
             "limitations": err_limits("Command execution preview hooks not available"),
         })
 
-    # 11. transaction.preview_replay (Finding 3: load-bearing transaction remains degraded/unavailable until later live feasibility proof)
-    if not probe_failed and facts.get("has_command_preview") and facts.get("has_undo_redo"):
+    # 11. transaction.preview_replay -- supported only after the empty live
+    # PTransaction Start/Abort discriminator succeeds on this runtime.
+    if not probe_failed and facts.get("transaction_runtime_verified"):
         records.append({
             "name": "transaction.preview_replay",
-            "state": "degraded",
-            "implementation": "command-preview-replay",
+            "state": "supported",
+            "implementation": "ptransaction-preview-replay",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Staged transaction preview and replay semantics require live feasibility proof; load-bearing transaction remains degraded pending live verification"],
+            "limitations": [],
         })
     elif not probe_failed and facts.get("has_undo_redo"):
         records.append({
             "name": "transaction.preview_replay",
             "state": "degraded",
-            "implementation": "undo-redo-fallback",
+            "implementation": "ptransaction-preview-replay",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Command preview hooks not available; rollback relies on active transaction undo; load-bearing transaction remains degraded pending live verification"],
+            "limitations": ["PTransaction API prerequisites are present but the live feasibility proof (Start/Abort runtime semantics) is not verified for this runtime context"],
         })
     else:
         records.append({
@@ -405,7 +488,7 @@ def probe_runtime():
             "implementation": None,
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": err_limits("Neither command preview nor undo/redo available for transaction replay"),
+            "limitations": err_limits("Verified PTransaction runtime is not available"),
         })
 
     # 12. metadata.attributes (Finding 2: collection/add/count is insufficient; prefer degraded/unavailable)
@@ -447,6 +530,30 @@ def probe_runtime():
             "relay_version": relay_version,
             "limitations": err_limits("SketchText API not available"),
         })
+
+    text_read_verified = bool(facts.get("sketch_text_read_runtime_verified"))
+    transaction_verified = bool(facts.get("transaction_runtime_verified"))
+    for name in ("style.text_read", "style.text_update"):
+        supported = text_read_verified and (name == "style.text_read" or transaction_verified)
+        records.append({
+            "name": name,
+            "state": "supported" if supported else "unavailable",
+            "implementation": "native-sketch-text-v1" if supported else None,
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [] if supported else err_limits("Native SketchText read prerequisites and, for update, verified PTransaction support are required"),
+        })
+    for name in ("style.text_create", "style.text_delete", "style.text_extrude", "style.text_cut"):
+        records.append({"name": name, "state": "unavailable", "implementation": None,
+                        "fusion_version": resolved_version, "relay_version": relay_version,
+                        "limitations": err_limits("Native P0 semantics are not implemented and verified")})
+    visibility_verified = bool(facts.get("visibility_runtime_verified")) and transaction_verified
+    records.append({
+        "name": "style.visibility", "state": "supported" if visibility_verified else "unavailable",
+        "implementation": "native-entity-visibility-v1" if visibility_verified else None,
+        "fusion_version": resolved_version, "relay_version": relay_version,
+        "limitations": [] if visibility_verified else err_limits("Native entity visibility and verified PTransaction support are required"),
+    })
 
     # 14. transaction.undo_redo (Finding 2: undo API presence is insufficient; prefer degraded/unavailable)
     if not probe_failed and (facts.get("has_undo_redo") or facts.get("has_undo_redo_context") or facts.get("undo_redo_verified")):
@@ -497,15 +604,25 @@ def probe_runtime():
             "limitations": err_limits("Document mutation modified indicator not available"),
         })
 
-    # 16. revision.external_change_detection (Finding 3: do not claim contract-level supported from hasattr alone)
-    if not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
+    # 16. revision.external_change_detection -- supported only when the exact
+    # authoritative fingerprint is stable on the active runtime/document.
+    if not probe_failed and facts.get("revision_runtime_verified"):
+        records.append({
+            "name": "revision.external_change_detection",
+            "state": "supported",
+            "implementation": "authoritative-fingerprint-guard",
+            "fusion_version": resolved_version,
+            "relay_version": relay_version,
+            "limitations": [],
+        })
+    elif not probe_failed and facts.get("has_mutation_indicators") and facts.get("has_timeline_access"):
         records.append({
             "name": "revision.external_change_detection",
             "state": "degraded",
             "implementation": "timeline-fingerprint-guard",
             "fusion_version": resolved_version,
             "relay_version": relay_version,
-            "limitations": ["Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime atomicity proof"],
+            "limitations": ["Fusion-side revision freshness guard and external-change atomicity not guaranteed at contract level; unverified without active runtime fingerprint proof"],
         })
     elif not probe_failed and facts.get("has_mutation_indicators"):
         records.append({

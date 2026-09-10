@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.errors import ErrorCode
 from app.fusion_cad.errors import FusionCadError
+from app.fusion_cad.metadata import entity_metadata_view
 from app.fusion_cad.models import (
     BoundingBox,
     CreatedBySelector,
@@ -29,7 +30,12 @@ class SelectorQueryResult(BaseModel):
 
 
 class SelectorEngine:
-    """Evaluates declarative semantic selectors against CAD entities with strict cardinality enforcement."""
+    """Evaluates declarative semantic selectors against CAD entities with strict cardinality enforcement.
+
+    Role/tag/provenance criteria read PERSISTED model attributes carried by the
+    entity (``bridge.cad/v1`` attribute records) when the transient candidate
+    fields are absent, so selectors never depend on Bridge-side memory only.
+    """
 
     def normalize(
         self, selector: EntitySelector | Mapping[str, Any] | None
@@ -108,6 +114,17 @@ class SelectorEngine:
         context: Mapping[str, Any] | None = None,
     ) -> bool:
         """Check if an entity matches all non-None criteria of the normalized selector."""
+        # Lazy view of the entity's persisted model attributes (bridge.cad/v1
+        # records only); computed at most once per matches() call and only when
+        # a metadata-derived criterion needs it.
+        persisted_view: dict[str, Any] | None = None
+
+        def persisted_metadata() -> dict[str, Any]:
+            nonlocal persisted_view
+            if persisted_view is None:
+                persisted_view = entity_metadata_view(entity)
+            return persisted_view
+
         # 1. kind
         if selector.kind is not None:
             ent_kind = self._extract_attr(entity, "kind")
@@ -166,9 +183,11 @@ class SelectorEngine:
             if ent_feat != selector.feature_type:
                 return False
 
-        # 6. created_by
+        # 6. created_by (direct field first, then persisted provenance attribute)
         if selector.created_by is not None:
             ent_creator = self._extract_attr(entity, "created_by")
+            if ent_creator is None:
+                ent_creator = persisted_metadata().get("created_by")
             if ent_creator is None:
                 return False
             cr_tool = self._extract_attr(ent_creator, "tool")
@@ -187,13 +206,12 @@ class SelectorEngine:
             ):
                 return False
 
-        # 7. tag
+        # 7. tag (direct field first, then persisted tag attributes in the
+        #    reserved namespace; provenance/foreign records are never tags)
         if selector.tag is not None:
-            tags = (
-                self._extract_attr(entity, "tags")
-                or self._extract_attr(entity, "attributes")
-                or ()
-            )
+            tags = self._extract_attr(entity, "tags")
+            if not tags:
+                tags = persisted_metadata().get("tags") or ()
             found = False
             for t in tags:
                 t_group = self._extract_attr(t, "group", "bridge.cad/v1")
@@ -209,9 +227,11 @@ class SelectorEngine:
             if not found:
                 return False
 
-        # 8. role
+        # 8. role (direct field first, then persisted role attribute)
         if selector.role is not None:
             ent_role = self._extract_attr(entity, "role")
+            if ent_role is None:
+                ent_role = persisted_metadata().get("role")
             if ent_role is None:
                 return False
             ent_roles = (
@@ -292,21 +312,27 @@ class SelectorEngine:
             if separated:
                 return False
 
-        # 12. logical_object
+        # 12. logical_object (direct field first, then persisted provenance)
         if selector.logical_object is not None:
             ent_log = self._extract_attr(entity, "logical_object")
+            if ent_log is None:
+                ent_log = persisted_metadata().get("logical_object")
             if ent_log != selector.logical_object:
                 return False
 
-        # 13. transaction_id
+        # 13. transaction_id (direct field first, then persisted provenance)
         if selector.transaction_id is not None:
             ent_tx = self._extract_attr(entity, "transaction_id")
+            if ent_tx is None:
+                ent_tx = persisted_metadata().get("transaction_id")
             if ent_tx != selector.transaction_id:
                 return False
 
-        # 14. recipe
+        # 14. recipe (direct field first, then persisted provenance)
         if selector.recipe is not None:
             ent_rec = self._extract_attr(entity, "recipe")
+            if ent_rec is None:
+                ent_rec = persisted_metadata().get("recipe")
             if ent_rec != selector.recipe:
                 return False
 

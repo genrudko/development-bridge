@@ -134,11 +134,13 @@ def test_external_result_storage_failure_never_interpolates_exception_text_or_pa
     )
 
     with pytest.raises(FusionCadError) as exc_info:
+        # Task 7 gives inspect operations real semantic normalization, so this
+        # externalization-failure boundary uses a neutral non-normalizing read op.
         cad_service._finalize_completed_execution(
             cad_result,
-            effective_bundle_group="inspect",
-            op="describe",
-            payload={"operation": "describe"},
+            effective_bundle_group="read",
+            op="echo",
+            payload={"operation": "echo"},
             node_id="desk-1",
         )
 

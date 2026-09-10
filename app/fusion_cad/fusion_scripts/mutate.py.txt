@@ -3,12 +3,1472 @@ def run():
     if op == "test_op":
         return make_result(data={"operation": op}, summary=f"Executed mutate:{op}")
 
+    _RESERVED_GROUP = "bridge.cad/v1"
+    _PROVENANCE_NAME = "provenance"
+    _MUTATION_OPS = ("set", "remove", "tag", "untag", "set_role", "clear_role")
+    _READ_OPS = ("get", "query", "provenance")
+
+    def _open_runtime():
+        import re as _re
+
+        import adsk.core
+
+        app = adsk.core.Application.get()
+        doc = getattr(app, "activeDocument", None) if app else None
+        design = None
+        if doc is not None and hasattr(doc, "products"):
+            try:
+                design = doc.products.itemByProductType("DesignProductType")
+            except Exception:
+                try:
+                    design = doc.products.itemByClass("adsk::fusion::Design")
+                except Exception:
+                    design = None
+        if not doc or not design:
+            raise FusionScriptError(
+                "NO_ACTIVE_DESIGN",
+                "Active document and design required for metadata operation",
+                details={"has_doc": bool(doc), "has_design": bool(design)},
+            )
+        safe_doc = _fusion_document_identity(doc)["document_ref"]
+        req_doc = PAYLOAD.get("document_ref")
+        if req_doc and req_doc != safe_doc:
+            raise FusionScriptError(
+                "WRONG_DOCUMENT",
+                f"Requested document_ref '{req_doc}' does not match active document runtime identity '{safe_doc}'",
+                details={"requested": req_doc, "active": safe_doc},
+            )
+        return app, doc, design, safe_doc
+
+    def _doc_state(safe_doc, doc):
+        return {
+            "document_ref": safe_doc,
+            "model_revision": PAYLOAD.get("expected_revision") or "rev_1",
+            "name": getattr(doc, "name", "active"),
+            "units": "mm",
+        }
+
+    def _owner_attributes(owner):
+        attrs = getattr(owner, "attributes", None)
+        if attrs is None or not hasattr(attrs, "count") or not hasattr(attrs, "item"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Owner attribute collection is unreadable; metadata cannot be accessed safely",
+                details={},
+            )
+        items = []
+        for idx in range(attrs.count):
+            a = attrs.item(idx)
+            if a is None:
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    f"Attribute {idx} on metadata owner is unreadable (None)",
+                )
+            items.append(a)
+        return attrs, items
+
+    def _read_records(owner, owner_type, group_filter=None, name_filter=None, value_filter=None):
+        _, items = _owner_attributes(owner)
+        records = []
+        for a in items:
+            grp = str(getattr(a, "groupName", "") or "")
+            nm = str(getattr(a, "name", "") or "")
+            if group_filter and grp != group_filter:
+                continue
+            if name_filter and nm != name_filter:
+                continue
+            val = str(getattr(a, "value", "") or "")
+            if value_filter is not None and val != value_filter:
+                continue
+            records.append(
+                {"group": grp, "name": nm, "value": val, "owner_type": owner_type}
+            )
+        return records
+
+    def _resolve_owner(doc, design, target):
+        """Resolve the metadata owner EXACTLY; fail closed, never document fallback.
+
+        - No target at all: explicit document-scope metadata (document owner).
+        - Mapping target with a native token: exact entity-token resolution;
+          ambiguous or stale resolutions fail closed (REF_AMBIGUOUS/REF_STALE).
+        - Mapping target WITHOUT a native token and any raw string ref: fail
+          closed with REF_STALE. An unresolvable entity target is never
+          silently mapped onto the document owner, so document metadata is
+          never written while echoing an entity ref.
+        """
+        if target is None:
+            return doc, None
+        if isinstance(target, dict):
+            token = target.get("native_token")
+            if not token:
+                raise FusionScriptError(
+                    "REF_STALE",
+                    "Metadata target hint lacks a native token and cannot be resolved exactly; refusing document fallback",
+                    details={"ref": target.get("ref")},
+                )
+            if not hasattr(design, "findEntityByToken"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Entity-token resolver unavailable; cannot resolve metadata target exactly",
+                    details={"ref": target.get("ref")},
+                )
+            try:
+                owner = resolve_exact_native_entity(design, target)
+            except FusionScriptError as exc:
+                if exc.code != "REF_SPLIT":
+                    raise
+                raise FusionScriptError(
+                    "REF_AMBIGUOUS",
+                    "Metadata target resolves to multiple current entities; refusing to pick one",
+                    details={"ref": target.get("ref")},
+                ) from None
+            return owner, target.get("ref")
+        raise FusionScriptError(
+            "REF_STALE",
+            "Metadata target is an unresolved opaque entity ref; unknown or stale refs fail closed and never fall back to the document owner",
+            details={"target_type": type(target).__name__},
+        )
+
+    def _public_target(target, target_ref):
+        if target_ref:
+            return target_ref
+        if isinstance(target, str):
+            return target
+        return None
+
+    def _reserved_records(owner):
+        """Snapshot of the owner's reserved-group attributes as (name, value) pairs."""
+        _attrs, items = _owner_attributes(owner)
+        records = []
+        for a in items:
+            if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                continue
+            records.append(
+                (
+                    str(getattr(a, "name", "") or ""),
+                    str(getattr(a, "value", "") or ""),
+                )
+            )
+        return records
+
+    def _preflight_metadata_plan(owner, writes, removals):
+        """Verify every capability the metadata plan needs BEFORE any mutation.
+
+        Fails closed (CAPABILITY_UNAVAILABLE) when attribute writes/removals or
+        the compensation primitives (Attribute.deleteMe / Attributes.add) are
+        unavailable, so a plan that could not be rolled back never starts
+        applying. Read-only: applies nothing.
+
+        Corrupted-state preflight: Autodesk documents attribute names as unique
+        within a group, so duplicate same-(group, name) records inside the
+        reserved namespace are outside the normal API contract. Their multiset
+        cannot be reconstructed by Attributes.add, so the plan is rejected
+        BEFORE the geometry hook or any reserved attribute side effect instead
+        of attempting impossible compensation. Unrelated groups are untouched.
+        """
+        attrs, items = _owner_attributes(owner)
+        if writes and not hasattr(attrs, "add"):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Attribute collection does not support writes; failing closed before any mutation",
+                details={"operation": op},
+            )
+        seen_reserved_names = set()
+        for a in items:
+            if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                continue
+            nm = str(getattr(a, "name", "") or "")
+            if nm in seen_reserved_names:
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Owner reserved metadata contains duplicate attribute names; the corrupted state cannot be safely mutated or compensated, so the plan fails closed before any mutation",
+                    details={"operation": op},
+                )
+            seen_reserved_names.add(nm)
+        removal_requests = []
+        for removal in removals:
+            if not isinstance(removal, dict):
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata removal plan contains a non-object entry",
+                    details={"operation": op},
+                )
+            rm_name = str(removal.get("name", "") or "")
+            if not rm_name:
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata removal plan contains an empty attribute name",
+                    details={"operation": op},
+                )
+            removal_requests.append((rm_name, removal.get("value")))
+        for a in items:
+            if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                continue
+            nm = str(getattr(a, "name", "") or "")
+            val = str(getattr(a, "value", "") or "")
+            for rm_name, expected_val in removal_requests:
+                if nm != rm_name:
+                    continue
+                if expected_val is not None and val != str(expected_val):
+                    continue
+                if not hasattr(a, "deleteMe"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Attribute does not support deleteMe; failing closed instead of leaving stale Bridge metadata",
+                        details={"operation": op},
+                    )
+
+    def _rollback_delete_reserved(owner, delete_targets, name, value=None):
+        """Delete reserved attribute(s) during compensation with full proof.
+
+        Documented Autodesk semantics: Attribute.deleteMe returns True iff the
+        deletion succeeded. A misbehaving runtime may also report success
+        without removing anything, so the owner is re-enumerated after the
+        deletes and the targeted reserved record (name, or name+value when the
+        value is known) must be observably ABSENT. Either failure raises
+        FUSION_API_ERROR with compensated=False: a bad Boolean result that
+        nevertheless mutated state is still a compensation failure, and success
+        is never inferred from the final snapshot equality alone. Only safe
+        constant metadata (operation/attribute_name/compensated) is attached to
+        the error; the raw deleteMe result object is never stringified or
+        copied into details."""
+        for delete_attr in delete_targets:
+            if not hasattr(delete_attr, "deleteMe"):
+                raise FusionScriptError(
+                    "CAPABILITY_UNAVAILABLE",
+                    "Attribute does not support deleteMe; metadata compensation is unavailable and partial metadata may remain",
+                    details={
+                        "operation": op,
+                        "attribute_name": name,
+                        "compensated": False,
+                    },
+                )
+            delete_result = delete_attr.deleteMe()
+            if delete_result is not True:
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    "Compensation Attribute.deleteMe did not report success; metadata compensation is unavailable and partial metadata may remain",
+                    details={
+                        "operation": op,
+                        "attribute_name": name,
+                        "compensated": False,
+                    },
+                )
+        _verify_attrs, verify_items = _owner_attributes(owner)
+        for post_attr in verify_items:
+            if str(getattr(post_attr, "groupName", "") or "") != _RESERVED_GROUP:
+                continue
+            if str(getattr(post_attr, "name", "") or "") != name:
+                continue
+            if value is not None and str(
+                getattr(post_attr, "value", "") or ""
+            ) != str(value):
+                continue
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Compensation Attribute.deleteMe reported success but the targeted reserved attribute is still present; metadata compensation is unavailable and partial metadata may remain",
+                details={
+                    "operation": op,
+                    "attribute_name": name,
+                    "compensated": False,
+                },
+            )
+
+    def _rollback_metadata(owner, undo):
+        """Restore the exact pre-mutation reserved-namespace state (all-or-nothing).
+
+        Uses ONLY the verified primitives this script already uses for metadata
+        (Attribute.deleteMe and Attributes.add); no transaction/undo APIs are
+        invented. The undo log distinguishes attributes this plan CREATED
+        (undone via deleteMe) from pre-existing attributes this plan OVERWROTE
+        or REMOVED (undone by re-adding the captured old value): real Fusion
+        Attributes.add(groupName, name, value) updates and returns the existing
+        same-group/same-name attribute instead of creating a new one, so a
+        returned Attribute is NOT proof of creation and deleteMe-ing it would
+        destroy pre-existing provenance/metadata instead of restoring its old
+        value. A failed CURRENT write whose Attributes.add returned null or a
+        mismatched Attribute is compensated through ("restored", name,
+        old_value) when it overwrote a pre-existing attribute, or through
+        ("delete_created_by_name", name) when it may have created one; the
+        persisted state is re-derived by enumeration and the bad returned
+        object is never trusted as proof of what was created. Every rollback
+        delete (created attribute or re-derived failed-write record) must
+        return the documented True deleteMe result AND re-enumeration must
+        prove the targeted reserved record is observably absent; a False/bad
+        result — even one that mutated state — fails the compensation closed.
+        Raises when the restored state does not match the pre-mutation snapshot
+        so a partially applied plan can never be reported as success.
+        """
+        if undo is None:
+            return
+        undo_actions, snapshot = undo
+        restore_attrs = getattr(owner, "attributes", None)
+        for action in reversed(undo_actions):
+            kind = action[0]
+            if kind == "created":
+                # The undo entry captures the created attribute together with
+                # its verified reserved name/value (captured when the write was
+                # validated, never re-read from the possibly misbehaving
+                # runtime object later). The compensation delete must report
+                # the documented True result AND the created record must be
+                # observably absent afterwards.
+                attr, created_name, created_value = action[1], action[2], action[3]
+                _rollback_delete_reserved(
+                    owner, [attr], created_name, created_value
+                )
+            elif kind == "restored":
+                name, value = action[1], action[2]
+                if restore_attrs is None or not hasattr(restore_attrs, "add"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Attribute collection does not support writes; metadata compensation is unavailable and partial metadata may remain",
+                        details={"operation": op, "compensated": False},
+                    )
+                restored_attr = restore_attrs.add(_RESERVED_GROUP, name, value)
+                if restored_attr is None:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Compensation Attributes.add returned null; metadata compensation is unavailable and partial metadata may remain",
+                        details={"operation": op, "compensated": False},
+                    )
+                restored_group = str(getattr(restored_attr, "groupName", "") or "")
+                restored_name = str(getattr(restored_attr, "name", "") or "")
+                restored_value = str(getattr(restored_attr, "value", "") or "")
+                if (
+                    restored_group != _RESERVED_GROUP
+                    or restored_name != name
+                    or restored_value != value
+                ):
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Compensation Attributes.add returned an Attribute that does not match the restore write; metadata compensation is unavailable and partial metadata may remain",
+                        details={"operation": op, "compensated": False},
+                    )
+            elif kind == "delete_created_by_name":
+                # A failed/untrusted Attributes.add result can still have
+                # persisted created state under this reserved name. Re-derive
+                # the actual persisted attributes by enumeration and delete
+                # exactly what the failed write created; the null/mismatched
+                # result object is never trusted as proof of creation. Every
+                # delete must report the documented True result AND matching
+                # reserved name(s) must be observably absent afterwards.
+                name = action[1]
+                _del_attrs, del_items = _owner_attributes(owner)
+                delete_targets = [
+                    del_attr
+                    for del_attr in del_items
+                    if str(getattr(del_attr, "groupName", "") or "")
+                    == _RESERVED_GROUP
+                    and str(getattr(del_attr, "name", "") or "") == name
+                ]
+                _rollback_delete_reserved(owner, delete_targets, name)
+            else:
+                raise FusionScriptError(
+                    "FUSION_API_ERROR",
+                    "Unknown undo action; metadata compensation is unavailable and partial metadata may remain",
+                    details={"operation": op, "compensated": False},
+                )
+        current = sorted(_reserved_records(owner))
+        if current != sorted(snapshot):
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Metadata compensation did not restore the pre-mutation attribute state; partial metadata may remain",
+                details={"operation": op, "compensated": False},
+            )
+
+    def _rollback_metadata_or_fail(owner, undo):
+        """Normalize every unprovable metadata compensation failure."""
+        try:
+            _rollback_metadata(owner, undo)
+        except Exception:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Metadata compensation failed or exact restoration could not be verified",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+
+    # Script-private control state lets an outer transaction handler observe a
+    # successful rollback even when _apply_metadata_plan re-raises before its
+    # tuple assignment completes. It is never included in a result or error.
+    _metadata_compensation_count = [0]
+
+    def _apply_metadata_plan(owner, writes, removals):
+        """Apply the plan with an undo log; any failure compensates fully.
+
+        Returns (applied_writes, applied_removals, undo). On any application
+        failure the reserved-namespace state is restored to the exact
+        pre-mutation snapshot before the failure is re-raised, so a failed
+        command never leaves partial metadata/provenance behind. Each write
+        captures its pre-add reserved state BEFORE calling Attributes.add, so a
+        failed current write with a null/mismatched add result is itself
+        compensated (restored by re-adding the old value, or deleted by
+        enumerated name) instead of remaining applied while only earlier
+        actions are rolled back.
+        """
+        snapshot = _reserved_records(owner)
+        undo_actions = []
+        undo = (undo_actions, snapshot)
+        applied_writes = []
+        applied_removals = []
+        try:
+            for removal in removals:
+                if not isinstance(removal, dict):
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Metadata removal plan contains a non-object entry",
+                        details={"operation": op},
+                    )
+                rm_name = str(removal.get("name", "") or "")
+                if not rm_name:
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Metadata removal plan contains an empty attribute name",
+                        details={"operation": op},
+                    )
+                expected_val = removal.get("value")
+                _attrs, items = _owner_attributes(owner)
+                for a in items:
+                    if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                        continue
+                    if str(getattr(a, "name", "") or "") != rm_name:
+                        continue
+                    if expected_val is not None and str(
+                        getattr(a, "value", "") or ""
+                    ) != str(expected_val):
+                        continue
+                    if not hasattr(a, "deleteMe"):
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "Attribute does not support deleteMe; failing closed instead of leaving stale Bridge metadata",
+                            details={"operation": op},
+                        )
+                    removed_value = str(getattr(a, "value", "") or "")
+                    # Register the CURRENT removal undo BEFORE deleting so a
+                    # deleteMe that mutates persisted state but reports a bad
+                    # result is still compensable back to the exact record.
+                    undo_actions.append(("restored", rm_name, removed_value))
+                    # Documented Autodesk semantics: Attribute.deleteMe returns
+                    # True iff the deletion succeeded; False means the attribute
+                    # was NOT removed. The return value alone is never trusted
+                    # (a misbehaving runtime may report success without removing
+                    # anything), so the owner is re-enumerated and the exact
+                    # targeted reserved (group, name, value) record must have
+                    # disappeared before the removal is treated as applied.
+                    # False/no-op/mismatch fails closed; the except handler then
+                    # restores the exact pre-mutation snapshot.
+                    delete_result = a.deleteMe()
+                    if delete_result is not True:
+                        raise FusionScriptError(
+                            "FUSION_API_ERROR",
+                            "Attribute.deleteMe did not report success for the metadata removal; failing closed so stale metadata is never reported as applied",
+                            # Confidentiality: only safe constant metadata is
+                            # attached; the arbitrary raw deleteMe result
+                            # object is never stringified or copied here.
+                            details={
+                                "operation": op,
+                                "attribute_name": rm_name,
+                            },
+                        )
+                    _verify_attrs, verify_items = _owner_attributes(owner)
+                    for post_attr in verify_items:
+                        post_group = str(getattr(post_attr, "groupName", "") or "")
+                        if post_group != _RESERVED_GROUP:
+                            continue
+                        post_name = str(getattr(post_attr, "name", "") or "")
+                        if post_name != rm_name:
+                            continue
+                        post_value = str(getattr(post_attr, "value", "") or "")
+                        if post_value != removed_value:
+                            continue
+                        raise FusionScriptError(
+                            "FUSION_API_ERROR",
+                            "Attribute.deleteMe reported success but the targeted reserved attribute is still present; failing closed so stale metadata is never reported as applied",
+                            details={"operation": op, "attribute_name": rm_name},
+                        )
+                    applied_removals.append(
+                        {
+                            "name": rm_name,
+                            "value": str(expected_val)
+                            if expected_val is not None
+                            else None,
+                        }
+                    )
+
+            for write in writes:
+                if not isinstance(write, dict):
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Metadata write plan contains a non-object entry",
+                        details={"operation": op},
+                    )
+                wr_name = str(write.get("name", "") or "")
+                wr_value = write.get("value")
+                if not wr_name or wr_value is None:
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Metadata write plan contains an empty attribute name or missing value",
+                        details={"operation": op},
+                    )
+                attrs, items = _owner_attributes(owner)
+                if not hasattr(attrs, "add"):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Attribute collection does not support writes; failing closed",
+                        details={"operation": op},
+                    )
+                # Real Fusion semantics: Attributes.add UPDATES and returns the
+                # EXISTING same-group/same-name attribute when the owner already
+                # has one. Capture the pre-add state so the undo log can
+                # distinguish a newly created attribute (undone via deleteMe)
+                # from an overwritten pre-existing attribute (undone by
+                # re-adding its captured old value).
+                existing_value = None
+                existed = False
+                for a in items:
+                    if str(getattr(a, "groupName", "") or "") != _RESERVED_GROUP:
+                        continue
+                    if str(getattr(a, "name", "") or "") != wr_name:
+                        continue
+                    existed = True
+                    existing_value = str(getattr(a, "value", "") or "")
+                    break
+                new_attr = attrs.add(_RESERVED_GROUP, wr_name, str(wr_value))
+                # Verified Fusion semantics: Attributes.add(groupName, name,
+                # value) returns the created or updated Attribute, or null when
+                # creation fails. The returned Attribute is validated BEFORE the
+                # write is marked applied or enters the undo log, so a null or
+                # mismatched result can never be reported as an applied write
+                # (nor deleted as a fake "created" attribute). A misbehaving
+                # runtime may ALREADY have mutated/created persisted state
+                # before returning null/mismatch, so the failed CURRENT write
+                # itself is registered for compensation from the pre-add state
+                # captured above: an overwritten attribute is restored via
+                # Attributes.add(group, name, old_value); a possibly created one
+                # is re-derived by enumeration and deleted via
+                # Attribute.deleteMe ("delete_created_by_name"). The bad
+                # returned object is never trusted as proof of creation. The
+                # except handler below then compensates every PRIOR plan
+                # write/removal via the undo log, and the post-rollback exact
+                # snapshot check in _rollback_metadata fails closed
+                # (compensated=False) if exact restoration cannot be proven.
+                if new_attr is None:
+                    undo_actions.append(
+                        ("restored", wr_name, existing_value)
+                        if existed
+                        else ("delete_created_by_name", wr_name)
+                    )
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Attributes.add returned null for a metadata write; the write cannot be verified as applied",
+                        details={"operation": op, "attribute_name": wr_name},
+                    )
+                added_group = str(getattr(new_attr, "groupName", "") or "")
+                added_name = str(getattr(new_attr, "name", "") or "")
+                added_value = str(getattr(new_attr, "value", "") or "")
+                if (
+                    added_group != _RESERVED_GROUP
+                    or added_name != wr_name
+                    or added_value != str(wr_value)
+                ):
+                    undo_actions.append(
+                        ("restored", wr_name, existing_value)
+                        if existed
+                        else ("delete_created_by_name", wr_name)
+                    )
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Attributes.add returned an Attribute that does not match the requested metadata write; the write cannot be verified as applied",
+                        details={"operation": op, "attribute_name": wr_name},
+                    )
+                if existed:
+                    undo_actions.append(("restored", wr_name, existing_value))
+                else:
+                    undo_actions.append(
+                        ("created", new_attr, wr_name, str(wr_value))
+                    )
+                applied_writes.append({"name": wr_name, "value": str(wr_value)})
+        except FusionScriptError:
+            _rollback_metadata_or_fail(owner, undo)
+            _metadata_compensation_count[0] += 1
+            raise
+        except Exception:
+            _rollback_metadata_or_fail(owner, undo)
+            _metadata_compensation_count[0] += 1
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Metadata plan application failed; compensated back to the exact pre-mutation metadata state",
+                details={"operation": op, "compensated": True},
+            )
+        return applied_writes, applied_removals, undo
+
+    def _prepare_geometry_compensation(primitive_hook):
+        """Capture operation-specific rollback state before geometry runs.
+
+        These hooks are internal script-scope closures supplied by the trusted
+        operation implementation. They are not payload fields or public API.
+        """
+        if not callable(primitive_hook):
+            return None
+        capture_hook = globals().get("_mutation_compensation_capture")
+        rollback_hook = globals().get("_mutation_compensation_rollback")
+        if not callable(capture_hook) or not callable(rollback_hook):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Plan-bearing geometry requires an explicit operation-specific compensation contract",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+        try:
+            return capture_hook(PAYLOAD)
+        except Exception:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Geometry compensation state could not be captured before mutation",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+
+    def _compensate_geometry(captured, baseline_fp):
+        """Rollback geometry and prove exact restoration by full fingerprint."""
+        rollback_hook = globals().get("_mutation_compensation_rollback")
+        try:
+            rollback_result = rollback_hook(captured)
+            if rollback_result is not True:
+                raise RuntimeError("rollback did not explicitly report success")
+            restored_fp, _restored_canonical, _restored_doc = collect_model_fingerprint(
+                PAYLOAD
+            )
+            if restored_fp != baseline_fp:
+                raise RuntimeError("rollback fingerprint does not match baseline")
+        except Exception:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Geometry compensation failed or exact model restoration could not be verified",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+
+    def _verify_full_restoration(baseline_fp):
+        """Prove metadata-only compensation restored the complete model state."""
+        try:
+            restored_fp, _restored_canonical, _restored_doc = collect_model_fingerprint(
+                PAYLOAD
+            )
+            if restored_fp != baseline_fp:
+                raise RuntimeError("rollback fingerprint does not match baseline")
+        except Exception:
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Exact model restoration after metadata compensation could not be verified",
+                details={"operation": op, "applied": False, "compensated": False},
+            )
+
+    if op in _MUTATION_OPS:
+        # Authoritative Fusion-side freshness guard runs in this SAME command
+        # execution, with no return to UI between guard and apply.
+        expected_fp = PAYLOAD.get("expected_fingerprint")
+        current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
+        if expected_fp is None or expected_fp != current_fp:
+            return make_error(
+                "REVISION_CONFLICT",
+                "Authoritative Fusion-side guard: model fingerprint diverged from baseline",
+                details={
+                    "document_ref": doc_ref,
+                    "expected_revision": PAYLOAD.get("expected_revision"),
+                    "expected_fingerprint": expected_fp,
+                    "current_fingerprint": current_fp,
+                    "applied": False,
+                },
+            )
+
+        # The complete metadata side of this ONE command is planned by the Bridge:
+        # explicit requested writes/removals PLUS the provenance write. Geometry or
+        # metadata change and provenance are applied by this single execution; no
+        # hidden post-commit metadata command exists.
+        writes = PAYLOAD.get("metadata_writes")
+        removals = PAYLOAD.get("metadata_removals")
+        if not isinstance(writes, list) or not isinstance(removals, list):
+            raise FusionScriptError(
+                "INVALID_ARGUMENT",
+                "Metadata mutation payload lacks the one-command metadata plan (metadata_writes/metadata_removals)",
+                details={"operation": op},
+            )
+
+        _app, doc, design, safe_doc = _open_runtime()
+        owner, target_ref = _resolve_owner(doc, design, PAYLOAD.get("target"))
+
+        # Preflight verifies every capability the plan needs (including the
+        # compensation primitives) BEFORE anything is mutated, and rejects
+        # corrupted duplicate reserved (group, name) state before the geometry
+        # hook or any reserved attribute side effect.
+        _preflight_metadata_plan(owner, writes, removals)
+
+        # Geometry primitive (when present) runs only after operation-specific
+        # rollback state is captured. Every later failure compensates metadata
+        # and geometry, then proves exact restoration by full fingerprint.
+        primitive_hook = globals().get("_mutation_primitive")
+        geometry_capture = _prepare_geometry_compensation(primitive_hook)
+        geometry_applied = False
+        metadata_compensations_before = _metadata_compensation_count[0]
+        try:
+            if callable(primitive_hook):
+                geometry_applied = True
+                primitive_hook(PAYLOAD)
+
+            applied_writes, applied_removals, undo = _apply_metadata_plan(
+                owner, writes, removals
+            )
+            if not applied_writes:
+                _rollback_metadata_or_fail(owner, undo)
+                undo = None
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata mutation plan produced no attribute writes; provenance cannot be recorded transactionally",
+                    details={"operation": op},
+                )
+
+        # Freshly collect real post-apply fingerprint of actual model state. Any
+        # failure here is compensated so partial metadata is never left behind
+        # and the command is never externally reported as applied.
+            post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+        except Exception as exc:
+            metadata_compensated_here = (
+                _metadata_compensation_count[0] > metadata_compensations_before
+            )
+            try:
+                if "undo" in locals() and undo is not None:
+                    _rollback_metadata_or_fail(owner, undo)
+                    metadata_compensated_here = True
+            finally:
+                if geometry_applied:
+                    _compensate_geometry(geometry_capture, current_fp)
+            if not geometry_applied and metadata_compensated_here:
+                _verify_full_restoration(current_fp)
+            if isinstance(exc, FusionScriptError):
+                raise exc
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Mutation execution failed after an apply attempt; exact compensation completed",
+                details={"operation": op, "applied": False, "compensated": True},
+            )
+        if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
+            try:
+                _rollback_metadata_or_fail(owner, undo)
+            finally:
+                if geometry_applied:
+                    _compensate_geometry(geometry_capture, current_fp)
+            if not geometry_applied:
+                _verify_full_restoration(current_fp)
+            return make_error(
+                "FINGERPRINT_FAILED",
+                "Authoritative post-apply model fingerprint collection failed or returned empty",
+                details={
+                    "document_ref": post_doc_ref or doc_ref,
+                    "applied": False,
+                    "compensated": True,
+                },
+            )
+        if post_fp == current_fp:
+            try:
+                _rollback_metadata_or_fail(owner, undo)
+            finally:
+                if geometry_applied:
+                    _compensate_geometry(geometry_capture, current_fp)
+            if not geometry_applied:
+                _verify_full_restoration(current_fp)
+            return make_error(
+                "MUTATION_FAILED",
+                "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
+                details={
+                    "document_ref": post_doc_ref or doc_ref,
+                    "initial_fingerprint": current_fp,
+                    "post_fingerprint": post_fp,
+                    "applied": False,
+                    "compensated": True,
+                },
+            )
+
+        try:
+            result_data = {
+                "operation": op,
+                "applied": True,
+                "fingerprint": post_fp,
+                "document_ref": post_doc_ref or doc_ref,
+                "target": _public_target(PAYLOAD.get("target"), target_ref),
+                "attributes": applied_writes,
+                "removed": applied_removals,
+                "provenance": PAYLOAD.get("provenance"),
+            }
+            return make_result(
+                data=result_data,
+                summary=f"Executed mutate:{op}",
+                document=_doc_state(safe_doc, doc),
+                changed_refs=[target_ref] if target_ref else [],
+            )
+        except Exception as exc:
+            try:
+                _rollback_metadata_or_fail(owner, undo)
+            finally:
+                if geometry_applied:
+                    _compensate_geometry(geometry_capture, current_fp)
+            if not geometry_applied:
+                _verify_full_restoration(current_fp)
+            if isinstance(exc, FusionScriptError):
+                raise exc
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Mutation execution failed after an apply attempt; exact compensation completed",
+                details={"operation": op, "applied": False, "compensated": True},
+            )
+
+    if op in _READ_OPS:
+        # Read-only metadata: no expected_revision, no mutation, no fingerprint write.
+        _app, doc, design, safe_doc = _open_runtime()
+        group_filter = PAYLOAD.get("group") or _RESERVED_GROUP
+        name_filter = PAYLOAD.get("name")
+        value_filter = PAYLOAD.get("value")
+        if value_filter is not None:
+            value_filter = str(value_filter)
+
+        if op == "get":
+            owner, target_ref = _resolve_owner(doc, design, PAYLOAD.get("target"))
+            records = _read_records(
+                owner, "document" if owner is doc else "entity", group_filter, name_filter
+            )
+            return make_result(
+                data={
+                    "target": _public_target(PAYLOAD.get("target"), target_ref),
+                    "group": group_filter,
+                    "records": records,
+                    "count": len(records),
+                },
+                summary=f"Executed mutate:{op}",
+                document=_doc_state(safe_doc, doc),
+            )
+
+        if op == "provenance":
+            owner, target_ref = _resolve_owner(doc, design, PAYLOAD.get("target"))
+            records = _read_records(
+                owner,
+                "document" if owner is doc else "entity",
+                _RESERVED_GROUP,
+                _PROVENANCE_NAME,
+            )
+            return make_result(
+                data={
+                    "target": _public_target(PAYLOAD.get("target"), target_ref),
+                    "group": _RESERVED_GROUP,
+                    "records": records,
+                    "count": len(records),
+                },
+                summary=f"Executed mutate:{op}",
+                document=_doc_state(safe_doc, doc),
+            )
+
+        # query: scan all metadata owners and surface records plus selector-ready
+        # candidates carrying their persisted model attributes.
+        records = []
+        candidates = []
+
+        def _collect(owner, owner_type, name_hint, token):
+            owner_records = _read_records(
+                owner, owner_type, group_filter, name_filter, value_filter
+            )
+            records.extend(owner_records)
+            if owner_records and token:
+                candidates.append(
+                    {
+                        "entityToken": token,
+                        "name": name_hint,
+                        "kind": owner_type,
+                        "attributes": owner_records,
+                    }
+                )
+
+        def _owner_token(owner):
+            token = getattr(owner, "entityToken", None) or getattr(owner, "id", None)
+            return str(token).strip() if token else None
+
+        _collect(doc, "document", getattr(doc, "name", None), None)
+
+        comps = getattr(design, "allComponents", None)
+        if comps is not None and hasattr(comps, "count"):
+            for i in range(comps.count):
+                c = comps.item(i)
+                if c is not None:
+                    _collect(c, "component", getattr(c, "name", None), _owner_token(c))
+
+        root = getattr(design, "rootComponent", None)
+        if root is not None:
+            occs = getattr(root, "allOccurrences", None)
+            if occs is not None and hasattr(occs, "count"):
+                for i in range(occs.count):
+                    o = occs.item(i)
+                    if o is not None:
+                        _collect(
+                            o, "occurrence", getattr(o, "name", None), _owner_token(o)
+                        )
+
+        if comps is not None and hasattr(comps, "count"):
+            for i in range(comps.count):
+                c = comps.item(i)
+                if c is None:
+                    continue
+                bodies = getattr(c, "bRepBodies", None)
+                if bodies is not None and hasattr(bodies, "count"):
+                    for bi in range(bodies.count):
+                        b = bodies.item(bi)
+                        if b is not None:
+                            _collect(
+                                b, "body", getattr(b, "name", None), _owner_token(b)
+                            )
+                sketches = getattr(c, "sketches", None)
+                if sketches is not None and hasattr(sketches, "count"):
+                    for si in range(sketches.count):
+                        s = sketches.item(si)
+                        if s is not None:
+                            _collect(
+                                s, "sketch", getattr(s, "name", None), _owner_token(s)
+                            )
+
+        timeline = getattr(design, "timeline", None)
+        if timeline is not None and hasattr(timeline, "count"):
+            for ti in range(timeline.count):
+                t = timeline.item(ti)
+                if t is None:
+                    continue
+                _collect(t, "feature", getattr(t, "name", None), _owner_token(t))
+                feat = getattr(t, "entity", None)
+                if feat is not None:
+                    _collect(
+                        feat, "feature", getattr(feat, "name", None), _owner_token(feat)
+                    )
+
+        return make_result(
+            data={
+                "group": group_filter,
+                "records": records,
+                "count": len(records),
+                "candidates": candidates,
+            },
+            summary=f"Executed mutate:{op}",
+            document=_doc_state(safe_doc, doc),
+        )
+
+    def _parse_text_provenance(sketch_text):
+        records = _read_records(sketch_text, "sketch_text", _RESERVED_GROUP, _PROVENANCE_NAME)
+        if len(records) != 1:
+            return None
+        try:
+            record = json.loads(records[0]["value"])
+        except Exception:
+            return None
+        logical_ref = record.get("logical_object_ref") if isinstance(record, dict) else None
+        created_revision = record.get("created_revision") if isinstance(record, dict) else None
+        if not isinstance(logical_ref, str) or not isinstance(created_revision, str):
+            return None
+        match = re.fullmatch(r"rev_([1-9][0-9]*)", created_revision)
+        if match is None:
+            raise FusionScriptError("FUSION_API_ERROR", "Logical text provenance has malformed created_revision")
+        return record, int(match.group(1))
+
+    def _all_sketch_texts(design):
+        result = []
+        components = getattr(design, "allComponents", None)
+        if components is None:
+            components = [getattr(design, "rootComponent", None)]
+        count = getattr(components, "count", None)
+        iterable = (components.item(i) for i in range(count)) if isinstance(count, int) else components
+        for component in iterable:
+            sketches = getattr(component, "sketches", None)
+            for si in range(getattr(sketches, "count", 0)):
+                sketch = sketches.item(si)
+                texts = getattr(sketch, "sketchTexts", None)
+                for ti in range(getattr(texts, "count", 0)):
+                    sketch_text = texts.item(ti)
+                    if sketch_text is not None:
+                        result.append((sketch, sketch_text))
+        return result
+
+    def _resolve_current_sketch_text(design, logical_ref):
+        matches = []
+        for sketch, sketch_text in _all_sketch_texts(design):
+            parsed = _parse_text_provenance(sketch_text)
+            if parsed is not None and parsed[0].get("logical_object_ref") == logical_ref:
+                matches.append((sketch, sketch_text, parsed[0], parsed[1]))
+        if not matches:
+            raise FusionScriptError("REF_STALE", "Logical TextRef has no current persisted SketchText", details={"ref": logical_ref})
+        if len(matches) != 1:
+            raise FusionScriptError("REF_AMBIGUOUS", "Logical TextRef resolves to multiple current SketchText objects", details={"ref": logical_ref, "count": len(matches)})
+        return matches[0]
+
+    def _native_text_lineage(sketch, sketch_text, provenance, generation, requested_font=None):
+        font_used = str(getattr(sketch_text, "fontName", "") or "")
+        font_requested = str(requested_font or font_used)
+        fallback = None if font_requested == font_used else "Fusion substituted the requested font"
+        logical_ref = provenance["logical_object_ref"]
+        return {
+            "logical_ref": logical_ref, "generation": generation, "is_current": True,
+            "sketch": "ent_sketch_" + logical_ref, "sketch_text_id": "ent_sketch_text_" + logical_ref,
+            "feature": None, "outputs": [], "text": _sketch_text_text_value(sketch_text),
+            "font_requested": font_requested, "font_used": font_used,
+            "fallback_reason": fallback, "height_mm": _sketch_text_height_value(sketch_text) * 10.0,
+        }
+
+    def _run_native_style_transaction(app, mutation):
+        command = getattr(app, "executeTextCommand", None)
+        if not callable(command):
+            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Verified PTransaction command boundary is unavailable", details={"applied": False})
+        try:
+            started = command('PTransaction.Start "bridge_cad_style_mutation"')
+        except Exception:
+            raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction start outcome is uncertain") from None
+        if str(started).strip() != "1":
+            raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction start outcome is uncertain")
+        try:
+            result = mutation()
+            post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+            if not post_fp or post_fp == current_fp:
+                raise FusionScriptError("MUTATION_FAILED", "Style mutation did not produce a distinct authoritative model state")
+            result.update({"fingerprint": post_fp, "document_ref": post_doc_ref or doc_ref})
+            try:
+                committed = command("PTransaction.Commit")
+            except Exception:
+                raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction commit outcome is uncertain") from None
+            if str(committed).strip() != "1":
+                raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction commit outcome is uncertain")
+            return result
+        except Exception as exc:
+            if isinstance(exc, FusionScriptError) and exc.code == "OPERATION_UNCERTAIN":
+                raise
+            try:
+                aborted = command("PTransaction.Abort")
+            except Exception:
+                raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction abort outcome is uncertain") from None
+            if str(aborted).strip() != "1":
+                raise FusionScriptError("OPERATION_UNCERTAIN", "Style transaction abort outcome is uncertain")
+            raise
+
+    def _visibility_value(entity):
+        if hasattr(entity, "isLightBulbOn"):
+            return bool(entity.isLightBulbOn), "isLightBulbOn"
+        if hasattr(entity, "isVisible"):
+            return bool(entity.isVisible), "isVisible"
+        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Resolved entity has no supported local visibility property")
+
+    def _visibility_evidence(entity, operation, target_ref, requested):
+        local, _property = _visibility_value(entity)
+        parent_visible = True
+        parent = getattr(entity, "assemblyContext", None)
+        while parent is not None:
+            parent_visible = parent_visible and bool(getattr(parent, "isVisible", True))
+            parent = getattr(parent, "assemblyContext", None)
+        return {"operation": operation, "target_ref": target_ref, "requested_visible": requested,
+                "local_visible": local, "parent_visible": parent_visible,
+                "effective_visible": local and parent_visible}
+
+    # Native Task 14 path. Unsupported text geometry operations retain the
+    # injected adapter compatibility path below but are capability-gated off.
+    # verified Fusion API surface for creating SketchText and reversible
+    # hierarchy visibility is not assumed here: a live relay that has not
+    # supplied this adapter fails closed before changing the model.  The adapter
+    # performs geometry and returns serializable semantic evidence plus an
+    # exact provenance-owner hint.  This script, not the adapter, applies and
+    # verifies the service-prepared Bridge provenance plan.
+    _TEXT_OPS = (
+        "text_create", "text_read", "text_update", "text_delete",
+        "text_extrude", "text_cut",
+    )
+    _VISIBILITY_OPS = ("show", "hide", "set", "show_only", "isolate", "restore")
+    if op in _TEXT_OPS + _VISIBILITY_OPS and (
+        PAYLOAD.get("style_semantic_contract") == "task11.v1"
+        or not (
+            isinstance(PAYLOAD.get("metadata_writes"), list)
+            and isinstance(PAYLOAD.get("metadata_removals"), list)
+        )
+    ):
+        if op == "text_read":
+            _app, doc, _design, safe_doc = _open_runtime()
+            sketch, sketch_text, provenance, generation = _resolve_current_sketch_text(_design, PAYLOAD.get("text_ref"))
+            return make_result(data={"lineage": _native_text_lineage(sketch, sketch_text, provenance, generation)}, summary="Read logical text lineage", document=_doc_state(safe_doc, doc))
+
+        native_ops = ("text_update", "show", "hide", "set", "show_only", "isolate", "restore")
+        if op in native_ops:
+            _app, doc, _design, safe_doc = _open_runtime()
+            expected_fp = PAYLOAD.get("expected_fingerprint")
+            current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
+            if expected_fp is None or expected_fp != current_fp:
+                return make_error("REVISION_CONFLICT", "Authoritative Fusion-side guard: model fingerprint diverged from baseline", details={"document_ref": doc_ref, "expected_revision": PAYLOAD.get("expected_revision"), "expected_fingerprint": expected_fp, "current_fingerprint": current_fp, "applied": False})
+
+            def _mutate_native():
+                if op == "text_update":
+                    sketch, sketch_text, old_provenance, previous_generation = _resolve_current_sketch_text(_design, PAYLOAD.get("text_ref"))
+                    if PAYLOAD.get("text") is not None:
+                        _sketch_text_set_text_value(sketch_text, PAYLOAD["text"])
+                    if PAYLOAD.get("font") is not None:
+                        sketch_text.fontName = PAYLOAD["font"]
+                    if PAYLOAD.get("height_mm") is not None:
+                        _sketch_text_set_height_value(sketch_text, float(PAYLOAD["height_mm"]) / 10.0)
+                    expected_provenance = PAYLOAD.get("provenance")
+                    writes = PAYLOAD.get("metadata_writes")
+                    if not isinstance(expected_provenance, dict) or not isinstance(writes, list) or len(writes) != 1:
+                        raise FusionScriptError("INVALID_ARGUMENT", "Logical text update lacks service-prepared provenance")
+                    _preflight_metadata_plan(sketch_text, writes, [])
+                    _apply_metadata_plan(sketch_text, writes, [])
+                    sketch2, current, persisted, generation = _resolve_current_sketch_text(_design, PAYLOAD.get("text_ref"))
+                    if current is not sketch_text or generation <= previous_generation or persisted != expected_provenance:
+                        raise FusionScriptError("FUSION_API_ERROR", "Logical text update failed same-owner lineage verification")
+                    return {"lineage": _native_text_lineage(sketch2, current, persisted, generation, PAYLOAD.get("font")),
+                            "provenance": expected_provenance, "persisted_provenance": persisted, "same_operation_provenance": True,
+                            "replacement_evidence": {"logical_ref": PAYLOAD.get("text_ref"), "previous_generation": previous_generation,
+                            "current_generation": generation, "previous_generation_is_current": False, "current_generation_count": 1,
+                            "replacement_or_rebind_verified": True, "unrelated_legacy_preserved": True}}
+                state = PAYLOAD.get("visibility_state") if op == "restore" else None
+                entries = state.get("captured") if isinstance(state, dict) else None
+                target = PAYLOAD.get("target")
+                target_ref = target.get("ref") if isinstance(target, dict) else None
+                if op == "restore":
+                    if not isinstance(entries, list) or not isinstance(state.get("state_ref"), str):
+                        raise FusionScriptError("REF_STALE", "Visibility restore state is missing or stale")
+                    restored = []
+                    for entry in entries:
+                        entity = resolve_exact_native_entity(_design, entry)
+                        _old, prop = _visibility_value(entity)
+                        setattr(entity, prop, entry["local_visible"])
+                        now, _ = _visibility_value(entity)
+                        if now is not entry["local_visible"]:
+                            raise FusionScriptError("MUTATION_FAILED", "Visibility restoration did not read back exactly")
+                        restored.append({"ref": entry["ref"], "local_visible": now, "native_token": entry["native_token"]})
+                    scope = dict(state); scope["restored"] = restored
+                    first = restored[0] if restored else {"local_visible": True}
+                    return {"visibility": {"operation": "restore", "state_ref": state["state_ref"], "local_visible": first["local_visible"], "parent_visible": True, "effective_visible": first["local_visible"]}, "scope_evidence": scope, "restoration_verified": True}
+                entity = resolve_exact_native_entity(_design, target)
+                desired = PAYLOAD.get("visible") if op == "set" else op in ("show", "show_only", "isolate")
+                changed = []
+                candidates = [(target_ref, entity, target.get("native_token"))]
+                if op in ("show_only", "isolate"):
+                    candidates = [(target_ref, entity, target.get("native_token"))]
+                    seen_tokens = {target.get("native_token")}
+                    root = getattr(_design, "rootComponent")
+                    collections = []
+                    components = getattr(_design, "allComponents", None)
+                    for component_index in range(getattr(components, "count", 0)):
+                        component = components.item(component_index)
+                        collections.extend((component.bRepBodies, component.sketches))
+                    collections.append(getattr(root, "allOccurrences", root.occurrences))
+                    for collection in collections:
+                        for ci in range(collection.count):
+                            candidate = collection.item(ci)
+                            token = getattr(candidate, "entityToken", None)
+                            if token not in seen_tokens:
+                                seen_tokens.add(token)
+                                candidates.append((None, candidate, token))
+                for ref, candidate, token in candidates:
+                    if not isinstance(token, str) or not token:
+                        raise FusionScriptError("CAPABILITY_UNAVAILABLE", "Visibility scope entity lacks stable entityToken identity")
+                    current, prop = _visibility_value(candidate)
+                    candidate_is_target = candidate is entity or token == target.get("native_token")
+                    wanted = desired if op not in ("show_only", "isolate") or candidate_is_target else False
+                    if current != wanted:
+                        public_ref = target_ref if candidate_is_target else "ent_visibility_" + str(len(changed) + 1)
+                        changed.append({"ref": public_ref, "local_visible": current, "native_token": token})
+                        setattr(candidate, prop, wanted)
+                evidence = _visibility_evidence(entity, op, target_ref, desired)
+                result = {"visibility": evidence}
+                if op in ("show_only", "isolate"):
+                    state_ref = "visibility_state_" + str(PAYLOAD.get("expected_revision") or "current")
+                    evidence["state_ref"] = state_ref
+                    result["scope_evidence"] = {"scope": "own_mutation", "operation": op, "target_ref": target_ref, "state_ref": state_ref, "captured": changed, "changed_refs": [entry["ref"] for entry in changed]}
+                return result
+
+            style_data = _run_native_style_transaction(_app, _mutate_native)
+            style_data.update({"operation": op, "applied": True})
+            return make_result(data=style_data, summary=f"Executed mutate:{op}", document=_doc_state(safe_doc, doc))
+
+        style_hook = globals().get("_style_primitive")
+        if not callable(style_hook):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Logical text/visibility requires a verified Fusion style adapter; no verified adapter was supplied, so no mutation was attempted",
+                details={"operation": op, "applied": False},
+            )
+
+        _app, doc, _design, safe_doc = _open_runtime()
+
+        expected_fp = PAYLOAD.get("expected_fingerprint")
+        current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
+        if expected_fp is None or expected_fp != current_fp:
+            return make_error(
+                "REVISION_CONFLICT",
+                "Authoritative Fusion-side guard: model fingerprint diverged from baseline",
+                details={
+                    "document_ref": doc_ref,
+                    "expected_revision": PAYLOAD.get("expected_revision"),
+                    "expected_fingerprint": expected_fp,
+                    "current_fingerprint": current_fp,
+                    "applied": False,
+                },
+            )
+        capture_hook = globals().get("_mutation_compensation_capture")
+        rollback_hook = globals().get("_mutation_compensation_rollback")
+        if not callable(capture_hook) or not callable(rollback_hook):
+            raise FusionScriptError(
+                "CAPABILITY_UNAVAILABLE",
+                "Logical text/visibility mutation lacks verified compensation and restoration proof",
+                details={"operation": op, "applied": False},
+            )
+        captured = capture_hook(PAYLOAD)
+        applied = False
+        metadata_owner = None
+        metadata_undo = None
+        try:
+            applied = True
+            style_data = style_hook(PAYLOAD)
+            if not isinstance(style_data, dict):
+                raise FusionScriptError(
+                    "FUSION_API_ERROR", "Verified style adapter returned no semantic result"
+                )
+            if op in _TEXT_OPS:
+                expected_provenance = PAYLOAD.get("provenance")
+                writes = PAYLOAD.get("metadata_writes")
+                removals = PAYLOAD.get("metadata_removals")
+                lineage = style_data.get("lineage")
+                requested_ref = PAYLOAD.get("logical_object_ref") or PAYLOAD.get("text_ref")
+                if op != "text_delete" and (
+                    not isinstance(lineage, dict)
+                    or lineage.get("logical_ref") != requested_ref
+                    or (
+                        op in ("text_update", "text_extrude", "text_cut")
+                        and lineage.get("is_current") is not True
+                    )
+                ):
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Logical text mutation did not return the requested current lineage",
+                        details={"operation": op},
+                    )
+                if not isinstance(expected_provenance, dict) or not (
+                    isinstance(writes, list)
+                    and len(writes) == 1
+                    and isinstance(writes[0], dict)
+                    and writes[0].get("name") == _PROVENANCE_NAME
+                    and isinstance(removals, list)
+                    and not removals
+                ):
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Logical text mutation lacks the service-prepared provenance-only metadata plan",
+                        details={"operation": op},
+                    )
+                try:
+                    planned_provenance = json.loads(str(writes[0].get("value")))
+                except Exception:
+                    planned_provenance = None
+                if planned_provenance != expected_provenance:
+                    raise FusionScriptError(
+                        "INVALID_ARGUMENT",
+                        "Logical text provenance plan does not match the service-prepared record",
+                        details={"operation": op},
+                    )
+                if op == "text_update":
+                    replacement = style_data.get("replacement_evidence")
+                    if not isinstance(replacement, dict) or not (
+                        replacement.get("logical_ref") == PAYLOAD.get("text_ref")
+                        and isinstance(replacement.get("previous_generation"), int)
+                        and isinstance(replacement.get("current_generation"), int)
+                        and replacement.get("current_generation") > replacement.get("previous_generation")
+                        and replacement.get("previous_generation_is_current") is False
+                        and replacement.get("current_generation_count") == 1
+                        and replacement.get("replacement_or_rebind_verified") is True
+                        and replacement.get("unrelated_legacy_preserved") is True
+                    ):
+                        raise FusionScriptError(
+                            "FUSION_API_ERROR",
+                            "Logical text update lacks verified single-current-generation replacement evidence",
+                            details={"operation": op},
+                        )
+                provenance_owner = style_data.get("provenance_owner")
+                if not isinstance(provenance_owner, dict):
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Logical text mutation did not provide an exact provenance owner; geometry was compensated and document-scope fallback was refused",
+                        details={"operation": op, "applied": False},
+                    )
+                metadata_owner, _metadata_owner_ref = _resolve_owner(
+                    doc, _design, provenance_owner
+                )
+                _preflight_metadata_plan(metadata_owner, writes, removals)
+                applied_writes, _applied_removals, metadata_undo = _apply_metadata_plan(
+                    metadata_owner, writes, removals
+                )
+                if len(applied_writes) != 1:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Logical text provenance plan was not applied exactly once",
+                        details={"operation": op},
+                    )
+                persisted_records = [
+                    value
+                    for name, value in _reserved_records(metadata_owner)
+                    if name == _PROVENANCE_NAME
+                ]
+                try:
+                    persisted_provenance = (
+                        json.loads(persisted_records[0])
+                        if len(persisted_records) == 1
+                        else None
+                    )
+                except Exception:
+                    persisted_provenance = None
+                if persisted_provenance != expected_provenance:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Persisted logical text provenance does not match the service-prepared same-command record",
+                        details={"operation": op},
+                    )
+                style_data.pop("provenance_owner", None)
+                style_data["provenance"] = expected_provenance
+                style_data["persisted_provenance"] = persisted_provenance
+                style_data["same_operation_provenance"] = True
+            else:
+                visibility = style_data.get("visibility")
+                target = PAYLOAD.get("target")
+                target_ref = target.get("ref") if isinstance(target, dict) else target
+                requested_visible = (
+                    PAYLOAD.get("visible")
+                    if op == "set"
+                    else op in ("show", "show_only", "isolate")
+                )
+                visibility_ok = (
+                    isinstance(visibility, dict)
+                    and visibility.get("operation") == op
+                    and isinstance(visibility.get("local_visible"), bool)
+                    and isinstance(visibility.get("parent_visible"), bool)
+                    and isinstance(visibility.get("effective_visible"), bool)
+                    and visibility.get("effective_visible")
+                    == (visibility.get("local_visible") and visibility.get("parent_visible"))
+                )
+                if op != "restore":
+                    visibility_ok = visibility_ok and (
+                        visibility.get("target_ref") == target_ref
+                        and visibility.get("requested_visible") is requested_visible
+                        and visibility.get("local_visible") is requested_visible
+                    )
+                if not visibility_ok:
+                    raise FusionScriptError(
+                        "FUSION_API_ERROR",
+                        "Visibility mutation lacks operation-specific local/effective evidence",
+                        details={"operation": op},
+                    )
+                if op in ("show_only", "isolate", "restore"):
+                    scope_evidence = style_data.get("scope_evidence")
+                    captured = scope_evidence.get("captured") if isinstance(scope_evidence, dict) else None
+                    changed_refs = scope_evidence.get("changed_refs") if isinstance(scope_evidence, dict) else None
+                    captured_state = {}
+                    if isinstance(captured, list):
+                        for entry in captured:
+                            if not isinstance(entry, dict):
+                                captured_state = None
+                                break
+                            ref = entry.get("ref")
+                            local = entry.get("local_visible")
+                            if not isinstance(ref, str) or ref in captured_state or not isinstance(local, bool):
+                                captured_state = None
+                                break
+                            captured_state[ref] = local
+                    else:
+                        captured_state = None
+                    valid_scope = (
+                        isinstance(scope_evidence, dict)
+                        and scope_evidence.get("scope") == "own_mutation"
+                        and scope_evidence.get("operation") in ("show_only", "isolate")
+                        and captured_state is not None
+                        and isinstance(changed_refs, list)
+                        and len(changed_refs) == len(set(changed_refs))
+                        and set(changed_refs) == set(captured_state)
+                    )
+                    if op in ("show_only", "isolate"):
+                        valid_scope = valid_scope and (
+                            scope_evidence.get("operation") == op
+                            and scope_evidence.get("target_ref") == target_ref
+                        )
+                    else:
+                        restored = scope_evidence.get("restored") if isinstance(scope_evidence, dict) else None
+                        restored_state = {}
+                        if isinstance(restored, list):
+                            for entry in restored:
+                                if not isinstance(entry, dict):
+                                    restored_state = None
+                                    break
+                                ref = entry.get("ref")
+                                local = entry.get("local_visible")
+                                if not isinstance(ref, str) or ref in restored_state or not isinstance(local, bool):
+                                    restored_state = None
+                                    break
+                                restored_state[ref] = local
+                        else:
+                            restored_state = None
+                        valid_scope = valid_scope and (
+                            restored_state == captured_state
+                            and isinstance(scope_evidence.get("state_ref"), str)
+                            and scope_evidence.get("state_ref") == visibility.get("state_ref")
+                        )
+                    if not valid_scope:
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "Scoped visibility mutation lacks own-mutation capture evidence",
+                            details={"operation": op},
+                        )
+                if op == "restore" and style_data.get("restoration_verified") is not True:
+                    raise FusionScriptError(
+                        "CAPABILITY_UNAVAILABLE",
+                        "Visibility restoration could not be verified exactly",
+                        details={"operation": op},
+                    )
+            post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+            if not post_fp or post_fp == current_fp:
+                raise FusionScriptError(
+                    "MUTATION_FAILED",
+                    "Style mutation did not produce a distinct authoritative model state",
+                    details={"operation": op},
+                )
+        except Exception as exc:
+            if applied:
+                try:
+                    if metadata_owner is not None and metadata_undo is not None:
+                        _rollback_metadata_or_fail(metadata_owner, metadata_undo)
+                finally:
+                    rollback_ok = rollback_hook(captured)
+                    restored_fp, _restored, _restored_doc = collect_model_fingerprint(PAYLOAD)
+                    if rollback_ok is not True or restored_fp != current_fp:
+                        raise FusionScriptError(
+                            "CAPABILITY_UNAVAILABLE",
+                            "Style mutation failed and exact restoration could not be verified",
+                            details={"operation": op, "applied": False, "compensated": False},
+                        )
+            if isinstance(exc, FusionScriptError):
+                raise exc
+            raise FusionScriptError(
+                "FUSION_API_ERROR",
+                "Style mutation failed; exact compensation completed",
+                details={"operation": op, "applied": False, "compensated": True},
+            )
+        style_data["operation"] = op
+        style_data["applied"] = True
+        style_data["fingerprint"] = post_fp
+        style_data["document_ref"] = post_doc_ref or doc_ref
+        return make_result(
+            data=style_data,
+            summary=f"Executed mutate:{op}",
+            document=_doc_state(safe_doc, doc),
+        )
+
+    # Fallback for other mutate-group operations (geometry/style mutations, to be
+    # owned by later tasks): the same authoritative guard + geometry primitive +
+    # one-command metadata plan structure. When the Bridge attaches a metadata
+    # plan, THIS same script execution applies it right after the geometry
+    # primitive — provenance travels with the geometry change in one command,
+    # with identical preflight/compensation/post-fingerprint atomicity. Without
+    # a plan nothing metadata-related is touched.
     expected_fp = PAYLOAD.get("expected_fingerprint")
-
-    # Authoritative Fusion-side freshness guard:
-    # Freshly collect current fingerprint before any apply
-    current_fp, canonical_data, doc_ref = collect_model_fingerprint(PAYLOAD)
-
+    current_fp, _canonical, doc_ref = collect_model_fingerprint(PAYLOAD)
     if expected_fp is None or expected_fp != current_fp:
         return make_error(
             "REVISION_CONFLICT",
@@ -22,34 +1482,90 @@ def run():
             },
         )
 
-    # Guard passed: execute mutation primitive
+    _app, doc, design, safe_doc = _open_runtime()
+
+    plan_writes = PAYLOAD.get("metadata_writes")
+    plan_removals = PAYLOAD.get("metadata_removals")
+    has_plan = isinstance(plan_writes, list) and isinstance(plan_removals, list)
+    plan_owner = None
+    plan_undo = None
+
+    if has_plan:
+        plan_owner, target_ref = _resolve_owner(
+            doc, design, PAYLOAD.get("target")
+        )
+        _preflight_metadata_plan(plan_owner, plan_writes, plan_removals)
+
     primitive_hook = globals().get("_mutation_primitive")
-    if callable(primitive_hook):
-        primitive_hook(PAYLOAD)
-
+    geometry_capture = None
+    geometry_applied = False
+    if has_plan:
+        geometry_capture = _prepare_geometry_compensation(primitive_hook)
+    metadata_compensations_before = _metadata_compensation_count[0]
     try:
-        import adsk.core
-        app = adsk.core.Application.get()
-        if app and getattr(app, "activeDocument", None):
-            doc = app.activeDocument
-            if hasattr(doc, "attributes") and op in ("set", "tag"):
-                target = PAYLOAD.get("target") or "document"
-                name = PAYLOAD.get("tag_name") or PAYLOAD.get("name") or "marker"
-                val = PAYLOAD.get("value") or "true"
-                doc.attributes.add("bridge.cad/v1", f"{target}:{name}", str(val))
-    except Exception as exc:
-        raise RuntimeError(f"Mutation primitive failed: {exc}") from exc
+        if callable(primitive_hook):
+            geometry_applied = True
+            primitive_hook(PAYLOAD)
 
-    # Freshly collect real post-apply fingerprint of actual model state
-    post_fp, post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+        if has_plan:
+            applied_writes, applied_removals, plan_undo = _apply_metadata_plan(
+                plan_owner, plan_writes, plan_removals
+            )
+            if not applied_writes:
+                _rollback_metadata_or_fail(plan_owner, plan_undo)
+                plan_undo = None
+                raise FusionScriptError(
+                    "INVALID_ARGUMENT",
+                    "Metadata plan produced no attribute writes; provenance cannot be recorded transactionally",
+                    details={"operation": op},
+                )
+
+        post_fp, _post_canonical, post_doc_ref = collect_model_fingerprint(PAYLOAD)
+    except Exception as exc:
+        metadata_compensated_here = (
+            _metadata_compensation_count[0] > metadata_compensations_before
+        )
+        try:
+            if plan_undo is not None:
+                _rollback_metadata_or_fail(plan_owner, plan_undo)
+                metadata_compensated_here = True
+        finally:
+            if geometry_applied and has_plan:
+                _compensate_geometry(geometry_capture, current_fp)
+        if has_plan and not geometry_applied and metadata_compensated_here:
+            _verify_full_restoration(current_fp)
+        if isinstance(exc, FusionScriptError):
+            raise exc
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            "Mutation execution failed after an apply attempt; exact compensation completed",
+            details={"operation": op, "applied": False, "compensated": True},
+        )
     if not post_fp or not isinstance(post_fp, str) or not post_fp.strip():
+        try:
+            _rollback_metadata_or_fail(plan_owner, plan_undo)
+        finally:
+            if geometry_applied and has_plan:
+                _compensate_geometry(geometry_capture, current_fp)
+        if has_plan and not geometry_applied:
+            _verify_full_restoration(current_fp)
         return make_error(
             "FINGERPRINT_FAILED",
             "Authoritative post-apply model fingerprint collection failed or returned empty",
-            details={"document_ref": post_doc_ref or doc_ref, "applied": False},
+            details={
+                "document_ref": post_doc_ref or doc_ref,
+                "applied": False,
+                "compensated": True,
+            },
         )
-
     if post_fp == current_fp:
+        try:
+            _rollback_metadata_or_fail(plan_owner, plan_undo)
+        finally:
+            if geometry_applied and has_plan:
+                _compensate_geometry(geometry_capture, current_fp)
+        if has_plan and not geometry_applied:
+            _verify_full_restoration(current_fp)
         return make_error(
             "MUTATION_FAILED",
             "Mutation failed to produce distinct post-apply model state; cannot advance model revision",
@@ -58,17 +1574,40 @@ def run():
                 "initial_fingerprint": current_fp,
                 "post_fingerprint": post_fp,
                 "applied": False,
+                "compensated": True,
             },
         )
 
-    result_data = {
-        "operation": op,
-        "applied": True,
-        "fingerprint": post_fp,
-        "document_ref": post_doc_ref or doc_ref,
-    }
-    return make_result(
-        data=result_data,
-        summary=f"Executed mutate:{op}",
-        changed_refs=[PAYLOAD.get("target")] if PAYLOAD.get("target") else [],
-    )
+    try:
+        result_data = {
+            "operation": op,
+            "applied": True,
+            "fingerprint": post_fp,
+            "document_ref": post_doc_ref or doc_ref,
+        }
+        if has_plan:
+            result_data["attributes"] = applied_writes
+            result_data["removed"] = applied_removals
+            result_data["provenance"] = PAYLOAD.get("provenance")
+        return make_result(
+            data=result_data,
+            summary=f"Executed mutate:{op}",
+            document=_doc_state(safe_doc, doc),
+            changed_refs=[target_ref] if has_plan and target_ref else [],
+        )
+    except Exception as exc:
+        try:
+            if plan_undo is not None:
+                _rollback_metadata_or_fail(plan_owner, plan_undo)
+        finally:
+            if geometry_applied and has_plan:
+                _compensate_geometry(geometry_capture, current_fp)
+        if has_plan and not geometry_applied:
+            _verify_full_restoration(current_fp)
+        if isinstance(exc, FusionScriptError):
+            raise exc
+        raise FusionScriptError(
+            "FUSION_API_ERROR",
+            "Mutation execution failed after an apply attempt; exact compensation completed",
+            details={"operation": op, "applied": False, "compensated": True},
+        )

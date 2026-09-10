@@ -13,7 +13,6 @@ from app.container import ApplicationContainer
 from app.fusion_cad.errors import (
     FusionCadError,
     format_safe_validation_message,
-    sanitize_public_payload,
     sanitize_validation_errors,
 )
 from app.fusion_cad.models import CadResult
@@ -164,7 +163,24 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             and getattr(container, "fusion_cad", None)
             and container.fusion_cad.is_domain_summary(summary)
         ):
-            container.fusion_cad.finalize_terminal_operation(op_status, full)
+            if op_status.get("domain_finalization") != "finalized":
+                finalized = container.fusion_cad.finalize_terminal_operation(
+                    op_status, full
+                )
+                finalized_payload = (
+                    finalized.model_dump(mode="python", exclude_none=True)
+                    if isinstance(finalized, CadResult)
+                    else finalized
+                )
+                container.desktop_nodes.finalize_operation_result(
+                    args["node_id"], args["operation_id"], finalized_payload
+                )
+            # Always render the retained public artifact.  On repeat reads the
+            # durable domain_finalization marker prevents replaying service state
+            # transitions such as transaction:begin.
+            full, metadata = container.desktop_nodes.operation_result(
+                args["node_id"], args["operation_id"]
+            )
         elif FusionCadService._is_error_payload(full) or op_status.get("status") in (
             "failed",
             "late_failed",
