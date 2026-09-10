@@ -104,3 +104,47 @@ def test_commit_requires_semantic_equivalence_to_accepted_preview():
     assert exc.value.code == ErrorCode.TRANSACTION_CONFLICT
     assert exc.value.details["applied"] is True
     assert mismatch.get("tx_mismatch").state is TransactionState.STAGED
+
+
+def test_begin_commit_requires_accepted_preview_for_current_plan():
+    store = TransactionStore()
+    store.begin("tx_no_preview", "doc_1", "rev_1", "fp_1", {})
+    store.stage("tx_no_preview", SPIKE_ACTION)
+
+    with pytest.raises(FusionCadError) as exc:
+        store.begin_commit("tx_no_preview", "fp_1")
+
+    assert exc.value.code == ErrorCode.TRANSACTION_CONFLICT
+
+
+def test_staging_plan_change_invalidates_accepted_preview():
+    store = TransactionStore()
+    store.begin("tx_changed", "doc_1", "rev_1", "fp_1", {})
+    staged = store.stage("tx_changed", SPIKE_ACTION)
+    store.begin_preview("tx_changed", "fp_1")
+    store.finish_preview(
+        "tx_changed",
+        preview={"replay_signature": {"plan_hash": staged.plan_hash}},
+    )
+
+    changed = store.stage("tx_changed", {**SPIKE_ACTION, "text": "changed"})
+
+    assert changed.preview_evidence is None
+    with pytest.raises(FusionCadError) as exc:
+        store.begin_commit("tx_changed", "fp_1")
+    assert exc.value.code == ErrorCode.TRANSACTION_CONFLICT
+
+
+def test_begin_commit_allows_accepted_preview_for_current_plan():
+    store = TransactionStore()
+    store.begin("tx_previewed", "doc_1", "rev_1", "fp_1", {})
+    staged = store.stage("tx_previewed", SPIKE_ACTION)
+    store.begin_preview("tx_previewed", "fp_1")
+    store.finish_preview(
+        "tx_previewed",
+        preview={"replay_signature": {"plan_hash": staged.plan_hash}},
+    )
+
+    committing = store.begin_commit("tx_previewed", "fp_1")
+
+    assert committing.plan_hash == staged.plan_hash

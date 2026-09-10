@@ -93,7 +93,11 @@ class TransactionStore:
             )
         plan = record.plan + (_clone(dict(action)),)
         self._records[transaction_id] = replace(
-            record, state=TransactionState.STAGED, plan=plan, plan_hash=_plan_hash(plan)
+            record,
+            state=TransactionState.STAGED,
+            plan=plan,
+            plan_hash=_plan_hash(plan),
+            preview_evidence=None,
         )
         return self.get(transaction_id)
 
@@ -142,6 +146,16 @@ class TransactionStore:
         if record.state is not TransactionState.STAGED or not record.plan:
             raise FusionCadError(
                 ErrorCode.TRANSACTION_CONFLICT, "Transaction cannot be committed"
+            )
+        preview_signature = (record.preview_evidence or {}).get("replay_signature")
+        if (
+            not isinstance(preview_signature, Mapping)
+            or preview_signature.get("plan_hash") != record.plan_hash
+        ):
+            raise FusionCadError(
+                ErrorCode.TRANSACTION_CONFLICT,
+                "Transaction commit requires an accepted preview of the current plan",
+                details={"transaction_id": transaction_id, "applied": False},
             )
         self._assert_fresh(record, fingerprint)
         return record

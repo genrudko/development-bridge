@@ -1709,6 +1709,12 @@ async def test_falsify_rendered_script_transaction_preview_and_commit_stale_bloc
                         "position": {"x": 0.0, "y": 0.0, "z": 0.0, "frame": {"space": "world"}}}},
             group="transaction",
         )
+        stale_record = cad_service.transaction_store.get("tx_1234")
+        cad_service.transaction_store.begin_preview("tx_1234", stale_record.baseline_fingerprint)
+        cad_service.transaction_store.finish_preview(
+            "tx_1234",
+            preview={"replay_signature": {"plan_hash": stale_record.plan_hash}},
+        )
 
         # 2. External change occurs in Fusion
         fake_adsk.volume = 300.0
@@ -2923,6 +2929,14 @@ async def test_transaction_stage_does_not_consume_commit_provenance_operation_id
                 "transaction_id": tx_id,
             },
         },
+    )
+    staged_record = cad_service.transaction_store.get(tx_id)
+    cad_service.transaction_store.begin_preview(
+        tx_id, staged_record.baseline_fingerprint
+    )
+    cad_service.transaction_store.finish_preview(
+        tx_id,
+        preview={"replay_signature": {"plan_hash": staged_record.plan_hash}},
     )
 
     commit = await cad_service.execute(
@@ -10024,6 +10038,53 @@ def test_task13_mismatching_commit_signature_fails_without_second_dispatch():
     assert exc.value.details["applied"] is True
     assert mock_desktop_service.call.call_count == 1
     assert service.transaction_store.get("tx_mismatch").state is TransactionState.STAGED
+
+
+@pytest.mark.asyncio
+async def test_task13_commit_without_accepted_preview_fails_before_dispatch(
+    mock_desktop_service: DesktopNodeService,
+):
+    service = FusionCadService(mock_desktop_service)
+    service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records(
+            [
+                CapabilityRecord(
+                    name="transaction.preview_replay", state="supported"
+                ),
+                CapabilityRecord(
+                    name="revision.external_change_detection", state="supported"
+                ),
+            ]
+        ),
+    )
+    rec = service.revision_tracker.observe("doc_1", "fp_base")
+    service.revision_tracker.begin_transaction(
+        "tx_no_preview", "doc_1", rec.revision, rec.fingerprint
+    )
+    service.transaction_store.begin(
+        "tx_no_preview", "doc_1", rec.revision, rec.fingerprint, {}
+    )
+    service.transaction_store.stage(
+        "tx_no_preview", {"action_type": "text_create"}
+    )
+    mock_desktop_service.submit = AsyncMock(
+        return_value={"status": "queued", "operation_id": "op_must_not_dispatch"}
+    )
+
+    with pytest.raises(FusionCadError) as exc:
+        await service.execute(
+            {
+                "node_id": "desk-1",
+                "operation": "commit",
+                "transaction_id": "tx_no_preview",
+            },
+            group="transaction",
+        )
+
+    assert exc.value.code == ErrorCode.TRANSACTION_CONFLICT
+    assert mock_desktop_service.call.call_count == 0
+    assert mock_desktop_service.submit.call_count == 0
 
 
 @pytest.mark.asyncio

@@ -3160,6 +3160,11 @@ class FusionCadService:
                     "P0 transaction preview/commit feasibility is limited to the logical text creation spike",
                     details={"operation": op, "applied": False},
                 )
+            if op == "commit":
+                self._transaction_store.begin_commit(
+                    transaction.transaction_id,
+                    transaction.baseline_fingerprint,
+                )
 
         # Transaction begin: persist baseline after execution succeeds (below)
         if is_transaction_begin:
