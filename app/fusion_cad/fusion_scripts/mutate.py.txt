@@ -1000,23 +1000,16 @@ def run():
         return matches[0]
 
     def _native_text_lineage(sketch, sketch_text, provenance, generation, requested_font=None):
-        text_parameter = getattr(sketch_text, "textParameter", None)
-        height_parameter = getattr(sketch_text, "heightParameter", None)
-        if text_parameter is None or not hasattr(text_parameter, "textValue"):
-            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "SketchText textParameter.textValue is unavailable")
         font_used = str(getattr(sketch_text, "fontName", "") or "")
         font_requested = str(requested_font or font_used)
         fallback = None if font_requested == font_used else "Fusion substituted the requested font"
-        height_cm = getattr(height_parameter, "value", None)
-        if not isinstance(height_cm, (int, float)):
-            raise FusionScriptError("CAPABILITY_UNAVAILABLE", "SketchText heightParameter.value is unavailable")
         logical_ref = provenance["logical_object_ref"]
         return {
             "logical_ref": logical_ref, "generation": generation, "is_current": True,
             "sketch": "ent_sketch_" + logical_ref, "sketch_text_id": "ent_sketch_text_" + logical_ref,
-            "feature": None, "outputs": [], "text": str(text_parameter.textValue),
+            "feature": None, "outputs": [], "text": _sketch_text_text_value(sketch_text),
             "font_requested": font_requested, "font_used": font_used,
-            "fallback_reason": fallback, "height_mm": float(height_cm) * 10.0,
+            "fallback_reason": fallback, "height_mm": _sketch_text_height_value(sketch_text) * 10.0,
         }
 
     def _run_native_style_transaction(app, mutation):
@@ -1108,11 +1101,11 @@ def run():
                 if op == "text_update":
                     sketch, sketch_text, old_provenance, previous_generation = _resolve_current_sketch_text(_design, PAYLOAD.get("text_ref"))
                     if PAYLOAD.get("text") is not None:
-                        sketch_text.textParameter.textValue = PAYLOAD["text"]
+                        _sketch_text_set_text_value(sketch_text, PAYLOAD["text"])
                     if PAYLOAD.get("font") is not None:
                         sketch_text.fontName = PAYLOAD["font"]
                     if PAYLOAD.get("height_mm") is not None:
-                        sketch_text.heightParameter.value = float(PAYLOAD["height_mm"]) / 10.0
+                        _sketch_text_set_height_value(sketch_text, float(PAYLOAD["height_mm"]) / 10.0)
                     expected_provenance = PAYLOAD.get("provenance")
                     writes = PAYLOAD.get("metadata_writes")
                     if not isinstance(expected_provenance, dict) or not isinstance(writes, list) or len(writes) != 1:

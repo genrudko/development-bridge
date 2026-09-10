@@ -67,6 +67,123 @@ def _finite_number(value, label):
     return number
 
 
+def _sketch_text_text_value(sketch_text):
+    """Read SketchText text via parameter API with a runtime legacy fallback."""
+    parameter_error = None
+    try:
+        parameter = getattr(sketch_text, "textParameter", None)
+    except Exception as exc:
+        parameter, parameter_error = None, exc
+    if parameter is not None:
+        try:
+            value = getattr(parameter, "textValue")
+        except Exception as exc:
+            parameter_error = exc
+        else:
+            if value is not None:
+                return str(value)
+    try:
+        value = getattr(sketch_text, "text")
+    except Exception as exc:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText text is unreadable through parameter and legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None, "legacy_error": str(exc)},
+        ) from exc
+    if value is None:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText text is unavailable through parameter and legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None},
+        )
+    return str(value)
+
+
+def _sketch_text_height_value(sketch_text):
+    """Read SketchText height in Fusion internal length units with runtime fallback."""
+    parameter_error = None
+    try:
+        parameter = getattr(sketch_text, "heightParameter", None)
+    except Exception as exc:
+        parameter, parameter_error = None, exc
+    if parameter is not None:
+        try:
+            value = getattr(parameter, "value")
+        except Exception as exc:
+            parameter_error = exc
+        else:
+            return _finite_number(value, "SketchText height")
+    try:
+        value = getattr(sketch_text, "height")
+    except Exception as exc:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText height is unreadable through parameter and legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None, "legacy_error": str(exc)},
+        ) from exc
+    return _finite_number(value, "SketchText height")
+
+
+def _sketch_text_set_text_value(sketch_text, value):
+    requested = str(value)
+    parameter_error = None
+    try:
+        parameter = getattr(sketch_text, "textParameter", None)
+    except Exception as exc:
+        parameter, parameter_error = None, exc
+    if parameter is not None:
+        try:
+            parameter.textValue = requested
+            actual = parameter.textValue
+        except Exception as exc:
+            parameter_error = exc
+        else:
+            if str(actual) != requested:
+                raise FusionScriptError("FUSION_API_ERROR", "SketchText parameter text read-back mismatch")
+            return
+    try:
+        sketch_text.text = requested
+        actual = sketch_text.text
+    except Exception as exc:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText text is not writable through parameter or legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None, "legacy_error": str(exc)},
+        ) from exc
+    if str(actual) != requested:
+        raise FusionScriptError("FUSION_API_ERROR", "SketchText legacy text read-back mismatch")
+
+
+def _sketch_text_set_height_value(sketch_text, value):
+    requested = _finite_number(value, "SketchText height")
+    parameter_error = None
+    try:
+        parameter = getattr(sketch_text, "heightParameter", None)
+    except Exception as exc:
+        parameter, parameter_error = None, exc
+    if parameter is not None:
+        try:
+            parameter.value = requested
+            actual = parameter.value
+        except Exception as exc:
+            parameter_error = exc
+        else:
+            if _finite_number(actual, "SketchText height") != requested:
+                raise FusionScriptError("FUSION_API_ERROR", "SketchText parameter height read-back mismatch")
+            return
+    try:
+        sketch_text.height = requested
+        actual = sketch_text.height
+    except Exception as exc:
+        raise FusionScriptError(
+            "CAPABILITY_UNAVAILABLE",
+            "SketchText height is not writable through parameter or legacy APIs",
+            details={"parameter_error": str(parameter_error) if parameter_error else None, "legacy_error": str(exc)},
+        ) from exc
+    if _finite_number(actual, "SketchText height") != requested:
+        raise FusionScriptError("FUSION_API_ERROR", "SketchText legacy height read-back mismatch")
+
+
 def canonicalize_value(val):
     if val is None or isinstance(val, (bool, int, str)):
         return val
@@ -1158,18 +1275,16 @@ def collect_model_fingerprint(payload=None):
                 for text_idx in range(texts.count):
                     sketch_text = texts.item(text_idx)
                     text_id = getattr(sketch_text, "entityToken", None) or getattr(sketch_text, "id", None)
-                    text_parameter = getattr(sketch_text, "textParameter", None)
-                    height_parameter = getattr(sketch_text, "heightParameter", None)
-                    if not text_id or text_parameter is None or height_parameter is None:
+                    if not text_id:
                         raise FusionScriptError(
                             "CAPABILITY_UNAVAILABLE",
-                            "SketchText lacks stable identity or semantic parameters for authoritative fingerprinting",
+                            "SketchText lacks stable identity for authoritative fingerprinting",
                         )
                     sketch_text_items.append({
                         "id": str(text_id),
-                        "text": str(text_parameter.textValue),
+                        "text": _sketch_text_text_value(sketch_text),
                         "font": str(getattr(sketch_text, "fontName", "") or ""),
-                        "height": _finite_number(height_parameter.value, "SketchText height"),
+                        "height": _sketch_text_height_value(sketch_text),
                     })
                     _read_owner_attributes(sketch_text, "sketch_text", str(text_id).strip())
 

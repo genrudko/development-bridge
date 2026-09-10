@@ -89,3 +89,44 @@ def test_authoritative_fingerprint_defines_sketch_text_finite_number_helper():
     source = FusionCadScriptBundle().build("read", {"operation": "model_snapshot"})
     assert "_finite_number(" in source
     assert "def _finite_number(" in source
+
+
+class _LiveBrokenSketchText:
+    def __init__(self):
+        self.text = "ПЫТОК"
+        self.height = 0.4
+        self.fontName = "Rubik"
+
+    @property
+    def textParameter(self):
+        raise RuntimeError("3 : Parameter is not numeric type")
+
+    @property
+    def heightParameter(self):
+        raise RuntimeError("3 : Parameter is not text type")
+
+
+def test_sketch_text_semantics_fall_back_when_live_parameter_getters_raise():
+    scope = _scope()
+    text = _LiveBrokenSketchText()
+    assert scope["_sketch_text_text_value"](text) == "ПЫТОК"
+    assert scope["_sketch_text_height_value"](text) == pytest.approx(0.4)
+    scope["_sketch_text_set_text_value"](text, "BRIDGE_Ω_ТЕСТ")
+    scope["_sketch_text_set_height_value"](text, 0.55)
+    assert text.text == "BRIDGE_Ω_ТЕСТ"
+    assert text.height == pytest.approx(0.55)
+
+
+def test_sketch_text_semantics_prefer_parameter_api_when_it_works():
+    text_parameter = SimpleNamespace(textValue="ПЫТОК")
+    height_parameter = SimpleNamespace(value=0.4)
+    text = SimpleNamespace(textParameter=text_parameter, heightParameter=height_parameter, text="legacy-text", height=9.9)
+    scope = _scope()
+    assert scope["_sketch_text_text_value"](text) == "ПЫТОК"
+    assert scope["_sketch_text_height_value"](text) == pytest.approx(0.4)
+    scope["_sketch_text_set_text_value"](text, "NEW")
+    scope["_sketch_text_set_height_value"](text, 0.5)
+    assert text_parameter.textValue == "NEW"
+    assert height_parameter.value == pytest.approx(0.5)
+    assert text.text == "legacy-text"
+    assert text.height == pytest.approx(9.9)
