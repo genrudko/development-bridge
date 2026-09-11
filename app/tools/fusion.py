@@ -17,18 +17,22 @@ from app.fusion_cad.errors import (
 )
 from app.fusion_cad.models import CadResult
 from app.fusion_cad.requests import (
+    FusionFeatureRequest,
     FusionInspectRequest,
     FusionMetadataRequest,
     FusionReadRequest,
+    FusionSketchRequest,
     FusionStyleRequest,
     FusionTransactionRequest,
     FusionValidateRequest,
     FusionViewRequest,
 )
 from app.fusion_cad.schemas import (
+    fusion_feature_schema,
     fusion_inspect_schema,
     fusion_metadata_schema,
     fusion_read_schema,
+    fusion_sketch_schema,
     fusion_style_schema,
     fusion_transaction_schema,
     fusion_validate_schema,
@@ -391,6 +395,24 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 inputSchema=fusion_transaction_schema(),
             ),
             make_domain_handler(FusionTransactionRequest, "fusion_transaction"),
+            "fusion-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="fusion_sketch",
+                description="Guarded parametric sketch creation and typed batch edits",
+                inputSchema=fusion_sketch_schema(),
+            ),
+            make_domain_handler(FusionSketchRequest, "fusion_sketch"),
+            "fusion-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="fusion_feature",
+                description="Guarded rich-provider solid feature creation",
+                inputSchema=fusion_feature_schema(),
+            ),
+            make_domain_handler(FusionFeatureRequest, "fusion_feature"),
             "fusion-desktop",
         ),
     )

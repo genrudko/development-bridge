@@ -5,9 +5,11 @@ from typing import Any
 from pydantic import TypeAdapter
 
 from app.fusion_cad.requests import (
+    FusionFeatureRequest,
     FusionInspectRequest,
     FusionMetadataRequest,
     FusionReadRequest,
+    FusionSketchRequest,
     FusionStyleRequest,
     FusionTransactionRequest,
     FusionValidateRequest,
@@ -67,6 +69,14 @@ def fusion_transaction_schema() -> dict[str, Any]:
     return _build_discriminated_schema(FusionTransactionRequest)
 
 
+def fusion_sketch_schema() -> dict[str, Any]:
+    return _build_discriminated_schema(FusionSketchRequest)
+
+
+def fusion_feature_schema() -> dict[str, Any]:
+    return _build_discriminated_schema(FusionFeatureRequest)
+
+
 FUSION_CAD_SCHEMAS: dict[str, dict[str, Any]] = {
     "fusion_read": fusion_read_schema(),
     "fusion_inspect": fusion_inspect_schema(),
@@ -75,4 +85,6 @@ FUSION_CAD_SCHEMAS: dict[str, dict[str, Any]] = {
     "fusion_style": fusion_style_schema(),
     "fusion_validate": fusion_validate_schema(),
     "fusion_transaction": fusion_transaction_schema(),
+    "fusion_sketch": fusion_sketch_schema(),
+    "fusion_feature": fusion_feature_schema(),
 }

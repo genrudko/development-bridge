@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.fusion_cad.models import (
     DOCUMENT_REF_PATTERN,
@@ -737,5 +737,231 @@ FusionTransactionRequest = Annotated[
     | TransactionRollbackRequest
     | TransactionAbortRequest
     | TransactionStatusRequest,
+    Field(discriminator="operation"),
+]
+
+# ==========================================
+# 8. fusion_sketch requests (Hands P1 slice)
+# ==========================================
+
+HandsFinite = Annotated[float, Field(allow_inf_nan=False)]
+HandsPositive = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+HandsActionId = Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")]
+HandsEntityRef = Annotated[str, Field(pattern=ENTITY_REF_PATTERN)]
+
+
+class SketchFacePlane(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    face_ref: HandsEntityRef
+
+
+class SketchPriorActionOperand(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    source: Literal["action"]
+    action_id: HandsActionId
+    element: Literal["curve", "start", "end", "center"] = "curve"
+    index: int = Field(default=0, ge=0, le=1024)
+
+
+class SketchOpaqueEntityOperand(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    source: Literal["entity"]
+    ref: HandsEntityRef
+
+
+SketchEntityOperand = Annotated[
+    SketchPriorActionOperand | SketchOpaqueEntityOperand,
+    Field(discriminator="source"),
+]
+
+
+class SketchLineAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: HandsActionId
+    type: Literal["line"]
+    x1: HandsFinite
+    y1: HandsFinite
+    x2: HandsFinite
+    y2: HandsFinite
+
+
+class SketchRectangleAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: HandsActionId
+    type: Literal["rectangle"]
+    width: HandsPositive
+    height: HandsPositive
+    x: HandsFinite = 0.0
+    y: HandsFinite = 0.0
+    mode: Literal["corner", "center"] = "corner"
+
+
+class SketchCircleAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: HandsActionId
+    type: Literal["circle"]
+    x: HandsFinite = 0.0
+    y: HandsFinite = 0.0
+    diameter: HandsPositive
+
+
+class SketchConstraintAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: HandsActionId
+    type: Literal["constraint"]
+    kind: Literal[
+        "coincident",
+        "parallel",
+        "perpendicular",
+        "tangent",
+        "equal",
+        "horizontal",
+        "vertical",
+        "concentric",
+        "collinear",
+        "midpoint",
+    ]
+    entity_one: SketchEntityOperand
+    entity_two: SketchEntityOperand | None = None
+
+    @model_validator(mode="after")
+    def entity_count_matches_constraint(self):
+        one_entity = self.kind in {"horizontal", "vertical"}
+        if one_entity and self.entity_two is not None:
+            raise ValueError("single-entity constraint forbids entity_two")
+        if not one_entity and self.entity_two is None:
+            raise ValueError("two-entity constraint requires entity_two")
+        return self
+
+
+class SketchDimensionAction(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: HandsActionId
+    type: Literal["dimension"]
+    kind: Literal["distance", "horizontal", "vertical", "angular", "radial", "diameter"]
+    entity_one: SketchEntityOperand
+    entity_two: SketchEntityOperand | None = None
+    value: HandsPositive
+
+    @model_validator(mode="after")
+    def entity_count_matches_dimension(self):
+        two_entity = self.kind in {"distance", "horizontal", "vertical", "angular"}
+        if two_entity and self.entity_two is None:
+            raise ValueError("dimension requires entity_two")
+        if not two_entity and self.entity_two is not None:
+            raise ValueError("radial/diameter dimension forbids entity_two")
+        return self
+
+
+SketchBatchAction = Annotated[
+    SketchLineAction
+    | SketchRectangleAction
+    | SketchCircleAction
+    | SketchConstraintAction
+    | SketchDimensionAction,
+    Field(discriminator="type"),
+]
+
+
+class SketchCreateRequest(_StrictCadBase):
+    operation: Literal["create"]
+    plane: Literal["xy", "xz", "yz"] | SketchFacePlane = "xy"
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    expected_revision: str = Field(..., pattern=MODEL_REVISION_PATTERN)
+    dry_run: bool = False
+
+
+class SketchBatchRequest(_StrictCadBase):
+    operation: Literal["batch"]
+    sketch: HandsEntityRef
+    actions: tuple[SketchBatchAction, ...] = Field(..., min_length=1, max_length=100)
+    expected_revision: str = Field(..., pattern=MODEL_REVISION_PATTERN)
+    dry_run: bool = False
+
+    @model_validator(mode="after")
+    def action_dependencies_are_backward_and_unique(self):
+        seen: dict[str, str] = {}
+        geometry_types = {"line", "rectangle", "circle"}
+        for action in self.actions:
+            if action.id in seen:
+                raise ValueError("duplicate sketch action id")
+            operands = []
+            if isinstance(action, (SketchConstraintAction, SketchDimensionAction)):
+                operands.append(action.entity_one)
+                if action.entity_two is not None:
+                    operands.append(action.entity_two)
+            for operand in operands:
+                if isinstance(operand, SketchPriorActionOperand):
+                    prior_type = seen.get(operand.action_id)
+                    if prior_type is None:
+                        raise ValueError("action references must target an earlier action")
+                    if prior_type not in geometry_types:
+                        raise ValueError("action reference must target created sketch geometry")
+            seen[action.id] = action.type
+        return self
+
+
+FusionSketchRequest = Annotated[
+    SketchCreateRequest | SketchBatchRequest,
+    Field(discriminator="operation"),
+]
+
+
+# ===========================================
+# 9. fusion_feature requests (Hands P1 slice)
+# ===========================================
+
+class ExtrudeFeatureSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["extrude"]
+    sketch: HandsEntityRef
+    distance_mm: HandsPositive
+    profile_index: int = Field(default=0, ge=0, le=4096)
+    operation_type: Literal["new_body", "join", "cut", "intersect"] = "new_body"
+    direction: Literal["positive", "negative", "symmetric"] = "positive"
+
+
+class HoleFeatureSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["hole"]
+    target_face: HandsEntityRef
+    diameter_mm: HandsPositive
+    x_mm: HandsFinite = 0.0
+    y_mm: HandsFinite = 0.0
+    through_all: bool = True
+    depth_mm: HandsPositive | None = None
+
+
+class FilletFeatureSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["fillet"]
+    body: HandsEntityRef
+    edges: tuple[HandsEntityRef, ...] = Field(..., min_length=1, max_length=256)
+    radius_mm: HandsPositive
+
+
+class ChamferFeatureSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["chamfer"]
+    body: HandsEntityRef
+    edges: tuple[HandsEntityRef, ...] = Field(..., min_length=1, max_length=256)
+    distance_mm: HandsPositive
+
+
+HandsFeatureSpec = Annotated[
+    ExtrudeFeatureSpec | HoleFeatureSpec | FilletFeatureSpec | ChamferFeatureSpec,
+    Field(discriminator="kind"),
+]
+
+
+class FeatureCreateRequest(_StrictCadBase):
+    operation: Literal["create"]
+    feature: HandsFeatureSpec
+    expected_revision: str = Field(..., pattern=MODEL_REVISION_PATTERN)
+    dry_run: bool = False
+
+
+FusionFeatureRequest = Annotated[
+    FeatureCreateRequest,
     Field(discriminator="operation"),
 ]

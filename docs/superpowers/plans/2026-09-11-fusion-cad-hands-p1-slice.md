@@ -83,13 +83,13 @@
 - Committed requests require `expected_revision`; `dry_run=true` may still require a known baseline revision so preview is bound to explicit model state.
 - Sketch geometry actions have stable `id`; constraint/dimension entity operands accept prior action ids/subrefs or opaque `ent_*` refs.
 
-- [ ] Write RED schema tests for valid create/batch/feature examples, `additionalProperties:false`, finite dimensions, duplicate/forward action refs, illegal dimension `entity_two` combinations, and missing `expected_revision`.
-- [ ] Write RED surface tests requiring `fusion_sketch` and `fusion_feature` and their strict schemas.
-- [ ] Run RED and confirm failures are caused only by absent Hands schemas/tools.
-- [ ] Implement minimal Pydantic discriminated unions and JSON schema adapters.
-- [ ] Register thin MCP handlers through the existing `make_domain_handler`; business logic remains in `FusionCadService`/provider adapters.
-- [ ] Run contract tests GREEN plus the existing P0 schema/tool-surface suite.
-- [ ] Review diff and commit this milestone.
+- [x] Write RED schema tests for valid create/batch/feature examples, `additionalProperties:false`, finite dimensions, duplicate/forward action refs, illegal dimension `entity_two` combinations, and missing `expected_revision`.
+- [x] Write RED surface tests requiring `fusion_sketch` and `fusion_feature` and their strict schemas.
+- [x] Run RED and confirm failures are caused only by absent Hands schemas/tools.
+- [x] Implement minimal Pydantic discriminated unions and JSON schema adapters.
+- [x] Register thin MCP handlers through the existing `make_domain_handler`; business logic remains in `FusionCadService`/provider adapters.
+- [x] Run contract tests GREEN plus the existing P0 schema/tool-surface suite.
+- [x] Review diff and commit this milestone.
 
 ### Task 4: Bridge-side Shimmer adapter, guard binding, and opaque refs
 
@@ -112,7 +112,7 @@
 - [ ] Add coherence binding using the existing P0 revision tracker and authoritative observation path without creating a second public revision sequence.
 - [ ] Add result normalization into existing `CadResult`/opaque refs with strict provider error translation.
 - [ ] Run unit/integration GREEN plus P0 revision/ref regressions.
-- [ ] Review diff and commit this milestone.
+- [x] Review diff and commit this milestone.
 
 ### Task 5: Standalone sketch/feature execution and dry-run
 
@@ -133,7 +133,7 @@
 - [ ] Implement classification/capability dispatch and minimal compilation to the Shimmer allow-listed envelope.
 - [ ] Run GREEN focused Hands integration tests and all existing Fusion service/capability regressions.
 - [ ] Run a falsification sweep: malformed symbolic refs, dimension contract mismatch, wrong document, provider reconnect/session generation change, guard mismatch, preview abort mismatch, and provider error after Start.
-- [ ] Review diff and commit this milestone.
+- [x] Review diff and commit this milestone.
 
 ### Task 6: Offline phase gate and independent review
 

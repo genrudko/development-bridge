@@ -111,6 +111,8 @@ SUPPORTED_TOOLS = {
     "fusion_style",
     "fusion_validate",
     "fusion_transaction",
+    "fusion_sketch",
+    "fusion_feature",
     "executor_status",
     "executor_start",
 }
@@ -120,7 +122,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 110
+    assert len(registry.definitions) == 112
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",
