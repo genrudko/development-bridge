@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -38,7 +39,9 @@ HANDS_SIDECAR_LOG = APP_DIR / "hands-sidecar.log"
 ROOT = Path(__file__).resolve().parent
 AGENT = ROOT / "windows_fusion_agent.py"
 TIMESTAMPED_LINE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s")
-HANDS_STARTUP_DEADLINE_SECONDS = 20.0
+TCP_TABLE_OWNER_PID_LISTENER = 3
+MIB_TCP_STATE_LISTEN = 2
+ERROR_INSUFFICIENT_BUFFER = 122
 
 
 def timestamp_log_line(line: str, now: float | None = None) -> str:
@@ -134,6 +137,52 @@ def tcp_open(host: str, port: int, timeout: float = 0.65) -> bool:
         return False
 
 
+def _windows_tcp4_owner_table() -> bytes | None:
+    """Read the IPv4 listener/PID table directly; never invoke a shell helper."""
+    if os.name != "nt":
+        return None
+    try:
+        get_table = ctypes.windll.iphlpapi.GetExtendedTcpTable
+        size = wintypes.DWORD(0)
+        result = get_table(None, ctypes.byref(size), False, socket.AF_INET,
+                           TCP_TABLE_OWNER_PID_LISTENER, 0)
+        if result != ERROR_INSUFFICIENT_BUFFER or size.value < 4:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        result = get_table(buffer, ctypes.byref(size), False, socket.AF_INET,
+                           TCP_TABLE_OWNER_PID_LISTENER, 0)
+        if result != 0:
+            return None
+        return bytes(buffer.raw[:size.value])
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def listener_owned_by_pid(port: int, pid: int, *, table_reader=None,
+                          platform: str | None = None) -> bool:
+    """Return true only for one unambiguous LISTEN row owned by exactly pid."""
+    if (os.name if platform is None else platform) != "nt" or pid <= 0:
+        return False
+    reader = _windows_tcp4_owner_table if table_reader is None else table_reader
+    try:
+        data = reader()
+        if data is None or len(data) < 4:
+            return False
+        count = struct.unpack_from("<I", data)[0]
+        if len(data) != 4 + count * 24:
+            return False
+        owners = []
+        for index in range(count):
+            state, _local_addr, local_port, _remote_addr, _remote_port, owner = struct.unpack_from(
+                "<6I", data, 4 + index * 24
+            )
+            if state == MIB_TCP_STATE_LISTEN and socket.ntohs(local_port & 0xFFFF) == port:
+                owners.append(owner)
+        return owners == [pid]
+    except Exception:
+        return False
+
+
 class FusionBridgeGUI(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -152,7 +201,6 @@ class FusionBridgeGUI(tk.Tk):
         self.hands_runtime_present: bool | None = None
         self.hands_connected = False
         self.hands_problem: str | None = None
-        self.hands_sidecar_deadline = 0.0
         self.hands_pending_relay: tuple[dict[str, object], int] | None = None
         self.supervision_enabled = True
         self.backoffs = {name: RestartBackoff() for name in ("reference", "eyes", "hands")}
@@ -547,7 +595,6 @@ class FusionBridgeGUI(tk.Tk):
                     stdout=sidecar_log, stderr=subprocess.STDOUT, creationflags=creationflags,
                 )
             threading.Thread(target=self._hands_sidecar_watcher, args=(self.hands_sidecar_proc,), daemon=True).start()
-            self.hands_sidecar_deadline = time.monotonic() + HANDS_STARTUP_DEADLINE_SECONDS
             self.hands_pending_relay = (relay_spec, creationflags)
             self._append_log("[hands] Shimmer starting; waiting for owned sidecar on 18768")
         except Exception as exc:
@@ -564,13 +611,13 @@ class FusionBridgeGUI(tk.Tk):
         if proc.poll() is not None:
             return  # The watcher reports and independently backs off this stack.
         if not tcp_open("127.0.0.1", HANDS_MCP_PORT):
-            if time.monotonic() < self.hands_sidecar_deadline:
-                return
+            return
+        if not listener_owned_by_pid(HANDS_MCP_PORT, proc.pid):
             self.hands_pending_relay = None
             self._terminate_owned_process(proc, tree=True)
             if self.hands_sidecar_proc is proc:
                 self.hands_sidecar_proc = None
-            self.hands_problem = "owned Shimmer sidecar readiness deadline exceeded"
+            self.hands_problem = "listener on 18768 is not owned by the started Shimmer sidecar"
             self._append_log("[hands] " + self.hands_problem)
             self.backoffs["hands"].fail()
             return
@@ -642,7 +689,6 @@ class FusionBridgeGUI(tk.Tk):
 
     def _stop_hands_stack(self) -> None:
         self.hands_pending_relay = None
-        self.hands_sidecar_deadline = 0.0
         self._terminate_owned_process(self.hands_relay_proc)
         self.hands_relay_proc = None
         self.hands_connected = False

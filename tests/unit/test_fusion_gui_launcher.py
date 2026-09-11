@@ -1,8 +1,41 @@
 from pathlib import Path
 import hashlib
+import importlib.util
 import json
+import socket
+import struct
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _gui_namespace():
+    source = (ROOT / "agents" / "fusion_relay_gui.pyw").read_text(encoding="utf-8")
+    start = source.index("TCP_TABLE_OWNER_PID_LISTENER =")
+    end = source.index("\n\nclass FusionBridgeGUI", start)
+    namespace = {}
+    exec(
+        "import base64, ctypes, os, re, socket, struct, time\n"
+        "from ctypes import wintypes\nfrom pathlib import Path\n" + source[start:end],
+        namespace,
+    )
+    return namespace
+
+
+def _continue_hands_method(namespace):
+    source = (ROOT / "agents" / "fusion_relay_gui.pyw").read_text(encoding="utf-8")
+    start = source.index("    def _continue_hands_start")
+    end = source.index("\n    def _hands_sidecar_watcher", start)
+    exec("class Subject:\n" + source[start:end], namespace)
+    return namespace["Subject"]._continue_hands_start
+
+
+def _tcp_table(*rows):
+    data = bytearray(struct.pack("<I", len(rows)))
+    for state, port, pid in rows:
+        encoded_port = socket.htons(port)
+        data.extend(struct.pack("<6I", state, 0x0100007F, encoded_port, 0, 0, pid))
+    return bytes(data)
 
 
 def _hands_runtime_module():
@@ -188,12 +221,95 @@ def test_gui_is_one_auto_supervisor_with_explicit_provider_rows_and_owned_hands(
     assert "self._start_hands_stack(token" in gui
     assert "self._stop_hands_stack()" in gui
     assert 'порт 18768 занят; Hands не запущен' in gui
-    assert "hands_sidecar_deadline" in gui
     assert "_continue_hands_start" in gui
     assert "HANDS_SIDECAR_LOG" in gui and "HANDS_RELAY_LOG" in gui
     assert "START_FUSION_HANDS" not in gui
     assert "qualification is Bridge-owned/session-scoped" in gui
     assert "supported" not in gui
+
+
+def test_windows_tcp_table_listener_ownership_is_exact_and_fail_closed():
+    module = _gui_namespace()
+    expected = 4242
+    assert module["listener_owned_by_pid"](
+        18768, expected, table_reader=lambda: _tcp_table((2, 18768, expected)), platform="nt"
+    )
+    assert not module["listener_owned_by_pid"](
+        18768, expected, table_reader=lambda: _tcp_table((2, 18768, 9999)), platform="nt"
+    )
+    assert not module["listener_owned_by_pid"](
+        18768, expected,
+        table_reader=lambda: _tcp_table((2, 18768, expected), (2, 18768, 9999)),
+        platform="nt",
+    )
+    assert not module["listener_owned_by_pid"](18768, expected, table_reader=lambda: b"bad", platform="nt")
+    assert not module["listener_owned_by_pid"](
+        18768, expected, table_reader=lambda: (_ for _ in ()).throw(RuntimeError("query failed")),
+        platform="nt",
+    )
+    assert not module["listener_owned_by_pid"](
+        18768, expected, table_reader=lambda: _tcp_table((2, 18768, expected)), platform="posix"
+    )
+
+
+def _hands_gui_fixture(module, monkeypatch, *, owner):
+    module["HANDS_MCP_PORT"] = 18768
+    proc = SimpleNamespace(pid=4242, poll=lambda: None)
+    gui = SimpleNamespace(
+        hands_pending_relay=({"argv": ["relay"], "cwd": ".", "env": {}}, 0),
+        hands_sidecar_proc=proc,
+        hands_relay_proc=None,
+        hands_problem=None,
+        backoffs={"hands": SimpleNamespace(fail=lambda: None)},
+        _append_log=lambda _line: None,
+        _hands_reader=lambda _proc: None,
+        _stop_hands_stack=lambda: None,
+        _terminate_owned_process=lambda *_args, **_kwargs: None,
+    )
+    module["tcp_open"] = lambda *_args: True
+    module["listener_owned_by_pid"] = lambda port, pid: owner
+    return gui, proc
+
+
+def test_hands_foreign_listener_never_starts_relay_and_degrades(monkeypatch):
+    module = _gui_namespace()
+    gui, _proc = _hands_gui_fixture(module, monkeypatch, owner=False)
+    popen_calls = []
+    module["subprocess"] = SimpleNamespace(Popen=lambda *a, **k: popen_calls.append((a, k)), STDOUT=-1, PIPE=-1)
+
+    _continue_hands_method(module)(gui)
+
+    assert popen_calls == []
+    assert gui.hands_pending_relay is None
+    assert "not owned" in gui.hands_problem
+
+
+def test_hands_exact_owned_listener_may_start_relay(monkeypatch):
+    module = _gui_namespace()
+    gui, _proc = _hands_gui_fixture(module, monkeypatch, owner=True)
+    relay = SimpleNamespace(stdout=[], wait=lambda: None, returncode=0)
+    module["subprocess"] = SimpleNamespace(Popen=lambda *a, **k: relay, STDOUT=-1, PIPE=-1)
+    module["threading"] = SimpleNamespace(Thread=lambda *a, **k: SimpleNamespace(start=lambda: None))
+
+    _continue_hands_method(module)(gui)
+
+    assert gui.hands_relay_proc is relay
+    assert gui.hands_pending_relay is None
+
+
+def test_alive_hands_sidecar_waits_without_deadline_or_relay(monkeypatch):
+    module = _gui_namespace()
+    gui, proc = _hands_gui_fixture(module, monkeypatch, owner=False)
+    module["tcp_open"] = lambda *_args: False
+    popen_calls = []
+    module["subprocess"] = SimpleNamespace(Popen=lambda *a, **k: popen_calls.append((a, k)), STDOUT=-1, PIPE=-1)
+
+    _continue_hands_method(module)(gui)
+
+    assert gui.hands_sidecar_proc is proc
+    assert gui.hands_pending_relay is not None
+    assert gui.hands_problem is None
+    assert popen_calls == []
 
 
 def test_hands_sidecar_start_is_not_blocked_by_addin_port_9000():
@@ -247,6 +363,26 @@ def test_unified_bootstrap_and_readme_describe_manual_two_launch_workflow_only()
     assert ".development-bridge-upstream-sha" not in readme
     assert "click Start" not in readme
     assert "Windows Startup" not in readme
+
+
+def test_gui_package_self_bootstraps_curated_assets_into_managed_launcher():
+    bootstrap = (ROOT / "agents" / "START_FUSION_GUI.ps1").read_text(encoding="utf-8-sig")
+    required = (
+        "START_FUSION_GUI.cmd", "START_FUSION_GUI.ps1", "fusion_relay_gui.pyw",
+        "fusion_hands_runtime.py", "fusion_eyes_runtime.py", "windows_fusion_agent.py",
+        "FUSION_GUI_README.txt", "INSTALL_FUSION_EYES.ps1", "periscope-lost-event.patch",
+        "fusion_shimmer_overlay", "install.py", "manifest.json", "addin_bridge_cad.py",
+        "server_bridge_cad.py",
+    )
+    assert 'DevelopmentBridgeFusion\\launcher' in bootstrap
+    assert all(asset in bootstrap for asset in required)
+    assert "Copy-LauncherPackage" in bootstrap
+    assert "Move-Item" in bootstrap
+    assert "GetFullPath" in bootstrap
+    assert "& $ManagedScript" in bootstrap
+    forbidden = ("desktop-node-token.dpapi", "relay.log", "outbox", "__pycache__")
+    assert all(item not in bootstrap for item in forbidden)
+    assert "Startup" not in bootstrap and "schtasks" not in bootstrap
 
 def test_fallback_launcher_never_uses_slow_test_net_connection():
     text=(ROOT / "agents" / "START_FUSION_AGENT.ps1").read_text(encoding="utf-8-sig")

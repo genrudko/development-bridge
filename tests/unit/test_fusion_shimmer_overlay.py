@@ -466,6 +466,51 @@ def test_installer_rolls_back_all_targets_if_a_late_write_fails(tmp_path, monkey
     assert not (repo / "server/fusion_mcp/tools/bridge_cad.py").exists()
 
 
+def test_installer_verifies_postimages_and_rolls_back_corruption(tmp_path, monkeypatch):
+    module = _load("install.py", "fusion_shimmer_overlay_install_postimage")
+    repo = tmp_path / "repo"
+    addin_init = repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py"
+    server_init = repo / "server/fusion_mcp/tools/__init__.py"
+    addin_bytes = b"from . import (\n    api,\n    assembly,\n)\n"
+    server_bytes = (b"from fusion_mcp.tools import (\n        api,\n        assembly,\n)\n\n"
+                    b"def register_all(mcp, client):\n"
+                    b"    # Read-only generic-API helpers (introspect/docs) are always available.\n"
+                    b"    api.register(mcp, client)\n")
+    addin_init.parent.mkdir(parents=True)
+    server_init.parent.mkdir(parents=True)
+    addin_init.write_bytes(addin_bytes)
+    server_init.write_bytes(server_bytes)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    manifest = {"upstream_sha": head, "targets": {
+        "addin_ops_init": {"path": str(addin_init.relative_to(repo)), "sha256_before": hashlib.sha256(addin_bytes).hexdigest()},
+        "server_tools_init": {"path": str(server_init.relative_to(repo)), "sha256_before": hashlib.sha256(server_bytes).hexdigest()},
+    }}
+    original_replace = Path.replace
+    corrupted = False
+
+    def corrupt_after_replace(self, target):
+        nonlocal corrupted
+        result = original_replace(self, target)
+        if Path(target) == server_init and not corrupted:
+            corrupted = True
+            Path(target).write_bytes(b"corrupt postimage")
+        return result
+
+    monkeypatch.setattr(Path, "replace", corrupt_after_replace)
+    with pytest.raises(module.OverlayInstallError, match="postimage"):
+        module.apply_overlay(repo, manifest=manifest)
+
+    assert addin_init.read_bytes() == addin_bytes
+    assert server_init.read_bytes() == server_bytes
+    assert not (addin_init.parent / "bridge_cad.py").exists()
+    assert not (server_init.parent / "bridge_cad.py").exists()
+
+
 def test_installer_uses_atomic_replacement_and_rolls_back_archive_layout(tmp_path, monkeypatch):
     module = _load("install.py", "fusion_shimmer_overlay_install_atomic_archive")
     pin = "pin"

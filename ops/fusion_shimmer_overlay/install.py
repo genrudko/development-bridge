@@ -243,7 +243,16 @@ def apply_overlay(repo, *, expected_upstream_sha=None, manifest=None, overlay_di
             temporary[path] = Path(name)
         for path in prepared:
             temporary[path].replace(path)
-    except OSError as exc:
+        mismatched = [
+            path for path, expected in prepared.items()
+            if not path.is_file() or path.read_bytes() != expected
+        ]
+        if mismatched:
+            raise OverlayInstallError(
+                "overlay postimage verification failed: "
+                + ", ".join(str(path) for path in mismatched)
+            )
+    except (OSError, OverlayInstallError) as exc:
         for temp_path in temporary.values():
             temp_path.unlink(missing_ok=True)
         rollback_errors = []
@@ -263,7 +272,11 @@ def apply_overlay(repo, *, expected_upstream_sha=None, manifest=None, overlay_di
                 rollback_errors.append((path, rollback_exc))
         if rollback_errors:
             raise OverlayInstallError(
-                "overlay write failed and rollback was incomplete"
+                "overlay write/postimage verification failed and rollback was incomplete"
+            ) from exc
+        if isinstance(exc, OverlayInstallError):
+            raise OverlayInstallError(
+                "overlay postimage verification failed; original layout restored"
             ) from exc
         raise OverlayInstallError(
             "overlay write failed; original layout restored"

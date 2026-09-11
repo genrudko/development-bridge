@@ -12,6 +12,9 @@ Start step on later runs. If the GUI opens before Fusion is ready, leave it
 open: each provider waits and recovers independently.
 
 First run:
+- run START_FUSION_GUI.cmd from the extracted package; it installs or upgrades
+  the curated launcher bundle under
+  LocalAppData\DevelopmentBridgeFusion\launcher and runs that managed copy;
 - the bootstrap creates .venv and installs mcp==2.0.0 if needed;
 - install the qualified PERISCOPE runtime once with INSTALL_FUSION_EYES.ps1;
 - keep the existing pinned Shimmer installation under
