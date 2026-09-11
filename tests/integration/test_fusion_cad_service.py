@@ -262,6 +262,113 @@ async def test_capabilities_read_overlays_degraded_hands_for_configured_rich_pro
 
 
 @pytest.mark.asyncio
+async def test_capabilities_read_strips_incoming_hands_records_without_rich_provider(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    mock_desktop_service.call = AsyncMock(
+        return_value={
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": "Runtime capabilities probed",
+                    "data": {
+                        "application": "Autodesk Fusion",
+                        "fusion_version": "2.0.18000",
+                        "probe_facts": {
+                            "has_app": True,
+                            "has_design_access": True,
+                            "has_entity_token_resolver": True,
+                        },
+                    },
+                    "capabilities": [
+                        {"name": "design.access", "state": "supported"},
+                        {"name": "hands.sketch", "state": "supported"},
+                        {"name": "hands.feature", "state": "supported"},
+                    ],
+                }),
+            }],
+            "isError": False,
+        }
+    )
+
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"}, group="read"
+    )
+
+    assert isinstance(result, CadResult)
+    returned = {record.name: record for record in result.capabilities or ()}
+    assert "hands.sketch" not in returned
+    assert "hands.feature" not in returned
+    saved = cad_service.get_node_capabilities("desk-1")
+    assert saved is not None
+    assert saved.get("hands.sketch") is None
+    assert saved.get("hands.feature") is None
+
+
+@pytest.mark.asyncio
+async def test_capabilities_read_downgrades_incoming_hands_records_until_live_qualification(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {
+            "provider_routes": {
+                "desk-1": {
+                    "reference_node": "desk-1",
+                    "rich_node": "rich-1",
+                }
+            }
+        }
+    })
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+    mock_desktop_service.call = AsyncMock(
+        return_value={
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": "Runtime capabilities probed",
+                    "data": {
+                        "application": "Autodesk Fusion",
+                        "fusion_version": "2.0.18000",
+                        "probe_facts": {
+                            "has_app": True,
+                            "has_design_access": True,
+                            "has_entity_token_resolver": True,
+                        },
+                    },
+                    "capabilities": [
+                        {"name": "design.access", "state": "supported"},
+                        {"name": "hands.sketch", "state": "supported"},
+                        {"name": "hands.feature", "state": "supported"},
+                    ],
+                }),
+            }],
+            "isError": False,
+        }
+    )
+
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"}, group="read"
+    )
+
+    assert isinstance(result, CadResult)
+    hands = [record for record in result.capabilities or () if record.name.startswith("hands.")]
+    assert [record.name for record in hands] == ["hands.sketch", "hands.feature"]
+    assert all(record.state == "degraded" for record in hands)
+    saved = cad_service.get_node_capabilities("desk-1")
+    assert saved is not None
+    assert saved.get("hands.sketch").state == "degraded"
+    assert saved.get("hands.feature").state == "degraded"
+
+
+@pytest.mark.asyncio
 async def test_capabilities_read_uses_reference_node_generation_for_logical_provider_route(
     mock_desktop_service: DesktopNodeService,
 ):
@@ -319,6 +426,81 @@ async def test_capabilities_read_uses_reference_node_generation_for_logical_prov
     assert cad_service.get_node_capabilities("logical-a") is not None
     generations["reference-a"] = 8
     assert cad_service.get_node_capabilities("logical-a") is None
+
+
+@pytest.mark.asyncio
+async def test_routed_capability_probe_discovers_transport_schema_on_reference_node(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {
+            "provider_routes": {
+                "logical-a": {
+                    "reference_node": "reference-a",
+                    "rich_node": "rich-a",
+                }
+            }
+        }
+    })
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+    mock_desktop_service.tools = MagicMock(
+        side_effect=lambda node_id: {
+            "tools": [{
+                "name": "fusion_mcp_execute",
+                "input_schema": {
+                    "properties": {"featureType": {}, "object": {}}
+                },
+            }]
+        }
+        if node_id == "reference-a"
+        else {"tools": []}
+    )
+    mock_desktop_service.get_session_generation = MagicMock(
+        side_effect=lambda node_id: {"reference-a": 7, "rich-a": 3}[node_id]
+    )
+    mock_desktop_service.call = AsyncMock(
+        return_value={
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": "Runtime capabilities probed",
+                    "data": {
+                        "application": "Autodesk Fusion",
+                        "fusion_version": "2.0.18000",
+                        "probe_facts": {
+                            "has_app": True,
+                            "has_design_access": True,
+                            "has_entity_token_resolver": True,
+                        },
+                    },
+                    "capabilities": [
+                        {"name": "design.access", "state": "supported"},
+                        {"name": "entity.token_resolver", "state": "supported"},
+                    ],
+                }),
+            }],
+            "isError": False,
+        }
+    )
+
+    await cad_service.execute(
+        {"node_id": "logical-a", "operation": "capabilities"}, group="read"
+    )
+
+    mock_desktop_service.tools.assert_called_once_with("reference-a")
+    dispatched = mock_desktop_service.call.call_args.args
+    assert dispatched[0] == "reference-a"
+    payload_line = next(
+        line for line in dispatched[2]["object"]["script"].splitlines()
+        if line.startswith("PAYLOAD_RAW = ")
+    )
+    transport_payload = json.loads(json.loads(payload_line[len("PAYLOAD_RAW = "):]))
+    assert transport_payload["_bridge_result_transport"] == "fusion_mcp_exception_v1"
 
 
 @pytest.mark.asyncio

@@ -1561,26 +1561,28 @@ class FusionCadService:
     def _overlay_provider_capabilities(
         self, node_id: str, cad_result: CadResult
     ) -> CadResult:
+        hands_names = ("hands.sketch", "hands.feature")
+        base_records = tuple(
+            record
+            for record in cad_result.capabilities or ()
+            if record.name not in hands_names
+        )
         route = self._provider_router.route(node_id)
         if route.rich_node is None or not isinstance(cad_result.data, (dict, Mapping)):
-            return cad_result
+            if base_records == tuple(cad_result.capabilities or ()):
+                return cad_result
+            return cad_result.model_copy(update={"capabilities": base_records})
         provider_matrix = CapabilityMatrix.from_probe(
             cad_result.model_dump(mode="python")["data"]
         )
-        existing_names = {record.name for record in cad_result.capabilities or ()}
         provider_records = tuple(
             record
-            for name in ("hands.sketch", "hands.feature")
-            if name not in existing_names
+            for name in hands_names
             for record in (provider_matrix.get(name),)
             if record is not None
         )
-        if not provider_records:
-            return cad_result
         return cad_result.model_copy(
-            update={
-                "capabilities": tuple(cad_result.capabilities or ()) + provider_records
-            }
+            update={"capabilities": base_records + provider_records}
         )
 
     def _cache_capability_probe(
@@ -3908,9 +3910,13 @@ class FusionCadService:
         ):
             self._inject_inspect_target_hints(payload)
 
+        capability_probe_node = node_id
+        if effective_bundle_group == "read" and op == "capabilities":
+            capability_probe_node = self._provider_router.route(node_id).reference_node
+
         script_payload = dict(payload)
         try:
-            node_tools = self._desktop_nodes.tools(node_id)
+            node_tools = self._desktop_nodes.tools(capability_probe_node)
         except (BridgeError, AttributeError):
             node_tools = {}
         discovered_tools = node_tools.get("tools", []) if isinstance(node_tools, Mapping) else []
@@ -3962,10 +3968,8 @@ class FusionCadService:
         # Authoritative DesktopNodeService session_generation captured from the
         # physical reference provider before dispatching read:capabilities.  The
         # public/cache key remains the logical node id.
-        capability_probe_node = node_id
         probe_generation: int | None = None
         if effective_bundle_group == "read" and op == "capabilities":
-            capability_probe_node = self._provider_router.route(node_id).reference_node
             try:
                 probe_generation = self._desktop_nodes.get_session_generation(
                     capability_probe_node
