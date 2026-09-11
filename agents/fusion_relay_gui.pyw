@@ -18,10 +18,10 @@ from tkinter import messagebox, ttk
 
 try:
     from .fusion_eyes_runtime import EYES_PROXY_PORT, build_eyes_process_specs
-    from .fusion_hands_runtime import HANDS_MCP_PORT, SHIMMER_ADDIN_PORT, build_hands_process_specs, ensure_hands_overlay
+    from .fusion_hands_runtime import HANDS_MCP_PORT, SHIMMER_ADDIN_PORT, build_hands_process_specs, ensure_hands_overlay, probe_hands_addin_ops, reload_hands_addin_ops
 except ImportError:  # Direct pythonw launch from the agents directory.
     from fusion_eyes_runtime import EYES_PROXY_PORT, build_eyes_process_specs
-    from fusion_hands_runtime import HANDS_MCP_PORT, SHIMMER_ADDIN_PORT, build_hands_process_specs, ensure_hands_overlay
+    from fusion_hands_runtime import HANDS_MCP_PORT, SHIMMER_ADDIN_PORT, build_hands_process_specs, ensure_hands_overlay, probe_hands_addin_ops, reload_hands_addin_ops
 
 BRIDGE_HOST = "mcp.vigilante.website"
 BRIDGE_URL = "https://mcp.vigilante.website"
@@ -42,6 +42,8 @@ TIMESTAMPED_LINE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s")
 TCP_TABLE_OWNER_PID_LISTENER = 3
 MIB_TCP_STATE_LISTEN = 2
 ERROR_INSUFFICIENT_BUFFER = 122
+JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 
 
 def timestamp_log_line(line: str, now: float | None = None) -> str:
@@ -183,6 +185,99 @@ def listener_owned_by_pid(port: int, pid: int, *, table_reader=None,
         return False
 
 
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_ulonglong) for name in (
+        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+    )]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", _IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class _Kernel32JobApi:
+    def __init__(self) -> None:
+        self.kernel32 = ctypes.windll.kernel32
+        self.kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        self.kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        self.kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ]
+        self.kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        self.kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        self.kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def create_job(self):
+        handle = self.kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            raise ctypes.WinError()
+        return handle
+
+    def configure_kill_on_close(self, handle) -> None:
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.kernel32.SetInformationJobObject(
+            handle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            raise ctypes.WinError()
+
+    def assign_process(self, handle, process_handle) -> None:
+        if not self.kernel32.AssignProcessToJobObject(handle, process_handle):
+            raise ctypes.WinError()
+
+    def close_handle(self, handle) -> None:
+        self.kernel32.CloseHandle(handle)
+
+
+class WindowsKillJob:
+    def __init__(self, handle, api) -> None:
+        self.handle = handle
+        self.api = api
+
+    @classmethod
+    def assign(cls, proc, *, api=None, platform: str | None = None):
+        if (os.name if platform is None else platform) != "nt":
+            raise OSError("Windows Job Objects are available only on Windows")
+        job_api = _Kernel32JobApi() if api is None else api
+        handle = job_api.create_job()
+        try:
+            job_api.configure_kill_on_close(handle)
+            job_api.assign_process(handle, proc._handle)
+        except Exception:
+            job_api.close_handle(handle)
+            raise
+        return cls(handle, job_api)
+
+    def close(self) -> None:
+        if self.handle is not None:
+            self.api.close_handle(self.handle)
+            self.handle = None
+
+
 class FusionBridgeGUI(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -193,6 +288,8 @@ class FusionBridgeGUI(tk.Tk):
         self.proc: subprocess.Popen[str] | None = None
         self.eyes_proxy_proc: subprocess.Popen[str] | None = None
         self.eyes_relay_proc: subprocess.Popen[str] | None = None
+        self.eyes_pending_relay: tuple[dict[str, object], int] | None = None
+        self.eyes_job: WindowsKillJob | None = None
         self.eyes_runtime_present: bool | None = None
         self.eyes_connected = False
         self.eyes_problem: str | None = None
@@ -202,6 +299,7 @@ class FusionBridgeGUI(tk.Tk):
         self.hands_connected = False
         self.hands_problem: str | None = None
         self.hands_pending_relay: tuple[dict[str, object], int] | None = None
+        self.hands_reload_attempted = False
         self.supervision_enabled = True
         self.backoffs = {name: RestartBackoff() for name in ("reference", "eyes", "hands")}
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -426,6 +524,7 @@ class FusionBridgeGUI(tk.Tk):
 
     def _supervise(self) -> None:
         if self.supervision_enabled and not self.stop_event.is_set():
+            self._continue_eyes_start()
             self._continue_hands_start()
             self.start_relay(automatic=True)
         if self.winfo_exists():
@@ -514,32 +613,47 @@ class FusionBridgeGUI(tk.Tk):
                     stderr=subprocess.STDOUT,
                     creationflags=creationflags,
                 )
-            self._append_log("[eyes] PERISCOPE mcp-proxy запущен на 127.0.0.1:18769")
+            self.eyes_job = WindowsKillJob.assign(self.eyes_proxy_proc)
+            self.eyes_pending_relay = (relay_spec, creationflags)
+            self._append_log("[eyes] PERISCOPE mcp-proxy starting; waiting for owned listener on 18769")
             threading.Thread(
                 target=self._eyes_proxy_watcher, args=(self.eyes_proxy_proc,), daemon=True
             ).start()
-
-            self.eyes_relay_proc = subprocess.Popen(
-                relay_spec["argv"],
-                cwd=relay_spec["cwd"],
-                env=relay_spec["env"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                creationflags=creationflags,
-            )
-            threading.Thread(
-                target=self._eyes_reader, args=(self.eyes_relay_proc,), daemon=True
-            ).start()
-            self._append_log("[eyes] fusion-eyes relay запущен; ждёт PERISCOPE MCP")
         except Exception as exc:
             problem = f"запуск не удался: {type(exc).__name__}: {exc}"
             self._append_log("[eyes] " + problem)
             self._stop_eyes_stack()
             self.eyes_problem = problem
+            self.backoffs["eyes"].fail()
+
+    def _continue_eyes_start(self) -> None:
+        pending = self.eyes_pending_relay
+        proc = self.eyes_proxy_proc
+        if pending is None or proc is None:
+            return
+        if proc.poll() is not None:
+            return
+        if not tcp_open("127.0.0.1", EYES_PROXY_PORT):
+            return
+        if not listener_owned_by_pid(EYES_PROXY_PORT, proc.pid):
+            self._stop_eyes_stack()
+            self.eyes_problem = "listener on 18769 is not owned by the started mcp-proxy"
+            self._append_log("[eyes] " + self.eyes_problem)
+            self.backoffs["eyes"].fail()
+            return
+        relay_spec, creationflags = pending
+        self.eyes_pending_relay = None
+        try:
+            self.eyes_relay_proc = subprocess.Popen(
+                relay_spec["argv"], cwd=relay_spec["cwd"], env=relay_spec["env"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                encoding="utf-8", errors="replace", bufsize=1, creationflags=creationflags,
+            )
+            threading.Thread(target=self._eyes_reader, args=(self.eyes_relay_proc,), daemon=True).start()
+            self._append_log("[eyes] owned mcp-proxy ready; fusion-eyes relay starting")
+        except Exception as exc:
+            self._stop_eyes_stack()
+            self.eyes_problem = f"relay запуск не удался: {type(exc).__name__}: {exc}"
             self.backoffs["eyes"].fail()
 
     def _eyes_proxy_watcher(self, proc: subprocess.Popen[str]) -> None:
@@ -564,6 +678,7 @@ class FusionBridgeGUI(tk.Tk):
 
     def _start_hands_stack(self, token: str, relay_python: str, creationflags: int) -> None:
         self._stop_hands_stack()
+        self.hands_reload_attempted = False
         specs = build_hands_process_specs(
             token, app_dir=APP_DIR, root=ROOT, relay_python=Path(relay_python),
             environ=os.environ, bridge_url=BRIDGE_URL,
@@ -614,13 +729,23 @@ class FusionBridgeGUI(tk.Tk):
             return
         if not listener_owned_by_pid(HANDS_MCP_PORT, proc.pid):
             self.hands_pending_relay = None
-            self._terminate_owned_process(proc, tree=True)
+            self._terminate_owned_process(proc)
             if self.hands_sidecar_proc is proc:
                 self.hands_sidecar_proc = None
             self.hands_problem = "listener on 18768 is not owned by the started Shimmer sidecar"
             self._append_log("[hands] " + self.hands_problem)
             self.backoffs["hands"].fail()
             return
+        addin = probe_hands_addin_ops()
+        if not addin.ready:
+            self.hands_problem = addin.detail
+            if "auth" not in addin.detail.lower() and not self.hands_reload_attempted:
+                self.hands_reload_attempted = True
+                reload_result = reload_hands_addin_ops()
+                if not reload_result.ready:
+                    self.hands_problem = reload_result.detail
+            return
+        self.hands_problem = None
         relay_spec, creationflags = pending
         self.hands_pending_relay = None
         try:
@@ -657,22 +782,9 @@ class FusionBridgeGUI(tk.Tk):
         self.events.put(("hands_stopped", (proc, proc.returncode)))
 
     @staticmethod
-    def _terminate_owned_process(proc: subprocess.Popen[str] | None, *, tree: bool = False) -> None:
+    def _terminate_owned_process(proc: subprocess.Popen[str] | None) -> None:
         if proc is None or proc.poll() is not None:
             return
-        if tree and os.name == "nt":
-            try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                proc.wait(timeout=2)
-                return
-            except Exception:
-                pass
         proc.terminate()
         try:
             proc.wait(timeout=2)
@@ -680,10 +792,15 @@ class FusionBridgeGUI(tk.Tk):
             proc.kill()
 
     def _stop_eyes_stack(self) -> None:
+        self.eyes_pending_relay = None
         self._terminate_owned_process(self.eyes_relay_proc)
         self.eyes_relay_proc = None
         self.eyes_connected = False
-        self._terminate_owned_process(self.eyes_proxy_proc, tree=True)
+        if self.eyes_job is not None:
+            self.eyes_job.close()
+            self.eyes_job = None
+        else:
+            self._terminate_owned_process(self.eyes_proxy_proc)
         self.eyes_proxy_proc = None
         self.eyes_problem = None
 
@@ -692,7 +809,7 @@ class FusionBridgeGUI(tk.Tk):
         self._terminate_owned_process(self.hands_relay_proc)
         self.hands_relay_proc = None
         self.hands_connected = False
-        self._terminate_owned_process(self.hands_sidecar_proc, tree=True)
+        self._terminate_owned_process(self.hands_sidecar_proc)
         self.hands_sidecar_proc = None
         self.hands_problem = None
 

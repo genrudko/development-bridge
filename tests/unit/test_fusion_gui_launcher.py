@@ -5,6 +5,7 @@ import json
 import socket
 import struct
 from types import SimpleNamespace
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -28,6 +29,14 @@ def _continue_hands_method(namespace):
     end = source.index("\n    def _hands_sidecar_watcher", start)
     exec("class Subject:\n" + source[start:end], namespace)
     return namespace["Subject"]._continue_hands_start
+
+
+def _continue_eyes_method(namespace):
+    source = (ROOT / "agents" / "fusion_relay_gui.pyw").read_text(encoding="utf-8")
+    start = source.index("    def _continue_eyes_start")
+    end = source.index("\n    def _eyes_proxy_watcher", start)
+    exec("class Subject:\n" + source[start:end], namespace)
+    return namespace["Subject"]._continue_eyes_start
 
 
 def _tcp_table(*rows):
@@ -259,6 +268,7 @@ def _hands_gui_fixture(module, monkeypatch, *, owner):
         hands_pending_relay=({"argv": ["relay"], "cwd": ".", "env": {}}, 0),
         hands_sidecar_proc=proc,
         hands_relay_proc=None,
+        hands_reload_attempted=False,
         hands_problem=None,
         backoffs={"hands": SimpleNamespace(fail=lambda: None)},
         _append_log=lambda _line: None,
@@ -268,6 +278,8 @@ def _hands_gui_fixture(module, monkeypatch, *, owner):
     )
     module["tcp_open"] = lambda *_args: True
     module["listener_owned_by_pid"] = lambda port, pid: owner
+    module["probe_hands_addin_ops"] = lambda: SimpleNamespace(ready=True, detail="ready")
+    module["reload_hands_addin_ops"] = lambda: SimpleNamespace(ready=True, detail="ready")
     return gui, proc
 
 
@@ -310,6 +322,118 @@ def test_alive_hands_sidecar_waits_without_deadline_or_relay(monkeypatch):
     assert gui.hands_pending_relay is not None
     assert gui.hands_problem is None
     assert popen_calls == []
+
+
+def test_hands_addin_ops_probe_requires_auth_and_both_bridge_ops(tmp_path):
+    runtime = _hands_runtime_module()
+    token_file = tmp_path / "token"
+    token_file.write_text("local-secret\n", encoding="utf-8")
+    seen = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self): return json.dumps({"ops": ["system.reload", "bridge.cad_guard", "bridge.cad_apply"]}).encode()
+
+    def opener(request, timeout):
+        seen.append((request.full_url, request.get_header("Authorization"), timeout))
+        return Response()
+
+    result = runtime.probe_hands_addin_ops(token_file=token_file, opener=opener)
+
+    assert result.ready
+    assert seen == [("http://127.0.0.1:9000/ops", "Bearer local-secret", runtime.ADDIN_API_TIMEOUT)]
+    assert "local-secret" not in repr(result)
+
+    class MissingResponse(Response):
+        def read(self): return json.dumps({"ops": ["system.reload", "bridge.cad_guard"]}).encode()
+
+    assert not runtime.probe_hands_addin_ops(token_file=token_file, opener=lambda *_a, **_k: MissingResponse()).ready
+
+
+def test_hands_reload_uses_pinned_shimmer_rpc_contract(tmp_path):
+    runtime = _hands_runtime_module()
+    token_file = tmp_path / "token"
+    token_file.write_text("local-secret\n", encoding="utf-8")
+    seen = []
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self): return json.dumps({"ok": True, "result": {"reloaded": True}}).encode()
+
+    def opener(request, timeout):
+        seen.append((request.method, request.full_url, json.loads(request.data.decode()), request.get_header("Authorization"), timeout))
+        return Response()
+
+    result = runtime.reload_hands_addin_ops(token_file=token_file, opener=opener)
+
+    assert result.ready
+    assert seen == [(
+        "POST",
+        "http://127.0.0.1:9000/rpc",
+        {"op": "system.reload", "params": {}},
+        "Bearer local-secret",
+        runtime.ADDIN_API_TIMEOUT,
+    )]
+
+
+def test_hands_addin_probe_missing_auth_and_reload_failure_are_sanitized(tmp_path):
+    runtime = _hands_runtime_module()
+    missing = runtime.probe_hands_addin_ops(token_file=tmp_path / "absent")
+    assert not missing.ready and "auth" in missing.detail.lower()
+
+    token_file = tmp_path / "token"
+    token_file.write_text("do-not-log-this", encoding="utf-8")
+    result = runtime.reload_hands_addin_ops(
+        token_file=token_file,
+        opener=lambda *_a, **_k: (_ for _ in ()).throw(urllib.error.HTTPError("url", 401, "do-not-log-this", {}, None)),
+    )
+    assert not result.ready
+    assert "do-not-log-this" not in result.detail
+
+
+def test_hands_relay_waits_for_owned_sidecar_and_loaded_ops_then_reloads_once(monkeypatch):
+    module = _gui_namespace()
+    gui, _proc = _hands_gui_fixture(module, monkeypatch, owner=True)
+    gui.hands_reload_attempted = False
+    probe_results = iter([
+        SimpleNamespace(ready=False, detail="required operations are not loaded"),
+        SimpleNamespace(ready=False, detail="required operations are not loaded"),
+        SimpleNamespace(ready=True, detail="ready"),
+    ])
+    reload_calls = []
+    module["probe_hands_addin_ops"] = lambda: next(probe_results)
+    module["reload_hands_addin_ops"] = lambda: reload_calls.append(True) or SimpleNamespace(ready=True, detail="reload requested")
+    relay = SimpleNamespace(stdout=[], wait=lambda: None, returncode=0)
+    module["subprocess"] = SimpleNamespace(Popen=lambda *a, **k: relay, STDOUT=-1, PIPE=-1)
+    module["threading"] = SimpleNamespace(Thread=lambda *a, **k: SimpleNamespace(start=lambda: None))
+
+    method = _continue_hands_method(module)
+    method(gui)
+    method(gui)
+    method(gui)
+
+    assert reload_calls == [True]
+    assert gui.hands_relay_proc is relay
+    assert gui.hands_pending_relay is None
+
+
+def test_hands_relay_stays_pending_when_addin_auth_or_reload_fails(monkeypatch):
+    module = _gui_namespace()
+    gui, _proc = _hands_gui_fixture(module, monkeypatch, owner=True)
+    gui.hands_reload_attempted = False
+    module["probe_hands_addin_ops"] = lambda: SimpleNamespace(ready=False, detail="local add-in auth unavailable")
+    module["reload_hands_addin_ops"] = lambda: SimpleNamespace(ready=False, detail="reload failed")
+    popen_calls = []
+    module["subprocess"] = SimpleNamespace(Popen=lambda *a, **k: popen_calls.append((a, k)), STDOUT=-1, PIPE=-1)
+
+    _continue_hands_method(module)(gui)
+
+    assert popen_calls == []
+    assert gui.hands_pending_relay is not None
+    assert not gui.hands_reload_attempted
+    assert "auth" in gui.hands_problem
 
 
 def test_hands_sidecar_start_is_not_blocked_by_addin_port_9000():
@@ -548,3 +672,88 @@ def test_gui_monitors_proxy_exit_and_tears_down_current_eyes_stack():
     assert 'if event_proc is self.eyes_proxy_proc:' in proxy_block
     assert 'self._stop_eyes_stack()' in proxy_block
     assert 'mcp-proxy завершился' in proxy_block
+
+
+def test_eyes_proxy_listener_ownership_gates_relay_without_deadline():
+    module = _gui_namespace()
+    module["EYES_PROXY_PORT"] = 18769
+    proxy = SimpleNamespace(pid=5151, poll=lambda: None)
+    relay = SimpleNamespace(stdout=[], wait=lambda: None, returncode=0)
+    gui = SimpleNamespace(
+        eyes_pending_relay=({"argv": ["relay"], "cwd": ".", "env": {}}, 0),
+        eyes_proxy_proc=proxy, eyes_relay_proc=None, eyes_problem=None,
+        backoffs={"eyes": SimpleNamespace(fail=lambda: None)},
+        _append_log=lambda _line: None, _eyes_reader=lambda _proc: None,
+        _stop_eyes_stack=lambda: None,
+    )
+    calls = []
+    module["tcp_open"] = lambda *_a: False
+    module["listener_owned_by_pid"] = lambda *_a: False
+    module["subprocess"] = SimpleNamespace(Popen=lambda *a, **k: calls.append((a, k)) or relay, STDOUT=-1, PIPE=-1)
+    method = _continue_eyes_method(module)
+
+    method(gui)
+    assert gui.eyes_pending_relay is not None and calls == []
+
+    module["tcp_open"] = lambda *_a: True
+    module["listener_owned_by_pid"] = lambda port, pid: (port, pid) == (18769, 5151)
+    module["threading"] = SimpleNamespace(Thread=lambda *a, **k: SimpleNamespace(start=lambda: None))
+    method(gui)
+    assert gui.eyes_relay_proc is relay and gui.eyes_pending_relay is None
+
+
+def test_eyes_foreign_or_ambiguous_listener_stops_only_owned_eyes_and_backs_off():
+    module = _gui_namespace()
+    module["EYES_PROXY_PORT"] = 18769
+    proxy = SimpleNamespace(pid=5151, poll=lambda: None)
+    stopped = []
+    failed = []
+    gui = SimpleNamespace(
+        eyes_pending_relay=({"argv": ["relay"], "cwd": ".", "env": {}}, 0),
+        eyes_proxy_proc=proxy, eyes_relay_proc=None, eyes_problem=None,
+        backoffs={"eyes": SimpleNamespace(fail=lambda: failed.append(True))},
+        _append_log=lambda _line: None, _stop_eyes_stack=lambda: stopped.append(True),
+    )
+    module["tcp_open"] = lambda *_a: True
+    module["listener_owned_by_pid"] = lambda *_a: False
+
+    _continue_eyes_method(module)(gui)
+
+    assert stopped == [True] and failed == [True]
+    assert "not owned" in gui.eyes_problem
+
+
+def test_windows_job_object_helper_is_injectable_and_closes_on_failure():
+    module = _gui_namespace()
+    calls = []
+
+    class Api:
+        def create_job(self): calls.append("create"); return 71
+        def configure_kill_on_close(self, handle): calls.append(("configure", handle))
+        def assign_process(self, handle, process_handle): calls.append(("assign", handle, process_handle))
+        def close_handle(self, handle): calls.append(("close", handle))
+
+    job = module["WindowsKillJob"].assign(SimpleNamespace(_handle=99), api=Api(), platform="nt")
+    job.close()
+    assert calls == ["create", ("configure", 71), ("assign", 71, 99), ("close", 71)]
+
+    calls.clear()
+    class FailingApi(Api):
+        def assign_process(self, handle, process_handle): raise OSError("assign failed")
+    try:
+        module["WindowsKillJob"].assign(SimpleNamespace(_handle=99), api=FailingApi(), platform="nt")
+    except OSError:
+        pass
+    else:
+        assert False, "job assignment must fail closed"
+    assert calls == ["create", ("configure", 71), ("close", 71)]
+
+
+def test_launcher_has_no_taskkill_and_eyes_job_is_closed_on_stop():
+    gui = (ROOT / "agents" / "fusion_relay_gui.pyw").read_text(encoding="utf-8")
+    assert "taskkill" not in gui.lower()
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in gui
+    assert "self.eyes_job" in gui
+    stop = gui[gui.index("    def _stop_eyes_stack"):gui.index("    def _stop_hands_stack")]
+    assert "self.eyes_job.close()" in stop
+    assert "tree=True" not in gui
