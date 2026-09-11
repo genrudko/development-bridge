@@ -17,8 +17,10 @@ from tkinter import messagebox, ttk
 
 try:
     from .fusion_eyes_runtime import EYES_PROXY_PORT, build_eyes_process_specs
+    from .fusion_hands_runtime import HANDS_MCP_PORT, SHIMMER_ADDIN_PORT, build_hands_process_specs, ensure_hands_overlay
 except ImportError:  # Direct pythonw launch from the agents directory.
     from fusion_eyes_runtime import EYES_PROXY_PORT, build_eyes_process_specs
+    from fusion_hands_runtime import HANDS_MCP_PORT, SHIMMER_ADDIN_PORT, build_hands_process_specs, ensure_hands_overlay
 
 BRIDGE_HOST = "mcp.vigilante.website"
 BRIDGE_URL = "https://mcp.vigilante.website"
@@ -31,9 +33,12 @@ TOKEN_FILE = APP_DIR / "desktop-node-token.dpapi"
 LOG_FILE = APP_DIR / "relay.log"
 EYES_RELAY_LOG = APP_DIR / "eyes-relay.log"
 EYES_PROXY_LOG = APP_DIR / "eyes-proxy.log"
+HANDS_RELAY_LOG = APP_DIR / "hands-relay.log"
+HANDS_SIDECAR_LOG = APP_DIR / "hands-sidecar.log"
 ROOT = Path(__file__).resolve().parent
 AGENT = ROOT / "windows_fusion_agent.py"
 TIMESTAMPED_LINE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s")
+HANDS_STARTUP_DEADLINE_SECONDS = 20.0
 
 
 def timestamp_log_line(line: str, now: float | None = None) -> str:
@@ -45,6 +50,27 @@ def timestamp_log_line(line: str, now: float | None = None) -> str:
     local = time.localtime(moment)
     millis = int(moment * 1000) % 1000
     return time.strftime("%H:%M:%S", local) + f".{millis:03d} " + clean
+
+
+class RestartBackoff:
+    def __init__(self, delays: tuple[float, ...] = (2.0, 5.0, 10.0, 30.0)) -> None:
+        self.delays = delays
+        self.failures = 0
+        self.retry_at = 0.0
+
+    def fail(self, *, now: float | None = None) -> float:
+        moment = time.monotonic() if now is None else now
+        delay = self.delays[min(self.failures, len(self.delays) - 1)]
+        self.failures += 1
+        self.retry_at = moment + delay
+        return self.retry_at
+
+    def ready(self, *, now: float | None = None) -> bool:
+        return (time.monotonic() if now is None else now) >= self.retry_at
+
+    def recovered(self) -> None:
+        self.failures = 0
+        self.retry_at = 0.0
 
 
 class DATA_BLOB(ctypes.Structure):
@@ -121,6 +147,15 @@ class FusionBridgeGUI(tk.Tk):
         self.eyes_runtime_present: bool | None = None
         self.eyes_connected = False
         self.eyes_problem: str | None = None
+        self.hands_sidecar_proc: subprocess.Popen[str] | None = None
+        self.hands_relay_proc: subprocess.Popen[str] | None = None
+        self.hands_runtime_present: bool | None = None
+        self.hands_connected = False
+        self.hands_problem: str | None = None
+        self.hands_sidecar_deadline = 0.0
+        self.hands_pending_relay: tuple[dict[str, object], int] | None = None
+        self.supervision_enabled = True
+        self.backoffs = {name: RestartBackoff() for name in ("reference", "eyes", "hands")}
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event = threading.Event()
         self.connected = False
@@ -132,6 +167,7 @@ class FusionBridgeGUI(tk.Tk):
         self._update_token_state()
         threading.Thread(target=self._status_worker, daemon=True).start()
         self.after(100, self._drain_events)
+        self.after(250, self._supervise)
 
     def _build(self) -> None:
         outer = ttk.Frame(self, padding=14)
@@ -144,12 +180,13 @@ class FusionBridgeGUI(tk.Tk):
         status.pack(fill="x")
         self.fusion_label = ttk.Label(status, text="Fusion MCP: проверка…")
         self.bridge_label = ttk.Label(status, text="Bridge: проверка…")
-        self.relay_label = ttk.Label(status, text="Relay: остановлен")
+        self.relay_label = ttk.Label(status, text="Reference — Autodesk MCP / fusion-workstation: ожидание…")
         self.connection_label = ttk.Label(status, text="MCP session: не подключена")
         self.heartbeat_label = ttk.Label(status, text="Bridge heartbeat: ожидание…")
         self.delivery_label = ttk.Label(status, text="Result delivery: ожидание…")
-        self.eyes_label = ttk.Label(status, text="Fusion Eyes: ожидание…")
-        for widget in (self.fusion_label, self.bridge_label, self.relay_label, self.connection_label, self.heartbeat_label, self.delivery_label, self.eyes_label):
+        self.eyes_label = ttk.Label(status, text="Eyes — PERISCOPE / fusion-eyes: ожидание…")
+        self.hands_label = ttk.Label(status, text="Hands — Shimmer / fusion-hands: ожидание…")
+        for widget in (self.fusion_label, self.bridge_label, self.relay_label, self.connection_label, self.heartbeat_label, self.delivery_label, self.eyes_label, self.hands_label):
             widget.pack(anchor="w", pady=2)
 
         token_frame = ttk.LabelFrame(outer, text="Desktop-node token", padding=10)
@@ -166,7 +203,7 @@ class FusionBridgeGUI(tk.Tk):
 
         buttons = ttk.Frame(outer)
         buttons.pack(fill="x", pady=10)
-        self.start_button = ttk.Button(buttons, text="▶ Start", command=self.start_relay)
+        self.start_button = ttk.Button(buttons, text="▶ Retry / Start", command=self.start_relay)
         self.stop_button = ttk.Button(buttons, text="■ Stop", command=self.stop_relay, state="disabled")
         self.forget_button = ttk.Button(buttons, text="Забыть токен", command=self.forget_token)
         self.open_log_button = ttk.Button(buttons, text="Открыть лог", command=self.open_log)
@@ -190,7 +227,8 @@ class FusionBridgeGUI(tk.Tk):
         while not self.stop_event.is_set():
             fusion = tcp_open(FUSION_HOST, FUSION_PORT)
             bridge = tcp_open(BRIDGE_HOST, 443)
-            self.events.put(("network", (fusion, bridge)))
+            shimmer_addin = tcp_open("127.0.0.1", SHIMMER_ADDIN_PORT)
+            self.events.put(("network", (fusion, bridge, shimmer_addin)))
             self.stop_event.wait(2.0)
 
     def _drain_events(self) -> None:
@@ -198,39 +236,68 @@ class FusionBridgeGUI(tk.Tk):
             while True:
                 kind, value = self.events.get_nowait()
                 if kind == "network":
-                    fusion, bridge = value  # type: ignore[misc]
+                    fusion, bridge, shimmer_addin = value  # type: ignore[misc]
                     self._set_text(self.fusion_label, "Fusion MCP", bool(fusion), "127.0.0.1:27182 доступен" if fusion else "порт 27182 закрыт")
                     self._set_text(self.bridge_label, "Bridge", bool(bridge), "доступен" if bridge else "недоступен")
+                    if not fusion:
+                        self.connected = False
+                        self.eyes_connected = False
+                    if not shimmer_addin:
+                        self.hands_connected = False
                 elif kind == "log":
                     self._append_log(str(value))
                 elif kind == "connected":
                     self.connected = bool(value)
                     if self.connected and self.heartbeat_ok is None:
                         self.heartbeat_ok = True
+                    if self.connected:
+                        self.backoffs["reference"].recovered()
                 elif kind == "eyes_connected":
                     event_proc, connected = value  # type: ignore[misc]
                     if event_proc is self.eyes_relay_proc:
                         self.eyes_connected = bool(connected)
+                        if connected:
+                            self.backoffs["eyes"].recovered()
                 elif kind == "eyes_proxy_stopped":
                     event_proc, _returncode = value  # type: ignore[misc]
                     if event_proc is self.eyes_proxy_proc:
                         self._stop_eyes_stack()
                         self.eyes_problem = f"mcp-proxy завершился (код {_returncode})"
+                        self.backoffs["eyes"].fail()
                 elif kind == "eyes_stopped":
                     event_proc, _returncode = value  # type: ignore[misc]
                     if event_proc is self.eyes_relay_proc:
                         self._stop_eyes_stack()
                         self.eyes_problem = f"fusion-eyes relay завершился (код {_returncode})"
+                        self.backoffs["eyes"].fail()
+                elif kind == "hands_connected":
+                    event_proc, connected = value  # type: ignore[misc]
+                    if event_proc is self.hands_relay_proc:
+                        self.hands_connected = bool(connected)
+                        if connected:
+                            self.backoffs["hands"].recovered()
+                elif kind == "hands_sidecar_stopped":
+                    event_proc, _returncode = value  # type: ignore[misc]
+                    if event_proc is self.hands_sidecar_proc:
+                        self._stop_hands_stack()
+                        self.hands_problem = f"Shimmer sidecar завершился (код {_returncode})"
+                        self.backoffs["hands"].fail()
+                elif kind == "hands_stopped":
+                    event_proc, _returncode = value  # type: ignore[misc]
+                    if event_proc is self.hands_relay_proc:
+                        self._stop_hands_stack()
+                        self.hands_problem = f"fusion-hands relay завершился (код {_returncode})"
+                        self.backoffs["hands"].fail()
                 elif kind == "stopped":
-                    self._stop_eyes_stack()
-                    self.proc = None
-                    self.connected = False
-                    self.heartbeat_ok = None
-                    self.heartbeat_failures = 0
-                    self.delivery_degraded = False
-                    self.outbox_count = 0
-                    self.start_button.configure(state="normal")
-                    self.stop_button.configure(state="disabled")
+                    event_proc, _returncode = value  # type: ignore[misc]
+                    if event_proc is self.proc:
+                        self.proc = None
+                        self.connected = False
+                        self.heartbeat_ok = None
+                        self.heartbeat_failures = 0
+                        self.delivery_degraded = False
+                        self.outbox_count = 0
+                        self.backoffs["reference"].fail()
                 self._refresh_relay_labels()
         except queue.Empty:
             pass
@@ -239,7 +306,7 @@ class FusionBridgeGUI(tk.Tk):
 
     def _refresh_relay_labels(self) -> None:
         running = self.proc is not None and self.proc.poll() is None
-        self._set_text(self.relay_label, "Relay", running, "работает" if running else "остановлен")
+        self._set_text(self.relay_label, "Reference — Autodesk MCP / fusion-workstation", running and self.connected, "online" if running and self.connected else ("ожидание Fusion/Bridge" if running else "failed/retrying"))
         self._set_text(self.connection_label, "MCP session", running and self.connected, "Fusion зарегистрирован в Bridge" if running and self.connected else "ожидание регистрации")
         if not running:
             self._set_text(self.heartbeat_label, "Bridge heartbeat", False, "relay остановлен")
@@ -259,16 +326,29 @@ class FusionBridgeGUI(tk.Tk):
         eyes_relay_running = self.eyes_relay_proc is not None and self.eyes_relay_proc.poll() is None
         eyes_proxy_running = self.eyes_proxy_proc is not None and self.eyes_proxy_proc.poll() is None
         if self.eyes_problem:
-            self._set_text(self.eyes_label, "Fusion Eyes", False, self.eyes_problem)
+            self._set_text(self.eyes_label, "Eyes — PERISCOPE / fusion-eyes", False, self.eyes_problem)
         elif self.eyes_runtime_present is False:
-            self._set_text(self.eyes_label, "Fusion Eyes", False, "PERISCOPE runtime не установлен")
+            self._set_text(self.eyes_label, "Eyes — PERISCOPE / fusion-eyes", False, "PERISCOPE runtime не установлен")
         elif eyes_relay_running and self.eyes_connected:
-            self._set_text(self.eyes_label, "Fusion Eyes", True, "fusion-eyes зарегистрирован в Bridge")
+            self._set_text(self.eyes_label, "Eyes — PERISCOPE / fusion-eyes", True, "online; зарегистрирован в Bridge")
         elif eyes_relay_running:
             detail = "ожидание MCP session" if eyes_proxy_running else "proxy не запущен"
-            self._set_text(self.eyes_label, "Fusion Eyes", False, detail)
+            self._set_text(self.eyes_label, "Eyes — PERISCOPE / fusion-eyes", False, detail)
         else:
-            self._set_text(self.eyes_label, "Fusion Eyes", False, "остановлен")
+            self._set_text(self.eyes_label, "Eyes — PERISCOPE / fusion-eyes", False, "waiting/retrying")
+
+        hands_relay_running = self.hands_relay_proc is not None and self.hands_relay_proc.poll() is None
+        hands_sidecar_running = self.hands_sidecar_proc is not None and self.hands_sidecar_proc.poll() is None
+        if self.hands_problem:
+            self._set_text(self.hands_label, "Hands — Shimmer / fusion-hands", False, self.hands_problem)
+        elif self.hands_runtime_present is False:
+            self._set_text(self.hands_label, "Hands — Shimmer / fusion-hands", False, "runtime/overlay отсутствует или не квалифицирован")
+        elif hands_relay_running and self.hands_connected:
+            self._set_text(self.hands_label, "Hands — Shimmer / fusion-hands", True, "online; qualification is Bridge-owned/session-scoped")
+        elif hands_relay_running:
+            self._set_text(self.hands_label, "Hands — Shimmer / fusion-hands", False, "overlay applied; qualification is Bridge-owned/session-scoped" if hands_sidecar_running else "sidecar не запущен")
+        else:
+            self._set_text(self.hands_label, "Hands — Shimmer / fusion-hands", False, "waiting/retrying")
 
     def _append_log(self, line: str) -> None:
         line = timestamp_log_line(line)
@@ -296,40 +376,59 @@ class FusionBridgeGUI(tk.Tk):
             return typed
         return load_token()
 
-    def start_relay(self) -> None:
-        if self.proc is not None and self.proc.poll() is None:
-            return
-        token = self._token_for_start()
+    def _supervise(self) -> None:
+        if self.supervision_enabled and not self.stop_event.is_set():
+            self._continue_hands_start()
+            self.start_relay(automatic=True)
+        if self.winfo_exists():
+            self.after(2000, self._supervise)
+
+    def start_relay(self, automatic: bool = False) -> None:
+        if not automatic:
+            self.supervision_enabled = True
+            for backoff in self.backoffs.values():
+                backoff.recovered()
+        token = load_token() if automatic else self._token_for_start()
         if not token:
-            messagebox.showwarning("Fusion Bridge", "Вставь desktop-node token один раз и нажми Start.")
-            self.token_entry.focus_set()
+            if not automatic:
+                messagebox.showwarning("Fusion Bridge", "Вставь desktop-node token один раз и нажми Start.")
+                self.token_entry.focus_set()
             return
         if not AGENT.exists():
-            messagebox.showerror("Fusion Bridge", f"Не найден агент:\n{AGENT}")
+            if not automatic:
+                messagebox.showerror("Fusion Bridge", f"Не найден агент:\n{AGENT}")
             return
         APP_DIR.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env.update({
-            "DEVELOPMENT_BRIDGE_URL": BRIDGE_URL,
-            "DEVELOPMENT_BRIDGE_NODE_ID": NODE_ID,
-            "DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN": token,
-            "FUSION_MCP_URL": FUSION_URL,
-            "PYTHONUNBUFFERED": "1",
-        })
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         python = str(Path(sys.executable).with_name("python.exe")) if Path(sys.executable).name.lower() == "pythonw.exe" else sys.executable
-        self.proc = subprocess.Popen(
-            [python, str(AGENT)], cwd=str(ROOT), env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=creationflags,
-        )
+        if (self.proc is None or self.proc.poll() is not None) and self.backoffs["reference"].ready():
+            env = os.environ.copy()
+            env.update({
+                "DEVELOPMENT_BRIDGE_URL": BRIDGE_URL,
+                "DEVELOPMENT_BRIDGE_NODE_ID": NODE_ID,
+                "DEVELOPMENT_BRIDGE_DESKTOP_NODE_TOKEN": token,
+                "FUSION_MCP_URL": FUSION_URL,
+                "PYTHONUNBUFFERED": "1",
+            })
+            try:
+                self.proc = subprocess.Popen(
+                    [python, str(AGENT)], cwd=str(ROOT), env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace", bufsize=1,
+                    creationflags=creationflags,
+                )
+                self._append_log("[reference] relay starting; waits for Fusion automatically")
+                threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
+            except Exception as exc:
+                self.proc = None
+                self.backoffs["reference"].fail()
+                self._append_log(f"[reference] запуск не удался: {type(exc).__name__}: {exc}")
         self.token_var.set("")
-        self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self._append_log("--- relay started ---")
-        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
-        self._start_eyes_stack(token, python, creationflags)
+        if self.eyes_proxy_proc is None and self.eyes_relay_proc is None and self.backoffs["eyes"].ready():
+            self._start_eyes_stack(token, python, creationflags)
+        if self.hands_sidecar_proc is None and self.hands_relay_proc is None and self.backoffs["hands"].ready():
+            self._start_hands_stack(token, python, creationflags)
         self._refresh_relay_labels()
 
     def _start_eyes_stack(self, token: str, relay_python: str, creationflags: int) -> None:
@@ -346,6 +445,7 @@ class FusionBridgeGUI(tk.Tk):
             self.eyes_runtime_present = False
             self.eyes_problem = "PERISCOPE runtime не установлен"
             self._append_log("[eyes] PERISCOPE runtime отсутствует; fusion-workstation продолжает работать")
+            self.backoffs["eyes"].fail()
             return
         self.eyes_runtime_present = True
         self.eyes_problem = None
@@ -355,6 +455,7 @@ class FusionBridgeGUI(tk.Tk):
             if tcp_open("127.0.0.1", EYES_PROXY_PORT):
                 self.eyes_problem = "порт 18769 занят; Fusion Eyes не запущен"
                 self._append_log("[eyes] " + self.eyes_problem)
+                self.backoffs["eyes"].fail()
                 return
             with EYES_PROXY_LOG.open("a", encoding="utf-8") as proxy_log:
                 self.eyes_proxy_proc = subprocess.Popen(
@@ -391,6 +492,7 @@ class FusionBridgeGUI(tk.Tk):
             self._append_log("[eyes] " + problem)
             self._stop_eyes_stack()
             self.eyes_problem = problem
+            self.backoffs["eyes"].fail()
 
     def _eyes_proxy_watcher(self, proc: subprocess.Popen[str]) -> None:
         proc.wait()
@@ -411,6 +513,101 @@ class FusionBridgeGUI(tk.Tk):
                 self.events.put(("log", "[eyes] " + line.rstrip()))
         proc.wait()
         self.events.put(("eyes_stopped", (proc, proc.returncode)))
+
+    def _start_hands_stack(self, token: str, relay_python: str, creationflags: int) -> None:
+        self._stop_hands_stack()
+        specs = build_hands_process_specs(
+            token, app_dir=APP_DIR, root=ROOT, relay_python=Path(relay_python),
+            environ=os.environ, bridge_url=BRIDGE_URL,
+        )
+        if specs is None:
+            self.hands_runtime_present = False
+            self.hands_problem = "Shimmer runtime не установлен"
+            self.backoffs["hands"].fail()
+            return
+        overlay = ensure_hands_overlay(APP_DIR, environ=os.environ)
+        if overlay.state != "applied":
+            self.hands_runtime_present = False
+            self.hands_problem = f"overlay {overlay.state}: {overlay.detail}"
+            self._append_log("[hands] " + self.hands_problem)
+            self.backoffs["hands"].fail()
+            return
+        self.hands_runtime_present = True
+        self.hands_problem = None
+        sidecar_spec, relay_spec = specs
+        try:
+            if tcp_open("127.0.0.1", HANDS_MCP_PORT):
+                self.hands_problem = "порт 18768 занят; Hands не запущен"
+                self._append_log("[hands] " + self.hands_problem)
+                self.backoffs["hands"].fail()
+                return
+            with HANDS_SIDECAR_LOG.open("a", encoding="utf-8") as sidecar_log:
+                self.hands_sidecar_proc = subprocess.Popen(
+                    sidecar_spec["argv"], cwd=sidecar_spec["cwd"], env=sidecar_spec["env"],
+                    stdout=sidecar_log, stderr=subprocess.STDOUT, creationflags=creationflags,
+                )
+            threading.Thread(target=self._hands_sidecar_watcher, args=(self.hands_sidecar_proc,), daemon=True).start()
+            self.hands_sidecar_deadline = time.monotonic() + HANDS_STARTUP_DEADLINE_SECONDS
+            self.hands_pending_relay = (relay_spec, creationflags)
+            self._append_log("[hands] Shimmer starting; waiting for owned sidecar on 18768")
+        except Exception as exc:
+            problem = f"запуск не удался: {type(exc).__name__}: {exc}"
+            self._stop_hands_stack()
+            self.hands_problem = problem
+            self.backoffs["hands"].fail()
+
+    def _continue_hands_start(self) -> None:
+        pending = self.hands_pending_relay
+        proc = self.hands_sidecar_proc
+        if pending is None or proc is None:
+            return
+        if proc.poll() is not None:
+            return  # The watcher reports and independently backs off this stack.
+        if not tcp_open("127.0.0.1", HANDS_MCP_PORT):
+            if time.monotonic() < self.hands_sidecar_deadline:
+                return
+            self.hands_pending_relay = None
+            self._terminate_owned_process(proc, tree=True)
+            if self.hands_sidecar_proc is proc:
+                self.hands_sidecar_proc = None
+            self.hands_problem = "owned Shimmer sidecar readiness deadline exceeded"
+            self._append_log("[hands] " + self.hands_problem)
+            self.backoffs["hands"].fail()
+            return
+        relay_spec, creationflags = pending
+        self.hands_pending_relay = None
+        try:
+            self.hands_relay_proc = subprocess.Popen(
+                relay_spec["argv"], cwd=relay_spec["cwd"], env=relay_spec["env"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                encoding="utf-8", errors="replace", bufsize=1, creationflags=creationflags,
+            )
+            threading.Thread(target=self._hands_reader, args=(self.hands_relay_proc,), daemon=True).start()
+            self._append_log("[hands] owned Shimmer ready; fusion-hands relay starting")
+        except Exception as exc:
+            self._stop_hands_stack()
+            self.hands_problem = f"relay запуск не удался: {type(exc).__name__}: {exc}"
+            self.backoffs["hands"].fail()
+
+    def _hands_sidecar_watcher(self, proc: subprocess.Popen[str]) -> None:
+        proc.wait()
+        self.events.put(("hands_sidecar_stopped", (proc, proc.returncode)))
+
+    def _hands_reader(self, proc: subprocess.Popen[str]) -> None:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with HANDS_RELAY_LOG.open("a", encoding="utf-8") as logfile:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                stamped = timestamp_log_line(line)
+                logfile.write(stamped + "\n")
+                logfile.flush()
+                if "Connected: Fusion MCP tools discovered:" in line:
+                    self.events.put(("hands_connected", (proc, True)))
+                elif "Fusion MCP watchdog: port unavailable" in line or "Fusion/Bridge unavailable" in line:
+                    self.events.put(("hands_connected", (proc, False)))
+                self.events.put(("log", "[hands] " + line.rstrip()))
+        proc.wait()
+        self.events.put(("hands_stopped", (proc, proc.returncode)))
 
     @staticmethod
     def _terminate_owned_process(proc: subprocess.Popen[str] | None, *, tree: bool = False) -> None:
@@ -443,6 +640,16 @@ class FusionBridgeGUI(tk.Tk):
         self.eyes_proxy_proc = None
         self.eyes_problem = None
 
+    def _stop_hands_stack(self) -> None:
+        self.hands_pending_relay = None
+        self.hands_sidecar_deadline = 0.0
+        self._terminate_owned_process(self.hands_relay_proc)
+        self.hands_relay_proc = None
+        self.hands_connected = False
+        self._terminate_owned_process(self.hands_sidecar_proc, tree=True)
+        self.hands_sidecar_proc = None
+        self.hands_problem = None
+
     def _reader(self, proc: subprocess.Popen[str]) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         with LOG_FILE.open("a", encoding="utf-8") as logfile:
@@ -473,20 +680,18 @@ class FusionBridgeGUI(tk.Tk):
                     self.delivery_degraded = False
                 self.events.put(("log", stamped))
         proc.wait()
-        self.events.put(("stopped", proc.returncode))
+        self.events.put(("stopped", (proc, proc.returncode)))
 
     def stop_relay(self) -> None:
+        self.supervision_enabled = False
+        self.stop_button.configure(state="disabled")
         self._stop_eyes_stack()
+        self._stop_hands_stack()
         proc = self.proc
         if proc is None or proc.poll() is not None:
-            self.events.put(("stopped", 0))
             return
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        self.events.put(("stopped", proc.returncode))
+        self._terminate_owned_process(self.proc)
+        self.events.put(("stopped", (proc, proc.returncode)))
 
     def forget_token(self) -> None:
         try:

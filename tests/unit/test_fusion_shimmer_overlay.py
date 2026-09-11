@@ -446,17 +446,17 @@ def test_installer_rolls_back_all_targets_if_a_late_write_fails(tmp_path, monkey
         },
     }
     fail_path = repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/bridge_cad.py"
-    original_write = Path.write_bytes
+    original_replace = Path.replace
     failed = False
 
-    def flaky_write(self, data):
+    def flaky_replace(self, target):
         nonlocal failed
-        if self == fail_path and not failed:
+        if Path(target) == fail_path and not failed:
             failed = True
             raise OSError("injected late write failure")
-        return original_write(self, data)
+        return original_replace(self, target)
 
-    monkeypatch.setattr(Path, "write_bytes", flaky_write)
+    monkeypatch.setattr(Path, "replace", flaky_replace)
     with pytest.raises(module.OverlayInstallError, match="write"):
         module.apply_overlay(repo, manifest=manifest)
 
@@ -464,6 +464,71 @@ def test_installer_rolls_back_all_targets_if_a_late_write_fails(tmp_path, monkey
     assert server_init.read_bytes() == server_bytes
     assert not (repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/bridge_cad.py").exists()
     assert not (repo / "server/fusion_mcp/tools/bridge_cad.py").exists()
+
+
+def test_installer_uses_atomic_replacement_and_rolls_back_archive_layout(tmp_path, monkeypatch):
+    module = _load("install.py", "fusion_shimmer_overlay_install_atomic_archive")
+    pin = "pin"
+    repo = tmp_path / f"extract-{pin}" / f"self-host-fusion360-MCP-{pin}"
+    source_addin = repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py"
+    source_server = repo / "server/fusion_mcp/tools/__init__.py"
+    addin = tmp_path / "installed-addin/ops/__init__.py"
+    server = tmp_path / "installed-server/tools/__init__.py"
+    addin.parent.mkdir(parents=True)
+    server.parent.mkdir(parents=True)
+    addin_bytes = b"from . import (\n    api,\n    assembly,\n)\n"
+    server_bytes = (b"from fusion_mcp.tools import (\n        api,\n        assembly,\n)\n\n"
+                    b"def register_all(mcp, client):\n"
+                    b"    # Read-only generic-API helpers (introspect/docs) are always available.\n"
+                    b"    api.register(mcp, client)\n")
+    addin.write_bytes(addin_bytes)
+    server.write_bytes(server_bytes)
+    source_addin.parent.mkdir(parents=True)
+    source_server.parent.mkdir(parents=True)
+    source_addin.write_bytes(addin_bytes)
+    source_server.write_bytes(server_bytes)
+    manifest = {"upstream_sha": "pin", "targets": {
+        "addin_ops_init": {"path": str(source_addin.relative_to(repo)), "sha256_before": hashlib.sha256(addin_bytes).hexdigest()},
+        "server_tools_init": {"path": str(source_server.relative_to(repo)), "sha256_before": hashlib.sha256(server_bytes).hexdigest()},
+    }}
+    original_replace = Path.replace
+    calls = []
+
+    def fail_late(self, target):
+        calls.append(Path(target))
+        if Path(target) == server:
+            raise OSError("injected atomic replacement failure")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_late)
+    with pytest.raises(module.OverlayInstallError, match="write"):
+        module.apply_overlay(repo, manifest=manifest, runtime_paths={
+            "addin_ops_init": addin, "server_tools_init": server,
+        })
+    assert calls
+    assert addin.read_bytes() == addin_bytes
+    assert server.read_bytes() == server_bytes
+
+
+def test_archive_provenance_rejects_wrong_sha_path_and_wrong_source_hash(tmp_path):
+    module = _load("install.py", "fusion_shimmer_overlay_archive_provenance")
+    data = b"from . import (\n    api,\n    assembly,\n)\n"
+    manifest = {"upstream_sha": "pin", "targets": {
+        "addin_ops_init": {"path": "addin/ops/__init__.py", "sha256_before": hashlib.sha256(data).hexdigest()},
+    }}
+    wrong_path = tmp_path / "extract-wrong" / "self-host-fusion360-MCP-pin"
+    target = wrong_path / "addin/ops/__init__.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(data)
+    with pytest.raises(module.OverlayInstallError, match="path provenance"):
+        module.apply_overlay(wrong_path, manifest=manifest)
+
+    exact_path = tmp_path / "extract-pin" / "self-host-fusion360-MCP-pin"
+    target = exact_path / "addin/ops/__init__.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"tampered")
+    with pytest.raises(module.OverlayInstallError, match="source preimage hash"):
+        module.apply_overlay(exact_path, manifest=manifest)
 
 
 def test_manifest_pins_exact_upstream_and_registration_preimages():
@@ -474,6 +539,15 @@ def test_manifest_pins_exact_upstream_and_registration_preimages():
     assert manifest["upstream_sha"] == "97a06e76c289420a721590ddcab334f5f3dc3178"
     assert manifest["targets"]["addin_ops_init"]["sha256_before"] == "7373d22eb6e4f212f88df8972bf55a71aa33b25b38b12beb0fd6b8009ee82510"
     assert manifest["targets"]["server_tools_init"]["sha256_before"] == "b33e6fac165b98d304014fa60a3c55c7b7d6177d9c52f80ff6f32a557a06fc60"
+    assert manifest["overlay_sha256"]["addin_bridge_cad.py"] == hashlib.sha256((OVERLAY / "addin_bridge_cad.py").read_bytes()).hexdigest()
+    assert manifest["overlay_sha256"]["server_bridge_cad.py"] == hashlib.sha256((OVERLAY / "server_bridge_cad.py").read_bytes()).hexdigest()
+
+
+def test_overlay_readme_documents_fail_closed_pinned_archive_provenance():
+    readme = (OVERLAY / "README.md").read_text(encoding="utf-8")
+    assert "extract-<sha>" in readme
+    assert "source registration-file preimage hashes" in readme
+    assert "extracted archive" in readme
 
 
 

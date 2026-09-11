@@ -1,5 +1,9 @@
 {
   "upstream_sha": "97a06e76c289420a721590ddcab334f5f3dc3178",
+  "overlay_sha256": {
+    "addin_bridge_cad.py": "10468b674f37dbe567c4abf64162b083fa93d6b07c519bd92fe6629f1489864a",
+    "server_bridge_cad.py": "5a82ac2b53da3398899387bbb98cfa058dd318d6193789cf5b8de45c69173173"
+  },
   "targets": {
     "addin_ops_init": {
       "path": "addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py",

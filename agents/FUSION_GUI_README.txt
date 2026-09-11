@@ -1,34 +1,43 @@
 Fusion Bridge GUI
 =================
 
-Normal launch: double-click START_FUSION_GUI.cmd.
+Normal workflow (both applications are manual):
+1. Launch Autodesk Fusion 360 manually.
+2. Close Fusion's modal "Scripts and Add-Ins" dialog if it is open.
+3. Then launch START_FUSION_GUI.cmd manually.
+
+The GUI automatically supervises Reference, Eyes, and Hands after a saved
+desktop-node token exists. There is no separate Hands launcher and no extra
+Start step on later runs. If the GUI opens before Fusion is ready, leave it
+open: each provider waits and recovers independently.
 
 First run:
 - the bootstrap creates .venv and installs mcp==2.0.0 if needed;
-- for the optional Fusion Eyes provider, run INSTALL_FUSION_EYES.ps1 once. It pins the live-qualified PERISCOPE revision, applies the qualified lost-CustomEvent repair, and installs the compatible mcp-proxy environment;
-- paste the desktop-node token in the GUI;
-- leave "Remember on this PC" enabled;
-- Windows DPAPI encrypts the token for the current Windows user.
+- install the qualified PERISCOPE runtime once with INSTALL_FUSION_EYES.ps1;
+- keep the existing pinned Shimmer installation under
+  LocalAppData\DevelopmentBridgeFusion\shimmer-sidecar: fusion-mcp.exe is in
+  venv\Scripts, the package is in venv\Lib\site-packages\fusion_mcp, and the
+  exact SHA-named extracted source remains under extract-<sha>;
+- the installed add-in is under AppData\Roaming\Autodesk\Autodesk Fusion 360\
+  API\AddIns\Fusion360MCP\fusion_mcp_addin;
+- keep fusion_hands_runtime.py and the fusion_shimmer_overlay directory beside
+  this GUI (the distributed package includes them);
+- paste the desktop-node token, leave "Remember on this PC" enabled, and use
+  Retry / Start once. Windows DPAPI encrypts the token for this Windows user.
 
-Later runs:
-- double-click START_FUSION_GUI.cmd;
-- click Start; no token lookup/paste is needed.
-- if the qualified PERISCOPE runtime is installed under LocalAppData\DevelopmentBridgeFusion\periscope, the same Start also launches its local mcp-proxy and a second unchanged Relay as fusion-eyes; no manual PowerShell windows are needed.
-- stopping/closing this GUI stops the eyes Relay and proxy processes it started. If port 18769 is already occupied, Fusion Eyes fails closed instead of attaching to an unknown process; the official fusion-workstation Relay keeps running.
+Status rows report Reference (Autodesk MCP / fusion-workstation), Eyes
+(PERISCOPE / fusion-eyes), and Hands (Shimmer / fusion-hands). A missing or
+mismatched optional runtime degrades only that provider. Unknown listeners on
+18768 or 18769 fail closed and are not adopted or killed.
 
-GUI shows:
-- local Fusion MCP port status;
-- Bridge network reachability;
-- relay process state;
-- Fusion-to-Bridge connected state;
-- live relay log with local HH:MM:SS.mmm timestamps;
-- result-delivery health and pending outbox state. Full-resolution screenshots
-  automatically use verified external spill when too large for inline delivery.
+Stop leaves the GUI open and terminates only child processes created by this
+GUI. Closing the GUI does the same. Neither action closes Fusion, saves or
+closes a Fusion document, or changes a Fusion document.
 
 Security:
-- token is never stored as plaintext;
-- token is passed to the child agent only through its process environment;
+- the token is never stored as plaintext;
+- the token is passed to relay children only through their process environment;
 - Forget token deletes the DPAPI-protected local token file.
 
 Fallback:
-START_FUSION_AGENT.ps1 remains available and no longer runs Test-NetConnection.
+START_FUSION_AGENT.ps1 remains available for the Reference relay only.

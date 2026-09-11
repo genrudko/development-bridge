@@ -5,9 +5,14 @@ $Venv = Join-Path $Root ".venv"
 $Python = Join-Path $Venv "Scripts\python.exe"
 $PythonW = Join-Path $Venv "Scripts\pythonw.exe"
 $Gui = Join-Path $Root "fusion_relay_gui.pyw"
+$HandsRuntime = Join-Path $Root "fusion_hands_runtime.py"
+$HandsOverlay = Join-Path $Root "fusion_shimmer_overlay"
+$SourceHandsOverlay = Join-Path (Split-Path -Parent $Root) "ops\fusion_shimmer_overlay"
 
 Add-Type -AssemblyName System.Windows.Forms
 try {
+    if (-not (Test-Path $HandsRuntime)) { throw "Missing fusion_hands_runtime.py" }
+    if (-not (Test-Path (Join-Path $HandsOverlay "install.py")) -and -not (Test-Path (Join-Path $SourceHandsOverlay "install.py"))) { throw "Missing fusion_shimmer_overlay assets" }
     & py -3.12 --version *> $null
     if ($LASTEXITCODE -ne 0) { throw "Python 3.12 not found" }
     if (-not (Test-Path $Python)) {
