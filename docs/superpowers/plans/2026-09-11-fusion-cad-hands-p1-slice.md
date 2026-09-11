@@ -37,11 +37,11 @@
 - Produces `FusionCadProviderRouter.route(logical_node: str) -> FusionCadProviderRoute`.
 - `FusionCadService` receives the router by dependency injection; absence of a rich role fails closed for Hands operations.
 
-- [ ] Write RED tests proving logical nodes map to explicit roles, unknown logical nodes fall back to reference-only, invalid node ids are rejected, and no literal `fusion-workstation -> fusion-shimmer` rule exists in router code.
-- [ ] Run the focused tests and confirm the expected missing-type/settings failures.
-- [ ] Add the minimal frozen Pydantic settings and router implementation; wire it through `ApplicationContainer` construction without changing existing P0 behavior.
-- [ ] Run focused tests GREEN plus existing settings/container regressions.
-- [ ] Review diff and commit this milestone.
+- [x] Write RED tests proving logical nodes map to explicit roles, unknown logical nodes fall back to reference-only, invalid node ids are rejected, and no literal `fusion-workstation -> fusion-shimmer` rule exists in router code.
+- [x] Run the focused tests and confirm the expected missing-type/settings failures.
+- [x] Add the minimal frozen Pydantic settings and router implementation; wire it through `ApplicationContainer` construction without changing existing P0 behavior.
+- [x] Run focused tests GREEN plus existing settings/container regressions.
+- [x] Review diff and commit this milestone.
 
 ### Task 2: Source-controlled Shimmer guarded overlay
 
@@ -60,13 +60,13 @@
 - Apply payload includes `expected_guard`, `mode` (`commit` or `preview`), and an allow-listed declarative operation list.
 - Apply result includes private `guard_before`, `guard_after`, `effects`, and created/changed entity-token evidence; it never saves/closes a document.
 
-- [ ] Write RED tests using a fake Shimmer module/registry that prove disallowed ops are rejected before delegation, guard mismatch performs zero mutations, commit uses exactly Start then Commit, preview uses exactly Start then Abort and requires restored guard, and an exception after Start attempts Abort.
-- [ ] Write RED installer tests proving a wrong upstream SHA or unexpected target file hash fails closed and no files are modified.
-- [ ] Run tests and verify RED for missing overlay modules.
-- [ ] Implement the smallest overlay helpers around the existing Shimmer registry; do not reimplement sketch/feature geometry algorithms.
-- [ ] Implement the pinned overlay installer as an offline file transform/copy with backup-free fail-closed semantics; actual Windows deployment is out of scope here.
-- [ ] Run overlay tests GREEN, compile the overlay modules, and scan for arbitrary-code dispatch or save/close calls.
-- [ ] Review diff and commit this milestone.
+- [x] Write RED tests using a fake Shimmer module/registry that prove disallowed ops are rejected before delegation, guard mismatch performs zero mutations, commit uses exactly Start then Commit, preview uses exactly Start then Abort and requires restored guard, and an exception after Start attempts Abort.
+- [x] Write RED installer tests proving a wrong upstream SHA or unexpected target file hash fails closed and no files are modified.
+- [x] Run tests and verify RED for missing overlay modules.
+- [x] Implement the smallest overlay helpers around the existing Shimmer registry; do not reimplement sketch/feature geometry algorithms.
+- [x] Implement the pinned overlay installer as an offline file transform/copy with backup-free fail-closed semantics; actual Windows deployment is out of scope here.
+- [x] Run overlay tests GREEN, compile the overlay modules, and scan for arbitrary-code dispatch or save/close calls.
+- [x] Review diff and commit this milestone.
 
 ### Task 3: Strict public Hands request schemas and tool surface
 

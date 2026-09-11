@@ -1,0 +1,13 @@
+{
+  "upstream_sha": "97a06e76c289420a721590ddcab334f5f3dc3178",
+  "targets": {
+    "addin_ops_init": {
+      "path": "addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py",
+      "sha256_before": "7373d22eb6e4f212f88df8972bf55a71aa33b25b38b12beb0fd6b8009ee82510"
+    },
+    "server_tools_init": {
+      "path": "server/fusion_mcp/tools/__init__.py",
+      "sha256_before": "b33e6fac165b98d304014fa60a3c55c7b7d6177d9c52f80ff6f32a557a06fc60"
+    }
+  }
+}
