@@ -11,9 +11,10 @@ from app.desktop_nodes.service import DesktopNodeService
 from app.fusion_cad.capabilities import CapabilityMatrix
 from app.fusion_cad.errors import FusionCadError
 from app.fusion_cad.models import CadResult, CapabilityRecord
+from app.fusion_cad.providers import FusionCadProviderRouter
 from app.fusion_cad.service import FusionCadService
 from app.fusion_cad.transactions import TransactionState
-from app.settings import DesktopNodeSettings
+from app.settings import BridgeSettings, DesktopNodeSettings
 
 
 @pytest.mark.asyncio
@@ -198,6 +199,66 @@ async def test_service_executes_capabilities_read_and_persists_matrix(
     )
     transport_payload = json.loads(json.loads(payload_line[len("PAYLOAD_RAW = "):]))
     assert transport_payload["_bridge_result_transport"] == "fusion_mcp_exception_v1"
+
+
+@pytest.mark.asyncio
+async def test_capabilities_read_overlays_degraded_hands_for_configured_rich_provider(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {
+            "provider_routes": {
+                "desk-1": {
+                    "reference_node": "desk-1",
+                    "rich_node": "rich-1",
+                }
+            }
+        }
+    })
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+    mock_desktop_service.call = AsyncMock(
+        return_value={
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": "Runtime capabilities probed",
+                    "data": {
+                        "application": "Autodesk Fusion",
+                        "fusion_version": "2.0.18000",
+                        "probe_facts": {
+                            "has_app": True,
+                            "has_design_access": True,
+                            "has_entity_token_resolver": True,
+                        },
+                    },
+                    "capabilities": [
+                        {"name": "design.access", "state": "supported"},
+                        {"name": "entity.token_resolver", "state": "supported"},
+                    ],
+                }),
+            }],
+            "isError": False,
+        }
+    )
+
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"},
+        group="read",
+    )
+
+    assert isinstance(result, CadResult)
+    returned = {record.name: record for record in result.capabilities or ()}
+    assert returned["hands.sketch"].state == "degraded"
+    assert returned["hands.feature"].state == "degraded"
+    saved = cad_service.get_node_capabilities("desk-1")
+    assert saved is not None
+    assert saved.get("hands.sketch").state == "degraded"
+    assert saved.get("hands.feature").state == "degraded"
 
 
 @pytest.mark.asyncio

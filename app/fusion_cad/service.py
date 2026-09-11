@@ -4063,8 +4063,32 @@ class FusionCadService:
                     self._revision_tracker.observe(doc_ref, cur_fp)
             raise
 
-        # If operation was capabilities read, persist the probed capability matrix
-        # only if the authoritative session_generation is still current.
+        # If operation was capabilities read, overlay Bridge/provider-layer
+        # capabilities that the Autodesk-side probe cannot know about.  Keep the
+        # Fusion-side records authoritative for native runtime facts; only add
+        # Hands records when this logical node actually has a configured rich
+        # provider route.
+        if effective_bundle_group == "read" and op == "capabilities":
+            route = self._provider_router.route(node_id)
+            if route.rich_node is not None and isinstance(cad_result.data, (dict, Mapping)):
+                provider_matrix = CapabilityMatrix.from_probe(cad_result.model_dump(mode="python")["data"])
+                existing_names = {record.name for record in cad_result.capabilities or ()}
+                provider_records = tuple(
+                    record
+                    for name in ("hands.sketch", "hands.feature")
+                    if name not in existing_names
+                    for record in (provider_matrix.get(name),)
+                    if record is not None
+                )
+                if provider_records:
+                    cad_result = cad_result.model_copy(
+                        update={
+                            "capabilities": tuple(cad_result.capabilities or ()) + provider_records
+                        }
+                    )
+
+        # Persist the probed/overlaid capability matrix only if the authoritative
+        # session_generation is still current.
         if effective_bundle_group == "read" and op == "capabilities":
             if cad_result.capabilities:
                 current_gen: int | None = None
