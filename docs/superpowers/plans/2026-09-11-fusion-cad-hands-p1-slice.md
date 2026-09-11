@@ -112,7 +112,7 @@
 - [ ] Add coherence binding using the existing P0 revision tracker and authoritative observation path without creating a second public revision sequence.
 - [ ] Add result normalization into existing `CadResult`/opaque refs with strict provider error translation.
 - [ ] Run unit/integration GREEN plus P0 revision/ref regressions.
-- [x] Review diff and commit this milestone.
+- [ ] Review diff and commit this milestone.
 
 ### Task 5: Standalone sketch/feature execution and dry-run
 
@@ -133,7 +133,7 @@
 - [ ] Implement classification/capability dispatch and minimal compilation to the Shimmer allow-listed envelope.
 - [ ] Run GREEN focused Hands integration tests and all existing Fusion service/capability regressions.
 - [ ] Run a falsification sweep: malformed symbolic refs, dimension contract mismatch, wrong document, provider reconnect/session generation change, guard mismatch, preview abort mismatch, and provider error after Start.
-- [x] Review diff and commit this milestone.
+- [ ] Review diff and commit this milestone.
 
 ### Task 6: Offline phase gate and independent review
 
