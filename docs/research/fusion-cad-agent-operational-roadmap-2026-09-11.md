@@ -88,6 +88,14 @@ Make Shimmer the rich P1 CAD provider while keeping `fusion.cad/v1` as the stabl
 - When a needed operation is weak/missing in Shimmer, search qualified donors before implementing it locally.
 - Keep provider choice hidden from the model-facing workflow where practical.
 
+### Current offline implementation status
+
+The first Stage B facade slice is now implemented and offline-qualified behind the existing logical workstation contract. It adds public `fusion_sketch` and `fusion_feature` operations backed by a pinned Shimmer rich provider, while Autodesk/P0 remains the authoritative reference provider for public revisions, fingerprints and post-mutation readback.
+
+The implemented slice covers sketch create/batch plus extrude, hole, fillet and chamfer, with `dry_run` preview/abort. Bridge keeps Shimmer indices/native tokens private, resolves public `ent_*` refs fail-closed, scopes private guard bindings by rich provider/document/revision, checks provider session generation at dispatch, and publishes output refs only when the exact authoritative post-commit snapshot attests the provider token and kind. Ambiguous outcomes after dispatch/commit are non-replayable `OPERATION_UNCERTAIN`. The source-controlled overlay is pinned to Shimmer `97a06e76c289420a721590ddcab334f5f3dc3178`.
+
+This is **offline implementation evidence only**. The live Hands gate has not yet run, so `hands.sketch` and `hands.feature` must remain `degraded`. This slice also does not claim sketch/feature support inside explicit `fusion_transaction` plan/replay; that expansion remains after live proof.
+
 ### Gate
 
 A representative model-edit loop works through the normal facade/provider path:

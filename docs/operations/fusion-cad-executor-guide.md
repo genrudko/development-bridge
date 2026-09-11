@@ -207,3 +207,31 @@ Accepted/deployed baseline on 2026-09-10:
 At that runtime, load-bearing P0 capabilities such as `view.pick`, `transaction.preview_replay`, `style.text_read`, `style.text_update`, and `revision.external_change_detection` were `supported`. Some capabilities remain honestly `degraded` or `unavailable`; for example interactive selection primitives were degraded, while DXF export, section-view contract semantics, and assembly joints remained unavailable/P2-gated.
 
 This SHA/capability list is historical acceptance evidence, not a permanent assumption. Re-probe capabilities after runtime changes.
+
+
+## 14. P1 Hands offline-qualified boundary
+
+The first reuse-first Hands slice is implemented and offline-qualified, but it is **not live-qualified yet**. Keep `hands.sketch` and `hands.feature` capability state `degraded` until the dedicated live gate succeeds on the installed Fusion/Shimmer runtime.
+
+Provider roles are explicit and configuration-owned:
+
+- `reference` — the accepted Autodesk/P0 provider and authoritative source of public `rev_N`, fingerprints, snapshots and post-mutation readback;
+- `rich` — the pinned Shimmer provider used for the first rich modeling mutations;
+- `eyes` — an optional read-only observation provider when configured.
+
+The model-facing request continues to name the logical workstation. Do not expose or require provider node ids in normal agent workflows. Hands bindings are private and scoped by rich provider + document + public revision, and are invalidated on provider-session changes.
+
+The offline-supported public Hands surface is deliberately narrow:
+
+- `fusion_sketch(operation="create")` on `xy`, `xz`, `yz`, or an opaque planar-face ref;
+- `fusion_sketch(operation="batch")` for line, rectangle, circle, geometric constraints and driving dimensions, including symbolic references only to earlier geometry actions in the same batch;
+- `fusion_feature(operation="create")` for `extrude`, `hole`, `fillet`, and `chamfer`;
+- `dry_run=true` through the guarded Shimmer preview/abort path.
+
+Committed Hands calls require `expected_revision`. Bridge binds a private Shimmer guard around an authoritative P0 observation, checks the rich-provider session generation atomically at dispatch, and treats ambiguous post-dispatch/post-commit outcomes as non-replayable `OPERATION_UNCERTAIN`. Provider native tokens and Shimmer indices remain private; public results use existing opaque `ent_*` refs only after exact authoritative post-commit snapshot attestation. Preview-created refs are never published.
+
+The source-controlled overlay lives under `ops/fusion_shimmer_overlay/` and is pinned to Shimmer commit `97a06e76c289420a721590ddcab334f5f3dc3178`. Its installer fails closed on upstream SHA or target-hash mismatch. The overlay delegates geometry work to Shimmer's existing allow-listed operations; it is not a second CAD implementation and it does not expose arbitrary-code dispatch or save/close behavior.
+
+This slice does **not** add sketch/feature actions to `fusion_transaction` plan/replay. Standalone commit and `dry_run` are the only qualified Hands mutation semantics until the live gate is green and later work explicitly extends transaction replay.
+
+Before reporting Hands as `supported`, run the live disposable-model gate and prove: provider guard coherence against manual external edits, session/reconnect invalidation, preview restoration, public `fusion_sketch` and `fusion_feature` commit paths, authoritative post-readback/ref attestation, and no mutation/save of the protected original document.
