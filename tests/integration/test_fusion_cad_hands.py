@@ -1252,4 +1252,3 @@ async def test_public_coincident_accepts_two_opaque_sketch_point_refs(monkeypatc
             },
         }
     ]
-

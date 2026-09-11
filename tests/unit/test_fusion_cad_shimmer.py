@@ -244,4 +244,3 @@ async def test_adapter_uses_desktop_timeout_claim_state_for_mutation_uncertainty
 
     assert exc_info.value.code == expected_code
     assert exc_info.value.retryable is False
-
