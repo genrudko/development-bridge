@@ -16,11 +16,14 @@ First run:
   the curated launcher bundle under
   LocalAppData\DevelopmentBridgeFusion\launcher and runs that managed copy;
 - the bootstrap creates .venv and installs mcp==2.0.0 if needed;
-- install the qualified PERISCOPE runtime once with INSTALL_FUSION_EYES.ps1;
-- keep the existing pinned Shimmer installation under
-  LocalAppData\DevelopmentBridgeFusion\shimmer-sidecar: fusion-mcp.exe is in
-  venv\Scripts, the package is in venv\Lib\site-packages\fusion_mcp, and the
-  exact SHA-named extracted source remains under extract-<sha>;
+- the same one-time bootstrap installs missing qualified Eyes and Hands runtimes
+  under LocalAppData\DevelopmentBridgeFusion. Eyes is pinned PERISCOPE; Hands is
+  the exact pinned Shimmer archive/server/add-in. Provider installer failures are
+  logged to bootstrap-install.log and degrade only that optional provider;
+- the Shimmer runtime lives under DevelopmentBridgeFusion\shimmer-sidecar:
+  fusion-mcp.exe is in venv\Scripts, the package is in
+  venv\Lib\site-packages\fusion_mcp, and the exact SHA-named extracted source
+  remains under extract-<sha>;
 - the installed add-in is under AppData\Roaming\Autodesk\Autodesk Fusion 360\
   API\AddIns\Fusion360MCP\fusion_mcp_addin;
 - keep fusion_hands_runtime.py and the fusion_shimmer_overlay directory beside

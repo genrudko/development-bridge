@@ -508,6 +508,33 @@ def test_gui_package_self_bootstraps_curated_assets_into_managed_launcher():
     assert all(item not in bootstrap for item in forbidden)
     assert "Startup" not in bootstrap and "schtasks" not in bootstrap
 
+def test_unified_bootstrap_installs_missing_optional_provider_runtimes_together():
+    bootstrap = (ROOT / "agents" / "START_FUSION_GUI.ps1").read_text(encoding="utf-8-sig")
+    readme = (ROOT / "agents" / "FUSION_GUI_README.txt").read_text(encoding="utf-8")
+    assert "INSTALL_FUSION_HANDS.ps1" in bootstrap
+    assert "Invoke-OptionalProviderInstaller" in bootstrap
+    assert "periscope\\server\\.venv\\Scripts\\python.exe" in bootstrap
+    assert "shimmer-sidecar\\venv\\Scripts\\fusion-mcp.exe" in bootstrap
+    assert "INSTALL_FUSION_EYES.ps1" in bootstrap
+    assert "install the qualified PERISCOPE runtime once" not in readme
+    assert "keep the existing pinned Shimmer installation" not in readme
+    assert "installs missing qualified Eyes and Hands runtimes" in readme
+
+
+def test_hands_installer_is_pinned_hash_guarded_and_non_destructive():
+    installer = (ROOT / "agents" / "INSTALL_FUSION_HANDS.ps1").read_text(encoding="utf-8-sig")
+    assert "97a06e76c289420a721590ddcab334f5f3dc3178" in installer
+    assert "https://github.com/shimmerjordan/self-host-fusion360-MCP/archive/$Pin.zip" in installer
+    assert "ConvertFrom-Json" in installer and "Get-FileHash" in installer
+    assert "overlay_sha256" in installer and "sha256_before" in installer
+    assert "extract-$Pin" in installer and "self-host-fusion360-MCP-$Pin" in installer
+    assert '"[http]"' in installer and "fusion-mcp.exe" in installer
+    assert "gen_token.py" in installer
+    assert "Claude Desktop" not in installer
+    assert "Remove-Item $AddinTarget -Recurse" not in installer
+    assert "refusing to overwrite an existing unqualified Fusion360MCP add-in" in installer
+
+
 def test_fallback_launcher_never_uses_slow_test_net_connection():
     text=(ROOT / "agents" / "START_FUSION_AGENT.ps1").read_text(encoding="utf-8-sig")
     assert "Test-NetConnection" not in text
