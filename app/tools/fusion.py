@@ -164,6 +164,15 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         )
         return to_mcp_result(success(request_context.request_id, data))
 
+    async def hands_qualify_runtime(ctx, params, request_context):
+        args = params.arguments or {}
+        data = container.fusion_cad.qualify_hands_runtime(
+            str(args["logical_node"]),
+            expected_rich_node=str(args["expected_rich_node"]),
+            expected_session_generation=int(args["expected_session_generation"]),
+        )
+        return to_mcp_result(success(request_context.request_id, data))
+
     async def operation_status(ctx, params, request_context):
         args = params.arguments
         data = container.desktop_nodes.operation_status(
@@ -297,6 +306,20 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             "resource_uri": {"type": "string", "minLength": 1, "maxLength": 2048}
         },
         "required": ["resource_uri"],
+        "additionalProperties": False,
+    }
+    hands_qualification_schema = {
+        "type": "object",
+        "properties": {
+            "logical_node": node,
+            "expected_rich_node": node,
+            "expected_session_generation": {"type": "integer", "minimum": 1},
+        },
+        "required": [
+            "logical_node",
+            "expected_rich_node",
+            "expected_session_generation",
+        ],
         "additionalProperties": False,
     }
     operation_lookup = {
@@ -448,6 +471,18 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 inputSchema=fusion_feature_schema(),
             ),
             make_domain_handler(FusionFeatureRequest, "fusion_feature"),
+            "fusion-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="fusion_hands_qualify_runtime",
+                description=(
+                    "Internal operator-only gate: bind successful live Hands qualification "
+                    "to the current configured rich-provider session generation"
+                ),
+                inputSchema=hands_qualification_schema,
+            ),
+            hands_qualify_runtime,
             "fusion-desktop",
         ),
     )

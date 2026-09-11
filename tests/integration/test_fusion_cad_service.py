@@ -503,6 +503,163 @@ async def test_routed_capability_probe_discovers_transport_schema_on_reference_n
     assert transport_payload["_bridge_result_transport"] == "fusion_mcp_exception_v1"
 
 
+
+@pytest.mark.asyncio
+async def test_hands_provider_policy_ignores_reference_qualification_flags_and_promotes_only_bridge_owned_session(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {"provider_routes": {"desk-1": {
+            "reference_node": "desk-1", "rich_node": "rich-1"
+        }}}
+    })
+    generations = {"desk-1": 4, "rich-1": 9}
+    mock_desktop_service.get_session_generation = MagicMock(
+        side_effect=lambda node_id: generations[node_id]
+    )
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+    raw = {
+        "content": [{"type": "text", "text": json.dumps({
+            "api_version": "fusion.cad/v1", "status": "succeeded",
+            "summary": "Runtime capabilities probed",
+            "data": {
+                "application": "Autodesk Fusion",
+                "probe_facts": {
+                    "has_app": True,
+                    "has_design_access": True,
+                    "has_entity_token_resolver": True,
+                    "hands_runtime_verified": True,
+                    "hands_sketch_runtime_verified": True,
+                    "hands_feature_runtime_verified": True,
+                },
+            },
+            "capabilities": [{"name": "design.access", "state": "supported"}],
+        })}], "isError": False,
+    }
+    mock_desktop_service.call = AsyncMock(return_value=raw)
+
+    before = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"}, group="read"
+    )
+    before_hands = {r.name: r for r in before.capabilities or ()}
+    assert before_hands["hands.sketch"].state == "degraded"
+    assert before_hands["hands.feature"].state == "degraded"
+
+    proof = cad_service.qualify_hands_runtime(
+        "desk-1", expected_rich_node="rich-1", expected_session_generation=9
+    )
+    assert proof == {
+        "logical_node": "desk-1", "rich_node": "rich-1", "session_generation": 9,
+        "qualified": True,
+    }
+    after = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"}, group="read"
+    )
+    after_hands = {r.name: r for r in after.capabilities or ()}
+    assert after_hands["hands.sketch"].state == "supported"
+    assert after_hands["hands.feature"].state == "supported"
+
+
+@pytest.mark.asyncio
+async def test_configured_rich_route_emits_exact_hands_policy_records_when_probe_data_is_empty(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {"provider_routes": {"desk-1": {
+            "reference_node": "desk-1", "rich_node": "rich-1"
+        }}}
+    })
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+    mock_desktop_service.get_session_generation = MagicMock(
+        side_effect=lambda node_id: {"desk-1": 1, "rich-1": 1}[node_id]
+    )
+    mock_desktop_service.call = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps({
+            "api_version": "fusion.cad/v1", "status": "succeeded",
+            "summary": "Runtime capabilities probed", "data": {},
+            "capabilities": [{"name": "design.access", "state": "unavailable"}],
+        })}], "isError": False,
+    })
+
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"}, group="read"
+    )
+    hands = [r for r in result.capabilities or () if r.name.startswith("hands.")]
+    assert [r.name for r in hands] == ["hands.sketch", "hands.feature"]
+    assert all(r.state == "unavailable" for r in hands)
+
+
+def test_hands_runtime_qualification_requires_exact_rich_provider_generation(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {"provider_routes": {"desk-1": {
+            "reference_node": "desk-1", "rich_node": "rich-1"
+        }}}
+    })
+    mock_desktop_service.get_session_generation = MagicMock(
+        side_effect=lambda node_id: {"desk-1": 2, "rich-1": 7}[node_id]
+    )
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+
+    with pytest.raises(FusionCadError) as exc:
+        cad_service.qualify_hands_runtime(
+            "desk-1", expected_rich_node="rich-1", expected_session_generation=6
+        )
+    assert exc.value.code == ErrorCode.CAPABILITY_UNAVAILABLE
+    assert cad_service.hands_runtime_qualification("desk-1") is None
+
+
+@pytest.mark.asyncio
+async def test_rich_provider_reconnect_invalidates_supported_hands_capability_cache(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {"provider_routes": {"desk-1": {
+            "reference_node": "desk-1", "rich_node": "rich-1"
+        }}}
+    })
+    generations = {"desk-1": 5, "rich-1": 11}
+    mock_desktop_service.get_session_generation = MagicMock(
+        side_effect=lambda node_id: generations[node_id]
+    )
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+    cad_service.qualify_hands_runtime(
+        "desk-1", expected_rich_node="rich-1", expected_session_generation=11
+    )
+    mock_desktop_service.call = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps({
+            "api_version": "fusion.cad/v1", "status": "succeeded",
+            "summary": "Runtime capabilities probed",
+            "data": {"probe_facts": {
+                "has_app": True, "has_design_access": True,
+                "has_entity_token_resolver": True,
+            }},
+            "capabilities": [{"name": "design.access", "state": "supported"}],
+        })}], "isError": False,
+    })
+    await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"}, group="read"
+    )
+    assert cad_service.get_node_capabilities("desk-1").get("hands.sketch").state == "supported"
+
+    generations["rich-1"] = 12
+    assert cad_service.get_node_capabilities("desk-1") is None
+    assert cad_service.hands_runtime_qualification("desk-1") is None
+
+
 @pytest.mark.asyncio
 async def test_falsify_finding_1_unprobed_node_fails_closed_before_script_dispatch(
     mock_desktop_service: DesktopNodeService,

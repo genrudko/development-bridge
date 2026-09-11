@@ -235,6 +235,7 @@ class FusionCadService:
         self._hands_provider_guard_sessions: dict[
             tuple[str, str, str], tuple[str, int | None]
         ] = {}
+        self._hands_runtime_qualifications: dict[str, tuple[str, int]] = {}
 
     @property
     def provider_router(self) -> FusionCadProviderRouter:
@@ -1509,6 +1510,68 @@ class FusionCadService:
 
         return self._revision_tracker.assert_expected(doc_ref, exp_rev)
 
+    def hands_runtime_qualification(self, logical_node: str) -> dict[str, Any] | None:
+        route = self._provider_router.route(logical_node)
+        qualification = self._hands_runtime_qualifications.get(logical_node)
+        if route.rich_node is None or qualification is None:
+            return None
+        rich_node, generation = qualification
+        if rich_node != route.rich_node:
+            self._hands_runtime_qualifications.pop(logical_node, None)
+            self._node_capabilities.pop(logical_node, None)
+            return None
+        current_generation = self._hands_session_generation(rich_node)
+        if current_generation is None or current_generation != generation:
+            self._hands_runtime_qualifications.pop(logical_node, None)
+            self._node_capabilities.pop(logical_node, None)
+            return None
+        return {
+            "logical_node": logical_node,
+            "rich_node": rich_node,
+            "session_generation": generation,
+            "qualified": True,
+        }
+
+    def qualify_hands_runtime(
+        self,
+        logical_node: str,
+        *,
+        expected_rich_node: str,
+        expected_session_generation: int,
+    ) -> dict[str, Any]:
+        route = self._provider_router.route(logical_node)
+        rich_node = route.rich_node
+        current_generation = (
+            self._hands_session_generation(rich_node) if rich_node is not None else None
+        )
+        if (
+            rich_node is None
+            or rich_node != expected_rich_node
+            or current_generation is None
+            or current_generation != expected_session_generation
+        ):
+            self._hands_runtime_qualifications.pop(logical_node, None)
+            self._node_capabilities.pop(logical_node, None)
+            raise FusionCadError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "Hands runtime qualification does not match the current rich-provider session",
+                retryable=False,
+                details={
+                    "node_id": trusted_detail(logical_node),
+                    "rich_node": trusted_detail(expected_rich_node),
+                    "expected_session_generation": expected_session_generation,
+                    "current_session_generation": current_generation,
+                },
+            )
+        self._hands_runtime_qualifications[logical_node] = (rich_node, current_generation)
+        self._node_capabilities.pop(logical_node, None)
+        return {
+            "logical_node": logical_node,
+            "rich_node": rich_node,
+            "session_generation": current_generation,
+            "qualified": True,
+        }
+
     def get_node_capabilities(self, node_id: str) -> CapabilityMatrix | None:
         cached = self._node_capabilities.get(node_id)
         if cached is None:
@@ -1523,6 +1586,15 @@ class FusionCadService:
             self._node_capabilities.pop(node_id, None)
             return None
         if current_gen != cached.session_generation:
+            self._node_capabilities.pop(node_id, None)
+            return None
+        if any(
+            record is not None and record.state == "supported"
+            for record in (
+                cached.matrix.get("hands.sketch"),
+                cached.matrix.get("hands.feature"),
+            )
+        ) and self.hands_runtime_qualification(node_id) is None:
             self._node_capabilities.pop(node_id, None)
             return None
         return cached.matrix
@@ -1568,13 +1640,34 @@ class FusionCadService:
             if record.name not in hands_names
         )
         route = self._provider_router.route(node_id)
-        if route.rich_node is None or not isinstance(cad_result.data, (dict, Mapping)):
+        if route.rich_node is None:
             if base_records == tuple(cad_result.capabilities or ()):
                 return cad_result
             return cad_result.model_copy(update={"capabilities": base_records})
-        provider_matrix = CapabilityMatrix.from_probe(
-            cad_result.model_dump(mode="python")["data"]
-        )
+
+        dumped = cad_result.model_dump(mode="python")
+        provider_data = dict(dumped.get("data") or {})
+        for facts_key in ("probe_facts", "probe_details", "facts"):
+            raw_facts = provider_data.get(facts_key)
+            if not isinstance(raw_facts, (dict, Mapping)):
+                continue
+            clean_facts = dict(raw_facts)
+            for untrusted_name in (
+                "hands_runtime_verified",
+                "hands_sketch_runtime_verified",
+                "hands_feature_runtime_verified",
+            ):
+                clean_facts.pop(untrusted_name, None)
+            provider_data[facts_key] = clean_facts
+
+        qualification = self.hands_runtime_qualification(node_id)
+        if qualification is not None:
+            facts = provider_data.get("probe_facts")
+            facts = dict(facts) if isinstance(facts, (dict, Mapping)) else {}
+            facts["hands_runtime_verified"] = True
+            provider_data["probe_facts"] = facts
+
+        provider_matrix = CapabilityMatrix.from_probe(provider_data)
         provider_records = tuple(
             record
             for name in hands_names

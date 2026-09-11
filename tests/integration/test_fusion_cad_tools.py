@@ -137,6 +137,48 @@ def test_fusion_tools_registration(mock_container: ApplicationContainer):
         assert tool.source == "fusion-desktop"
 
 
+
+@pytest.mark.asyncio
+async def test_hidden_hands_qualification_tool_pins_current_rich_session_generation():
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://127.0.0.1:8000"},
+        "desktop_nodes": {"token": "test-desktop-token", "journal_path": ":memory:"},
+        "fusion_cad": {"provider_routes": {"desk-1": {
+            "reference_node": "desk-1", "rich_node": "rich-1"
+        }}},
+    })
+    container = build_container(settings)
+    now = time.monotonic()
+    wall = time.time()
+    container.desktop_nodes._nodes["desk-1"] = NodeState(
+        node_id="desk-1", last_seen=now, last_seen_wall=wall,
+        tools=[{"name": "fusion_mcp_execute"}], fusion_available=True,
+        session_generation=2,
+    )
+    container.desktop_nodes._nodes["rich-1"] = NodeState(
+        node_id="rich-1", last_seen=now, last_seen_wall=wall,
+        tools=[{"name": "_bridge_cad_guard"}, {"name": "_bridge_cad_apply"}],
+        fusion_available=True, session_generation=7,
+    )
+    registry = build_tool_registry(container)
+    tool = registry.get("fusion_hands_qualify_runtime")
+    assert tool is not None
+    params = types.CallToolRequestParams(
+        name="fusion_hands_qualify_runtime",
+        arguments={
+            "logical_node": "desk-1",
+            "expected_rich_node": "rich-1",
+            "expected_session_generation": 7,
+        },
+    )
+    result = await tool.handler(None, params, RequestContext(request_id="req_qualify"))
+    assert result.is_error is False
+    proof = container.fusion_cad.hands_runtime_qualification("desk-1")
+    assert proof is not None
+    assert proof["rich_node"] == "rich-1"
+    assert proof["session_generation"] == 7
+
+
 @pytest.mark.parametrize("tool_name", [
     "fusion_read",
     "fusion_inspect",
