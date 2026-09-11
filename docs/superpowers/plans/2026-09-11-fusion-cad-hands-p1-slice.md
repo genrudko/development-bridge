@@ -106,13 +106,13 @@
 - Produces service-owned `(document_ref, model_revision) -> provider_guard` binding only after the `guard A -> authoritative observation -> guard B` coherence check.
 - Converts public `ent_*` inputs to private tokens; registers token-backed public refs only after proven commit.
 
-- [ ] Write RED tests for rich-node absence, A/B guard mismatch, stale expected revision, token kind mismatch, provider error mapping, preview ref non-registration, and commit ref registration.
-- [ ] Run RED and confirm the missing adapter/service path is the cause.
-- [ ] Implement the minimal adapter using `DesktopNodeService.call` against `_bridge_cad_guard`/`_bridge_cad_apply`; keep raw provider payloads private.
-- [ ] Add coherence binding using the existing P0 revision tracker and authoritative observation path without creating a second public revision sequence.
-- [ ] Add result normalization into existing `CadResult`/opaque refs with strict provider error translation.
-- [ ] Run unit/integration GREEN plus P0 revision/ref regressions.
-- [ ] Review diff and commit this milestone.
+- [x] Write RED tests for rich-node absence, A/B guard mismatch, stale expected revision, token kind mismatch, provider error mapping, preview ref non-registration, and commit ref registration.
+- [x] Run RED and confirm the missing adapter/service path is the cause.
+- [x] Implement the minimal adapter using `DesktopNodeService.call` against `_bridge_cad_guard`/`_bridge_cad_apply`; keep raw provider payloads private.
+- [x] Add coherence binding using the existing P0 revision tracker and authoritative observation path without creating a second public revision sequence.
+- [x] Add result normalization into existing `CadResult`/opaque refs with strict provider error translation.
+- [x] Run unit/integration GREEN plus P0 revision/ref regressions.
+- [x] Review diff and commit this milestone.
 
 ### Task 5: Standalone sketch/feature execution and dry-run
 

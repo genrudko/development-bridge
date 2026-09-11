@@ -4,7 +4,7 @@ import json
 import math
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +59,7 @@ from app.fusion_cad.requests import (
 from app.fusion_cad.revisions import RevisionRecord, RevisionTracker
 from app.fusion_cad.scripts import FusionCadScriptBundle
 from app.fusion_cad.selectors import SelectorEngine
+from app.fusion_cad.shimmer import ProviderGuardEvidence, ShimmerHandsAdapter
 from app.fusion_cad.snapshots import (
     SnapshotStore,
     normalize_feature,
@@ -220,6 +221,8 @@ class FusionCadService:
         self._node_capabilities: dict[str, _CachedNodeCapabilities] = {}
         self._active_document_refs_by_node: dict[str, str] = {}
         self._visibility_restore_states: dict[str, dict[str, Any]] = {}
+        self._shimmer_hands = ShimmerHandsAdapter(desktop_nodes)
+        self._hands_provider_guards: dict[tuple[str, str], str] = {}
 
     @property
     def provider_router(self) -> FusionCadProviderRouter:
@@ -248,6 +251,176 @@ class FusionCadService:
     @property
     def selector_engine(self) -> SelectorEngine:
         return self._selector_engine
+
+    def get_hands_provider_guard(self, document_ref: str, model_revision: str) -> str | None:
+        return self._hands_provider_guards.get((document_ref, model_revision))
+
+    async def _observe_authoritative_for_hands(
+        self, reference_node: str, document_ref: str
+    ) -> RevisionRecord:
+        # model_snapshot is the bounded public read that carries the authoritative
+        # P0 fingerprint. feature_tree computes that fingerprint inside Fusion but
+        # deliberately does not return it, so it cannot advance RevisionTracker.
+        await self.execute(
+            {
+                "node_id": reference_node,
+                "operation": "model_snapshot",
+                "document_ref": document_ref,
+                "detail": "compact",
+                "include_bodies": False,
+                "include_sketches": False,
+                "include_features": False,
+                "include_parameters": False,
+            },
+            group="read",
+        )
+        record = self._revision_tracker.current(document_ref)
+        if record is None:
+            raise FusionCadError(ErrorCode.NO_ACTIVE_DESIGN)
+        return record
+
+    async def bind_hands_provider(
+        self, logical_node: str, document_ref: str
+    ) -> ProviderGuardEvidence:
+        """Bind a private Shimmer guard to one authoritative P0 revision."""
+        route = self._provider_router.route(logical_node)
+        rich_node = self._provider_router.require(logical_node, "rich")
+        guard_a = await self._shimmer_hands.guard(rich_node, document_ref)
+        revision = await self._observe_authoritative_for_hands(route.reference_node, document_ref)
+        guard_b = await self._shimmer_hands.guard(rich_node, document_ref)
+        if guard_a.guard != guard_b.guard:
+            raise FusionCadError(
+                ErrorCode.REVISION_CONFLICT,
+                details={"document_ref": document_ref, "current_revision": revision.revision, "applied": False},
+            )
+        self._hands_provider_guards[(document_ref, revision.revision)] = guard_b.guard
+        return guard_b
+
+    def _resolve_hands_value(self, value: Any, document_ref: str) -> Any:
+        if isinstance(value, Mapping):
+            if isinstance(value.get("ref"), str) and value["ref"].startswith("ent_"):
+                record = self._ref_registry.get_internal_record(value["ref"], document_ref)
+                if record is None:
+                    other = self._ref_registry.get_internal_record(value["ref"])
+                    raise FusionCadError(ErrorCode.WRONG_DOCUMENT if other else ErrorCode.REF_STALE)
+                expected_kind = value.get("expected_kind") or value.get("kind")
+                if expected_kind is not None and expected_kind != record.kind:
+                    raise FusionCadError(ErrorCode.TYPE_MISMATCH)
+                if not record.native_token:
+                    raise FusionCadError(ErrorCode.REF_STALE)
+                return {"token": record.native_token, "kind": record.kind}
+            return {key: self._resolve_hands_value(item, document_ref) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_hands_value(item, document_ref) for item in value]
+        if isinstance(value, tuple):
+            return [self._resolve_hands_value(item, document_ref) for item in value]
+        return value
+
+    async def apply_hands_provider(
+        self,
+        logical_node: str,
+        document_ref: str,
+        *,
+        expected_revision: str,
+        mode: str,
+        operations: Sequence[Mapping[str, Any]],
+    ) -> CadResult:
+        """Internal Task 4 provider path; public sketch/feature dispatch is Task 5."""
+        if mode not in ("commit", "preview"):
+            raise FusionCadError(ErrorCode.INVALID_ARGUMENT)
+        revision = self.assert_fresh_for_mutation(
+            expected_revision, document_ref=document_ref
+        )
+        expected_guard = self._hands_provider_guards.get(
+            (document_ref, revision.revision)
+        )
+        if expected_guard is None:
+            raise FusionCadError(
+                ErrorCode.REVISION_CONFLICT,
+                details={"document_ref": document_ref, "applied": False},
+            )
+        prepared = self._resolve_hands_value(list(operations), document_ref)
+        route = self._provider_router.route(logical_node)
+        rich_node = self._provider_router.require(logical_node, "rich")
+        evidence = await self._shimmer_hands.apply(
+            rich_node,
+            document_ref,
+            mode=mode,
+            expected_guard=expected_guard,
+            operations=prepared,
+        )
+
+        if mode == "preview":
+            return CadResult(
+                summary="Fusion CAD provider preview completed",
+                data=ImmutableMapping(
+                    {
+                        "mode": mode,
+                        "committed": evidence.committed,
+                        "baseline_restored": evidence.baseline_restored,
+                    }
+                ),
+            )
+
+        # Shimmer has now reported a committed native mutation. The old guard is
+        # no longer safe even if post-commit verification cannot complete. From
+        # this point no failure may auto-replay the mutation.
+        self._hands_provider_guards.pop((document_ref, revision.revision), None)
+        try:
+            post_revision = await self._observe_authoritative_for_hands(
+                route.reference_node, document_ref
+            )
+            post_guard = await self._shimmer_hands.guard(rich_node, document_ref)
+        except Exception:
+            raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN) from None
+
+        if (
+            post_revision.revision == revision.revision
+            or post_guard.guard != evidence.guard_after
+        ):
+            raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
+
+        entities = (*evidence.created, *evidence.changed)
+        token_kinds: dict[str, str] = {}
+        for entity in entities:
+            prior_kind = token_kinds.get(entity.native_token)
+            if prior_kind is not None and prior_kind != entity.kind:
+                raise FusionCadError(ErrorCode.TYPE_MISMATCH)
+            token_kinds[entity.native_token] = entity.kind
+            existing = self._ref_registry.get_internal_record_by_native_token(
+                document_ref, entity.native_token
+            )
+            if existing is not None and existing.kind != entity.kind:
+                raise FusionCadError(ErrorCode.TYPE_MISMATCH)
+
+        refs: list[str] = []
+        for entity in entities:
+            issued = self._ref_registry.issue(
+                document_ref=document_ref,
+                kind=entity.kind,
+                native_token=entity.native_token,
+            )
+            refs.append(issued.ref)
+
+        self._hands_provider_guards[(document_ref, post_revision.revision)] = (
+            post_guard.guard
+        )
+        return CadResult(
+            document=DocumentState(
+                document_ref=document_ref,
+                model_revision=post_revision.revision,
+                units="mm",
+            ),
+            summary="Fusion CAD provider mutation committed",
+            data=ImmutableMapping(
+                {
+                    "mode": mode,
+                    "committed": evidence.committed,
+                    "baseline_restored": evidence.baseline_restored,
+                }
+            ),
+            changed_refs=tuple(dict.fromkeys(refs)),
+        )
 
     def build_current_view_context(
         self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import inspect
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 OVERLAY = ROOT / "ops" / "fusion_shimmer_overlay"
+DOC_REF = "doc_unsaved_fixture"
 
 
 def _load(filename: str, module_name: str):
@@ -51,7 +53,9 @@ class FakeApp:
     def __init__(self, state):
         self.state = state
         self.commands = []
-        self.activeDocument = SimpleNamespace(name="Disposable", dataFile=None)
+        self.activeDocument = SimpleNamespace(
+            name="Disposable", dataFile=None, dataId=None, savedVersion=None, creationId="fixture"
+        )
 
     def executeTextCommand(self, command):
         self.commands.append(command)
@@ -142,7 +146,7 @@ def test_guard_mismatch_rejects_before_transaction_or_delegation():
 
     result = module.execute_guarded(
         ctx,
-        {"expected_guard": "0" * 64, "mode": "commit", "operations": [{"op": "sketch.rectangle", "params": {}}]},
+        {"document_ref": DOC_REF, "expected_guard": "0" * 64, "mode": "commit", "operations": [{"op": "sketch.rectangle", "params": {}}]},
         registry,
     )
 
@@ -160,7 +164,7 @@ def test_disallowed_operation_rejects_before_transaction():
 
     result = module.execute_guarded(
         ctx,
-        {"expected_guard": guard, "mode": "commit", "operations": [{"op": "document.save", "params": {}}]},
+        {"document_ref": DOC_REF, "expected_guard": guard, "mode": "commit", "operations": [{"op": "document.save", "params": {}}]},
         {"document.save": lambda ctx, params: pytest.fail("must not delegate")},
     )
 
@@ -177,7 +181,7 @@ def test_commit_uses_one_ptransaction_start_then_commit_and_returns_effects():
 
     result = module.execute_guarded(
         ctx,
-        {"expected_guard": guard, "mode": "commit", "operations": [{"op": "sketch.rectangle", "params": {"delta": 2}}]},
+        {"document_ref": DOC_REF, "expected_guard": guard, "mode": "commit", "operations": [{"op": "sketch.rectangle", "params": {"delta": 2}}]},
         _mutating_registry(ctx.state),
     )
 
@@ -206,7 +210,7 @@ def test_preview_aborts_and_requires_guard_restoration():
 
     result = module.execute_guarded(
         ctx,
-        {"expected_guard": guard, "mode": "preview", "operations": [{"op": "feature.extrude", "params": {}}]},
+        {"document_ref": DOC_REF, "expected_guard": guard, "mode": "preview", "operations": [{"op": "feature.extrude", "params": {}}]},
         _mutating_registry(ctx.state),
     )
 
@@ -232,7 +236,7 @@ def test_exception_after_start_aborts_when_abort_is_proven():
 
     result = module.execute_guarded(
         ctx,
-        {"expected_guard": guard, "mode": "commit", "operations": [{"op": "test.explode", "params": {}}]},
+        {"document_ref": DOC_REF, "expected_guard": guard, "mode": "commit", "operations": [{"op": "test.explode", "params": {}}]},
         {**_mutating_registry(ctx.state)},
         allowed_ops={"test.explode"},
     )
@@ -262,6 +266,7 @@ def test_commit_returns_private_created_entity_token_evidence():
     result = module.execute_guarded(
         ctx,
         {
+            "document_ref": DOC_REF,
             "expected_guard": guard,
             "mode": "commit",
             "operations": [{"op": "sketch.create", "params": {}}],
@@ -290,7 +295,9 @@ def test_server_overlay_exposes_only_two_bridge_tools():
     module.register(FakeMcp(), client)
 
     assert set(registered) == {"_bridge_cad_guard", "_bridge_cad_apply"}
-    assert registered["_bridge_cad_guard"]() == {"op": "bridge.cad_guard", "params": {}}
+    assert registered["_bridge_cad_guard"](DOC_REF) == {
+        "op": "bridge.cad_guard", "params": {"document_ref": DOC_REF}
+    }
 
 
 def test_installer_fails_closed_before_writes_on_wrong_upstream_sha(tmp_path):
@@ -360,9 +367,15 @@ def test_installer_applies_overlay_to_verified_shimmer_layout(tmp_path):
     addin_init.parent.mkdir(parents=True)
     server_init.parent.mkdir(parents=True)
 
-    source_repo = Path("/tmp/fusion-reuse-audit2/shimmer")
-    addin_bytes = (source_repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py").read_bytes()
-    server_bytes = (source_repo / "server/fusion_mcp/tools/__init__.py").read_bytes()
+    # Minimal exact registration anchors make this test hermetic; the separate
+    # pinned-manifest gate proves the real upstream preimage hashes.
+    addin_bytes = b"from . import (\n    api,\n    assembly,\n)\n"
+    server_bytes = (
+        b"from fusion_mcp.tools import (\n        api,\n        assembly,\n)\n\n"
+        b"def register_all(mcp, client):\n"
+        b"    # Read-only generic-API helpers (introspect/docs) are always available.\n"
+        b"    api.register(mcp, client)\n"
+    )
     addin_init.write_bytes(addin_bytes)
     server_init.write_bytes(server_bytes)
 
@@ -405,3 +418,90 @@ def test_manifest_pins_exact_upstream_and_registration_preimages():
     assert manifest["upstream_sha"] == "97a06e76c289420a721590ddcab334f5f3dc3178"
     assert manifest["targets"]["addin_ops_init"]["sha256_before"] == "7373d22eb6e4f212f88df8972bf55a71aa33b25b38b12beb0fd6b8009ee82510"
     assert manifest["targets"]["server_tools_init"]["sha256_before"] == "b33e6fac165b98d304014fa60a3c55c7b7d6177d9c52f80ff6f32a557a06fc60"
+
+
+
+def test_provider_guard_reports_p0_normalized_document_ref():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_doc_identity")
+    ctx = FakeCtx()
+    ctx.app.activeDocument = SimpleNamespace(
+        name="Disposable", dataFile=SimpleNamespace(id="urn:adsk.wipprod:dm.lineage:abc-123")
+    )
+    evidence = module.compute_provider_guard(ctx)
+    assert evidence["document_ref"] == "doc_urn_adsk.wipprod_dm.lineage_abc-123"
+
+
+def test_guard_and_apply_reject_wrong_document_before_transaction_or_delegation():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_wrong_doc")
+    ctx = FakeCtx()
+    ctx.app.activeDocument = SimpleNamespace(
+        name="Disposable", dataFile=SimpleNamespace(id="actual-doc")
+    )
+    active = module.compute_provider_guard(ctx)
+
+    guard_result = module.guard_for_document(ctx, {"document_ref": "doc_other-doc"})
+    assert guard_result["ok"] is False
+    assert guard_result["error"]["code"] == "WRONG_DOCUMENT"
+
+    apply_result = module.execute_guarded(
+        ctx,
+        {
+            "document_ref": "doc_other-doc",
+            "expected_guard": active["guard"],
+            "mode": "commit",
+            "operations": [{"op": "sketch.rectangle", "params": {"delta": 1}}],
+        },
+        _mutating_registry(ctx.state),
+    )
+    assert apply_result["ok"] is False
+    assert apply_result["error"]["code"] == "WRONG_DOCUMENT"
+    assert ctx.app.commands == []
+    assert ctx.state["value"] == 0
+
+
+def test_server_overlay_private_tools_require_and_forward_document_ref():
+    module = _load("server_bridge_cad.py", "fusion_shimmer_overlay_server_doc")
+    registered = {}
+    calls = []
+
+    class FakeMcp:
+        def tool(self, **kwargs):
+            def deco(fn):
+                registered[fn.__name__] = fn
+                return fn
+            return deco
+
+    client = SimpleNamespace(call=lambda op, params=None: calls.append((op, params)) or {"ok": True})
+    module.register(FakeMcp(), client)
+
+    guard_sig = inspect.signature(registered["_bridge_cad_guard"])
+    apply_sig = inspect.signature(registered["_bridge_cad_apply"])
+    assert tuple(guard_sig.parameters) == ("document_ref",)
+    assert tuple(apply_sig.parameters) == ("document_ref", "expected_guard", "mode", "operations")
+
+    registered["_bridge_cad_guard"]("doc_a")
+    registered["_bridge_cad_apply"]("doc_a", "a" * 64, "preview", [{"op": "sketch.create", "params": {}}])
+    assert calls == [
+        ("bridge.cad_guard", {"document_ref": "doc_a"}),
+        ("bridge.cad_apply", {
+            "document_ref": "doc_a", "expected_guard": "a" * 64,
+            "mode": "preview", "operations": [{"op": "sketch.create", "params": {}}],
+        }),
+    ]
+
+
+def test_entity_inventory_preserves_sketch_kind_when_same_entity_is_on_timeline():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_sketch_kind")
+    ctx = FakeCtx()
+    sketch = SimpleNamespace(
+        name="HandsSketch",
+        entityToken="shared-sketch-token",
+        revisionId="sketch-rev-1",
+        attributes=FakeCollection(),
+    )
+    ctx._component.sketches.append(sketch)
+    ctx._design.timeline = FakeCollection([SimpleNamespace(entity=sketch)])
+
+    inventory = module._entity_inventory(ctx)
+
+    assert inventory["shared-sketch-token"]["kind"] == "sketch"

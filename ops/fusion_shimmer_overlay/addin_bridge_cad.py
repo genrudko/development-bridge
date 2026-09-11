@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 
 API_VERSION = "bridge.shimmer/v1"
@@ -120,12 +121,52 @@ def _attribute_rows(owner, owner_kind, owner_id):
     return rows
 
 
+def _active_document_ref(ctx):
+    """Mirror P0's copy-safe document-ref normalization for provider binding."""
+    doc = getattr(getattr(ctx, "app", None), "activeDocument", None)
+    if doc is None:
+        raise ValueError("active document required")
+    try:
+        data_file = getattr(doc, "dataFile", None)
+    except Exception:
+        data_file = None
+    if data_file is not None:
+        try:
+            value = getattr(data_file, "id", None)
+        except Exception:
+            value = None
+        if value is None or not str(value).strip():
+            raise ValueError("saved/cloud document lacks DataFile.id")
+        raw = str(value).strip()
+    else:
+        try:
+            value = getattr(doc, "dataId", None)
+        except Exception:
+            value = None
+        if value is not None and str(value).strip():
+            raw = str(value).strip()
+        else:
+            try:
+                creation = getattr(doc, "creationId", None)
+                saved_version = getattr(doc, "savedVersion", None)
+            except Exception:
+                creation, saved_version = None, None
+            if saved_version is not None:
+                raise ValueError("saved document lacks copy-safe identity")
+            if creation is None or not str(creation).strip():
+                raise ValueError("document lacks stable runtime identity")
+            raw = "unsaved_" + str(creation).strip()
+    clean = re.sub(r"[^A-Za-z0-9._-]", "_", raw)
+    return clean if clean.startswith("doc_") else "doc_" + clean
+
+
 def _document_identity(ctx, design, components):
     doc = getattr(getattr(ctx, "app", None), "activeDocument", None)
     data_file = getattr(doc, "dataFile", None) if doc is not None else None
     data_id = _text(getattr(data_file, "id", None)) if data_file is not None else None
     component_tokens = sorted(t for t in (_token(c) for c in components) if t)
     return {
+        "document_ref": _active_document_ref(ctx),
         "data_file_id": data_id,
         "document_name": _text(getattr(doc, "name", None)) if doc is not None else None,
         "root_component_token": _token(getattr(design, "rootComponent", None)),
@@ -251,8 +292,15 @@ def _entity_inventory(ctx):
     timeline = getattr(design, "timeline", None)
     for item in _items(timeline):
         entity = getattr(item, "entity", None)
-        if entity is not None:
-            add("feature", entity, _text(getattr(entity, "revisionId", None)))
+        if entity is None:
+            continue
+        # Timeline can expose sketches and other already-classified entities as
+        # timeline items. Preserve their canonical entity kind; only classify a
+        # token as a feature when it was not identified by a stronger collection.
+        token = _token(entity)
+        if token and token in rows:
+            continue
+        add("feature", entity, _text(getattr(entity, "revisionId", None)))
     return rows
 
 
@@ -283,8 +331,24 @@ def compute_provider_guard(ctx):
     return {
         "api_version": API_VERSION,
         "algorithm": "sha256",
+        "document_ref": payload["document"]["document_ref"],
         "guard": hashlib.sha256(encoded).hexdigest(),
     }
+
+
+def guard_for_document(ctx, params):
+    if not isinstance(params, Mapping):
+        return _error("INVALID_ARGUMENT")
+    requested = params.get("document_ref")
+    if not isinstance(requested, str) or not requested:
+        return _error("INVALID_ARGUMENT")
+    try:
+        evidence = compute_provider_guard(ctx)
+    except Exception:
+        return _error("FUSION_API_ERROR")
+    if evidence.get("document_ref") != requested:
+        return _error("WRONG_DOCUMENT")
+    return evidence
 
 
 def _error(code, *, applied=False):
@@ -332,10 +396,13 @@ def execute_guarded(ctx, params, registry, allowed_ops=None):
     """Execute an allow-listed Shimmer plan under one Fusion PTransaction."""
     if not isinstance(params, Mapping):
         return _error("INVALID_ARGUMENT")
+    requested_document_ref = params.get("document_ref")
     expected_guard = params.get("expected_guard")
     mode = params.get("mode")
     if (
-        not isinstance(expected_guard, str)
+        not isinstance(requested_document_ref, str)
+        or not requested_document_ref
+        or not isinstance(expected_guard, str)
         or len(expected_guard) != 64
         or any(ch not in "0123456789abcdefABCDEF" for ch in expected_guard)
         or mode not in {"commit", "preview"}
@@ -348,9 +415,12 @@ def execute_guarded(ctx, params, registry, allowed_ops=None):
         return _error("INVALID_ARGUMENT")
 
     try:
-        guard_before = compute_provider_guard(ctx)["guard"]
+        guard_evidence = compute_provider_guard(ctx)
     except Exception:
         return _error("FUSION_API_ERROR")
+    if guard_evidence.get("document_ref") != requested_document_ref:
+        return _error("WRONG_DOCUMENT")
+    guard_before = guard_evidence["guard"]
     if guard_before != expected_guard:
         return _error("REVISION_CONFLICT")
 
@@ -402,6 +472,7 @@ def execute_guarded(ctx, params, registry, allowed_ops=None):
             "api_version": API_VERSION,
             "ok": True,
             "mode": "preview",
+            "document_ref": requested_document_ref,
             "guard_before": guard_before,
             "preview_guard": preview_guard,
             "guard_after": guard_after,
@@ -425,6 +496,7 @@ def execute_guarded(ctx, params, registry, allowed_ops=None):
         "api_version": API_VERSION,
         "ok": True,
         "mode": "commit",
+        "document_ref": requested_document_ref,
         "guard_before": guard_before,
         "guard_after": guard_after,
         "effects": effects,
@@ -443,7 +515,7 @@ if op is not None:
 
     @op("bridge.cad_guard", summary="Return Development Bridge private CAD provider guard.", readonly=True)
     def bridge_cad_guard(ctx, params):
-        return compute_provider_guard(ctx)
+        return guard_for_document(ctx, params)
 
     @op("bridge.cad_apply", summary="Apply an allow-listed Development Bridge CAD plan under one Fusion transaction.")
     def bridge_cad_apply(ctx, params):

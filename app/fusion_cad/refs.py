@@ -125,6 +125,16 @@ class EntityRefRegistry:
                 return doc_map[ref]
         return None
 
+    def get_internal_record_by_native_token(
+        self, document_ref: str, native_token: str
+    ) -> InternalEntityRecord | None:
+        """Return private token-backed registry state without minting a public ref."""
+        ref = self._token_to_ref.get((document_ref, native_token))
+        if ref is None:
+            return None
+        doc_map = self._doc_refs.get(document_ref)
+        return doc_map.get(ref) if doc_map is not None else None
+
     def issue(
         self,
         *,
