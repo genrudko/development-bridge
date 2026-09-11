@@ -410,6 +410,62 @@ def test_installer_applies_overlay_to_verified_shimmer_layout(tmp_path):
     assert "bridge_cad.register(mcp, client)" in server_text
 
 
+def test_installer_rolls_back_all_targets_if_a_late_write_fails(tmp_path, monkeypatch):
+    module = _load("install.py", "fusion_shimmer_overlay_install_rollback")
+    repo = tmp_path / "shimmer"
+    addin_init = repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py"
+    server_init = repo / "server/fusion_mcp/tools/__init__.py"
+    addin_init.parent.mkdir(parents=True)
+    server_init.parent.mkdir(parents=True)
+    addin_bytes = b"from . import (\n    api,\n    assembly,\n)\n"
+    server_bytes = (
+        b"from fusion_mcp.tools import (\n        api,\n        assembly,\n)\n\n"
+        b"def register_all(mcp, client):\n"
+        b"    # Read-only generic-API helpers (introspect/docs) are always available.\n"
+        b"    api.register(mcp, client)\n"
+    )
+    addin_init.write_bytes(addin_bytes)
+    server_init.write_bytes(server_bytes)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    manifest = {
+        "upstream_sha": head,
+        "targets": {
+            "addin_ops_init": {
+                "path": "addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py",
+                "sha256_before": hashlib.sha256(addin_bytes).hexdigest(),
+            },
+            "server_tools_init": {
+                "path": "server/fusion_mcp/tools/__init__.py",
+                "sha256_before": hashlib.sha256(server_bytes).hexdigest(),
+            },
+        },
+    }
+    fail_path = repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/bridge_cad.py"
+    original_write = Path.write_bytes
+    failed = False
+
+    def flaky_write(self, data):
+        nonlocal failed
+        if self == fail_path and not failed:
+            failed = True
+            raise OSError("injected late write failure")
+        return original_write(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky_write)
+    with pytest.raises(module.OverlayInstallError, match="write"):
+        module.apply_overlay(repo, manifest=manifest)
+
+    assert addin_init.read_bytes() == addin_bytes
+    assert server_init.read_bytes() == server_bytes
+    assert not (repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/bridge_cad.py").exists()
+    assert not (repo / "server/fusion_mcp/tools/bridge_cad.py").exists()
+
+
 def test_manifest_pins_exact_upstream_and_registration_preimages():
     manifest_path = OVERLAY / "manifest.json"
     if not manifest_path.exists():

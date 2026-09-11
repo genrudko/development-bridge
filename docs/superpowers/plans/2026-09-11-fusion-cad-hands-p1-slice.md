@@ -148,6 +148,6 @@
 - [x] Add bounded operator/developer documentation for provider roles, overlay installation boundary, Hands tools, and live-gate requirements.
 - [x] Run `git diff --check`, overlay compile checks, focused Hands tests, the complete Fusion regression suite, then the repository's full offline test gate if time permits.
 - [x] Inspect final `git status`, `git diff --stat`, and load-bearing diff sections for accidental P0 changes or token leakage.
-- [ ] Dispatch one independent Codex review against base `6bdda8b0d03fba8fb9fa5118c0fc07cf01b1e9d7..HEAD`; fix only proven Critical/Important findings via new RED tests.
-- [ ] Re-run affected tests plus the full Fusion gate after repairs.
-- [ ] Stop before live Fusion, push, merge, deploy, or explicit transaction-plan expansion and report the exact remaining live gate.
+- [x] Dispatch one independent Codex review against base `6bdda8b0d03fba8fb9fa5118c0fc07cf01b1e9d7..HEAD`; fix only proven Critical/Important findings via new RED tests.
+- [x] Re-run affected tests plus the full Fusion gate after repairs.
+- [x] Stop before live Fusion, push, merge, deploy, or explicit transaction-plan expansion and report the exact remaining live gate.

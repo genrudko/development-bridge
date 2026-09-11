@@ -114,9 +114,32 @@ def apply_overlay(repo, *, expected_upstream_sha=None, manifest=None):
     }
 
     # All validation and patch preparation has succeeded; only now mutate files.
-    for path, data in prepared.items():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+    originals = {
+        path: (path.read_bytes() if path.exists() else None)
+        for path in prepared
+    }
+    try:
+        for path, data in prepared.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+    except OSError as exc:
+        rollback_errors = []
+        for path, original in originals.items():
+            try:
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(original)
+            except OSError as rollback_exc:
+                rollback_errors.append((path, rollback_exc))
+        if rollback_errors:
+            raise OverlayInstallError(
+                "overlay write failed and rollback was incomplete"
+            ) from exc
+        raise OverlayInstallError(
+            "overlay write failed; original layout restored"
+        ) from exc
 
     return {
         "status": "installed",

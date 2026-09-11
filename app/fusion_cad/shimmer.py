@@ -84,6 +84,10 @@ class ShimmerHandsAdapter:
                 code = ErrorCode(str(code_value))
             except ValueError:
                 code = ErrorCode.FUSION_API_ERROR
+            if code == ErrorCode.OPERATION_UNCERTAIN:
+                raise _ShimmerProviderRejected(code)
+            if not isinstance(error, Mapping) or error.get("applied") is not False:
+                raise FusionCadError(ErrorCode.FUSION_API_ERROR)
             raise _ShimmerProviderRejected(code)
         return raw
 

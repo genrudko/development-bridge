@@ -45,7 +45,7 @@ async def test_adapter_maps_provider_errors_without_leaking_payload_or_token():
     desktop = FakeDesktop([{
         "api_version": PRIVATE_API_VERSION,
         "isError": True,
-        "error": {"code": "TYPE_MISMATCH", "message": secret, "details": {"token": secret}},
+        "error": {"code": "TYPE_MISMATCH", "applied": False, "message": secret, "details": {"token": secret}},
     }])
 
     with pytest.raises(FusionCadError) as exc_info:
@@ -56,6 +56,22 @@ async def test_adapter_maps_provider_errors_without_leaking_payload_or_token():
     assert exc_info.value.code == ErrorCode.TYPE_MISMATCH
     assert secret not in str(exc_info.value)
     assert secret not in json.dumps(exc_info.value.details)
+
+
+@pytest.mark.asyncio
+async def test_adapter_provider_error_without_applied_false_after_dispatch_is_uncertain():
+    desktop = FakeDesktop([{
+        "api_version": PRIVATE_API_VERSION,
+        "ok": False,
+        "error": {"code": "TYPE_MISMATCH"},
+    }])
+
+    with pytest.raises(FusionCadError) as exc_info:
+        await ShimmerHandsAdapter(desktop).apply(
+            "rich-a", "doc_a", mode="commit", expected_guard=GUARD_A, operations=[]
+        )
+
+    assert exc_info.value.code == ErrorCode.OPERATION_UNCERTAIN
 
 
 @pytest.mark.asyncio
