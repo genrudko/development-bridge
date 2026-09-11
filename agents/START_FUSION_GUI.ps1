@@ -5,7 +5,7 @@ $PackageRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ManagedRoot = Join-Path $env:LOCALAPPDATA "DevelopmentBridgeFusion\launcher"
 $ManagedScript = Join-Path $ManagedRoot "START_FUSION_GUI.ps1"
 $LauncherFiles = @(
-    "START_FUSION_GUI.cmd", "START_FUSION_GUI.ps1", "fusion_relay_gui.pyw",
+    "START_FUSION_GUI.cmd", "START_FUSION_GUI.ps1", "START_FUSION_AGENT.ps1", "fusion_relay_gui.pyw",
     "fusion_hands_runtime.py", "fusion_eyes_runtime.py", "windows_fusion_agent.py",
     "FUSION_GUI_README.txt", "INSTALL_FUSION_EYES.ps1", "INSTALL_FUSION_HANDS.ps1", "periscope-lost-event.patch"
 )

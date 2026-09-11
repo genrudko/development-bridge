@@ -535,6 +535,13 @@ def test_hands_installer_is_pinned_hash_guarded_and_non_destructive():
     assert "refusing to overwrite an existing unqualified Fusion360MCP add-in" in installer
 
 
+def test_managed_launcher_bundle_keeps_reference_fallback_available():
+    bootstrap = (ROOT / "agents" / "START_FUSION_GUI.ps1").read_text(encoding="utf-8-sig")
+    readme = (ROOT / "agents" / "FUSION_GUI_README.txt").read_text(encoding="utf-8")
+    assert '"START_FUSION_AGENT.ps1"' in bootstrap
+    assert "START_FUSION_AGENT.ps1 remains available for the Reference relay only." in readme
+
+
 def test_fallback_launcher_never_uses_slow_test_net_connection():
     text=(ROOT / "agents" / "START_FUSION_AGENT.ps1").read_text(encoding="utf-8-sig")
     assert "Test-NetConnection" not in text
