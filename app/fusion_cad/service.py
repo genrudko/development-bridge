@@ -172,6 +172,7 @@ _CAD_OPERATION_CLASSIFICATION: dict[tuple[str, str], tuple[bool, bool]] = {
 class _CachedNodeCapabilities:
     matrix: CapabilityMatrix
     session_generation: int
+    session_node_id: str | None = None
 
 
 CAD_RESULT_INLINE_LIMIT_BYTES: int = 1_048_576
@@ -1515,8 +1516,9 @@ class FusionCadService:
         if not isinstance(cached, _CachedNodeCapabilities):
             cached = _CachedNodeCapabilities(matrix=cached, session_generation=1)
             self._node_capabilities[node_id] = cached
+        session_node_id = cached.session_node_id or node_id
         try:
-            current_gen = self._desktop_nodes.get_session_generation(node_id)
+            current_gen = self._desktop_nodes.get_session_generation(session_node_id)
         except (BridgeError, AttributeError):
             self._node_capabilities.pop(node_id, None)
             return None
@@ -1530,9 +1532,11 @@ class FusionCadService:
         node_id: str,
         matrix: CapabilityMatrix,
         generation: int | None = None,
+        session_node_id: str | None = None,
     ) -> None:
+        physical_node_id = session_node_id or node_id
         try:
-            current_gen = self._desktop_nodes.get_session_generation(node_id)
+            current_gen = self._desktop_nodes.get_session_generation(physical_node_id)
         except (BridgeError, AttributeError):
             current_gen = 1
 
@@ -1542,7 +1546,9 @@ class FusionCadService:
 
         target_gen = generation if generation is not None else current_gen
         self._node_capabilities[node_id] = _CachedNodeCapabilities(
-            matrix=matrix, session_generation=target_gen
+            matrix=matrix,
+            session_generation=target_gen,
+            session_node_id=physical_node_id,
         )
 
     def invalidate_node_capabilities(self, node_id: str | None = None) -> None:
@@ -1550,6 +1556,75 @@ class FusionCadService:
             self._node_capabilities.clear()
         else:
             self._node_capabilities.pop(node_id, None)
+
+
+    def _overlay_provider_capabilities(
+        self, node_id: str, cad_result: CadResult
+    ) -> CadResult:
+        route = self._provider_router.route(node_id)
+        if route.rich_node is None or not isinstance(cad_result.data, (dict, Mapping)):
+            return cad_result
+        provider_matrix = CapabilityMatrix.from_probe(
+            cad_result.model_dump(mode="python")["data"]
+        )
+        existing_names = {record.name for record in cad_result.capabilities or ()}
+        provider_records = tuple(
+            record
+            for name in ("hands.sketch", "hands.feature")
+            if name not in existing_names
+            for record in (provider_matrix.get(name),)
+            if record is not None
+        )
+        if not provider_records:
+            return cad_result
+        return cad_result.model_copy(
+            update={
+                "capabilities": tuple(cad_result.capabilities or ()) + provider_records
+            }
+        )
+
+    def _cache_capability_probe(
+        self,
+        node_id: str,
+        session_node_id: str,
+        probe_generation: int | None,
+        cad_result: CadResult,
+    ) -> None:
+        if not cad_result.capabilities:
+            self._node_capabilities.pop(node_id, None)
+            return
+        try:
+            current_gen = self._desktop_nodes.get_session_generation(session_node_id)
+        except (BridgeError, AttributeError):
+            current_gen = None
+        if probe_generation is None or current_gen != probe_generation:
+            self._node_capabilities.pop(node_id, None)
+            return
+
+        identity = None
+        if isinstance(cad_result.data, (dict, Mapping)):
+            try:
+                data_dict = dict(cad_result.data)
+                if "local_tool" not in data_dict or data_dict["local_tool"] is None:
+                    data_dict["local_tool"] = "fusion_mcp_execute"
+                if (
+                    "implementation" not in data_dict
+                    or data_dict["implementation"] is None
+                ):
+                    data_dict["implementation"] = "fusion-desktop-mcp"
+                identity = FusionRuntimeIdentity.model_validate(data_dict)
+            except (ValidationError, ValueError, TypeError):
+                identity = None
+        matrix = CapabilityMatrix.from_records(
+            cad_result.capabilities,
+            identity=identity,
+        )
+        self.set_node_capabilities(
+            node_id,
+            matrix,
+            generation=probe_generation,
+            session_node_id=session_node_id,
+        )
 
     @staticmethod
     def is_domain_summary(summary: str | None) -> bool:
@@ -3884,11 +3959,17 @@ class FusionCadService:
         if journal_operation_id is not None:
             journal["operation_id"] = journal_operation_id
 
-        # Authoritative DesktopNodeService session_generation captured before dispatching read:capabilities
+        # Authoritative DesktopNodeService session_generation captured from the
+        # physical reference provider before dispatching read:capabilities.  The
+        # public/cache key remains the logical node id.
+        capability_probe_node = node_id
         probe_generation: int | None = None
         if effective_bundle_group == "read" and op == "capabilities":
+            capability_probe_node = self._provider_router.route(node_id).reference_node
             try:
-                probe_generation = self._desktop_nodes.get_session_generation(node_id)
+                probe_generation = self._desktop_nodes.get_session_generation(
+                    capability_probe_node
+                )
             except (BridgeError, AttributeError):
                 probe_generation = None
 
@@ -3979,7 +4060,9 @@ class FusionCadService:
 
         try:
             raw_result = await self._desktop_nodes.call(
-                node_id,
+                capability_probe_node
+                if effective_bundle_group == "read" and op == "capabilities"
+                else node_id,
                 "fusion_mcp_execute",
                 {"featureType": "script", "object": {"script": script}},
                 journal=journal,
@@ -4017,6 +4100,11 @@ class FusionCadService:
         if "external_result" in raw_result:
             full, _ = self._desktop_nodes.external_result(raw_result["external_result"])
             cad_result = self.decode_domain_result(full)
+            if effective_bundle_group == "read" and op == "capabilities":
+                cad_result = self._overlay_provider_capabilities(node_id, cad_result)
+                self._cache_capability_probe(
+                    node_id, capability_probe_node, probe_generation, cad_result
+                )
             finalized = self._finalize_completed_execution(
                 cad_result,
                 effective_bundle_group=effective_bundle_group,
@@ -4063,70 +4151,11 @@ class FusionCadService:
                     self._revision_tracker.observe(doc_ref, cur_fp)
             raise
 
-        # If operation was capabilities read, overlay Bridge/provider-layer
-        # capabilities that the Autodesk-side probe cannot know about.  Keep the
-        # Fusion-side records authoritative for native runtime facts; only add
-        # Hands records when this logical node actually has a configured rich
-        # provider route.
         if effective_bundle_group == "read" and op == "capabilities":
-            route = self._provider_router.route(node_id)
-            if route.rich_node is not None and isinstance(cad_result.data, (dict, Mapping)):
-                provider_matrix = CapabilityMatrix.from_probe(cad_result.model_dump(mode="python")["data"])
-                existing_names = {record.name for record in cad_result.capabilities or ()}
-                provider_records = tuple(
-                    record
-                    for name in ("hands.sketch", "hands.feature")
-                    if name not in existing_names
-                    for record in (provider_matrix.get(name),)
-                    if record is not None
-                )
-                if provider_records:
-                    cad_result = cad_result.model_copy(
-                        update={
-                            "capabilities": tuple(cad_result.capabilities or ()) + provider_records
-                        }
-                    )
-
-        # Persist the probed/overlaid capability matrix only if the authoritative
-        # session_generation is still current.
-        if effective_bundle_group == "read" and op == "capabilities":
-            if cad_result.capabilities:
-                current_gen: int | None = None
-                try:
-                    current_gen = self._desktop_nodes.get_session_generation(node_id)
-                except (BridgeError, AttributeError):
-                    current_gen = None
-
-                if probe_generation is not None and current_gen == probe_generation:
-                    identity = None
-                    if isinstance(cad_result.data, (dict, Mapping)):
-                        try:
-                            data_dict = dict(cad_result.data)
-                            if (
-                                "local_tool" not in data_dict
-                                or data_dict["local_tool"] is None
-                            ):
-                                data_dict["local_tool"] = "fusion_mcp_execute"
-                            if (
-                                "implementation" not in data_dict
-                                or data_dict["implementation"] is None
-                            ):
-                                data_dict["implementation"] = "fusion-desktop-mcp"
-                            identity = FusionRuntimeIdentity.model_validate(data_dict)
-                        except (ValidationError, ValueError, TypeError):
-                            identity = None
-                    matrix = CapabilityMatrix.from_records(
-                        cad_result.capabilities,
-                        identity=identity,
-                    )
-                    self.set_node_capabilities(
-                        node_id, matrix, generation=probe_generation
-                    )
-                else:
-                    # Generation changed during in-flight probe: discard result, leave unprobed/fail-closed
-                    self._node_capabilities.pop(node_id, None)
-            else:
-                self._node_capabilities.pop(node_id, None)
+            cad_result = self._overlay_provider_capabilities(node_id, cad_result)
+            self._cache_capability_probe(
+                node_id, capability_probe_node, probe_generation, cad_result
+            )
 
         return self._finalize_completed_execution(
             cad_result,

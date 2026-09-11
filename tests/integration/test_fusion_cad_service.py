@@ -262,6 +262,66 @@ async def test_capabilities_read_overlays_degraded_hands_for_configured_rich_pro
 
 
 @pytest.mark.asyncio
+async def test_capabilities_read_uses_reference_node_generation_for_logical_provider_route(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {
+            "provider_routes": {
+                "logical-a": {
+                    "reference_node": "reference-a",
+                    "rich_node": "rich-a",
+                }
+            }
+        }
+    })
+    generations = {"logical-a": 99, "reference-a": 7, "rich-a": 3}
+    mock_desktop_service.get_session_generation = MagicMock(
+        side_effect=lambda node_id: generations[node_id]
+    )
+    mock_desktop_service.call = AsyncMock(
+        return_value={
+            "content": [{
+                "type": "text",
+                "text": json.dumps({
+                    "api_version": "fusion.cad/v1",
+                    "status": "succeeded",
+                    "summary": "Runtime capabilities probed",
+                    "data": {
+                        "application": "Autodesk Fusion",
+                        "fusion_version": "2.0.18000",
+                        "probe_facts": {
+                            "has_app": True,
+                            "has_design_access": True,
+                            "has_entity_token_resolver": True,
+                        },
+                    },
+                    "capabilities": [
+                        {"name": "design.access", "state": "supported"},
+                        {"name": "entity.token_resolver", "state": "supported"},
+                    ],
+                }),
+            }],
+            "isError": False,
+        }
+    )
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+
+    await cad_service.execute(
+        {"node_id": "logical-a", "operation": "capabilities"},
+        group="read",
+    )
+
+    assert mock_desktop_service.call.call_args.args[0] == "reference-a"
+    assert cad_service.get_node_capabilities("logical-a") is not None
+    generations["reference-a"] = 8
+    assert cad_service.get_node_capabilities("logical-a") is None
+
+
+@pytest.mark.asyncio
 async def test_falsify_finding_1_unprobed_node_fails_closed_before_script_dispatch(
     mock_desktop_service: DesktopNodeService,
 ):
@@ -9924,6 +9984,63 @@ async def test_sync_externalized_domain_result_rewrites_raw_artifact_with_finali
         raw_ref["external_result"],
         public.model_dump(mode="python", exclude_none=True),
     )
+
+
+@pytest.mark.asyncio
+async def test_externalized_capabilities_overlay_hands_and_persist_generation_bound_matrix(
+    mock_desktop_service: DesktopNodeService,
+):
+    settings = BridgeSettings.model_validate({
+        "fusion_cad": {
+            "provider_routes": {
+                "desk-1": {
+                    "reference_node": "desk-1",
+                    "rich_node": "rich-1",
+                }
+            }
+        }
+    })
+    cad_service = FusionCadService(
+        mock_desktop_service,
+        provider_router=FusionCadProviderRouter(settings.fusion_cad),
+    )
+    raw_ref = {"external_result": {"result_id": "capabilities_external_12345678"}}
+    raw_full = {
+        "api_version": "fusion.cad/v1",
+        "status": "succeeded",
+        "summary": "Runtime capabilities probed",
+        "data": {
+            "application": "Autodesk Fusion",
+            "fusion_version": "2.0.18000",
+            "probe_facts": {
+                "has_app": True,
+                "has_design_access": True,
+                "has_entity_token_resolver": True,
+            },
+        },
+        "capabilities": [
+            {"name": "design.access", "state": "supported"},
+            {"name": "entity.token_resolver", "state": "supported"},
+        ],
+    }
+    mock_desktop_service.call = AsyncMock(return_value=raw_ref)
+    mock_desktop_service.external_result = MagicMock(return_value=(raw_full, {}))
+    mock_desktop_service.overwrite_external_result = MagicMock()
+    mock_desktop_service.get_session_generation = MagicMock(return_value=1)
+
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "capabilities"}, group="read"
+    )
+
+    assert result == raw_ref
+    rewritten = mock_desktop_service.overwrite_external_result.call_args.args[1]
+    returned = {record["name"]: record for record in rewritten["capabilities"]}
+    assert returned["hands.sketch"]["state"] == "degraded"
+    assert returned["hands.feature"]["state"] == "degraded"
+    saved = cad_service.get_node_capabilities("desk-1")
+    assert saved is not None
+    assert saved.get("hands.sketch").state == "degraded"
+    assert saved.get("hands.feature").state == "degraded"
 
 
 @pytest.mark.asyncio
