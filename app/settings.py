@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import yaml
@@ -317,6 +317,25 @@ class DesktopNodeSettings(BaseModel):
     journal_max_bytes: int = Field(default=5_242_880, ge=65_536, le=67_108_864)
 
 
+FusionNodeId = Annotated[
+    str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+]
+
+
+class FusionCadProviderRouteSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    reference_node: FusionNodeId
+    rich_node: FusionNodeId | None = None
+    eyes_node: FusionNodeId | None = None
+
+
+class FusionCadSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider_routes: dict[FusionNodeId, FusionCadProviderRouteSettings] = Field(
+        default_factory=dict
+    )
+
+
 class EodBrowserSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
     enabled: bool = False
@@ -416,6 +435,7 @@ class BridgeSettings(BaseModel):
     )
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     desktop_nodes: DesktopNodeSettings = Field(default_factory=DesktopNodeSettings)
+    fusion_cad: FusionCadSettings = Field(default_factory=FusionCadSettings)
     eod_browser: EodBrowserSettings = Field(default_factory=EodBrowserSettings)
     operator_dashboard: OperatorDashboardSettings = Field(
         default_factory=OperatorDashboardSettings

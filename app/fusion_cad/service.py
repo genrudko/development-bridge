@@ -31,6 +31,7 @@ from app.fusion_cad.errors import (
     trusted_detail,
 )
 from app.fusion_cad.inspect import normalize_inspect_result
+from app.fusion_cad.providers import FusionCadProviderRouter
 from app.fusion_cad.metadata import (
     ProvenanceRecord,
     apply_geometry_provenance_plan,
@@ -203,6 +204,7 @@ class FusionCadService:
         snapshot_store: SnapshotStore | None = None,
         view_store: ViewRefStore | None = None,
         transaction_store: TransactionStore | None = None,
+        provider_router: FusionCadProviderRouter | None = None,
         inline_limit_bytes: int = CAD_RESULT_INLINE_LIMIT_BYTES,
     ) -> None:
         self._desktop_nodes = desktop_nodes
@@ -212,11 +214,16 @@ class FusionCadService:
         self._snapshot_store = snapshot_store or SnapshotStore()
         self._view_store = view_store or ViewRefStore()
         self._transaction_store = transaction_store or TransactionStore()
+        self._provider_router = provider_router or FusionCadProviderRouter()
         self._selector_engine = SelectorEngine()
         self.inline_limit_bytes = inline_limit_bytes
         self._node_capabilities: dict[str, _CachedNodeCapabilities] = {}
         self._active_document_refs_by_node: dict[str, str] = {}
         self._visibility_restore_states: dict[str, dict[str, Any]] = {}
+
+    @property
+    def provider_router(self) -> FusionCadProviderRouter:
+        return self._provider_router
 
     @property
     def revision_tracker(self) -> RevisionTracker:

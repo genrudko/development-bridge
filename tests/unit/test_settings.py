@@ -456,3 +456,39 @@ def test_review_gpt_on_demand_browser_lifecycle_settings_require_a_pair():
     configured = BridgeSettings.model_validate({"coordinator_wake_delivery": {"review_gpt": {"browser_start_command": ["browserctl", "start"], "browser_stop_command": ["browserctl", "stop"], "browser_lifecycle_timeout_seconds": 45}}})
     assert configured.coordinator_wake_delivery.review_gpt.browser_start_command == ("browserctl", "start")
     assert configured.coordinator_wake_delivery.review_gpt.browser_stop_command == ("browserctl", "stop")
+
+
+def test_fusion_cad_provider_routes_are_explicit_and_empty_by_default():
+    default = BridgeSettings()
+    assert default.fusion_cad.provider_routes == {}
+
+    configured = BridgeSettings.model_validate({
+        "fusion_cad": {
+            "provider_routes": {
+                "fusion-workstation": {
+                    "reference_node": "fusion-workstation",
+                    "rich_node": "fusion-shimmer",
+                    "eyes_node": "fusion-eyes",
+                }
+            }
+        }
+    })
+    route = configured.fusion_cad.provider_routes["fusion-workstation"]
+    assert route.reference_node == "fusion-workstation"
+    assert route.rich_node == "fusion-shimmer"
+    assert route.eyes_node == "fusion-eyes"
+
+
+@pytest.mark.parametrize("bad_node", ["", " has-space", "bad/node", "x" * 65])
+def test_fusion_cad_provider_routes_reject_invalid_node_ids(bad_node):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({
+            "fusion_cad": {
+                "provider_routes": {
+                    "fusion-workstation": {
+                        "reference_node": bad_node,
+                        "rich_node": "fusion-shimmer",
+                    }
+                }
+            }
+        })

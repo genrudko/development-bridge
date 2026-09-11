@@ -33,6 +33,7 @@ from app.executors import (
     OpenRouterExecutor,
 )
 from app.files import FileService
+from app.fusion_cad.providers import FusionCadProviderRouter
 from app.fusion_cad.service import FusionCadService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
 from app.github import (
@@ -499,7 +500,10 @@ def build_container(
             str(configured.server.public_base_url) if configured.server.public_base_url else None,
             configured.server.endpoint,
         )),
-        fusion_cad=FusionCadService(desktop_nodes),
+        fusion_cad=FusionCadService(
+            desktop_nodes,
+            provider_router=FusionCadProviderRouter(configured.fusion_cad),
+        ),
         coordinator_wake_delivery=coordinator_wake_delivery,
         route_control_trace_store=route_control_trace_store,
     )
