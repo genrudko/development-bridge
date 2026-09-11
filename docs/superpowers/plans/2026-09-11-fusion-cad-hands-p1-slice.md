@@ -128,12 +128,12 @@
 - Commit dispatch returns only after proven provider commit evidence is normalized; uncertain outcomes are not replayed.
 - Hands capability remains `degraded`/not runtime-verified until the later live gate.
 
-- [ ] Write RED end-to-end service tests for sketch create, symbolic batch compile, extrude, fillet, dry-run baseline restoration, stale guard refusal, and uncertain provider outcome.
-- [ ] Run RED and verify exact missing execution behavior.
-- [ ] Implement classification/capability dispatch and minimal compilation to the Shimmer allow-listed envelope.
-- [ ] Run GREEN focused Hands integration tests and all existing Fusion service/capability regressions.
-- [ ] Run a falsification sweep: malformed symbolic refs, dimension contract mismatch, wrong document, provider reconnect/session generation change, guard mismatch, preview abort mismatch, and provider error after Start.
-- [ ] Review diff and commit this milestone.
+- [x] Write RED end-to-end service tests for sketch create, symbolic batch compile, extrude, fillet, dry-run baseline restoration, stale guard refusal, and uncertain provider outcome.
+- [x] Run RED and verify exact missing execution behavior.
+- [x] Implement classification/capability dispatch and minimal compilation to the Shimmer allow-listed envelope.
+- [x] Run GREEN focused Hands integration tests and all existing Fusion service/capability regressions.
+- [x] Run a falsification sweep: malformed symbolic refs, dimension contract mismatch, wrong document, provider reconnect/session generation change, guard mismatch, preview abort mismatch, and provider error after Start.
+- [x] Review diff and commit this milestone.
 
 ### Task 6: Offline phase gate and independent review
 

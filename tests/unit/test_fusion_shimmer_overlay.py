@@ -505,3 +505,287 @@ def test_entity_inventory_preserves_sketch_kind_when_same_entity_is_on_timeline(
     inventory = module._entity_inventory(ctx)
 
     assert inventory["shared-sketch-token"]["kind"] == "sketch"
+
+
+def _hands_token_ctx():
+    ctx = FakeCtx()
+    sketch_points = FakeCollection()
+    sketch_curves = FakeCollection()
+    sketch = SimpleNamespace(
+        name="HandsSketch",
+        objectType="adsk::fusion::Sketch",
+        entityToken="sketch-token",
+        revisionId="sketch-rev-1",
+        attributes=FakeCollection(),
+        sketchCurves=sketch_curves,
+        sketchPoints=sketch_points,
+    )
+    body = SimpleNamespace(
+        name="HandsBody",
+        objectType="adsk::fusion::BRepBody",
+        entityToken="body-token",
+        attributes=FakeCollection(),
+        faces=FakeCollection(),
+        edges=FakeCollection(),
+    )
+    face = SimpleNamespace(
+        objectType="adsk::fusion::BRepFace",
+        entityToken="face-token",
+        body=body,
+    )
+    edge = SimpleNamespace(
+        objectType="adsk::fusion::BRepEdge",
+        entityToken="edge-token",
+        body=body,
+    )
+    body.faces.append(face)
+    body.edges.append(edge)
+    ctx._component.bRepBodies.append(body)
+    ctx._component.sketches.append(sketch)
+    ctx._design.rootComponent = SimpleNamespace(allOccurrences=FakeCollection([ctx._occurrence]))
+    by_token = {
+        "sketch-token": sketch,
+        "body-token": body,
+        "face-token": face,
+        "edge-token": edge,
+    }
+    ctx._design.findEntityByToken = lambda token: by_token.get(token)
+    ctx.target = lambda: ctx._component
+    ctx.get_sketch = lambda ref: ctx._component.sketches.item(ref) if isinstance(ref, int) else None
+    return ctx, sketch, body, face, edge, by_token
+
+
+def _entity_marker(token, kind):
+    return {"token": token, "kind": kind}
+
+
+def _action_marker(action_id, element="curve", index=0):
+    return {"__bridge_action_ref__": {"action_id": action_id, "element": element, "index": index}}
+
+
+def test_guarded_delegate_resolves_body_and_edge_tokens_to_shimmer_indices():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_private_body_edge")
+    ctx, _sketch, _body, _face, _edge, _by_token = _hands_token_ctx()
+    guard = module.compute_provider_guard(ctx)["guard"]
+    seen = []
+
+    def fillet(_ctx, params):
+        seen.append(dict(params))
+        ctx._component.revisionId = "component-rev-2"
+        return {"feature": "fillet"}
+
+    result = module.execute_guarded(
+        ctx,
+        {
+            "document_ref": DOC_REF,
+            "expected_guard": guard,
+            "mode": "commit",
+            "operations": [{
+                "op": "feature.fillet",
+                "params": {
+                    "body": _entity_marker("body-token", "body"),
+                    "edges": [_entity_marker("edge-token", "edge")],
+                    "radius": 1.0,
+                },
+            }],
+        },
+        {"feature.fillet": fillet},
+        allowed_ops={"feature.fillet"},
+    )
+
+    assert result["ok"] is True
+    assert seen == [{"body": 0, "edges": [0], "radius": 1.0}]
+
+
+def test_guarded_delegate_resolves_face_token_to_shimmer_plane_body_face_indices():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_private_face_plane")
+    ctx, _sketch, _body, _face, _edge, _by_token = _hands_token_ctx()
+    guard = module.compute_provider_guard(ctx)["guard"]
+    seen = []
+
+    def create(_ctx, params):
+        seen.append(dict(params))
+        ctx._component.revisionId = "component-rev-2"
+        return {"sketch_index": 1}
+
+    result = module.execute_guarded(
+        ctx,
+        {
+            "document_ref": DOC_REF,
+            "expected_guard": guard,
+            "mode": "commit",
+            "operations": [{
+                "op": "sketch.create",
+                "params": {"plane": _entity_marker("face-token", "face"), "name": "OnFace"},
+            }],
+        },
+        {"sketch.create": create},
+        allowed_ops={"sketch.create"},
+    )
+
+    assert result["ok"] is True
+    assert seen == [{"plane": {"body": 0, "face": 0}, "name": "OnFace"}]
+
+
+@pytest.mark.parametrize(
+    ("resolved", "declared_kind", "expected_code"),
+    [
+        (None, "body", "REF_STALE"),
+        ([SimpleNamespace(objectType="adsk::fusion::BRepBody"), SimpleNamespace(objectType="adsk::fusion::BRepBody")], "body", "REF_SPLIT"),
+        ("body", "sketch", "TYPE_MISMATCH"),
+    ],
+)
+def test_private_token_resolution_fails_closed_before_transaction(resolved, declared_kind, expected_code):
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_private_token_errors_" + expected_code)
+    ctx, _sketch, body, _face, _edge, by_token = _hands_token_ctx()
+    if resolved == "body":
+        resolved = body
+    ctx._design.findEntityByToken = lambda token: resolved
+    guard = module.compute_provider_guard(ctx)["guard"]
+    called = []
+
+    result = module.execute_guarded(
+        ctx,
+        {
+            "document_ref": DOC_REF,
+            "expected_guard": guard,
+            "mode": "commit",
+            "operations": [{
+                "op": "feature.fillet",
+                "params": {"body": _entity_marker("body-token", declared_kind), "edges": "all", "radius": 1.0},
+            }],
+        },
+        {"feature.fillet": lambda _ctx, _params: called.append(True)},
+        allowed_ops={"feature.fillet"},
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == expected_code
+    assert result["error"]["applied"] is False
+    assert called == []
+    assert ctx.app.commands == []
+
+
+def test_symbolic_action_refs_resolve_to_curves_created_earlier_in_same_transaction():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_symbolic_refs")
+    ctx, sketch, _body, _face, _edge, _by_token = _hands_token_ctx()
+    guard = module.compute_provider_guard(ctx)["guard"]
+    seen_dimensions = []
+
+    def line(_ctx, params):
+        idx = sketch.sketchCurves.count
+        start = SimpleNamespace(objectType="adsk::fusion::SketchPoint", entityToken=f"p{idx}s")
+        end = SimpleNamespace(objectType="adsk::fusion::SketchPoint", entityToken=f"p{idx}e")
+        sketch.sketchPoints.append(start)
+        sketch.sketchPoints.append(end)
+        curve = SimpleNamespace(
+            objectType="adsk::fusion::SketchLine",
+            entityToken=f"curve-{idx}",
+            startSketchPoint=start,
+            endSketchPoint=end,
+        )
+        sketch.sketchCurves.append(curve)
+        ctx._component.revisionId = f"component-rev-{idx + 2}"
+        return {"sketch_index": 0}
+
+    def dimension(_ctx, params):
+        seen_dimensions.append(dict(params))
+        return {"dimension": params["type"]}
+
+    result = module.execute_guarded(
+        ctx,
+        {
+            "document_ref": DOC_REF,
+            "expected_guard": guard,
+            "mode": "commit",
+            "operations": [
+                {"op": "sketch.line", "action_id": "l1", "params": {"sketch": _entity_marker("sketch-token", "sketch"), "x1": 0, "y1": 0, "x2": 10, "y2": 0}},
+                {"op": "sketch.line", "action_id": "l2", "params": {"sketch": _entity_marker("sketch-token", "sketch"), "x1": 0, "y1": 5, "x2": 10, "y2": 5}},
+                {"op": "sketch.dimension", "params": {"sketch": _entity_marker("sketch-token", "sketch"), "type": "distance", "entity_one": _action_marker("l1"), "entity_two": _action_marker("l2"), "value": 5.0}},
+            ],
+        },
+        {"sketch.line": line, "sketch.dimension": dimension},
+        allowed_ops={"sketch.line", "sketch.dimension"},
+    )
+
+    assert result["ok"] is True
+    assert seen_dimensions == [{"sketch": 0, "type": "distance", "entity_one": 0, "entity_two": 1, "value": 5.0}]
+
+
+def test_symbolic_coincident_resolves_end_and_start_as_two_sketch_points():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_symbolic_coincident_points")
+    ctx, sketch, _body, _face, _edge, _by_token = _hands_token_ctx()
+    guard = module.compute_provider_guard(ctx)["guard"]
+    seen_constraints = []
+
+    def line(_ctx, params):
+        idx = sketch.sketchCurves.count
+        start = SimpleNamespace(
+            objectType="adsk::fusion::SketchPoint", entityToken=f"p{idx}s"
+        )
+        end = SimpleNamespace(
+            objectType="adsk::fusion::SketchPoint", entityToken=f"p{idx}e"
+        )
+        sketch.sketchPoints.append(start)
+        sketch.sketchPoints.append(end)
+        curve = SimpleNamespace(
+            objectType="adsk::fusion::SketchLine",
+            entityToken=f"curve-{idx}",
+            startSketchPoint=start,
+            endSketchPoint=end,
+        )
+        sketch.sketchCurves.append(curve)
+        ctx._component.revisionId = f"component-rev-{idx + 2}"
+        return {"sketch_index": 0}
+
+    def constrain(_ctx, params):
+        seen_constraints.append(dict(params))
+        return {"constraint": params["type"]}
+
+    result = module.execute_guarded(
+        ctx,
+        {
+            "document_ref": DOC_REF,
+            "expected_guard": guard,
+            "mode": "commit",
+            "operations": [
+                {
+                    "op": "sketch.line",
+                    "action_id": "l1",
+                    "params": {
+                        "sketch": _entity_marker("sketch-token", "sketch"),
+                        "x1": 0, "y1": 0, "x2": 10, "y2": 0,
+                    },
+                },
+                {
+                    "op": "sketch.line",
+                    "action_id": "l2",
+                    "params": {
+                        "sketch": _entity_marker("sketch-token", "sketch"),
+                        "x1": 10, "y1": 5, "x2": 20, "y2": 5,
+                    },
+                },
+                {
+                    "op": "sketch.constrain",
+                    "params": {
+                        "sketch": _entity_marker("sketch-token", "sketch"),
+                        "type": "coincident",
+                        "entity_one": _action_marker("l1", "end"),
+                        "entity_two": _action_marker("l2", "start"),
+                    },
+                },
+            ],
+        },
+        {"sketch.line": line, "sketch.constrain": constrain},
+        allowed_ops={"sketch.line", "sketch.constrain"},
+    )
+
+    assert result["ok"] is True
+    assert seen_constraints == [
+        {
+            "sketch": 0,
+            "type": "coincident",
+            "entity_one": 1,
+            "entity_two": 2,
+        }
+    ]

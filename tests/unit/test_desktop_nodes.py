@@ -423,3 +423,25 @@ def test_sanitized_image_resource_uri_is_stable_and_resolvable_after_restart(tmp
     path, item = resolved
     assert path.read_bytes() == png
     assert item["mime_type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_call_expected_session_generation_rejects_reconnected_node_before_queueing():
+    service = DesktopNodeService(configured(call_timeout_seconds=1))
+    tools = [{"name": "mutate", "inputSchema": {"type": "object"}}]
+    first = await service.register("desk-1", tools, True)
+    assert first["session_generation"] == 1
+    second = await service.register("desk-1", tools, True)
+    assert second["session_generation"] == 2
+
+    with pytest.raises(BridgeError) as exc_info:
+        await service.call(
+            "desk-1",
+            "mutate",
+            {},
+            expected_session_generation=1,
+        )
+
+    assert exc_info.value.code == ErrorCode.DESKTOP_NODE_OFFLINE
+    assert exc_info.value.details["status"] == "session_changed"
+    assert service.status("desk-1")["pending_commands"] == 0

@@ -847,7 +847,14 @@ class DesktopNodeService:
             "sha256": item["sha256"],
         }
 
-    async def call(self, node_id: str, tool_name: str, arguments: dict[str, Any], journal: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def call(
+        self,
+        node_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        journal: dict[str, Any] | None = None,
+        expected_session_generation: int | None = None,
+    ) -> dict[str, Any]:
         self._configured()
         if self._json_size(arguments) > self.settings.max_arguments_bytes:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion tool arguments are too large")
@@ -855,6 +862,20 @@ class DesktopNodeService:
         loop = asyncio.get_running_loop()
         async with self._condition:
             node = self._node(node_id)
+            if (
+                expected_session_generation is not None
+                and node.session_generation != expected_session_generation
+            ):
+                raise BridgeError(
+                    ErrorCode.DESKTOP_NODE_OFFLINE,
+                    "Desktop node session changed before command dispatch",
+                    retryable=True,
+                    details={
+                        "status": "session_changed",
+                        "expected_session_generation": expected_session_generation,
+                        "current_session_generation": node.session_generation,
+                    },
+                )
             if not self._online(node) or not node.fusion_available:
                 raise BridgeError(ErrorCode.DESKTOP_NODE_OFFLINE, "Desktop node or Fusion is offline", retryable=True)
             discovered = {item.get("name") for item in node.tools}

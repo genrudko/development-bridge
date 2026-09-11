@@ -47,9 +47,11 @@ from app.fusion_cad.models import (
 )
 from app.fusion_cad.refs import EntityRefRegistry, InternalEntityRecord
 from app.fusion_cad.requests import (
+    FusionFeatureRequest,
     FusionInspectRequest,
     FusionMetadataRequest,
     FusionReadRequest,
+    FusionSketchRequest,
     FusionStyleRequest,
     FusionTransactionRequest,
     FusionValidateRequest,
@@ -84,6 +86,8 @@ _GROUP_REQUEST_ADAPTERS: dict[str, TypeAdapter[Any]] = {
     "style": TypeAdapter(FusionStyleRequest),
     "validate": TypeAdapter(FusionValidateRequest),
     "transaction": TypeAdapter(FusionTransactionRequest),
+    "sketch": TypeAdapter(FusionSketchRequest),
+    "feature": TypeAdapter(FusionFeatureRequest),
 }
 
 # Exhaustive per-(group, operation) classification mapping:
@@ -157,6 +161,10 @@ _CAD_OPERATION_CLASSIFICATION: dict[tuple[str, str], tuple[bool, bool]] = {
     ("transaction", "preview"): (True, True),
     ("transaction", "commit"): (True, True),
     ("transaction", "rollback"): (True, True),
+    # 8-9. P1 Hands guarded rich-provider operations
+    ("sketch", "create"): (False, True),
+    ("sketch", "batch"): (False, True),
+    ("feature", "create"): (False, True),
 }
 
 
@@ -222,7 +230,10 @@ class FusionCadService:
         self._active_document_refs_by_node: dict[str, str] = {}
         self._visibility_restore_states: dict[str, dict[str, Any]] = {}
         self._shimmer_hands = ShimmerHandsAdapter(desktop_nodes)
-        self._hands_provider_guards: dict[tuple[str, str], str] = {}
+        self._hands_provider_guards: dict[tuple[str, str, str], str] = {}
+        self._hands_provider_guard_sessions: dict[
+            tuple[str, str, str], tuple[str, int | None]
+        ] = {}
 
     @property
     def provider_router(self) -> FusionCadProviderRouter:
@@ -252,8 +263,41 @@ class FusionCadService:
     def selector_engine(self) -> SelectorEngine:
         return self._selector_engine
 
-    def get_hands_provider_guard(self, document_ref: str, model_revision: str) -> str | None:
-        return self._hands_provider_guards.get((document_ref, model_revision))
+    def _hands_session_generation(self, rich_node: str) -> int | None:
+        try:
+            return int(self._desktop_nodes.get_session_generation(rich_node))
+        except (AttributeError, BridgeError, TypeError, ValueError):
+            return None
+
+    def _invalidate_hands_binding(
+        self, rich_node: str, document_ref: str, model_revision: str
+    ) -> None:
+        key = (rich_node, document_ref, model_revision)
+        self._hands_provider_guards.pop(key, None)
+        self._hands_provider_guard_sessions.pop(key, None)
+
+    def get_hands_provider_guard(
+        self, rich_node: str, document_ref: str, model_revision: str
+    ) -> str | None:
+        key = (rich_node, document_ref, model_revision)
+        guard = self._hands_provider_guards.get(key)
+        if guard is None:
+            return None
+        session = self._hands_provider_guard_sessions.get(key)
+        if session is None:
+            self._invalidate_hands_binding(rich_node, document_ref, model_revision)
+            return None
+        bound_rich_node, bound_generation = session
+        current_generation = self._hands_session_generation(rich_node)
+        if (
+            bound_rich_node != rich_node
+            or bound_generation is None
+            or current_generation is None
+            or current_generation != bound_generation
+        ):
+            self._invalidate_hands_binding(rich_node, document_ref, model_revision)
+            return None
+        return guard
 
     async def _observe_authoritative_for_hands(
         self, reference_node: str, document_ref: str
@@ -285,16 +329,71 @@ class FusionCadService:
         """Bind a private Shimmer guard to one authoritative P0 revision."""
         route = self._provider_router.route(logical_node)
         rich_node = self._provider_router.require(logical_node, "rich")
-        guard_a = await self._shimmer_hands.guard(rich_node, document_ref)
+        generation_a = self._hands_session_generation(rich_node)
+        if generation_a is None:
+            raise FusionCadError(
+                ErrorCode.REVISION_CONFLICT,
+                details={"document_ref": document_ref, "applied": False},
+            )
+        guard_a = await self._shimmer_hands.guard(
+            rich_node,
+            document_ref,
+            expected_session_generation=generation_a,
+        )
         revision = await self._observe_authoritative_for_hands(route.reference_node, document_ref)
-        guard_b = await self._shimmer_hands.guard(rich_node, document_ref)
-        if guard_a.guard != guard_b.guard:
+        guard_b = await self._shimmer_hands.guard(
+            rich_node,
+            document_ref,
+            expected_session_generation=generation_a,
+        )
+        generation_b = self._hands_session_generation(rich_node)
+        if (
+            guard_a.guard != guard_b.guard
+            or generation_b is None
+            or generation_a != generation_b
+        ):
             raise FusionCadError(
                 ErrorCode.REVISION_CONFLICT,
                 details={"document_ref": document_ref, "current_revision": revision.revision, "applied": False},
             )
-        self._hands_provider_guards[(document_ref, revision.revision)] = guard_b.guard
+        key = (rich_node, document_ref, revision.revision)
+        self._hands_provider_guards[key] = guard_b.guard
+        self._hands_provider_guard_sessions[key] = (rich_node, generation_b)
         return guard_b
+
+    def _hands_snapshot_attestation(
+        self, document_ref: str, revision: RevisionRecord
+    ) -> dict[str, InternalEntityRecord]:
+        """Return token evidence present in this exact authoritative snapshot."""
+        snapshot = self._snapshot_store.get_latest(document_ref)
+        if (
+            snapshot is None
+            or snapshot.document_ref != document_ref
+            or snapshot.fingerprint != revision.fingerprint
+        ):
+            return {}
+        attested: dict[str, InternalEntityRecord] = {}
+        for collection in (
+            snapshot.components,
+            snapshot.occurrences,
+            snapshot.bodies,
+            snapshot.sketches,
+            snapshot.features,
+        ):
+            for item in collection:
+                record = self._ref_registry.get_internal_record(item.ref, document_ref)
+                if record is None or not record.native_token:
+                    continue
+                attested[record.native_token] = record
+        return attested
+
+    @staticmethod
+    def _hands_constraint_operand_kinds(kind: Any) -> tuple[str, str]:
+        if kind == "coincident":
+            return "sketch_point", "sketch_point"
+        if kind == "midpoint":
+            return "sketch_point", "sketch_curve"
+        return "sketch_curve", "sketch_curve"
 
     def _resolve_hands_value(self, value: Any, document_ref: str) -> Any:
         if isinstance(value, Mapping):
@@ -316,6 +415,171 @@ class FusionCadService:
             return [self._resolve_hands_value(item, document_ref) for item in value]
         return value
 
+    @staticmethod
+    def _compile_hands_operand(operand: Mapping[str, Any], expected_kind: str) -> dict[str, Any]:
+        source = operand.get("source")
+        if source == "action":
+            return {
+                "__bridge_action_ref__": {
+                    "action_id": operand.get("action_id"),
+                    "element": operand.get("element", "curve"),
+                    "index": operand.get("index", 0),
+                }
+            }
+        if source == "entity":
+            return {"ref": operand.get("ref"), "expected_kind": expected_kind}
+        raise FusionCadError(ErrorCode.INVALID_ARGUMENT)
+
+    def _compile_hands_operations(
+        self, domain_group: str, payload: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        if domain_group == "sketch":
+            operation = payload.get("operation")
+            if operation == "create":
+                plane = payload.get("plane", "xy")
+                if isinstance(plane, Mapping):
+                    plane = {"ref": plane.get("face_ref"), "expected_kind": "face"}
+                params: dict[str, Any] = {"plane": plane}
+                if payload.get("name") is not None:
+                    params["name"] = payload["name"]
+                return [{"op": "sketch.create", "params": params}]
+
+            if operation != "batch":
+                raise FusionCadError(ErrorCode.INVALID_ARGUMENT)
+            sketch = {"ref": payload.get("sketch"), "expected_kind": "sketch"}
+            compiled: list[dict[str, Any]] = []
+            for action in payload.get("actions") or ():
+                if not isinstance(action, Mapping):
+                    raise FusionCadError(ErrorCode.INVALID_ARGUMENT)
+                action_type = action.get("type")
+                action_id = action.get("id")
+                params = {"sketch": sketch}
+                if action_type == "line":
+                    params.update(
+                        x1=action.get("x1"), y1=action.get("y1"),
+                        x2=action.get("x2"), y2=action.get("y2"),
+                    )
+                    op_name = "sketch.line"
+                elif action_type == "rectangle":
+                    params.update(
+                        width=action.get("width"), height=action.get("height"),
+                        x=action.get("x", 0.0), y=action.get("y", 0.0),
+                        mode=action.get("mode", "corner"),
+                    )
+                    op_name = "sketch.rectangle"
+                elif action_type == "circle":
+                    params.update(
+                        x=action.get("x", 0.0), y=action.get("y", 0.0),
+                        diameter=action.get("diameter"),
+                    )
+                    op_name = "sketch.circle"
+                elif action_type == "constraint":
+                    kind = action.get("kind")
+                    expected_one, expected_two = self._hands_constraint_operand_kinds(kind)
+                    params.update(
+                        type=kind,
+                        entity_one=self._compile_hands_operand(
+                            action.get("entity_one") or {}, expected_one
+                        ),
+                    )
+                    if action.get("entity_two") is not None:
+                        params["entity_two"] = self._compile_hands_operand(
+                            action["entity_two"], expected_two
+                        )
+                    op_name = "sketch.constrain"
+                elif action_type == "dimension":
+                    params.update(
+                        type=action.get("kind"),
+                        entity_one=self._compile_hands_operand(
+                            action.get("entity_one") or {}, "sketch_curve"
+                        ),
+                        value=action.get("value"),
+                    )
+                    if action.get("entity_two") is not None:
+                        params["entity_two"] = self._compile_hands_operand(
+                            action["entity_two"], "sketch_curve"
+                        )
+                    op_name = "sketch.dimension"
+                else:
+                    raise FusionCadError(ErrorCode.INVALID_ARGUMENT)
+                compiled.append(
+                    {"op": op_name, "action_id": action_id, "params": params}
+                )
+            return compiled
+
+        if domain_group == "feature" and payload.get("operation") == "create":
+            feature = payload.get("feature")
+            if not isinstance(feature, Mapping):
+                raise FusionCadError(ErrorCode.INVALID_ARGUMENT)
+            kind = feature.get("kind")
+            if kind == "extrude":
+                operation_type = feature.get("operation_type", "new_body")
+                operation_name = "new" if operation_type == "new_body" else operation_type
+                return [{
+                    "op": "feature.extrude",
+                    "params": {
+                        "sketch": {"ref": feature.get("sketch"), "expected_kind": "sketch"},
+                        "distance": feature.get("distance_mm"),
+                        "profile": feature.get("profile_index", 0),
+                        "operation": operation_name,
+                        "direction": feature.get("direction", "positive"),
+                    },
+                }]
+            if kind == "hole":
+                params = {
+                    "plane": {"ref": feature.get("target_face"), "expected_kind": "face"},
+                    "diameter": feature.get("diameter_mm"),
+                    "x": feature.get("x_mm", 0.0),
+                    "y": feature.get("y_mm", 0.0),
+                    "through_all": feature.get("through_all", True),
+                }
+                if feature.get("depth_mm") is not None:
+                    params["depth"] = feature["depth_mm"]
+                return [{"op": "feature.hole", "params": params}]
+            if kind in {"fillet", "chamfer"}:
+                params = {
+                    "body": {"ref": feature.get("body"), "expected_kind": "body"},
+                    "edges": [
+                        {"ref": ref, "expected_kind": "edge"}
+                        for ref in feature.get("edges") or ()
+                    ],
+                }
+                if kind == "fillet":
+                    params["radius"] = feature.get("radius_mm")
+                    return [{"op": "feature.fillet", "params": params}]
+                params["distance"] = feature.get("distance_mm")
+                return [{"op": "feature.chamfer", "params": params}]
+        raise FusionCadError(ErrorCode.INVALID_ARGUMENT)
+
+    async def _execute_public_hands(
+        self, domain_group: str, logical_node: str, payload: Mapping[str, Any]
+    ) -> CadResult:
+        expected_revision = payload.get("expected_revision")
+        if not isinstance(expected_revision, str):
+            raise FusionCadError(ErrorCode.REVISION_CONFLICT)
+        revision = self.assert_fresh_for_mutation(
+            expected_revision, document_ref=payload.get("document_ref")
+        )
+        document_ref = revision.document_ref
+        rich_node = self._provider_router.require(logical_node, "rich")
+        if self.get_hands_provider_guard(rich_node, document_ref, revision.revision) is None:
+            await self.bind_hands_provider(logical_node, document_ref)
+        # The A/B bind performs another authoritative observation. Reassert the
+        # caller's revision afterwards so a change during the handshake cannot be
+        # smuggled into the mutation under a newly-bound provider guard.
+        self.assert_fresh_for_mutation(
+            expected_revision, document_ref=document_ref
+        )
+        operations = self._compile_hands_operations(domain_group, payload)
+        mode = "preview" if payload.get("dry_run") is True else "commit"
+        return await self.apply_hands_provider(
+            logical_node,
+            document_ref,
+            expected_revision=expected_revision,
+            mode=mode,
+            operations=operations,
+        )
+
     async def apply_hands_provider(
         self,
         logical_node: str,
@@ -331,33 +595,74 @@ class FusionCadService:
         revision = self.assert_fresh_for_mutation(
             expected_revision, document_ref=document_ref
         )
-        expected_guard = self._hands_provider_guards.get(
-            (document_ref, revision.revision)
+        route = self._provider_router.route(logical_node)
+        rich_node = self._provider_router.require(logical_node, "rich")
+        expected_guard = self.get_hands_provider_guard(
+            rich_node, document_ref, revision.revision
         )
         if expected_guard is None:
             raise FusionCadError(
                 ErrorCode.REVISION_CONFLICT,
                 details={"document_ref": document_ref, "applied": False},
             )
+        key = (rich_node, document_ref, revision.revision)
+        binding = self._hands_provider_guard_sessions.get(key)
+        if binding is None or binding[1] is None:
+            self._invalidate_hands_binding(rich_node, document_ref, revision.revision)
+            raise FusionCadError(
+                ErrorCode.REVISION_CONFLICT,
+                details={"document_ref": document_ref, "applied": False},
+            )
+        bound_rich_node, bound_generation = binding
         prepared = self._resolve_hands_value(list(operations), document_ref)
-        route = self._provider_router.route(logical_node)
-        rich_node = self._provider_router.require(logical_node, "rich")
-        evidence = await self._shimmer_hands.apply(
-            rich_node,
-            document_ref,
-            mode=mode,
-            expected_guard=expected_guard,
-            operations=prepared,
-        )
+        if bound_rich_node != rich_node:
+            self._invalidate_hands_binding(rich_node, document_ref, revision.revision)
+            raise FusionCadError(
+                ErrorCode.REVISION_CONFLICT,
+                details={"document_ref": document_ref, "applied": False},
+            )
+        try:
+            evidence = await self._shimmer_hands.apply(
+                rich_node,
+                document_ref,
+                mode=mode,
+                expected_guard=expected_guard,
+                operations=prepared,
+                expected_session_generation=bound_generation,
+            )
+        except FusionCadError as exc:
+            if exc.code in (
+                ErrorCode.DESKTOP_NODE_OFFLINE,
+                ErrorCode.REVISION_CONFLICT,
+                ErrorCode.OPERATION_UNCERTAIN,
+            ):
+                self._invalidate_hands_binding(rich_node, document_ref, revision.revision)
+            raise
 
+        generation_after_apply = self._hands_session_generation(rich_node)
+        if generation_after_apply is None or generation_after_apply != bound_generation:
+            self._invalidate_hands_binding(rich_node, document_ref, revision.revision)
+            raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
+
+        effect_ops = tuple(
+            str(effect.get("op"))
+            for effect in evidence.effects
+            if isinstance(effect, Mapping) and isinstance(effect.get("op"), str)
+        )
         if mode == "preview":
             return CadResult(
+                document=DocumentState(
+                    document_ref=document_ref,
+                    model_revision=revision.revision,
+                    units="mm",
+                ),
                 summary="Fusion CAD provider preview completed",
                 data=ImmutableMapping(
                     {
                         "mode": mode,
                         "committed": evidence.committed,
                         "baseline_restored": evidence.baseline_restored,
+                        "effect_ops": effect_ops,
                     }
                 ),
             )
@@ -365,45 +670,56 @@ class FusionCadService:
         # Shimmer has now reported a committed native mutation. The old guard is
         # no longer safe even if post-commit verification cannot complete. From
         # this point no failure may auto-replay the mutation.
-        self._hands_provider_guards.pop((document_ref, revision.revision), None)
+        self._invalidate_hands_binding(rich_node, document_ref, revision.revision)
         try:
             post_revision = await self._observe_authoritative_for_hands(
                 route.reference_node, document_ref
             )
-            post_guard = await self._shimmer_hands.guard(rich_node, document_ref)
+            post_guard = await self._shimmer_hands.guard(
+                rich_node,
+                document_ref,
+                expected_session_generation=bound_generation,
+            )
         except Exception:
             raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN) from None
 
+        generation_after_readback = self._hands_session_generation(rich_node)
         if (
-            post_revision.revision == revision.revision
+            generation_after_readback is None
+            or generation_after_readback != bound_generation
+            or post_revision.revision == revision.revision
             or post_guard.guard != evidence.guard_after
         ):
             raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
 
         entities = (*evidence.created, *evidence.changed)
         token_kinds: dict[str, str] = {}
+        snapshot_attestation = self._hands_snapshot_attestation(document_ref, post_revision)
+        attested_refs: dict[str, str] = {}
         for entity in entities:
             prior_kind = token_kinds.get(entity.native_token)
             if prior_kind is not None and prior_kind != entity.kind:
-                raise FusionCadError(ErrorCode.TYPE_MISMATCH)
+                # Commit already succeeded; contradictory provider evidence is
+                # non-replayable uncertainty, not a safe caller type error.
+                raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
             token_kinds[entity.native_token] = entity.kind
-            existing = self._ref_registry.get_internal_record_by_native_token(
-                document_ref, entity.native_token
-            )
-            if existing is not None and existing.kind != entity.kind:
-                raise FusionCadError(ErrorCode.TYPE_MISMATCH)
+            existing = snapshot_attestation.get(entity.native_token)
+            if existing is None:
+                # Persistent registry membership is insufficient: this exact
+                # authoritative post-commit snapshot must attest the token.
+                raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
+            if existing.kind != entity.kind:
+                # Authoritative/provider kind disagreement is discovered only
+                # after a proven commit, so retry safety is unknown.
+                raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
+            attested_refs[entity.native_token] = existing.ref
 
-        refs: list[str] = []
-        for entity in entities:
-            issued = self._ref_registry.issue(
-                document_ref=document_ref,
-                kind=entity.kind,
-                native_token=entity.native_token,
-            )
-            refs.append(issued.ref)
+        refs = [attested_refs[entity.native_token] for entity in entities]
 
-        self._hands_provider_guards[(document_ref, post_revision.revision)] = (
-            post_guard.guard
+        post_key = (rich_node, document_ref, post_revision.revision)
+        self._hands_provider_guards[post_key] = post_guard.guard
+        self._hands_provider_guard_sessions[post_key] = (
+            rich_node, bound_generation
         )
         return CadResult(
             document=DocumentState(
@@ -417,6 +733,7 @@ class FusionCadService:
                     "mode": mode,
                     "committed": evidence.committed,
                     "baseline_restored": evidence.baseline_restored,
+                    "effect_ops": effect_ops,
                 }
             ),
             changed_refs=tuple(dict.fromkeys(refs)),
@@ -2873,6 +3190,10 @@ class FusionCadService:
             return "validate"
         if isinstance(request, FusionTransactionRequest.__args__):  # type: ignore[attr-defined]
             return "transaction"
+        if isinstance(request, FusionSketchRequest.__args__):  # type: ignore[attr-defined]
+            return "sketch"
+        if isinstance(request, FusionFeatureRequest.__args__):  # type: ignore[attr-defined]
+            return "feature"
         raise BridgeError(
             ErrorCode.INVALID_ARGUMENT,
             f"Unsupported request model type: {type(request).__name__}",
@@ -2925,6 +3246,10 @@ class FusionCadService:
                 "pick",
             ):
                 target_group = "view"
+            elif op == "batch":
+                target_group = "sketch"
+            elif op == "create":
+                target_group = "feature" if "feature" in request_dict else "sketch"
             elif op == "run":
                 target_group = "validate"
             elif op in (
@@ -3191,7 +3516,9 @@ class FusionCadService:
             effective_bundle_group, payload
         )
 
-        is_standalone_mutation = (effective_bundle_group == "mutate") and is_mutation
+        is_standalone_mutation = (
+            effective_bundle_group in {"mutate", "sketch", "feature"}
+        ) and is_mutation
         is_transaction_preview_commit = (effective_bundle_group == "transaction") and (
             op in ("preview", "commit")
         )
@@ -3352,6 +3679,9 @@ class FusionCadService:
                     payload.pop("expected_fingerprint", None)
             elif "expected_fingerprint" in payload:
                 payload.pop("expected_fingerprint", None)
+
+        if domain_group in {"sketch", "feature"}:
+            return await self._execute_public_hands(domain_group, node_id, payload)
 
         # Task 13 feasibility is intentionally narrower than the public staging
         # contract. Preserve freshness-error precedence, then require an actually

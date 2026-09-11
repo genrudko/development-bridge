@@ -87,17 +87,26 @@ class ShimmerHandsAdapter:
             raise _ShimmerProviderRejected(code)
         return raw
 
-    async def _call(self, node_id: str, tool_name: str, arguments: dict[str, Any]) -> Mapping[str, Any]:
+    async def _call(
+        self,
+        node_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        expected_session_generation: int | None = None,
+    ) -> Mapping[str, Any]:
         mutation = tool_name == "_bridge_cad_apply"
+        call_kwargs: dict[str, Any] = {
+            "journal": {
+                "mutation": mutation,
+                "summary": "Private Fusion CAD provider operation",
+            }
+        }
+        if expected_session_generation is not None:
+            call_kwargs["expected_session_generation"] = expected_session_generation
         try:
             raw = await self._desktop_nodes.call(
-                node_id,
-                tool_name,
-                arguments,
-                journal={
-                    "mutation": mutation,
-                    "summary": "Private Fusion CAD provider operation",
-                },
+                node_id, tool_name, arguments, **call_kwargs
             )
         except FusionCadError:
             raise
@@ -124,8 +133,19 @@ class ShimmerHandsAdapter:
                 ) from None
         return self._payload(raw)
 
-    async def guard(self, rich_node: str, document_ref: str) -> ProviderGuardEvidence:
-        raw = await self._call(rich_node, "_bridge_cad_guard", {"document_ref": document_ref})
+    async def guard(
+        self,
+        rich_node: str,
+        document_ref: str,
+        *,
+        expected_session_generation: int | None = None,
+    ) -> ProviderGuardEvidence:
+        raw = await self._call(
+            rich_node,
+            "_bridge_cad_guard",
+            {"document_ref": document_ref},
+            expected_session_generation=expected_session_generation,
+        )
         guard = raw.get("guard")
         if not isinstance(guard, str) or _PROVIDER_GUARD_RE.fullmatch(guard) is None:
             raise FusionCadError(ErrorCode.FUSION_API_ERROR)
@@ -157,6 +177,7 @@ class ShimmerHandsAdapter:
         mode: Literal["commit", "preview"],
         expected_guard: str,
         operations: Sequence[Mapping[str, Any]],
+        expected_session_generation: int | None = None,
     ) -> HandsApplyEvidence:
         if _PROVIDER_GUARD_RE.fullmatch(expected_guard) is None:
             raise FusionCadError(ErrorCode.REVISION_CONFLICT)
@@ -171,6 +192,7 @@ class ShimmerHandsAdapter:
                     "mode": mode,
                     "operations": list(operations),
                 },
+                expected_session_generation=expected_session_generation,
             )
             if raw.get("document_ref") != document_ref:
                 raise FusionCadError(ErrorCode.FUSION_API_ERROR)

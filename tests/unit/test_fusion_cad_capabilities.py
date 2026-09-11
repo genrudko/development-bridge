@@ -440,7 +440,7 @@ def test_falsify_finding_2_probe_failure_yields_unavailable_with_limitations():
         },
     }
     matrix = CapabilityMatrix.from_probe(probe_failed)
-    assert len(matrix.records) == 26
+    assert len(matrix.records) == 28
 
     for rec in matrix.records:
         assert rec.state == "unavailable", f"Expected {rec.name} to be unavailable on probe failure"
@@ -906,3 +906,34 @@ def test_read_capability_probe_reuses_verified_real_fusion_design_resolver():
     probe = script[start:end]
     assert "design = _fusion_design_from_context(app, doc)" in probe
     assert "products.itemByClass" not in probe
+
+
+def test_hands_operation_capability_mapping_is_explicit():
+    from app.fusion_cad.capabilities import get_required_capability
+
+    assert get_required_capability("sketch", "create") == "hands.sketch"
+    assert get_required_capability("sketch", "batch") == "hands.sketch"
+    assert get_required_capability("feature", "create") == "hands.feature"
+
+
+def test_hands_capabilities_stay_degraded_until_live_provider_verification():
+    matrix = CapabilityMatrix.from_probe(
+        {
+            "probe_facts": {
+                "has_app": True,
+                "has_adsk_fusion": True,
+                "has_design_access": True,
+                "has_timeline_access": True,
+                "has_entity_token_resolver": True,
+                "has_sketch_access": True,
+                "has_mutation_indicators": True,
+            }
+        }
+    )
+
+    for name in ("hands.sketch", "hands.feature"):
+        record = matrix.get(name)
+        assert record is not None
+        assert record.state == "degraded"
+        assert record.implementation == "shimmer-guarded-overlay-v1"
+        assert any("live" in limitation.lower() for limitation in record.limitations)

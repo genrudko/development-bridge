@@ -71,6 +71,28 @@ async def test_adapter_rejects_malformed_success_evidence():
 
 
 @pytest.mark.asyncio
+async def test_adapter_committed_receipt_with_mismatched_guard_before_is_uncertain():
+    desktop = FakeDesktop([{
+        "api_version": PRIVATE_API_VERSION,
+        "document_ref": "doc_a",
+        "mode": "commit",
+        "guard_before": GUARD_C,
+        "guard_after": GUARD_B,
+        "effects": [],
+        "entities": {"created": [], "changed": []},
+        "committed": True,
+    }])
+
+    with pytest.raises(FusionCadError) as exc_info:
+        await ShimmerHandsAdapter(desktop).apply(
+            "rich-a", "doc_a", mode="commit", expected_guard=GUARD_A,
+            operations=[{"op": "sketch.create", "params": {}}],
+        )
+
+    assert exc_info.value.code == ErrorCode.OPERATION_UNCERTAIN
+
+
+@pytest.mark.asyncio
 async def test_adapter_rejects_wrong_private_api_version():
     desktop = FakeDesktop([{
         "api_version": "wrong/v0",

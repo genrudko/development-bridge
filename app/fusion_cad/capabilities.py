@@ -125,6 +125,11 @@ OPERATION_REQUIRED_CAPABILITIES: dict[tuple[str, str], str | None] = {
     ("transaction", "preview"): "transaction.preview_replay",
     ("transaction", "commit"): "transaction.preview_replay",
     ("transaction", "rollback"): "transaction.preview_replay",
+
+    # 8-9. P1 Hands rich-provider surface
+    ("sketch", "create"): "hands.sketch",
+    ("sketch", "batch"): "hands.sketch",
+    ("feature", "create"): "hands.feature",
 }
 
 
@@ -694,7 +699,50 @@ class CapabilityMatrix:
                 relay_version=relay_version,
             ))
 
-        # 17. export.dxf (Finding 3: DXF is capability-gated until P2)
+        # 17-18. P1 Hands provider capabilities. Presence of the reference
+        # Fusion API is only a prerequisite; contract-level support is claimed
+        # only after the separate guarded Shimmer live gate records proof.
+        hands_prereqs = (
+            not probe_failed
+            and facts.get("has_design_access")
+            and facts.get("has_entity_token_resolver")
+        )
+        for capability_name, fact_name in (
+            ("hands.sketch", "hands_sketch_runtime_verified"),
+            ("hands.feature", "hands_feature_runtime_verified"),
+        ):
+            verified = bool(facts.get("hands_runtime_verified") or facts.get(fact_name))
+            if hands_prereqs and verified:
+                records.append(CapabilityRecord(
+                    name=capability_name,
+                    state="supported",
+                    implementation="shimmer-guarded-overlay-v1",
+                    fusion_version=fusion_version,
+                    relay_version=relay_version,
+                ))
+            elif hands_prereqs:
+                records.append(CapabilityRecord(
+                    name=capability_name,
+                    state="degraded",
+                    implementation="shimmer-guarded-overlay-v1",
+                    limitations=(
+                        "Guarded Shimmer Hands implementation is present but live rich-provider runtime verification is pending for this session",
+                    ),
+                    fusion_version=fusion_version,
+                    relay_version=relay_version,
+                ))
+            else:
+                records.append(CapabilityRecord(
+                    name=capability_name,
+                    state="unavailable",
+                    limitations=err_limits(
+                        "Hands rich-provider prerequisites are unavailable on the reference Fusion runtime"
+                    ),
+                    fusion_version=fusion_version,
+                    relay_version=relay_version,
+                ))
+
+        # 19. export.dxf (Finding 3: DXF is capability-gated until P2)
         records.append(CapabilityRecord(
             name="export.dxf",
             state="unavailable",
@@ -703,7 +751,7 @@ class CapabilityMatrix:
             relay_version=relay_version,
         ))
 
-        # 18. view.section (Finding 3: section analysis is capability-gated until P2)
+        # 20. view.section (Finding 3: section analysis is capability-gated until P2)
         records.append(CapabilityRecord(
             name="view.section",
             state="unavailable",
@@ -712,7 +760,7 @@ class CapabilityMatrix:
             relay_version=relay_version,
         ))
 
-        # 19. assembly.joints (Finding 3: assembly joints are capability-gated until P2)
+        # 21. assembly.joints (Finding 3: assembly joints are capability-gated until P2)
         records.append(CapabilityRecord(
             name="assembly.joints",
             state="unavailable",
