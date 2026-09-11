@@ -47,7 +47,7 @@ async def test_full_mcp_session_exercises_all_knowledge_tools(tmp_path):
     ) as streams, ClientSession(*streams) as session:
         await session.initialize()
         listed = await session.list_tools()
-        assert len(listed.tools) == 112
+        assert len(listed.tools) == 113
 
         sources = await session.call_tool("knowledge_source_list", {})
         source_payload = json.loads(sources.content[0].text)

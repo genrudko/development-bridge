@@ -445,3 +445,74 @@ async def test_call_expected_session_generation_rejects_reconnected_node_before_
     assert exc_info.value.code == ErrorCode.DESKTOP_NODE_OFFLINE
     assert exc_info.value.details["status"] == "session_changed"
     assert service.status("desk-1")["pending_commands"] == 0
+
+
+def test_external_image_resource_resolves_bridge_issued_png_without_network(tmp_path):
+    service = DesktopNodeService(
+        configured(result_artifact_directory=tmp_path),
+        public_base_url="https://bridge.example",
+        endpoint="/mcp",
+    )
+    png = b"\x89PNG\r\n\x1a\nviewer-image"
+    value = {
+        "content": [{
+            "type": "image",
+            "data": base64.b64encode(png).decode("ascii"),
+            "mimeType": "image/png",
+        }],
+        "isError": False,
+    }
+    reference = service.store_external_result("desk-1", value, sanitize_binary=True)["external_result"]
+    _, metadata = service.external_result(reference)
+    uri = metadata["resources"][0]["uri"]
+
+    raw, image = service.external_image_resource(uri)
+
+    assert raw == png
+    assert image == {
+        "uri": uri,
+        "file_name": metadata["resources"][0]["file_name"],
+        "mime_type": "image/png",
+        "size_bytes": len(png),
+        "sha256": hashlib.sha256(png).hexdigest(),
+    }
+
+
+def test_external_image_resource_rejects_foreign_nonimage_and_bad_capability(tmp_path):
+    service = DesktopNodeService(
+        configured(result_artifact_directory=tmp_path),
+        public_base_url="https://bridge.example",
+        endpoint="/mcp",
+    )
+    png = b"\x89PNG\r\n\x1a\nviewer-image"
+    value = {
+        "content": [{
+            "type": "image",
+            "data": base64.b64encode(png).decode("ascii"),
+            "mimeType": "image/png",
+        }],
+        "isError": False,
+    }
+    reference = service.store_external_result("desk-1", value, sanitize_binary=True)["external_result"]
+    _, metadata = service.external_result(reference)
+    uri = metadata["resources"][0]["uri"]
+
+    for invalid in (
+        "https://foreign.example/mcp/desktop-results/exports/" + uri.rsplit("/", 1)[-1],
+        metadata["export_url"],
+        uri[:-1] + ("A" if uri[-1] != "A" else "B"),
+    ):
+        with pytest.raises(BridgeError) as caught:
+            service.external_image_resource(invalid)
+        assert caught.value.code == ErrorCode.INVALID_ARGUMENT
+
+    gif = b"GIF89a-not-for-viewer"
+    gif_ref = service.store_external_result(
+        "desk-1",
+        {"content": [{"type": "image", "data": base64.b64encode(gif).decode("ascii"), "mimeType": "image/gif"}], "isError": False},
+        sanitize_binary=True,
+    )["external_result"]
+    _, gif_meta = service.external_result(gif_ref)
+    with pytest.raises(BridgeError) as caught:
+        service.external_image_resource(gif_meta["resources"][0]["uri"])
+    assert caught.value.code == ErrorCode.INVALID_ARGUMENT

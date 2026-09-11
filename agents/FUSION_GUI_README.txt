@@ -5,6 +5,7 @@ Normal launch: double-click START_FUSION_GUI.cmd.
 
 First run:
 - the bootstrap creates .venv and installs mcp==2.0.0 if needed;
+- for the optional Fusion Eyes provider, run INSTALL_FUSION_EYES.ps1 once. It pins the live-qualified PERISCOPE revision, applies the qualified lost-CustomEvent repair, and installs the compatible mcp-proxy environment;
 - paste the desktop-node token in the GUI;
 - leave "Remember on this PC" enabled;
 - Windows DPAPI encrypts the token for the current Windows user.
@@ -12,6 +13,8 @@ First run:
 Later runs:
 - double-click START_FUSION_GUI.cmd;
 - click Start; no token lookup/paste is needed.
+- if the qualified PERISCOPE runtime is installed under LocalAppData\DevelopmentBridgeFusion\periscope, the same Start also launches its local mcp-proxy and a second unchanged Relay as fusion-eyes; no manual PowerShell windows are needed.
+- stopping/closing this GUI stops the eyes Relay and proxy processes it started. If port 18769 is already occupied, Fusion Eyes fails closed instead of attaching to an unknown process; the official fusion-workstation Relay keeps running.
 
 GUI shows:
 - local Fusion MCP port status;

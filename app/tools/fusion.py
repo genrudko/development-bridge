@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from mcp import types
+from mcp.server.mcpserver.utilities.types import Image
 from pydantic import TypeAdapter, ValidationError
 
 from app.api.errors import BridgeError, ErrorCode
@@ -135,6 +136,23 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 )
             )
         return to_mcp_result(success(request_context.request_id, data))
+
+    async def result_view(ctx, params, request_context):
+        image_bytes, metadata = container.desktop_nodes.external_image_resource(
+            params.arguments["resource_uri"]
+        )
+        result = to_mcp_result(
+            success(request_context.request_id, {"resource": metadata})
+        )
+        image_format = {
+            "image/png": "png",
+            "image/jpeg": "jpeg",
+            "image/webp": "webp",
+        }[metadata["mime_type"]]
+        result.content.append(
+            Image(data=image_bytes, format=image_format).to_image_content()
+        )
+        return result
 
     async def submit(ctx, params, request_context):
         args = params.arguments
@@ -273,6 +291,14 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         "required": ["node_id", "tool_name"],
         "additionalProperties": False,
     }
+    result_view_schema = {
+        "type": "object",
+        "properties": {
+            "resource_uri": {"type": "string", "minLength": 1, "maxLength": 2048}
+        },
+        "required": ["resource_uri"],
+        "additionalProperties": False,
+    }
     operation_lookup = {
         "type": "object",
         "properties": {"node_id": node, "operation_id": operation_id},
@@ -314,6 +340,15 @@ def fusion_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 inputSchema=invocation,
             ),
             submit,
+            "fusion-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="fusion_result_view",
+                description="View one previously returned Fusion desktop image resource directly as MCP image content without refetching it over the network.",
+                inputSchema=result_view_schema,
+            ),
+            result_view,
             "fusion-desktop",
         ),
         RegisteredTool(

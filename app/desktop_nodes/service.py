@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from secrets import compare_digest, token_urlsafe
 from typing import Any, ClassVar
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from app.api.capability_exports import CapabilityExportRegistry
 from app.api.errors import BridgeError, ErrorCode
@@ -1513,6 +1513,41 @@ class DesktopNodeService:
                     "expires_at": expires_at,
                 })
         return value, metadata
+
+    def external_image_resource(self, uri: str) -> tuple[bytes, dict[str, Any]]:
+        """Resolve one Bridge-issued desktop image URI to retained local bytes.
+
+        This is intentionally a local capability lookup, not an HTTP fetch.  Only
+        image resources emitted by this DesktopNodeService instance are accepted.
+        """
+        self._configured()
+        if not isinstance(uri, str) or not uri or self._public_base_url is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop image URI is invalid")
+        prefix = f"{self._public_base_url}{self._export_path}/"
+        if not uri.startswith(prefix):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop image URI is invalid")
+        encoded_token = uri[len(prefix):]
+        if not encoded_token or any(marker in encoded_token for marker in ("/", "?", "#")):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop image URI is invalid")
+        token = unquote(encoded_token)
+        resolved = self.resolve_external_export(token)
+        if resolved is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop image is unavailable")
+        path, item = resolved
+        mime_type = item.get("mime_type")
+        if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop resource is not a supported image")
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "External desktop image is unavailable") from exc
+        return raw, {
+            "uri": uri,
+            "file_name": item["file_name"],
+            "mime_type": mime_type,
+            "size_bytes": item["size_bytes"],
+            "sha256": item["sha256"],
+        }
 
     def resolve_external_export(self, token: str) -> tuple[Path, dict[str, Any]] | None:
         self._cleanup_external_results()

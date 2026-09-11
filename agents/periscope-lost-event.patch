@@ -1,0 +1,28 @@
+diff --git a/addin/Periscope/periscope_bridge/marshal.py b/addin/Periscope/periscope_bridge/marshal.py
+--- a/addin/Periscope/periscope_bridge/marshal.py
++++ b/addin/Periscope/periscope_bridge/marshal.py
+@@ -185,8 +185,22 @@ class Marshaller:
+                     "PERISCOPE could not hand the request to Fusion's main thread.",
+                     detail="fireCustomEvent failed: {0}".format(exc),
+                 )
+-            remaining = max(0.0, deadline - time.time())
+-            if not req.event.wait(remaining):
++            delivered = False
++            while True:
++                remaining = max(0.0, deadline - time.time())
++                if remaining <= 0.0:
++                    break
++                if req.event.wait(min(0.25, remaining)):
++                    delivered = True
++                    break
++                with self._lock:
++                    still_pending = request_id in self._pending
++                if still_pending:
++                    try:
++                        self._app.fireCustomEvent(EVENT_ID, request_id)
++                    except Exception:  # noqa: BLE001 - bounded wait remains authoritative
++                        LOG.debug("re-fire failed for pending request %s", request_id, exc_info=True)
++            if not delivered:
+                 with self._lock:
+                     self._pending.pop(request_id, None)
+                 self._stats["timed_out"] += 1

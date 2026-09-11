@@ -15,6 +15,11 @@ from ctypes import wintypes
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+try:
+    from .fusion_eyes_runtime import EYES_PROXY_PORT, build_eyes_process_specs
+except ImportError:  # Direct pythonw launch from the agents directory.
+    from fusion_eyes_runtime import EYES_PROXY_PORT, build_eyes_process_specs
+
 BRIDGE_HOST = "mcp.vigilante.website"
 BRIDGE_URL = "https://mcp.vigilante.website"
 NODE_ID = "fusion-workstation"
@@ -24,6 +29,8 @@ FUSION_URL = "http://127.0.0.1:27182/mcp"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "DevelopmentBridgeFusion"
 TOKEN_FILE = APP_DIR / "desktop-node-token.dpapi"
 LOG_FILE = APP_DIR / "relay.log"
+EYES_RELAY_LOG = APP_DIR / "eyes-relay.log"
+EYES_PROXY_LOG = APP_DIR / "eyes-proxy.log"
 ROOT = Path(__file__).resolve().parent
 AGENT = ROOT / "windows_fusion_agent.py"
 TIMESTAMPED_LINE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s")
@@ -109,6 +116,11 @@ class FusionBridgeGUI(tk.Tk):
         self.minsize(640, 430)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.proc: subprocess.Popen[str] | None = None
+        self.eyes_proxy_proc: subprocess.Popen[str] | None = None
+        self.eyes_relay_proc: subprocess.Popen[str] | None = None
+        self.eyes_runtime_present: bool | None = None
+        self.eyes_connected = False
+        self.eyes_problem: str | None = None
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event = threading.Event()
         self.connected = False
@@ -136,7 +148,8 @@ class FusionBridgeGUI(tk.Tk):
         self.connection_label = ttk.Label(status, text="MCP session: не подключена")
         self.heartbeat_label = ttk.Label(status, text="Bridge heartbeat: ожидание…")
         self.delivery_label = ttk.Label(status, text="Result delivery: ожидание…")
-        for widget in (self.fusion_label, self.bridge_label, self.relay_label, self.connection_label, self.heartbeat_label, self.delivery_label):
+        self.eyes_label = ttk.Label(status, text="Fusion Eyes: ожидание…")
+        for widget in (self.fusion_label, self.bridge_label, self.relay_label, self.connection_label, self.heartbeat_label, self.delivery_label, self.eyes_label):
             widget.pack(anchor="w", pady=2)
 
         token_frame = ttk.LabelFrame(outer, text="Desktop-node token", padding=10)
@@ -194,7 +207,22 @@ class FusionBridgeGUI(tk.Tk):
                     self.connected = bool(value)
                     if self.connected and self.heartbeat_ok is None:
                         self.heartbeat_ok = True
+                elif kind == "eyes_connected":
+                    event_proc, connected = value  # type: ignore[misc]
+                    if event_proc is self.eyes_relay_proc:
+                        self.eyes_connected = bool(connected)
+                elif kind == "eyes_proxy_stopped":
+                    event_proc, _returncode = value  # type: ignore[misc]
+                    if event_proc is self.eyes_proxy_proc:
+                        self._stop_eyes_stack()
+                        self.eyes_problem = f"mcp-proxy завершился (код {_returncode})"
+                elif kind == "eyes_stopped":
+                    event_proc, _returncode = value  # type: ignore[misc]
+                    if event_proc is self.eyes_relay_proc:
+                        self._stop_eyes_stack()
+                        self.eyes_problem = f"fusion-eyes relay завершился (код {_returncode})"
                 elif kind == "stopped":
+                    self._stop_eyes_stack()
                     self.proc = None
                     self.connected = False
                     self.heartbeat_ok = None
@@ -227,6 +255,20 @@ class FusionBridgeGUI(tk.Tk):
             self._set_text(self.delivery_label, "Result delivery", False, f"degraded; outbox: {self.outbox_count}")
         else:
             self._set_text(self.delivery_label, "Result delivery", True, f"OK; outbox: {self.outbox_count}")
+
+        eyes_relay_running = self.eyes_relay_proc is not None and self.eyes_relay_proc.poll() is None
+        eyes_proxy_running = self.eyes_proxy_proc is not None and self.eyes_proxy_proc.poll() is None
+        if self.eyes_problem:
+            self._set_text(self.eyes_label, "Fusion Eyes", False, self.eyes_problem)
+        elif self.eyes_runtime_present is False:
+            self._set_text(self.eyes_label, "Fusion Eyes", False, "PERISCOPE runtime не установлен")
+        elif eyes_relay_running and self.eyes_connected:
+            self._set_text(self.eyes_label, "Fusion Eyes", True, "fusion-eyes зарегистрирован в Bridge")
+        elif eyes_relay_running:
+            detail = "ожидание MCP session" if eyes_proxy_running else "proxy не запущен"
+            self._set_text(self.eyes_label, "Fusion Eyes", False, detail)
+        else:
+            self._set_text(self.eyes_label, "Fusion Eyes", False, "остановлен")
 
     def _append_log(self, line: str) -> None:
         line = timestamp_log_line(line)
@@ -287,7 +329,119 @@ class FusionBridgeGUI(tk.Tk):
         self.stop_button.configure(state="normal")
         self._append_log("--- relay started ---")
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
+        self._start_eyes_stack(token, python, creationflags)
         self._refresh_relay_labels()
+
+    def _start_eyes_stack(self, token: str, relay_python: str, creationflags: int) -> None:
+        self._stop_eyes_stack()
+        specs = build_eyes_process_specs(
+            token,
+            app_dir=APP_DIR,
+            root=ROOT,
+            relay_python=Path(relay_python),
+            environ=os.environ,
+            bridge_url=BRIDGE_URL,
+        )
+        if specs is None:
+            self.eyes_runtime_present = False
+            self.eyes_problem = "PERISCOPE runtime не установлен"
+            self._append_log("[eyes] PERISCOPE runtime отсутствует; fusion-workstation продолжает работать")
+            return
+        self.eyes_runtime_present = True
+        self.eyes_problem = None
+        proxy_spec, relay_spec = specs
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            if tcp_open("127.0.0.1", EYES_PROXY_PORT):
+                self.eyes_problem = "порт 18769 занят; Fusion Eyes не запущен"
+                self._append_log("[eyes] " + self.eyes_problem)
+                return
+            with EYES_PROXY_LOG.open("a", encoding="utf-8") as proxy_log:
+                self.eyes_proxy_proc = subprocess.Popen(
+                    proxy_spec["argv"],
+                    cwd=proxy_spec["cwd"],
+                    env=proxy_spec["env"],
+                    stdout=proxy_log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creationflags,
+                )
+            self._append_log("[eyes] PERISCOPE mcp-proxy запущен на 127.0.0.1:18769")
+            threading.Thread(
+                target=self._eyes_proxy_watcher, args=(self.eyes_proxy_proc,), daemon=True
+            ).start()
+
+            self.eyes_relay_proc = subprocess.Popen(
+                relay_spec["argv"],
+                cwd=relay_spec["cwd"],
+                env=relay_spec["env"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=creationflags,
+            )
+            threading.Thread(
+                target=self._eyes_reader, args=(self.eyes_relay_proc,), daemon=True
+            ).start()
+            self._append_log("[eyes] fusion-eyes relay запущен; ждёт PERISCOPE MCP")
+        except Exception as exc:
+            problem = f"запуск не удался: {type(exc).__name__}: {exc}"
+            self._append_log("[eyes] " + problem)
+            self._stop_eyes_stack()
+            self.eyes_problem = problem
+
+    def _eyes_proxy_watcher(self, proc: subprocess.Popen[str]) -> None:
+        proc.wait()
+        self.events.put(("eyes_proxy_stopped", (proc, proc.returncode)))
+
+    def _eyes_reader(self, proc: subprocess.Popen[str]) -> None:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        with EYES_RELAY_LOG.open("a", encoding="utf-8") as logfile:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                stamped = timestamp_log_line(line)
+                logfile.write(stamped + "\n")
+                logfile.flush()
+                if "Connected: Fusion MCP tools discovered:" in line:
+                    self.events.put(("eyes_connected", (proc, True)))
+                elif "Fusion MCP watchdog: port unavailable" in line or "Fusion/Bridge unavailable" in line:
+                    self.events.put(("eyes_connected", (proc, False)))
+                self.events.put(("log", "[eyes] " + line.rstrip()))
+        proc.wait()
+        self.events.put(("eyes_stopped", (proc, proc.returncode)))
+
+    @staticmethod
+    def _terminate_owned_process(proc: subprocess.Popen[str] | None, *, tree: bool = False) -> None:
+        if proc is None or proc.poll() is not None:
+            return
+        if tree and os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                proc.wait(timeout=2)
+                return
+            except Exception:
+                pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    def _stop_eyes_stack(self) -> None:
+        self._terminate_owned_process(self.eyes_relay_proc)
+        self.eyes_relay_proc = None
+        self.eyes_connected = False
+        self._terminate_owned_process(self.eyes_proxy_proc, tree=True)
+        self.eyes_proxy_proc = None
+        self.eyes_problem = None
 
     def _reader(self, proc: subprocess.Popen[str]) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -322,6 +476,7 @@ class FusionBridgeGUI(tk.Tk):
         self.events.put(("stopped", proc.returncode))
 
     def stop_relay(self) -> None:
+        self._stop_eyes_stack()
         proc = self.proc
         if proc is None or proc.poll() is not None:
             self.events.put(("stopped", 0))
