@@ -453,9 +453,7 @@ async function poll() {
         `If its response contains batched_messages, process those terminal groups in this same turn.`;
       const contextInjected = await setProtocolContext(protocolContext);
       if (contextInjected) modelContextContinuation = claim.continuation_id;
-      const fallback = contextInjected
-        ? ""
-        : `\n\n> Bridge ref: \`${claim.continuation_id}\` — acknowledge with coordinator_ack before other work.`;
+      const fallback = `\n\n> Bridge ref: \`${claim.continuation_id}\` — acknowledge with coordinator_ack before other work.`;
       deliveredMessage = `### ⚡ Bridge · задача завершена\n\n${humanMessage}${batch}${retry}${fallback}`;
     }
     await app.sendMessage({

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx2
@@ -58,6 +59,7 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                     assert "batched_messages" in resource.contents[0].text
                     assert "call coordinator_ack" in resource.contents[0].text
                     assert "Bridge ref:" in resource.contents[0].text
+                    assert "const fallback = contextInjected" not in resource.contents[0].text
                     assert "development-bridge/control-v1" in resource.contents[0].text
                     assert "development-bridge/control-ack-v1" in resource.contents[0].text
                     assert "handledControlOperations" in resource.contents[0].text
@@ -151,6 +153,12 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
             )
             assert observed.headers["access-control-allow-origin"] == "*"
             assert observed.json()["observed"] is True
+
+
+def test_coordinator_x_ui_keeps_visible_continuation_ack_reference():
+    html = (Path(__file__).parents[2] / "app" / "coordinator" / "x_ui.html").read_text()
+    assert "Bridge ref:" in html
+    assert "const fallback = contextInjected" not in html
 
 
 @pytest.mark.asyncio
