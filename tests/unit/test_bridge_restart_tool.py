@@ -14,6 +14,7 @@ class FakeCoordinator:
     def __init__(self):
         self.armed = []
         self.bindings = {}
+        self.resilient_calls = 0
 
     def validate_channel(self, value):
         assert value == "eod-tooling"
@@ -22,6 +23,11 @@ class FakeCoordinator:
     async def arm(self, message, *, channel_id, delay_seconds, conflict):
         self.armed.append({"message": message, "channel_id": channel_id, "delay_seconds": delay_seconds, "conflict": conflict})
         return {"state": "pending"}
+
+    async def arm_resilient(self, message, *, channel_id, delay_seconds, conflict):
+        self.resilient_calls += 1
+        self.armed.append({"message": message, "channel_id": channel_id, "delay_seconds": delay_seconds, "conflict": conflict, "resilient": True})
+        return {"state": "pending", "continuation_id": "cont_restart_test", "model_ack_required": True, "max_delivery_attempts": 3}
 
     def session_binding(self, session_id):
         return self.bindings.get(session_id)
@@ -53,7 +59,13 @@ async def test_explicit_restart_channel_overrides_default_route():
     result = await tool.handler(None, SimpleNamespace(arguments={"channel_id": "eod-tooling"}), SimpleNamespace(request_id="request-1"))
     payload = json.loads(result.content[0].text)
     assert coordinator.armed[0]["channel_id"] == "eod-tooling"
-    assert payload["data"]["continuation"] == {"channel_id": "eod-tooling", "state": "pending"}
+    assert payload["data"]["continuation"] == {
+        "channel_id": "eod-tooling",
+        "state": "pending",
+        "continuation_id": "cont_restart_test",
+        "model_ack_required": True,
+        "max_delivery_attempts": 3,
+    }
 
 
 @pytest.mark.asyncio
@@ -168,7 +180,7 @@ async def test_restart_arms_bound_route_under_route_lock(tmp_path):
 
     async def observe_lock(message, *, channel_id, delay_seconds, conflict):
         lock_observations.append(route_lock.locked())
-        return await FakeCoordinator.arm(
+        return await FakeCoordinator.arm_resilient(
             coordinator,
             message,
             channel_id=channel_id,
@@ -176,7 +188,7 @@ async def test_restart_arms_bound_route_under_route_lock(tmp_path):
             conflict=conflict,
         )
 
-    coordinator.arm = observe_lock
+    coordinator.arm_resilient = observe_lock
     container = SimpleNamespace(
         route_registry=registry,
         coordinator=coordinator,
@@ -192,6 +204,27 @@ async def test_restart_arms_bound_route_under_route_lock(tmp_path):
 
     assert json.loads(result.content[0].text)["data"]["restart_scheduled"] is True
     assert lock_observations == [True]
+
+
+@pytest.mark.asyncio
+async def test_restart_uses_resilient_continuation_for_direct_post_restart_delivery():
+    coordinator = FakeCoordinator()
+    registry = RouteRegistry()
+    registry.bootstrap("fusioncad", "https://chatgpt.com/g/g-p-project/c/conv", "telegram-fusioncad-g0")
+    container = SimpleNamespace(route_registry=registry, coordinator=coordinator, bridge_restart=FakeRestart())
+    tool = bridge_restart_tools(container)[0]
+
+    result = await tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "fusioncad"}),
+        SimpleNamespace(request_id="request-resilient-restart"),
+    )
+    payload = json.loads(result.content[0].text)["data"]
+
+    assert coordinator.resilient_calls == 1
+    assert coordinator.armed[0]["resilient"] is True
+    assert payload["continuation"]["continuation_id"] == "cont_restart_test"
+    assert payload["continuation"]["model_ack_required"] is True
 
 
 @pytest.mark.asyncio

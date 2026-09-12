@@ -81,7 +81,7 @@ def bridge_restart_tools(container: ApplicationContainer) -> tuple[RegisteredToo
             if channel_id is None:
                 return
             if route is None:
-                continuation = await container.coordinator.arm(
+                continuation = await container.coordinator.arm_resilient(
                     RESTART_CONTINUATION_MESSAGE,
                     channel_id=channel_id,
                     delay_seconds=3.0,
@@ -96,7 +96,7 @@ def bridge_restart_tools(container: ApplicationContainer) -> tuple[RegisteredToo
                     expected_generation=expected_generation,
                     expected_channel=channel_id,
                 )
-                continuation = await container.coordinator.arm(
+                continuation = await container.coordinator.arm_resilient(
                     RESTART_CONTINUATION_MESSAGE,
                     channel_id=channel_id,
                     delay_seconds=3.0,
@@ -111,6 +111,12 @@ def bridge_restart_tools(container: ApplicationContainer) -> tuple[RegisteredToo
                 "channel_id": channel_id,
                 "state": continuation["state"],
             }
+            if continuation.get("continuation_id") is not None:
+                data["continuation"]["continuation_id"] = continuation["continuation_id"]
+            if continuation.get("model_ack_required") is not None:
+                data["continuation"]["model_ack_required"] = continuation["model_ack_required"]
+            if continuation.get("max_delivery_attempts") is not None:
+                data["continuation"]["max_delivery_attempts"] = continuation["max_delivery_attempts"]
             if route is not None and route.get("route_id") is not None:
                 data["continuation"]["route_id"] = route["route_id"]
         elif channel_id is None:
