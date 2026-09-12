@@ -919,6 +919,44 @@ async def test_nonzero_exit_without_receipt_classification(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_context_timeout_before_staging_is_not_submitted_even_with_incidental_login_text(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+    request = WakeDeliveryRequest(
+        target=target,
+        continuation_id="cont_context_timeout",
+        prompt="DBRIDGE_CONTINUE cont_context_timeout",
+        delivery_key="cont_context_timeout",
+    )
+    runner = FakeProcessRunner(
+        exit_code=1,
+        stdout="Managed browser login probe completed",
+        stderr=(
+            'Draft staging failed: Auto-send failed: '
+            '{"status":"context-timeout","state":{"composerHasText":false,'
+            '"targetMatch":true,"inConversation":true}}'
+        ),
+    )
+    transport = ReviewGptWakeTransport(
+        node_path="/usr/bin/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=tmp_path / "receipts",
+        process_runner=runner,
+    )
+
+    result = await transport.deliver(request)
+
+    assert result.disposition == "not_submitted"
+    assert "context-timeout" in (result.detail or "")
+
+
+@pytest.mark.asyncio
 async def test_spawn_failure_is_not_submitted(tmp_path: Path):
     target = WakeTarget(
         route_id="r1",

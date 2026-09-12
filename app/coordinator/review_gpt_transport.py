@@ -472,6 +472,16 @@ class ReviewGptWakeTransport:
             )
 
         lower_out = output_text.lower()
+        compact_out = "".join(lower_out.split())
+        if (
+            "draft staging failed" in lower_out
+            and '"status":"context-timeout"' in compact_out
+            and '"composerhastext":false' in compact_out
+        ):
+            return WakeDeliveryResult(
+                disposition="not_submitted",
+                detail=f"Context timeout before draft staging completed: {bounded_text}",
+            )
         if "before auto-send" in lower_out:
             return WakeDeliveryResult(
                 disposition="not_submitted",
