@@ -373,7 +373,16 @@ def _native_candidates(resolved):
     try:
         count_value = getattr(resolved, "count")
     except AttributeError:
-        return [resolved]
+        try:
+            length = len(resolved)
+        except (TypeError, AttributeError):
+            return [resolved]
+        except Exception:
+            raise _PrivateResolutionError("REF_STALE") from None
+        try:
+            return [resolved[index] for index in range(length)]
+        except Exception:
+            raise _PrivateResolutionError("REF_STALE") from None
     except Exception:
         raise _PrivateResolutionError("REF_STALE") from None
     try:

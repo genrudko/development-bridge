@@ -802,6 +802,25 @@ def test_guarded_delegate_resolves_face_token_to_shimmer_plane_body_face_indices
     assert seen == [{"plane": {"body": 0, "face": 0}, "name": "OnFace"}]
 
 
+def test_private_token_resolution_accepts_autodesk_basevector_sequence():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_private_basevector")
+    ctx, sketch, _body, _face, _edge, _by_token = _hands_token_ctx()
+
+    class FakeBaseVector:
+        def __init__(self, values):
+            self._values = list(values)
+        def __len__(self):
+            return len(self._values)
+        def __iter__(self):
+            return iter(self._values)
+        def __getitem__(self, index):
+            return self._values[index]
+
+    ctx._design.findEntityByToken = lambda _token: FakeBaseVector([sketch])
+    resolved = module._resolve_entity_marker(ctx, _entity_marker("sketch-token", "sketch"), "sketch")
+    assert resolved is sketch
+
+
 @pytest.mark.parametrize(
     ("resolved", "declared_kind", "expected_code"),
     [
