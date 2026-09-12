@@ -803,15 +803,17 @@ def run(_context=None):
         sketches = canonical_data.get("sketches", [])
         matching_sketch = None
         for sk in sketches:
-            if (
-                (target_native and sk.get("native_token") == target_native)
-                or sk.get("ref") == target_ref
+            if target_native and sk.get("native_token") != target_native:
+                continue
+            if not target_native and not (
+                sk.get("ref") == target_ref
                 or sk.get("name") == target_ref
                 or sk.get("id") == target_ref
             ):
-                matching_sketch = dict(sk)
-                matching_sketch["ref"] = target_ref
-                break
+                continue
+            matching_sketch = dict(sk)
+            matching_sketch["ref"] = target_ref
+            break
         if matching_sketch is None:
             if target_native:
                 raise FusionScriptError(

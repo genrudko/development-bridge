@@ -33,7 +33,10 @@ def test_read_sketch_fragment_matches_authoritative_native_token_and_fails_close
         },
     )
     assert 'target_native = PAYLOAD.get("native_token")' in script
-    assert 'sk.get("native_token") == target_native' in script
+    assert (
+        'if target_native and sk.get("native_token") != target_native:' in script
+    )
+    assert 'if not target_native and not (' in script
     assert 'Authoritative sketch token was not found in the active design' in script
 
 
