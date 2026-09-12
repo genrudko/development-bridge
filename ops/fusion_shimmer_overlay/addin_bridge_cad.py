@@ -169,6 +169,7 @@ def _document_identity(ctx, design, components):
         "document_ref": _active_document_ref(ctx),
         "data_file_id": data_id,
         "document_name": _text(getattr(doc, "name", None)) if doc is not None else None,
+        "is_modified": bool(getattr(doc, "isModified", False)) if doc is not None else False,
         "root_component_token": _token(getattr(design, "rootComponent", None)),
         "component_tokens": component_tokens,
     }
@@ -752,6 +753,19 @@ def _abort_and_prove(ctx, guard_before):
     return guard_after == guard_before, guard_after
 
 
+def _schedule_preview_undo(ctx):
+    try:
+        ui = getattr(ctx.app, "userInterface", None)
+        definitions = getattr(ui, "commandDefinitions", None) if ui is not None else None
+        undo = definitions.itemById("UndoCommand") if definitions is not None else None
+        if undo is None:
+            return False
+        undo.execute()
+        return True
+    except Exception:
+        return False
+
+
 def execute_guarded(ctx, params, registry, allowed_ops=None):
     """Execute an allow-listed Shimmer plan under one Fusion PTransaction."""
     if not isinstance(params, Mapping):
@@ -853,9 +867,19 @@ def execute_guarded(ctx, params, registry, allowed_ops=None):
             preview_guard = compute_provider_guard(ctx)["guard"]
         except Exception:
             preview_guard = None
-        restored, guard_after = _abort_and_prove(ctx, guard_before)
-        if not restored:
+        # Fusion PTransaction.Abort restores geometry but can leave Document.isModified
+        # dirty after real sketch mutations. Commit the exact preview transaction, then
+        # queue Fusion's native Undo command. The undo settles after this provider
+        # callback returns; Bridge verifies the private guard in a second call before
+        # reporting baseline_restored=true.
+        try:
+            committed = str(ctx.app.executeTextCommand("PTransaction.Commit")).strip()
+        except Exception:
             return _error("OPERATION_UNCERTAIN", applied=None)
+        if committed != "1":
+            return _error("OPERATION_UNCERTAIN", applied=None)
+        if not _schedule_preview_undo(ctx):
+            return _error("OPERATION_UNCERTAIN", applied=True)
         return {
             "api_version": API_VERSION,
             "ok": True,
@@ -863,9 +887,10 @@ def execute_guarded(ctx, params, registry, allowed_ops=None):
             "document_ref": requested_document_ref,
             "guard_before": guard_before,
             "preview_guard": preview_guard,
-            "guard_after": guard_after,
             "effects": effects,
             "entities": entity_evidence,
+            "committed": False,
+            "rollback_pending": True,
         }
 
     # Once commit has been attempted its outcome is never auto-replayed or

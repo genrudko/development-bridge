@@ -151,6 +151,33 @@ async def test_adapter_malformed_apply_receipt_after_dispatch_is_uncertain(mode)
     assert exc_info.value.code == ErrorCode.OPERATION_UNCERTAIN
 
 @pytest.mark.asyncio
+async def test_preview_waits_for_post_undo_guard_before_reporting_restored():
+    desktop = FakeDesktop([
+        {
+            "api_version": PRIVATE_API_VERSION,
+            "document_ref": "doc_a",
+            "mode": "preview",
+            "guard_before": GUARD_A,
+            "preview_guard": GUARD_B,
+            "effects": [],
+            "entities": {"created": [], "changed": []},
+            "committed": False,
+            "rollback_pending": True,
+        },
+        {"api_version": PRIVATE_API_VERSION, "guard": GUARD_A, "document_ref": "doc_a"},
+    ])
+
+    evidence = await ShimmerHandsAdapter(desktop).apply(
+        "rich-a", "doc_a", mode="preview", expected_guard=GUARD_A,
+        operations=[{"op": "sketch.create", "params": {}}],
+    )
+
+    assert evidence.baseline_restored is True
+    assert evidence.guard_after == GUARD_A
+    assert [call[1] for call in desktop.calls] == ["_bridge_cad_apply", "_bridge_cad_guard"]
+
+
+@pytest.mark.asyncio
 async def test_adapter_resolves_externalized_apply_receipt_before_private_decode():
     payload = {
         "api_version": PRIVATE_API_VERSION,

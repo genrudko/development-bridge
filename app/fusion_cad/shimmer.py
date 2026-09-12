@@ -202,16 +202,12 @@ class ShimmerHandsAdapter:
                 raise FusionCadError(ErrorCode.FUSION_API_ERROR)
             if raw.get("mode") not in (None, mode):
                 raise FusionCadError(ErrorCode.FUSION_API_ERROR)
-            before, after, effects = (
-                raw.get("guard_before"),
-                raw.get("guard_after"),
-                raw.get("effects"),
-            )
+            before = raw.get("guard_before")
+            after = raw.get("guard_after")
+            effects = raw.get("effects")
             if (
                 not isinstance(before, str)
                 or _PROVIDER_GUARD_RE.fullmatch(before) is None
-                or not isinstance(after, str)
-                or _PROVIDER_GUARD_RE.fullmatch(after) is None
                 or not isinstance(effects, list)
                 or any(not isinstance(effect, Mapping) for effect in effects)
             ):
@@ -226,13 +222,35 @@ class ShimmerHandsAdapter:
             created = self._entities(entities.get("created", []))
             changed = self._entities(entities.get("changed", []))
             committed = raw.get("committed", mode == "commit")
-            restored = raw.get(
-                "baseline_restored", mode == "preview" and after == before
-            )
-            if mode == "commit" and committed is not True:
-                raise FusionCadError(ErrorCode.FUSION_API_ERROR)
-            if mode == "preview" and (restored is not True or after != before):
-                raise FusionCadError(ErrorCode.FUSION_API_ERROR)
+            if mode == "commit":
+                if (
+                    committed is not True
+                    or not isinstance(after, str)
+                    or _PROVIDER_GUARD_RE.fullmatch(after) is None
+                ):
+                    raise FusionCadError(ErrorCode.FUSION_API_ERROR)
+                restored = False
+            elif raw.get("rollback_pending") is True:
+                if committed is not False:
+                    raise FusionCadError(ErrorCode.FUSION_API_ERROR)
+                post_undo = await self.guard(
+                    rich_node,
+                    document_ref,
+                    expected_session_generation=expected_session_generation,
+                )
+                after = post_undo.guard
+                restored = after == before
+                if not restored:
+                    raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
+            else:
+                if (
+                    not isinstance(after, str)
+                    or _PROVIDER_GUARD_RE.fullmatch(after) is None
+                ):
+                    raise FusionCadError(ErrorCode.FUSION_API_ERROR)
+                restored = raw.get("baseline_restored", after == before)
+                if restored is not True or after != before:
+                    raise FusionCadError(ErrorCode.FUSION_API_ERROR)
         except _ShimmerProviderRejected as exc:
             # Overlay errors are structured evidence. In particular its
             # FUSION_API_ERROR is emitted only before mutation or after a proven

@@ -54,7 +54,7 @@ class FakeApp:
         self.state = state
         self.commands = []
         self.activeDocument = SimpleNamespace(
-            name="Disposable", dataFile=None, dataId=None, savedVersion=None, creationId="fixture"
+            name="Disposable", dataFile=None, dataId=None, savedVersion=None, creationId="fixture", isModified=False
         )
 
     def executeTextCommand(self, command):
@@ -129,6 +129,7 @@ def test_provider_guard_changes_for_each_guarded_state_class():
         lambda ctx: setattr(ctx._occurrence, "isGrounded", True),
         lambda ctx: setattr(ctx._occurrence, "isLightBulbOn", False),
         lambda ctx: setattr(ctx._parameter, "expression", "41 mm"),
+        lambda ctx: setattr(ctx.app.activeDocument, "isModified", True),
     ]
     for mutate in mutations:
         ctx = FakeCtx()
@@ -193,20 +194,23 @@ def test_commit_uses_one_ptransaction_start_then_commit_and_returns_effects():
     assert result["guard_after"] != guard
 
 
-def test_preview_aborts_and_requires_guard_restoration():
-    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_addin_preview")
+def test_preview_schedules_immediate_undo_instead_of_abort_for_clean_baseline():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_addin_preview_undo")
     ctx = FakeCtx()
     guard = module.compute_provider_guard(ctx)["guard"]
-    original = ctx._component.revisionId
 
-    # Simulate Fusion transaction rollback restoring both model value and component revision id.
-    original_execute = ctx.app.executeTextCommand
-    def execute(command):
-        value = original_execute(command)
-        if command == "PTransaction.Abort":
-            ctx._component.revisionId = original
-        return value
-    ctx.app.executeTextCommand = execute
+    class UndoCommand:
+        def __init__(self):
+            self.executed = 0
+        def execute(self):
+            self.executed += 1
+
+    undo = UndoCommand()
+    ctx.app.userInterface = SimpleNamespace(
+        commandDefinitions=SimpleNamespace(
+            itemById=lambda command_id: undo if command_id == "UndoCommand" else None
+        )
+    )
 
     result = module.execute_guarded(
         ctx,
@@ -216,9 +220,26 @@ def test_preview_aborts_and_requires_guard_restoration():
 
     assert result["ok"] is True
     assert result["mode"] == "preview"
-    assert ctx.state["value"] == 0
-    assert ctx.app.commands == ['PTransaction.Start "bridge_cad_shimmer"', "PTransaction.Abort"]
-    assert result["guard_after"] == guard
+    assert result["rollback_pending"] is True
+    assert result["committed"] is False
+    assert undo.executed == 1
+    assert ctx.app.commands == ['PTransaction.Start "bridge_cad_shimmer"', "PTransaction.Commit"]
+
+
+def test_preview_without_native_undo_fails_uncertain_after_commit():
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_addin_preview")
+    ctx = FakeCtx()
+    guard = module.compute_provider_guard(ctx)["guard"]
+
+    result = module.execute_guarded(
+        ctx,
+        {"document_ref": DOC_REF, "expected_guard": guard, "mode": "preview", "operations": [{"op": "feature.extrude", "params": {}}]},
+        _mutating_registry(ctx.state),
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "OPERATION_UNCERTAIN"
+    assert ctx.app.commands == ['PTransaction.Start "bridge_cad_shimmer"', "PTransaction.Commit"]
 
 
 def test_exception_after_start_aborts_when_abort_is_proven():
