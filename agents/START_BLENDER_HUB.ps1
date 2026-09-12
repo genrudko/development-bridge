@@ -26,8 +26,24 @@ if (-not $Python) {
     }
 }
 
-& $Python (Join-Path $ScriptDir "blender_hub_runtime.py") `
-    --bridge-url $BridgeUrl `
-    --node-id $NodeId `
-    --providers $Providers
-exit $LASTEXITCODE
+$GuiPython = $Python
+if ([System.IO.Path]::GetFileName($Python) -ieq "python.exe") {
+    $Candidate = Join-Path (Split-Path -Parent $Python) "pythonw.exe"
+    if (Test-Path $Candidate) {
+        $GuiPython = $Candidate
+    }
+} elseif ($Python -eq "python") {
+    $Pythonw = Get-Command pythonw -ErrorAction SilentlyContinue
+    if ($Pythonw) {
+        $GuiPython = $Pythonw.Source
+    }
+}
+
+$Gui = Join-Path $ScriptDir "blender_hub_gui.pyw"
+$Arguments = @(
+    $Gui,
+    "--bridge-url", $BridgeUrl,
+    "--node-id", $NodeId,
+    "--providers", $Providers
+)
+Start-Process -FilePath $GuiPython -ArgumentList $Arguments -WorkingDirectory (Split-Path -Parent $ScriptDir)

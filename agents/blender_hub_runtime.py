@@ -355,6 +355,8 @@ async def run(
     provider_config_path: Path,
     heartbeat_seconds: float,
     claim_wait_seconds: float,
+    operator: OperatorBackend | None = None,
+    status_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     # Reuse the already-qualified outbound Bridge transport/result-delivery logic.
     from windows_fusion_agent import (
@@ -365,7 +367,7 @@ async def run(
     )
 
     configs = load_provider_configs(provider_config_path)
-    runtime = BlenderHubRuntime(configs)
+    runtime = BlenderHubRuntime(configs, operator=operator)
     bridge = BridgeClient(bridge_url, node_id, token)
     outbox = ResultOutbox(default_outbox_directory())
     telemetry: dict[str, Any] = {
@@ -394,6 +396,12 @@ async def run(
             telemetry=telemetry,
         )
     )
+    if status_sink is not None:
+        status_sink({
+            "type": "connected",
+            "providers": runtime.provider_status(),
+            "tool_count": len(tools),
+        })
     print(
         f"Blender Hub connected: providers={len(runtime.transports)} tools={len(tools)}",
         flush=True,
