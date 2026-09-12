@@ -270,6 +270,16 @@ def test_windows_tcp_table_listener_ownership_accepts_winapi_tail_padding():
     )
 
 
+def test_windows_tcp_table_listener_ownership_accepts_owned_descendant():
+    module = _gui_namespace()
+    root_pid = 4242
+    listener_pid = 5001
+    module["_windows_process_parent_map"] = lambda: {listener_pid: root_pid}
+    assert module["listener_owned_by_pid"](
+        18768, root_pid, table_reader=lambda: _tcp_table((2, 18768, listener_pid)), platform="nt"
+    )
+
+
 def _hands_gui_fixture(module, monkeypatch, *, owner):
     module["HANDS_MCP_PORT"] = 18768
     proc = SimpleNamespace(pid=4242, poll=lambda: None)
@@ -806,3 +816,12 @@ def test_launcher_has_no_taskkill_and_eyes_job_is_closed_on_stop():
     stop = gui[gui.index("    def _stop_eyes_stack"):gui.index("    def _stop_hands_stack")]
     assert "self.eyes_job.close()" in stop
     assert "tree=True" not in gui
+
+
+def test_hands_sidecar_uses_kill_on_close_job_and_closes_it_on_stop():
+    gui = (ROOT / "agents" / "fusion_relay_gui.pyw").read_text(encoding="utf-8")
+    assert "self.hands_job: WindowsKillJob | None = None" in gui
+    start = gui[gui.index("    def _start_hands_stack"):gui.index("    def _continue_hands_start")]
+    assert "self.hands_job = WindowsKillJob.assign(self.hands_sidecar_proc)" in start
+    stop = gui[gui.index("    def _stop_hands_stack"):gui.index("    def _reader", gui.index("    def _stop_hands_stack"))]
+    assert "self.hands_job.close()" in stop

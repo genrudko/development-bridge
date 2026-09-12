@@ -42,6 +42,7 @@ TIMESTAMPED_LINE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3}\s")
 TCP_TABLE_OWNER_PID_LISTENER = 3
 MIB_TCP_STATE_LISTEN = 2
 ERROR_INSUFFICIENT_BUFFER = 122
+TH32CS_SNAPPROCESS = 0x00000002
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 
@@ -139,6 +140,73 @@ def tcp_open(host: str, port: int, timeout: float = 0.65) -> bool:
         return False
 
 
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def _windows_process_parent_map() -> dict[int, int] | None:
+    """Snapshot Windows process parentage directly; fail closed on API errors."""
+    if os.name != "nt":
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        create_snapshot = kernel32.CreateToolhelp32Snapshot
+        create_snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        create_snapshot.restype = wintypes.HANDLE
+        process_first = kernel32.Process32FirstW
+        process_first.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        process_first.restype = wintypes.BOOL
+        process_next = kernel32.Process32NextW
+        process_next.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        process_next.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        snapshot = create_snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snapshot or ctypes.c_void_p(snapshot).value == ctypes.c_void_p(-1).value:
+            return None
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            if not process_first(snapshot, ctypes.byref(entry)):
+                return None
+            parents: dict[int, int] = {}
+            while True:
+                parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                entry.dwSize = ctypes.sizeof(entry)
+                if not process_next(snapshot, ctypes.byref(entry)):
+                    break
+            return parents
+        finally:
+            close_handle(snapshot)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _pid_descends_from(pid: int, ancestor_pid: int, parents: dict[int, int]) -> bool:
+    seen: set[int] = set()
+    current = pid
+    while current > 0 and current not in seen:
+        seen.add(current)
+        parent = int(parents.get(current, 0))
+        if parent == ancestor_pid:
+            return True
+        current = parent
+    return False
+
+
 def _windows_tcp4_owner_table() -> bytes | None:
     """Read the IPv4 listener/PID table directly; never invoke a shell helper."""
     if os.name != "nt":
@@ -162,7 +230,7 @@ def _windows_tcp4_owner_table() -> bytes | None:
 
 def listener_owned_by_pid(port: int, pid: int, *, table_reader=None,
                           platform: str | None = None) -> bool:
-    """Return true only for one unambiguous LISTEN row owned by exactly pid."""
+    """Return true for one unambiguous listener owned by pid or its process tree."""
     if (os.name if platform is None else platform) != "nt" or pid <= 0:
         return False
     reader = _windows_tcp4_owner_table if table_reader is None else table_reader
@@ -180,7 +248,13 @@ def listener_owned_by_pid(port: int, pid: int, *, table_reader=None,
             )
             if state == MIB_TCP_STATE_LISTEN and socket.ntohs(local_port & 0xFFFF) == port:
                 owners.append(owner)
-        return owners == [pid]
+        if len(owners) != 1:
+            return False
+        owner = owners[0]
+        if owner == pid:
+            return True
+        parents = _windows_process_parent_map()
+        return parents is not None and _pid_descends_from(owner, pid, parents)
     except Exception:
         return False
 
@@ -295,6 +369,7 @@ class FusionBridgeGUI(tk.Tk):
         self.eyes_problem: str | None = None
         self.hands_sidecar_proc: subprocess.Popen[str] | None = None
         self.hands_relay_proc: subprocess.Popen[str] | None = None
+        self.hands_job: WindowsKillJob | None = None
         self.hands_runtime_present: bool | None = None
         self.hands_connected = False
         self.hands_problem: str | None = None
@@ -709,6 +784,7 @@ class FusionBridgeGUI(tk.Tk):
                     sidecar_spec["argv"], cwd=sidecar_spec["cwd"], env=sidecar_spec["env"],
                     stdout=sidecar_log, stderr=subprocess.STDOUT, creationflags=creationflags,
                 )
+            self.hands_job = WindowsKillJob.assign(self.hands_sidecar_proc)
             threading.Thread(target=self._hands_sidecar_watcher, args=(self.hands_sidecar_proc,), daemon=True).start()
             self.hands_pending_relay = (relay_spec, creationflags)
             self._append_log("[hands] Shimmer starting; waiting for owned sidecar on 18768")
@@ -729,7 +805,12 @@ class FusionBridgeGUI(tk.Tk):
             return
         if not listener_owned_by_pid(HANDS_MCP_PORT, proc.pid):
             self.hands_pending_relay = None
-            self._terminate_owned_process(proc)
+            job = getattr(self, "hands_job", None)
+            if job is not None:
+                job.close()
+                self.hands_job = None
+            else:
+                self._terminate_owned_process(proc)
             if self.hands_sidecar_proc is proc:
                 self.hands_sidecar_proc = None
             self.hands_problem = "listener on 18768 is not owned by the started Shimmer sidecar"
@@ -809,7 +890,11 @@ class FusionBridgeGUI(tk.Tk):
         self._terminate_owned_process(self.hands_relay_proc)
         self.hands_relay_proc = None
         self.hands_connected = False
-        self._terminate_owned_process(self.hands_sidecar_proc)
+        if self.hands_job is not None:
+            self.hands_job.close()
+            self.hands_job = None
+        else:
+            self._terminate_owned_process(self.hands_sidecar_proc)
         self.hands_sidecar_proc = None
         self.hands_problem = None
 
