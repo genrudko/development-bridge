@@ -435,7 +435,7 @@ async function poll() {
       const rawParts = rawMessage.split(batchSeparator);
       const humanMessages = rawParts.map((part) => {
         const markerAt = part.indexOf(marker);
-        return (markerAt >= 0 ? part.slice(markerAt + marker.length) : "").trim();
+        return markerAt >= 0 ? part.slice(markerAt + marker.length).trim() : part.trim();
       }).filter(Boolean);
       const humanMessage = humanMessages.length > 1
         ? humanMessages.map((item) => `- ${item}`).join("\n")

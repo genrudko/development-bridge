@@ -159,6 +159,7 @@ def test_coordinator_x_ui_keeps_visible_continuation_ack_reference():
     html = (Path(__file__).parents[2] / "app" / "coordinator" / "x_ui.html").read_text()
     assert "Bridge ref:" in html
     assert "const fallback = contextInjected" not in html
+    assert ': part.trim();' in html
 
 
 @pytest.mark.asyncio
