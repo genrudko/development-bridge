@@ -1,7 +1,7 @@
 # Fusion CAD Agent API v1 — Canonical Design Spec
 
 > [!WARNING]
-> **HISTORICAL / FROZEN — DO NOT IMPLEMENT P1/P2 AS WRITTEN.** The live reuse-first Stages A-D completed after this plan was written. Current execution boundaries and measured acceptance are in `docs/research/fusion-cad-agent-operational-roadmap-2026-09-11.md`; `docs/research/fusion-cad-reuse-landscape-2026-09-10.md` remains the donor/reuse research basis. The accepted `fusion.cad/v1` P0 safety invariants remain authoritative, but these greenfield phase assumptions are superseded.
+> **HISTORICAL / FROZEN — DO NOT IMPLEMENT P1/P2 AS WRITTEN.** The live reuse-first Stages A-D completed after this plan was written. Current execution boundaries and measured acceptance are in `docs/research/fusion-cad-agent-operational-roadmap-2026-09-11.md`; `docs/research/fusion-cad-reuse-landscape-2026-09-10.md` remains the donor/reuse research basis. The accepted `fusion.cad/v1` P0 safety invariants remain authoritative, but these greenfield phase assumptions are superseded. For current P2 research/design, read `docs/research/fusion-cad-p2-research-design-brief-2026-09-13.md` before using this file as requirements history.
 
 
 **Status:** accepted Release Candidate; canonical architecture for P0/P1/P2 implementation.

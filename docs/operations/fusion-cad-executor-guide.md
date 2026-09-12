@@ -273,3 +273,19 @@ The continuity repair chain is:
 A direct transport result of `uncertain` or genuine `owner_input_required` still fails closed and must not auto-resend. A proven `not_submitted` failure may retry according to the resilient continuation policy.
 
 Boundary batching is part of the accepted protocol. If multiple near-boundary messages fit inside the visible continuation reason, they may coalesce there. If the combined payload would exceed the 500-character visible-reason limit, later messages stay in the durable queued batch and are returned exactly through `coordinator_ack.batched_messages`; they must not be dropped or silently truncated. The 2026-09-12 live synthetic probe verified this with `SYNTHETIC_BOUNDARY_CORRECTION_20260912_V2` (`batched_count=1`, exactly once).
+
+## 17. Program boundary: P0/P1 operationally closed; P2 research/design is separate
+
+As of 2026-09-13, executors must distinguish **using the accepted CAD agent** from **designing P2**:
+
+- **P0 is closed.** Do not reopen its acceptance/golden work without new evidence or an explicit request.
+- **P0.5/P1 operational loop is closed/accepted at the current measured scope.** Reference + Eyes + Shimmer-backed Hands + Palette/read receipts + same-turn correction + resilient multi-turn continuation/restart recovery are normal operating infrastructure, not a research task.
+- **P2 is not implemented.** The owner has authorized a separate P2 **research and architecture/design phase** based on ready-made solutions and the existing reuse landscape. That authorization does not authorize production P2 implementation.
+
+For ordinary modeling, stay on the normal operating loop in sections 14–16 and do not reopen infrastructure qualification by default.
+
+For a P2 research/design task, read `docs/research/fusion-cad-p2-research-design-brief-2026-09-13.md` plus `docs/research/fusion-cad-reuse-landscape-2026-09-10.md` before using the old P2 plan/spec. Revalidate candidate versions/licenses/APIs against current upstream evidence; do not trust a 2026-09-10 README claim merely because it was recorded in the landscape. The historical P2 plan is an inventory of intended outcomes, not the architecture to implement.
+
+P2 research is reuse-first. Prefer native Fusion/Shimmer capabilities, qualified OSS donors, Trimesh analysis and optional external providers over custom subsystems. Preserve all accepted P0/P1 safety, revision, capability, uncertainty, provider-session and no-save invariants in the eventual design.
+
+Research spikes must be bounded and throwaway unless a later owner-approved implementation phase promotes them. The P2 research/design phase ends with a reviewed new design/spec and acceptance strategy; it must **not** silently continue into implementation.

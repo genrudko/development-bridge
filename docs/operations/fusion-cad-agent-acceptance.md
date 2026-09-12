@@ -115,3 +115,16 @@ mutation target and no save command was issued to it. Future work must not use
 the current F41 cloud file as if it were a reproducible copy of the historical
 `248783…` golden state. Create/use a fresh disposable baseline for new live
 acceptance work.
+
+## Current operational program boundary — 2026-09-13
+
+The historical sections above remain valid evidence for the P0 gates they describe. The program subsequently completed the reuse-first operational loop on canonical `main` through `60f0a94562f95b6bcb281251ccc9079002555daa`.
+
+Current accepted operating state:
+
+- **P0:** closed; authoritative reference/revision/ref/capability/transaction safety remains load-bearing.
+- **P0.5/P1 operational scope:** closed/accepted for the current Eyes + Shimmer-backed Hands + Fusion Palette + read-receipt + same-turn correction workflow.
+- **Stage D continuity:** closed/green with a clean 5/5 automatic-turn soak, resilient pre-submit retry, restart continuation recovery and exact boundary batching through `coordinator_ack.batched_messages`.
+- **P2:** not implemented. It is now authorized only as a separate research/architecture/design phase; use `docs/research/fusion-cad-p2-research-design-brief-2026-09-13.md` as the current kickoff boundary.
+
+Executors should therefore use the CAD agent for normal modeling without rerunning acceptance infrastructure, and should not claim the old frozen P2 implementation plan is current. A concrete reproduced defect may reopen the relevant accepted layer; P2 implementation requires a new approved design/plan.

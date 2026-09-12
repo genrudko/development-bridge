@@ -198,9 +198,9 @@ Expected phase meaning:
 
 - **P0:** proven base/control/reference provider — already complete.
 - **P0.5/P1 immediate objective:** one operational agent loop with rich observation, Shimmer-backed CAD actions, live owner dialogue and automatic turn continuation.
-- **P2:** deferred higher-level intelligence and manufacturing/printability features using Trimesh, OrcaSlicer and other mature projects where useful.
+- **P2:** higher-level evidence/DFM/recipes work using Trimesh, optional OrcaSlicer/external providers and other mature projects where useful. **Research and architecture/design are now authorized separately; implementation is not.**
 
-Do not start P2 implementation before the Stage A-D end-to-end gate is green unless the owner explicitly changes priorities.
+Stages A-D are green, so the former precondition is satisfied. The owner has now opened a separate P2 research/design phase. Start from `docs/research/fusion-cad-p2-research-design-brief-2026-09-13.md` and the measured reuse landscape; do not implement P2 until the new design is reviewed and explicitly approved.
 
 ## Final current-stage acceptance
 
@@ -213,7 +213,7 @@ The current stage is complete only when a real end-to-end disposable CAD exercis
 5. if the turn ends before the bounded task is complete, the next turn starts automatically and resumes correctly;
 6. the workflow can repeat across several turns without owner "poke" messages.
 
-Only after this gate is green do we expand into P2.
+This gate is green. P2 may now be **researched and redesigned** in a separate workstream; production implementation remains gated on the new P2 design review/approval.
 
 ## Immediate execution order
 

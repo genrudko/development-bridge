@@ -40,6 +40,7 @@ Treat model/tool round-trips, coordinator chat context, and live ChatGPT Web tra
 - Executor output is evidence, not acceptance. The coordinator reviews the diff, verification evidence, and permissions before any privileged Bridge-native write.
 - Detailed executor guidance is in `docs/operations/executor-operating-contract.md`.
 - Fusion CAD executors must also read and follow `docs/operations/fusion-cad-executor-guide.md`; public `fusion_*` semantic tools are the default interface and raw Fusion MCP is an escape hatch, not the normal modeling path.
+- Fusion CAD **P2 research/design** executors must additionally read `docs/research/fusion-cad-p2-research-design-brief-2026-09-13.md`; the frozen 2026-09-04 P2 plan/spec is requirements history, not an implementation instruction. Research/design must stop before P2 production implementation unless the owner explicitly authorizes that next phase.
 
 ### Coordinator routing and mount discipline
 
