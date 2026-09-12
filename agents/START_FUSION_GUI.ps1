@@ -27,7 +27,7 @@ function Copy-LauncherFile([string] $Source, [string] $Destination) {
     try {
         Copy-Item -LiteralPath $Source -Destination $Temporary
         if (Test-Path -LiteralPath $Destination) {
-            [System.IO.File]::Replace($Temporary, $Destination, $null)
+            Copy-Item -LiteralPath $Temporary -Destination $Destination -Force
         } else {
             Move-Item -LiteralPath $Temporary -Destination $Destination
         }

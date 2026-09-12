@@ -498,6 +498,12 @@ def test_unified_bootstrap_and_readme_describe_manual_two_launch_workflow_only()
     assert "Windows Startup" not in readme
 
 
+def test_gui_bootstrap_does_not_pass_null_backup_path_to_file_replace():
+    bootstrap = (ROOT / "agents" / "START_FUSION_GUI.ps1").read_text(encoding="utf-8-sig")
+    assert '[System.IO.File]::Replace($Temporary, $Destination, $null)' not in bootstrap
+    assert 'Copy-Item -LiteralPath $Temporary -Destination $Destination -Force' in bootstrap
+
+
 def test_gui_package_self_bootstraps_curated_assets_into_managed_launcher():
     bootstrap = (ROOT / "agents" / "START_FUSION_GUI.ps1").read_text(encoding="utf-8-sig")
     required = (
