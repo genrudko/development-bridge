@@ -85,3 +85,79 @@ def test_blender_operator_ask_keeps_same_handler_pending_until_node_answers():
         assert payload["data"] == {"prompt_id": "ask_1", "value": "B"}
 
     asyncio.run(scenario())
+
+
+class MutationAwareDesktopNode:
+    def __init__(self):
+        self.calls = []
+        self.submissions = []
+
+    def tools(self, node_id):
+        return {
+            "tools": [
+                {
+                    "name": "dcc.edit_mesh",
+                    "x_blender_hub": {"mutating": True},
+                },
+                {
+                    "name": "dcc.read_scene",
+                    "x_blender_hub": {"mutating": False},
+                },
+            ]
+        }
+
+    async def call(self, node_id, tool_name, arguments, journal=None):
+        self.calls.append((node_id, tool_name, arguments, journal))
+        return {"ok": True}
+
+    async def submit(self, node_id, tool_name, arguments, journal=None):
+        self.submissions.append((node_id, tool_name, arguments, journal))
+        return {"operation_id": "op_test", "status": "queued"}
+
+
+def test_blender_call_derives_mutation_from_advertised_catalog_not_caller():
+    async def scenario():
+        desktop = MutationAwareDesktopNode()
+        tools = {
+            tool.definition.name: tool
+            for tool in blender_tools(SimpleNamespace(desktop_nodes=desktop))
+        }
+        await tools["blender_call"].handler(
+            None,
+            SimpleNamespace(
+                arguments={
+                    "node_id": "blender-workstation",
+                    "tool_name": "dcc.edit_mesh",
+                    "arguments": {"object": "Cube"},
+                    "journal": {"summary": "edit", "mutation": False},
+                }
+            ),
+            SimpleNamespace(request_id="request-mutation"),
+        )
+        assert desktop.calls[0][3] == {"summary": "edit", "mutation": True}
+
+    asyncio.run(scenario())
+
+
+def test_blender_submit_marks_explicit_read_only_tool_non_mutating():
+    async def scenario():
+        desktop = MutationAwareDesktopNode()
+        tools = {
+            tool.definition.name: tool
+            for tool in blender_tools(SimpleNamespace(desktop_nodes=desktop))
+        }
+        await tools["blender_submit"].handler(
+            None,
+            SimpleNamespace(
+                arguments={
+                    "node_id": "blender-workstation",
+                    "tool_name": "dcc.read_scene",
+                    "arguments": {},
+                    "journal": {"summary": "read", "mutation": True},
+                }
+            ),
+            SimpleNamespace(request_id="request-read"),
+        )
+        assert desktop.submissions[0][3] == {"summary": "read", "mutation": False}
+
+    asyncio.run(scenario())

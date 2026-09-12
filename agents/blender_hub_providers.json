@@ -1,0 +1,10 @@
+{
+  "providers": [
+    {
+      "namespace": "dcc",
+      "url": "http://127.0.0.1:9765/mcp",
+      "pin": "v0.2.4",
+      "enabled": true
+    }
+  ]
+}

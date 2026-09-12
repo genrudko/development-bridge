@@ -7,6 +7,7 @@ from mcp.server.mcpserver.utilities.types import Image
 
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
+from app.blender_bridge.journal import effective_journal
 from app.container import ApplicationContainer
 
 
@@ -69,7 +70,11 @@ def blender_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
             args["node_id"],
             args["tool_name"],
             args.get("arguments", {}),
-            args.get("journal"),
+            effective_journal(
+                args["tool_name"],
+                container.desktop_nodes.tools(args["node_id"]).get("tools", []),
+                args.get("journal"),
+            ),
         )
         reference = data.get("external_result") if isinstance(data, dict) else None
         if isinstance(reference, dict):
@@ -83,7 +88,11 @@ def blender_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]
             args["node_id"],
             args["tool_name"],
             args.get("arguments", {}),
-            args.get("journal"),
+            effective_journal(
+                args["tool_name"],
+                container.desktop_nodes.tools(args["node_id"]).get("tools", []),
+                args.get("journal"),
+            ),
         )
         return to_mcp_result(success(request_context.request_id, data))
 
