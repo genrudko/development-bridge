@@ -333,6 +333,9 @@ def test_coordinator_pending_mount_cannot_wake_but_legacy_explicit_channel_can(
     legacy_data = json.loads(legacy.content[0].text)["data"]
     assert legacy_data["channel_id"] == "legacy-supervisor"
     assert legacy_data["state"] == "pending"
+    assert legacy_data["continuation_id"].startswith("cont_")
+    assert legacy_data["model_ack_required"] is True
+    assert legacy_data["max_delivery_attempts"] >= 2
 
 
 def test_coordinator_continue_coalesces_into_resilient_wake_without_downgrading(tmp_path: Path):

@@ -420,7 +420,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     expected_channel=str(destination.get("channel_id")),
                 )
                 channel_id = str(route["channel_id"])
-                data = await container.coordinator.arm(
+                data = await container.coordinator.arm_resilient(
                     arguments["message"],
                     channel_id=channel_id,
                     delay_seconds=arguments.get("delay_seconds", 12),
@@ -428,7 +428,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 )
         else:
             channel_id = str(destination["channel_id"])
-            data = await container.coordinator.arm(
+            data = await container.coordinator.arm_resilient(
                 arguments["message"],
                 channel_id=channel_id,
                 delay_seconds=arguments.get("delay_seconds", 12),
@@ -708,7 +708,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         RegisteredTool(
             types.Tool(
                 name="coordinator_continue",
-                description="Arm one bounded delayed X wake/checkpoint for an already mounted channel",
+                description="Arm one resilient delayed continuation/checkpoint for an already mounted channel",
                 inputSchema={
                     "type": "object",
                     "properties": {
