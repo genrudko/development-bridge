@@ -9,6 +9,7 @@ class ToolSpec:
     name: str
     description: str
     mutating: bool | None
+    idempotent: bool = False
     input_schema: dict[str, Any] | None = None
 
 
