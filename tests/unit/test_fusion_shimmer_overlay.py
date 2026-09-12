@@ -355,11 +355,18 @@ def test_palette_is_russian_chat_with_bounded_durable_history(tmp_path, monkeypa
         "message": "Какой размер гайки?",
     })
     assert state["state"]["status"] == "waiting"
-    assert state["history"][-1] == {"role": "assistant", "text": "Какой размер гайки?"}
+    assistant_message = state["history"][-1]
+    assert assistant_message["role"] == "assistant"
+    assert assistant_message["text"] == "Какой размер гайки?"
+    assert isinstance(assistant_message["timestamp_ms"], int)
 
     module._record_palette_message("correction", "М6, под ключ 10 мм")
     persisted = module._load_palette_store()
-    assert persisted["history"][-1] == {"role": "user", "text": "М6, под ключ 10 мм"}
+    user_message = persisted["history"][-1]
+    assert user_message["role"] == "user"
+    assert user_message["text"] == "М6, под ключ 10 мм"
+    assert user_message["receipt"] == "sent"
+    assert isinstance(user_message["timestamp_ms"], int)
 
     for index in range(60):
         module.palette_state(ctx, {"message": f"Шаг {index}"})
@@ -367,6 +374,31 @@ def test_palette_is_russian_chat_with_bounded_durable_history(tmp_path, monkeypa
     assert len(persisted["history"]) == 50
     assert persisted["history"][0]["text"] == "Шаг 10"
     assert persisted["history"][-1]["text"] == "Шаг 59"
+
+
+def test_palette_poll_marks_user_message_read_with_timestamp_and_receipt(tmp_path, monkeypatch):
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_palette_receipts")
+    monkeypatch.setattr(module, "_PALETTE_STATE_FILE", tmp_path / "palette.json")
+    monkeypatch.setattr(module, "_ensure_palette", lambda ctx: None)
+    ticks = iter([1_789_210_000_000, 1_789_210_005_000])
+    monkeypatch.setattr(module, "_palette_now_ms", lambda: next(ticks), raising=False)
+    ctx = SimpleNamespace()
+
+    assert "timestamp_ms" in module._PALETTE_HTML
+    assert "✓" in module._PALETTE_HTML
+    assert "✓✓" in module._PALETTE_HTML
+
+    module._record_palette_message("correction", "Проверка связи")
+    before = module._load_palette_store()["history"][-1]
+    assert before["timestamp_ms"] == 1_789_210_000_000
+    assert before["receipt"] == "sent"
+    assert before.get("read_at_ms") is None
+
+    result = module.palette_poll(ctx, {})
+    after = module._load_palette_store()["history"][-1]
+    assert result["correction"] == "Проверка связи"
+    assert after["receipt"] == "read"
+    assert after["read_at_ms"] == 1_789_210_005_000
 
 
 def test_palette_recreates_stale_instance_after_module_reload(tmp_path, monkeypatch):

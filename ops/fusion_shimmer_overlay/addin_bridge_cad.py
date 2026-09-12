@@ -14,6 +14,7 @@ import math
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from collections.abc import Mapping
 
@@ -33,7 +34,7 @@ _PALETTE_HTML = r"""<!doctype html>
 .header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.title{font-weight:600;font-size:15px}.status{font-size:11px;padding:3px 8px;border-radius:999px;background:#404040;color:#ddd}
 .context{background:#2d2d2d;border:1px solid #3e3e3e;border-radius:6px;padding:7px 9px;margin-bottom:9px;color:#bbb;font-size:11px;line-height:1.4}.context b{color:#e6e6e6;font-weight:500}
 #history{height:205px;overflow-y:auto;padding:4px 2px 6px;display:flex;flex-direction:column;gap:7px}.empty{color:#888;text-align:center;margin:auto 0;font-size:12px}
-.msg{max-width:88%;padding:7px 9px;border-radius:9px;white-space:pre-wrap;word-break:break-word;line-height:1.35}.assistant{align-self:flex-start;background:#353535;border:1px solid #464646}.user{align-self:flex-end;background:#365d8d;color:#fff}.system{align-self:center;background:transparent;color:#999;font-size:11px;padding:2px 4px;text-align:center}
+.msg{max-width:88%;padding:7px 9px 5px;border-radius:9px;word-break:break-word;line-height:1.35}.msgtext{white-space:pre-wrap}.meta{display:flex;justify-content:flex-end;align-items:center;gap:4px;margin-top:3px;font-size:10px;color:#aaa}.user .meta{color:#c9dcf6}.receipt{font-weight:600;letter-spacing:-1px}.assistant{align-self:flex-start;background:#353535;border:1px solid #464646}.user{align-self:flex-end;background:#365d8d;color:#fff}.system{align-self:center;background:transparent;color:#999;font-size:11px;padding:2px 4px;text-align:center}
 .label{font-size:11px;color:#aaa;margin:8px 0 4px}textarea{width:100%;min-height:62px;max-height:120px;resize:vertical;background:#181818;color:#eee;border:1px solid #555;border-radius:5px;padding:8px;font:inherit}
 .actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}button{padding:7px 10px;border:0;border-radius:4px;cursor:pointer;font:inherit}#send{background:#4f8cff;color:white;flex:1}#stop{background:#9b4545;color:white}#cont{background:#4b7a52;color:white}
 #ack{font-size:11px;color:#8bc58b;margin-top:6px;min-height:14px}
@@ -46,10 +47,12 @@ _PALETTE_HTML = r"""<!doctype html>
 <div id="ack"></div>
 <script>
 const statusNames={idle:'Ожидание',running:'Работаю',waiting:'Жду ответа',stopped:'Остановлен',completed:'Завершено'};
-function addBubble(role,text){if(!text)return;let h=document.getElementById('history');let empty=h.querySelector('.empty');if(empty)empty.remove();let d=document.createElement('div');d.className='msg '+(role==='user'?'user':role==='system'?'system':'assistant');d.textContent=text;h.appendChild(d);h.scrollTop=h.scrollHeight;}
-function renderHistory(items){let h=document.getElementById('history');h.innerHTML='';if(!Array.isArray(items)||!items.length){h.innerHTML='<div class="empty">Сообщений пока нет</div>';return;}items.forEach(x=>addBubble(x.role||'assistant',x.text||''));h.scrollTop=h.scrollHeight;}
+function fmtTime(ms){if(!ms)return '';try{return new Date(ms).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}catch(e){return '';}}
+function receiptMark(receipt){return receipt==='read'?'✓✓':receipt==='sent'?'✓':'';}
+function addBubble(role,text,timestamp_ms,receipt){if(!text)return;let h=document.getElementById('history');let empty=h.querySelector('.empty');if(empty)empty.remove();let d=document.createElement('div');d.className='msg '+(role==='user'?'user':role==='system'?'system':'assistant');let t=document.createElement('div');t.className='msgtext';t.textContent=text;d.appendChild(t);let tm=fmtTime(timestamp_ms),mark=role==='user'?receiptMark(receipt):'';if(tm||mark){let m=document.createElement('div');m.className='meta';if(tm){let x=document.createElement('span');x.textContent=tm;m.appendChild(x);}if(mark){let r=document.createElement('span');r.className='receipt';r.textContent=mark;m.appendChild(r);}d.appendChild(m);}h.appendChild(d);h.scrollTop=h.scrollHeight;}
+function renderHistory(items){let h=document.getElementById('history');h.innerHTML='';if(!Array.isArray(items)||!items.length){h.innerHTML='<div class="empty">Сообщений пока нет</div>';return;}items.forEach(x=>addBubble(x.role||'assistant',x.text||'',x.timestamp_ms,x.receipt));h.scrollTop=h.scrollHeight;}
 function send(action,data){try{adsk.fusionSendData(action,data||'');document.getElementById('ack').textContent='Отправлено';return true;}catch(e){document.getElementById('ack').textContent='Ошибка отправки';return false;}}
-document.getElementById('send').onclick=function(){let el=document.getElementById('msg'),v=el.value.trim();if(v&&send('correction',v)){addBubble('user',v);el.value='';}};
+document.getElementById('send').onclick=function(){let el=document.getElementById('msg'),v=el.value.trim();if(v&&send('correction',v)){addBubble('user',v,Date.now(),'sent');el.value='';}};
 document.getElementById('msg').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();document.getElementById('send').click();}});
 document.getElementById('stop').onclick=function(){if(send('stop',''))addBubble('system','Запрошена остановка после текущего шага');};
 document.getElementById('cont').onclick=function(){if(send('continue',''))addBubble('system','Запрошено продолжение работы');};
@@ -70,6 +73,10 @@ DEFAULT_ALLOWED_OPS = frozenset(
         "feature.chamfer",
     }
 )
+
+
+def _palette_now_ms():
+    return int(time.time() * 1000)
 
 
 def _default_palette_store():
@@ -94,10 +101,26 @@ def _load_palette_store():
         return _default_palette_store()
     if not isinstance(data.get("history"), list):
         data["history"] = []
-    data["history"] = [
-        {"role": str(item.get("role") or "assistant"), "text": str(item.get("text") or "")[:2000]}
-        for item in data["history"] if isinstance(item, dict) and str(item.get("text") or "").strip()
-    ][-50:]
+    normalized_history = []
+    for item in data["history"]:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()[:2000]
+        if not text:
+            continue
+        normalized = {
+            "role": str(item.get("role") or "assistant"),
+            "text": text,
+            "timestamp_ms": int(item.get("timestamp_ms") or 0),
+        }
+        if item.get("message_id"):
+            normalized["message_id"] = str(item["message_id"])
+        if item.get("receipt") in {"sent", "read"}:
+            normalized["receipt"] = item["receipt"]
+        if item.get("read_at_ms"):
+            normalized["read_at_ms"] = int(item["read_at_ms"])
+        normalized_history.append(normalized)
+    data["history"] = normalized_history[-50:]
     return data
 
 
@@ -108,13 +131,19 @@ def _save_palette_store(data):
     os.replace(tmp, _PALETTE_STATE_FILE)
 
 
-def _append_palette_history(data, role, text):
+def _append_palette_history(data, role, text, *, receipt=None, message_id=None):
     value = str(text or "").strip()[:2000]
     if not value:
-        return
+        return None
+    item = {"role": role, "text": value, "timestamp_ms": _palette_now_ms()}
+    if receipt in {"sent", "read"}:
+        item["receipt"] = receipt
+    if message_id:
+        item["message_id"] = str(message_id)
     history = data.setdefault("history", [])
-    history.append({"role": role, "text": value})
+    history.append(item)
     del history[:-50]
+    return item
 
 
 def _record_palette_message(action, text=""):
@@ -122,12 +151,14 @@ def _record_palette_message(action, text=""):
         return False
     data = _load_palette_store()
     inbox = data["inbox"]
+    next_revision = int(inbox.get("revision", 0)) + 1
     if action == "correction":
         value = str(text or "").strip()
         if not value:
             return False
         inbox["correction"] = value[:2000]
-        _append_palette_history(data, "user", value)
+        inbox["message_id"] = f"user-{next_revision}"
+        _append_palette_history(data, "user", value, receipt="sent", message_id=inbox["message_id"])
     elif action == "stop":
         inbox["stop_requested"] = True
         inbox["continue_requested"] = False
@@ -136,7 +167,7 @@ def _record_palette_message(action, text=""):
         inbox["continue_requested"] = True
         inbox["stop_requested"] = False
         _append_palette_history(data, "system", "Запрошено продолжение работы")
-    inbox["revision"] = int(inbox.get("revision", 0)) + 1
+    inbox["revision"] = next_revision
     _save_palette_store(data)
     return True
 
@@ -243,10 +274,20 @@ def palette_poll(ctx, params):
         "continue_requested": bool(inbox.get("continue_requested", False)),
         "revision": int(inbox.get("revision", 0)),
     }
+    message_id = inbox.get("message_id") if result["correction"] else None
+    if message_id:
+        for item in reversed(data.get("history", [])):
+            if item.get("message_id") == message_id and item.get("role") == "user":
+                item["receipt"] = "read"
+                item["read_at_ms"] = _palette_now_ms()
+                break
     inbox["correction"] = None
+    inbox.pop("message_id", None)
     inbox["stop_requested"] = False
     inbox["continue_requested"] = False
     _save_palette_store(data)
+    palette = _ensure_palette(ctx)
+    _send_palette_state(palette, data)
     return result
 
 
