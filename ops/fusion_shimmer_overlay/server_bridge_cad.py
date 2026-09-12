@@ -21,3 +21,16 @@ def register(mcp, client):
                 "operations": operations,
             },
         )
+
+    @mcp.tool()
+    def _bridge_palette_state(current: str = "", next: str = "", status: str = "running") -> dict:
+        """Update/show the owner Palette for the current CAD step."""
+        return client.call(
+            "bridge.palette_state",
+            {"current": current, "next": next, "status": status},
+        )
+
+    @mcp.tool()
+    def _bridge_palette_poll() -> dict:
+        """Poll and acknowledge owner correction/stop/continue requests."""
+        return client.call("bridge.palette_poll", {})

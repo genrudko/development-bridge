@@ -301,7 +301,7 @@ def test_commit_returns_private_created_entity_token_evidence():
     ]
 
 
-def test_server_overlay_exposes_only_two_bridge_tools():
+def test_server_overlay_exposes_cad_and_palette_tools():
     module = _load("server_bridge_cad.py", "fusion_shimmer_overlay_server")
     registered = {}
 
@@ -315,10 +315,46 @@ def test_server_overlay_exposes_only_two_bridge_tools():
     client = SimpleNamespace(call=lambda op, params=None: {"op": op, "params": params or {}})
     module.register(FakeMcp(), client)
 
-    assert set(registered) == {"_bridge_cad_guard", "_bridge_cad_apply"}
+    assert set(registered) == {"_bridge_cad_guard", "_bridge_cad_apply", "_bridge_palette_state", "_bridge_palette_poll"}
     assert registered["_bridge_cad_guard"](DOC_REF) == {
         "op": "bridge.cad_guard", "params": {"document_ref": DOC_REF}
     }
+    assert registered["_bridge_palette_state"]("Sketch", "Extrude", "running") == {
+        "op": "bridge.palette_state",
+        "params": {"current": "Sketch", "next": "Extrude", "status": "running"},
+    }
+    assert registered["_bridge_palette_poll"]() == {
+        "op": "bridge.palette_poll", "params": {}
+    }
+
+
+def test_palette_state_and_owner_inbox_are_durable_and_poll_once(tmp_path, monkeypatch):
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_palette_state")
+    monkeypatch.setattr(module, "_PALETTE_STATE_FILE", tmp_path / "palette.json")
+    monkeypatch.setattr(module, "_ensure_palette", lambda ctx: None)
+    ctx = SimpleNamespace()
+
+    state = module.palette_state(ctx, {
+        "current": "Create sketch",
+        "next": "Extrude",
+        "status": "running",
+    })
+    assert state["ok"] is True
+    assert state["state"]["current"] == "Create sketch"
+    assert state["state"]["next"] == "Extrude"
+    assert state["state"]["status"] == "running"
+
+    module._record_palette_message("correction", "Make it 12 mm")
+    module._record_palette_message("stop", "")
+    first = module.palette_poll(ctx, {})
+    second = module.palette_poll(ctx, {})
+
+    assert first["correction"] == "Make it 12 mm"
+    assert first["stop_requested"] is True
+    assert first["continue_requested"] is False
+    assert second["correction"] is None
+    assert second["stop_requested"] is False
+    assert (tmp_path / "palette.json").is_file()
 
 
 def test_installer_fails_closed_before_writes_on_wrong_upstream_sha(tmp_path):

@@ -11,11 +11,43 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
+from pathlib import Path
 from collections.abc import Mapping
 
 API_VERSION = "bridge.shimmer/v1"
 TRANSACTION_NAME = "bridge_cad_shimmer"
+
+PALETTE_ID = "DevelopmentBridgeFusionPalette"
+PALETTE_NAME = "Development Bridge"
+_PALETTE_HANDLERS = []
+_PALETTE_STATE_FILE = Path(
+    os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+) / "DevelopmentBridgeFusion" / "palette-state.json"
+
+_PALETTE_HTML = r"""<!doctype html>
+<html><head><meta charset="utf-8"><style>
+body{font-family:Segoe UI,Arial,sans-serif;background:#242424;color:#eee;margin:0;padding:12px}
+.label{font-size:11px;color:#aaa;text-transform:uppercase;margin-top:10px}.value{font-size:14px;margin-top:3px;word-break:break-word}
+textarea{width:100%;box-sizing:border-box;min-height:72px;background:#181818;color:#eee;border:1px solid #555;border-radius:4px;padding:8px}
+button{margin:6px 5px 0 0;padding:7px 10px;border:0;border-radius:4px;cursor:pointer}#send{background:#4f8cff;color:white}#stop{background:#9b4545;color:white}#cont{background:#4b7a52;color:white}
+#ack{font-size:11px;color:#8bc58b;margin-top:7px;min-height:14px}
+</style></head><body>
+<div class="label">Status</div><div id="status" class="value">idle</div>
+<div class="label">Current step</div><div id="current" class="value">—</div>
+<div class="label">Next step</div><div id="next" class="value">—</div>
+<div class="label">Correction</div><textarea id="msg" placeholder="Что изменить?"></textarea>
+<button id="send">Send correction</button><button id="stop">Stop after step</button><button id="cont">Continue</button>
+<div id="ack"></div>
+<script>
+function send(action,data){try{adsk.fusionSendData(action,data||'');document.getElementById('ack').textContent='Sent';}catch(e){document.getElementById('ack').textContent='Send failed';}}
+document.getElementById('send').onclick=function(){let v=document.getElementById('msg').value.trim();if(v){send('correction',v);document.getElementById('msg').value='';}};
+document.getElementById('stop').onclick=function(){send('stop','');};
+document.getElementById('cont').onclick=function(){send('continue','');};
+window.fusionJavaScriptHandler={handle:function(action,data){if(action!=='state')return 'ignored';let s={};try{s=JSON.parse(data||'{}')}catch(e){};document.getElementById('status').textContent=s.status||'idle';document.getElementById('current').textContent=s.current||'—';document.getElementById('next').textContent=s.next||'—';return 'ok';}};
+</script></body></html>"""
 
 DEFAULT_ALLOWED_OPS = frozenset(
     {
@@ -31,6 +63,151 @@ DEFAULT_ALLOWED_OPS = frozenset(
         "feature.chamfer",
     }
 )
+
+
+def _default_palette_store():
+    return {
+        "state": {"current": "", "next": "", "status": "idle", "revision": 0},
+        "inbox": {
+            "correction": None,
+            "stop_requested": False,
+            "continue_requested": False,
+            "revision": 0,
+        },
+    }
+
+
+def _load_palette_store():
+    try:
+        data = json.loads(_PALETTE_STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return _default_palette_store()
+    if not isinstance(data, dict) or not isinstance(data.get("state"), dict) or not isinstance(data.get("inbox"), dict):
+        return _default_palette_store()
+    return data
+
+
+def _save_palette_store(data):
+    _PALETTE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _PALETTE_STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, _PALETTE_STATE_FILE)
+
+
+def _record_palette_message(action, text=""):
+    if action not in {"correction", "stop", "continue"}:
+        return False
+    data = _load_palette_store()
+    inbox = data["inbox"]
+    if action == "correction":
+        value = str(text or "").strip()
+        if not value:
+            return False
+        inbox["correction"] = value[:2000]
+    elif action == "stop":
+        inbox["stop_requested"] = True
+        inbox["continue_requested"] = False
+    else:
+        inbox["continue_requested"] = True
+        inbox["stop_requested"] = False
+    inbox["revision"] = int(inbox.get("revision", 0)) + 1
+    _save_palette_store(data)
+    return True
+
+
+def _palette_html_path():
+    path = _PALETTE_STATE_FILE.parent / "palette.html"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_file() or path.read_text(encoding="utf-8") != _PALETTE_HTML:
+        path.write_text(_PALETTE_HTML, encoding="utf-8")
+    return path
+
+
+def _ensure_palette(ctx):
+    app = getattr(ctx, "app", None)
+    ui = getattr(app, "userInterface", None) if app is not None else None
+    palettes = getattr(ui, "palettes", None) if ui is not None else None
+    if palettes is None:
+        return None
+    try:
+        palette = palettes.itemById(PALETTE_ID)
+    except Exception:
+        palette = None
+    if palette is None:
+        path = _palette_html_path().resolve()
+        try:
+            palette = palettes.add(PALETTE_ID, PALETTE_NAME, path.as_uri(), True, True, True, 330, 390, True)
+        except TypeError:
+            palette = palettes.add(PALETTE_ID, PALETTE_NAME, path.as_uri(), True, True, True, 330, 390)
+        try:
+            import adsk.core
+
+            class _PaletteIncomingHandler(adsk.core.HTMLEventHandler):
+                def notify(self, args):
+                    action = str(getattr(args, "action", "") or "")
+                    text = str(getattr(args, "data", "") or "")
+                    accepted = _record_palette_message(action, text)
+                    try:
+                        args.returnData = json.dumps({"ok": bool(accepted)})
+                    except Exception:
+                        pass
+
+            handler = _PaletteIncomingHandler()
+            palette.incomingFromHTML.add(handler)
+            _PALETTE_HANDLERS.append(handler)
+        except Exception:
+            pass
+    try:
+        palette.isVisible = True
+        if hasattr(palette, "isDockedInCanvas"):
+            palette.isDockedInCanvas = False
+    except Exception:
+        pass
+    return palette
+
+
+def _send_palette_state(palette, state):
+    if palette is None:
+        return
+    try:
+        palette.sendInfoToHTML("state", json.dumps(state, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def palette_state(ctx, params):
+    params = params if isinstance(params, Mapping) else {}
+    current = str(params.get("current") or "").strip()[:300]
+    next_step = str(params.get("next") or "").strip()[:300]
+    status = str(params.get("status") or "running").strip().lower()
+    if status not in {"idle", "running", "stopped", "waiting", "completed"}:
+        status = "running"
+    data = _load_palette_store()
+    state = data["state"]
+    state.update({"current": current, "next": next_step, "status": status})
+    state["revision"] = int(state.get("revision", 0)) + 1
+    _save_palette_store(data)
+    palette = _ensure_palette(ctx)
+    _send_palette_state(palette, state)
+    return {"api_version": API_VERSION, "ok": True, "state": dict(state)}
+
+
+def palette_poll(ctx, params):
+    data = _load_palette_store()
+    inbox = data["inbox"]
+    result = {
+        "api_version": API_VERSION,
+        "ok": True,
+        "correction": inbox.get("correction"),
+        "stop_requested": bool(inbox.get("stop_requested", False)),
+        "continue_requested": bool(inbox.get("continue_requested", False)),
+        "revision": int(inbox.get("revision", 0)),
+    }
+    inbox["correction"] = None
+    inbox["stop_requested"] = False
+    inbox["continue_requested"] = False
+    _save_palette_store(data)
+    return result
 
 
 def _items(collection):
@@ -933,3 +1110,11 @@ if op is not None:
     @op("bridge.cad_apply", summary="Apply an allow-listed Development Bridge CAD plan under one Fusion transaction.")
     def bridge_cad_apply(ctx, params):
         return execute_guarded(ctx, params, REGISTRY)
+
+    @op("bridge.palette_state", summary="Show/update the Development Bridge operator Palette.")
+    def bridge_palette_state(ctx, params):
+        return palette_state(ctx, params)
+
+    @op("bridge.palette_poll", summary="Poll and acknowledge owner Palette corrections.", readonly=True)
+    def bridge_palette_poll(ctx, params):
+        return palette_poll(ctx, params)
