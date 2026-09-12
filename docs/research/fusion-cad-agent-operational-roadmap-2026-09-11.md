@@ -14,6 +14,24 @@ The immediate objective is not P2 intelligence or a broad CAD platform. It is on
 
 P2 is intentionally deferred until this loop works end-to-end.
 
+## Measured status — 2026-09-12
+
+- **P0: CLOSED.** The reference/control foundation is accepted and must not be reopened without new evidence.
+- **Stage A: CLOSED.** A live disposable-model exercise combined viewport and semantic observation, detected an intentional 1.5x wrong result (45 x 30 x 15 mm instead of 30 x 20 x 10 mm), then verified the Undo restoration.
+- **Stage B current slice: LIVE-ACCEPTED at its bounded scope.** The Shimmer-backed Hands path is deployed for the accepted sketch/feature slice, while Autodesk/P0 remains authoritative for public revisions, fingerprints, refs and post-mutation readback. This does not imply full wrapping of Shimmer's catalog or transaction-plan/replay expansion.
+- **Stage C: CLOSED.** The Russian Fusion Palette supports same-turn owner corrections, durable chat history and read receipts. A live owner correction changed the active CAD plan in the same model turn; no second ChatGPT user turn was required.
+- **Stage D: CLOSED / GREEN.** Five sequential automatic continuation turns completed in the same bound Project conversation. Transitions 1-4 delivered on attempt 1; transition 5 hit a proven pre-submit `context-timeout`, safely retried, then produced one committed turn and ACKed on attempt 2. No transition 6 was armed.
+- **Boundary batching: GREEN.** A separate synthetic coordinator boundary probe preserved `SYNTHETIC_BOUNDARY_CORRECTION_20260912_V2` across the turn boundary: continuation `cont_PSYknTM7uBzjHX9w3ZvJgv-e` ACKed with `batched_count=1`, the payload appeared exactly once in `batched_messages`, and delivery completed on attempt 1. This is coordinator batching evidence, not a Fusion Palette message.
+
+Continuity repairs proven during Stage D:
+
+1. `3dcef407` — `coordinator_continue` now arms resilient continuations with a durable `cont_*` ID and model ACK requirement.
+2. `ead0c8e` — the visible wake message always carries the exact Bridge continuation reference even when model-context injection reports success.
+3. `564d9f2` — plain `coordinator_continue` instructions remain visible instead of collapsing to a generic completion message.
+4. `a6ddfd6` — a `context-timeout` with `composerHasText=false` is classified as proven pre-submit `not_submitted`, even if unrelated output contains incidental login text; it may retry instead of becoming terminal `owner_input_required`.
+5. `6caf36b` — continuation payload that would overflow the 500-character visible reason is preserved as queued coordinator batch data and returned through `coordinator_ack.batched_messages` instead of being silently truncated.
+6. `3b54c6a` — `bridge_restart` now arms the same resilient `cont_*` continuation contract, so post-restart direct delivery no longer creates an undeliverable legacy wake without a continuation ID.
+
 ## Non-negotiable rule: reuse first
 
 For every missing capability, use this order:
@@ -40,6 +58,8 @@ Existing P0 safety behavior that is already useful stays in place, but new gover
 - ReviewGPT already provides a production direct-wake transport capable of creating a committed user turn in the exact bound ChatGPT Project conversation from the VPS.
 
 ## Stage A — Maximize the agent's eyes
+
+**Status: CLOSED on live disposable-model evidence.**
 
 ### Purpose
 
@@ -88,13 +108,13 @@ Make Shimmer the rich P1 CAD provider while keeping `fusion.cad/v1` as the stabl
 - When a needed operation is weak/missing in Shimmer, search qualified donors before implementing it locally.
 - Keep provider choice hidden from the model-facing workflow where practical.
 
-### Current offline implementation status
+### Current accepted implementation status
 
-The first Stage B facade slice is now implemented and offline-qualified behind the existing logical workstation contract. It adds public `fusion_sketch` and `fusion_feature` operations backed by a pinned Shimmer rich provider, while Autodesk/P0 remains the authoritative reference provider for public revisions, fingerprints and post-mutation readback.
+The first Stage B facade slice is implemented and live-accepted behind the existing logical workstation contract. It adds public `fusion_sketch` and `fusion_feature` operations backed by a pinned Shimmer rich provider, while Autodesk/P0 remains the authoritative reference provider for public revisions, fingerprints and post-mutation readback.
 
-The implemented slice covers sketch create/batch plus extrude, hole, fillet and chamfer, with `dry_run` preview/abort. Bridge keeps Shimmer indices/native tokens private, resolves public `ent_*` refs fail-closed, scopes private guard bindings by rich provider/document/revision, checks provider session generation at dispatch, and publishes output refs only when the exact authoritative post-commit snapshot attests the provider token and kind. Ambiguous outcomes after dispatch/commit are non-replayable `OPERATION_UNCERTAIN`. The source-controlled overlay is pinned to Shimmer `97a06e76c289420a721590ddcab334f5f3dc3178`.
+The accepted slice covers sketch create/batch plus extrude, hole, fillet and chamfer, with guarded preview/abort. Bridge keeps Shimmer indices/native tokens private, resolves public `ent_*` refs fail-closed, scopes private guard bindings by rich provider/document/revision, checks provider session generation at dispatch, and publishes output refs only when the exact authoritative post-commit snapshot attests the provider token and kind. Ambiguous outcomes after dispatch/commit remain non-replayable `OPERATION_UNCERTAIN`. The source-controlled overlay is pinned to Shimmer `97a06e76c289420a721590ddcab334f5f3dc3178`.
 
-This is **offline implementation evidence only**. The live Hands gate has not yet run, so `hands.sketch` and `hands.feature` must remain `degraded`. This slice also does not claim sketch/feature support inside explicit `fusion_transaction` plan/replay; that expansion remains after live proof.
+The live gate also drove follow-up repairs for native ref resolution, sketch token precedence, component token preservation and preview rollback/revision reconciliation. This bounded acceptance does **not** claim sketch/feature support inside explicit `fusion_transaction` plan/replay, nor does it claim complete coverage of Shimmer's 103-tool catalog.
 
 ### Gate
 
@@ -105,6 +125,8 @@ A representative model-edit loop works through the normal facade/provider path:
 The gate is workflow capability, not percentage coverage of Shimmer's tool catalog.
 
 ## Stage C — Ears and mouth: live owner interaction during a model turn
+
+**Status: CLOSED on live same-turn owner-correction evidence.**
 
 ### Purpose
 
@@ -137,6 +159,8 @@ During one real model turn:
 
 ## Stage D — Automatic turn-to-turn self-continuation
 
+**Status: CLOSED / GREEN — 5/5 live continuation soak plus boundary-batching probe accepted.**
+
 ### Purpose
 
 Remove the final manual "poke" needed when a model turn ends but the bounded task is not finished.
@@ -168,7 +192,7 @@ The browser UI not visually refreshing is a separate presentation issue; it must
 
 ## Stage E — Rewrite the old phase plans to match reality
 
-After Stages A-D are measured, update the old P0.5/P1/P2 documents so they stop describing greenfield work that donor projects have made unnecessary.
+Stages A-D are now measured. The old greenfield P0.5/P1/P2 plans/spec are historical references only and are explicitly superseded by this measured operational roadmap for current execution.
 
 Expected phase meaning:
 

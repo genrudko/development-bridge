@@ -1,5 +1,9 @@
 # Fusion CAD Agent API v1 P0 Implementation Plan
 
+> [!NOTE]
+> **HISTORICAL / SUPERSEDED FOR CURRENT EXECUTION.** Measured live Stages A-D and the reuse-first provider strategy are now recorded in `docs/research/fusion-cad-agent-operational-roadmap-2026-09-11.md`. Keep this document for design/history evidence, but do not execute its greenfield P1/P2 phase assumptions as the current roadmap. P0 safety invariants that were accepted remain authoritative.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver the `fusion.cad/v1` semantic and visual foundation: strict domain contract, truthful capabilities, revision-safe reads/mutations, stable refs/selectors, semantic snapshots/inspect, immutable views with pick, transactional metadata/logical text/visibility, model-hygiene validation, and proof that staged transaction semantics are feasible on live Fusion.

@@ -1,5 +1,9 @@
 # Fusion CAD Hands P1 Slice Implementation Plan
 
+> [!NOTE]
+> **HISTORICAL / SUPERSEDED FOR CURRENT EXECUTION.** Measured live Stages A-D and the reuse-first provider strategy are now recorded in `docs/research/fusion-cad-agent-operational-roadmap-2026-09-11.md`. Keep this document for design/history evidence, but do not execute its greenfield P1/P2 phase assumptions as the current roadmap. P0 safety invariants that were accepted remain authoritative.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Deliver the offline, testable first Shimmer-backed `fusion_sketch`/`fusion_feature` slice while preserving P0 revision/ref/transaction invariants.

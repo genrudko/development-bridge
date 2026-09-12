@@ -47,3 +47,18 @@ Security:
 
 Fallback:
 START_FUSION_AGENT.ps1 remains available for the Reference relay only.
+
+Palette / operator dialogue:
+- the installed Fusion add-in exposes the Russian "Диалог с CAD-агентом" Palette;
+- owner messages, timestamps and read receipts are durable through the Bridge Palette state;
+- ✓ means sent; ✓✓ means the agent actually polled/read that owner message;
+- Stop-after-step / Resume controls do not save or close the Fusion document.
+
+Turn continuity:
+- normal long-running work may continue automatically through the bound Development
+  Bridge route; a fresh continuation turn ACKs its visible cont_* reference before work;
+- a missing browser visual refresh is not proof of a failed continuation; Bridge durable
+  state / ACK evidence is authoritative;
+- retries are allowed only for proven pre-submit/not-submitted delivery failures.
+- bridge_restart uses the same resilient cont_* continuation/ACK contract after a service restart;
+- coordinator overflow is recovered through coordinator_ack batched_messages rather than being silently truncated.

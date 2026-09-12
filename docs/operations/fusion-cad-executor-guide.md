@@ -209,29 +209,67 @@ At that runtime, load-bearing P0 capabilities such as `view.pick`, `transaction.
 This SHA/capability list is historical acceptance evidence, not a permanent assumption. Re-probe capabilities after runtime changes.
 
 
-## 14. P1 Hands offline-qualified boundary
+## 14. Current Eyes/Hands accepted boundary
 
-The first reuse-first Hands slice is implemented and offline-qualified, but it is **not live-qualified yet**. Keep `hands.sketch` and `hands.feature` capability state `degraded` until the dedicated live gate succeeds on the installed Fusion/Shimmer runtime.
+The reuse-first Hands slice is **live-qualified at its current bounded scope**. Do not revert the documentation or runtime to the earlier assumption that `hands.sketch` / `hands.feature` are merely offline-only. The accepted provider roles remain:
 
-Provider roles are explicit and configuration-owned:
+- `reference` — Autodesk/P0; authoritative public `rev_N`, fingerprints, snapshots, opaque refs and post-mutation readback;
+- `rich` — pinned Shimmer; accepted rich sketch/feature mutations for the bounded slice;
+- `eyes` — optional read-only observation provider when configured.
 
-- `reference` — the accepted Autodesk/P0 provider and authoritative source of public `rev_N`, fingerprints, snapshots and post-mutation readback;
-- `rich` — the pinned Shimmer provider used for the first rich modeling mutations;
-- `eyes` — an optional read-only observation provider when configured.
+The model-facing workflow still names the logical workstation, not provider node IDs. Shimmer indices/native tokens remain private. Committed Hands calls keep revision/provider-session guards, preview must restore authoritative state, and ambiguous mutation outcomes remain non-replayable `OPERATION_UNCERTAIN`. The accepted scope still does **not** imply full Shimmer-tool wrapping or sketch/feature actions inside explicit `fusion_transaction` plan/replay.
 
-The model-facing request continues to name the logical workstation. Do not expose or require provider node ids in normal agent workflows. Hands bindings are private and scoped by rich provider + document + public revision, and are invalidated on provider-session changes.
+The source-controlled overlay remains under `ops/fusion_shimmer_overlay/`, pinned to Shimmer commit `97a06e76c289420a721590ddcab334f5f3dc3178`. No save/close behavior is added by the overlay.
 
-The offline-supported public Hands surface is deliberately narrow:
+## 15. Normal live operator loop: Eyes + Hands + Palette
 
-- `fusion_sketch(operation="create")` on `xy`, `xz`, `yz`, or an opaque planar-face ref;
-- `fusion_sketch(operation="batch")` for line, rectangle, circle, geometric constraints and driving dimensions, including symbolic references only to earlier geometry actions in the same batch;
-- `fusion_feature(operation="create")` for `extrude`, `hole`, `fillet`, and `chamfer`;
-- `dry_run=true` through the guarded Shimmer preview/abort path.
+For an ordinary disposable CAD task, prefer this loop:
 
-Committed Hands calls require `expected_revision`. Bridge binds a private Shimmer guard around an authoritative P0 observation, checks the rich-provider session generation atomically at dispatch, and treats ambiguous post-dispatch/post-commit outcomes as non-replayable `OPERATION_UNCERTAIN`. Provider native tokens and Shimmer indices remain private; public results use existing opaque `ent_*` refs only after exact authoritative post-commit snapshot attestation. Preview-created refs are never published.
+1. inspect the active document and current public revision;
+2. use Eyes/semantic reads to identify the relevant body/sketch/feature/ref;
+3. state the current step and next intended step through the Palette when the task is long enough to benefit;
+4. perform the smallest guarded Hands mutation;
+5. poll owner Palette messages before the next meaningful CAD step;
+6. if the owner corrected the plan, apply that correction in the same model turn when safe;
+7. re-observe visually **and** semantically;
+8. close the disposable document unsaved when the bounded live exercise is complete.
 
-The source-controlled overlay lives under `ops/fusion_shimmer_overlay/` and is pinned to Shimmer commit `97a06e76c289420a721590ddcab334f5f3dc3178`. Its installer fails closed on upstream SHA or target-hash mismatch. The overlay delegates geometry work to Shimmer's existing allow-listed operations; it is not a second CAD implementation and it does not expose arbitrary-code dispatch or save/close behavior.
+Palette behavior on the accepted runtime:
 
-This slice does **not** add sketch/feature actions to `fusion_transaction` plan/replay. Standalone commit and `dry_run` are the only qualified Hands mutation semantics until the live gate is green and later work explicitly extends transaction replay.
+- Russian chat UI: **«Диалог с CAD-агентом»**;
+- durable `history[]` capped at 50 entries;
+- new owner messages get `message_id` and real timestamps;
+- `receipt=sent` renders `✓`; an actual `_bridge_palette_poll` marks the message `read`, records `read_at_ms`, and renders `✓✓`;
+- Enter sends; Shift+Enter inserts a newline;
+- `Остановить после шага` and `Продолжить` remain separate controls.
 
-Before reporting Hands as `supported`, run the live disposable-model gate and prove: provider guard coherence against manual external edits, session/reconnect invalidation, preview restoration, public `fusion_sketch` and `fusion_feature` commit paths, authoritative post-readback/ref attestation, and no mutation/save of the protected original document.
+Do not invent a second owner-message queue. Palette interaction reuses the existing Bridge state path.
+
+## 16. Automatic turn continuation and ACK protocol
+
+When bounded work remains but the current model turn must end, arm one resilient `coordinator_continue` on the already bound route. The next committed user turn must visibly include the exact `cont_*` Bridge reference.
+
+On the fresh model turn, **before other work**:
+
+1. call `coordinator_ack` exactly once for that visible continuation ID;
+2. process every returned item in `batched_messages` in the same model turn;
+3. inspect the durable task/job/ledger boundary;
+4. continue the bounded task;
+5. if more model turns are required, arm the next continuation **before ending this turn**.
+
+Do not arm a gratuitous continuation after the bounded task is complete. Do not rely on browser visual refresh as proof that a model turn did or did not start. Durable continuation state, committed-turn evidence and model ACK are authoritative.
+
+The live 2026-09-12 soak completed five sequential automatic transitions in the same bound Project conversation. Four delivered on attempt 1. Transition 5 hit a proven pre-submit `context-timeout` (`composerHasText=false`), was classified as `not_submitted`, retried safely, then produced one committed turn and was ACKed on attempt 2. This is expected resilient behavior, not duplicate delivery.
+
+The continuity repair chain is:
+
+- `3dcef407` — resilient arming / durable continuation ID;
+- `ead0c8e` — always-visible Bridge ref;
+- `564d9f2` — visible plain continuation instructions;
+- `a6ddfd6` — pre-submit context timeout remains retryable even with incidental login text elsewhere in process output.
+- `6caf36b` — pre-delivery coalescing never hides batch overflow behind the 500-character visible-reason bound; overflow remains queued and is returned by `coordinator_ack.batched_messages`.
+- `3b54c6a` — `bridge_restart` arms a resilient `cont_*` continuation with model ACK and retry semantics instead of the legacy ID-less wake.
+
+A direct transport result of `uncertain` or genuine `owner_input_required` still fails closed and must not auto-resend. A proven `not_submitted` failure may retry according to the resilient continuation policy.
+
+Boundary batching is part of the accepted protocol. If multiple near-boundary messages fit inside the visible continuation reason, they may coalesce there. If the combined payload would exceed the 500-character visible-reason limit, later messages stay in the durable queued batch and are returned exactly through `coordinator_ack.batched_messages`; they must not be dropped or silently truncated. The 2026-09-12 live synthetic probe verified this with `SYNTHETIC_BOUNDARY_CORRECTION_20260912_V2` (`batched_count=1`, exactly once).
