@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from app.api.registry import RegisteredTool, ToolRegistry
 from app.container import ApplicationContainer
 
+from .blender import blender_tools
 from .bridge import bridge_tools
 from .bridge_restart import bridge_restart_tools
 from .changes import change_tools
@@ -41,6 +42,7 @@ def build_tool_registry(
         + project_tools(container)
         + file_tools(container)
         + eod_browser_tools(container)
+        + blender_tools(container)
         + fusion_tools(container)
         + git_read_tools(container)
         + git_write_tools(container)
