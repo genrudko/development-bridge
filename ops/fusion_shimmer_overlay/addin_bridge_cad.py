@@ -159,6 +159,12 @@ def _ensure_palette(ctx):
         palette = palettes.itemById(PALETTE_ID)
     except Exception:
         palette = None
+    if palette is not None and not _PALETTE_HANDLERS:
+        try:
+            palette.deleteMe()
+            palette = None
+        except Exception:
+            pass
     if palette is None:
         path = _palette_html_path().resolve()
         try:

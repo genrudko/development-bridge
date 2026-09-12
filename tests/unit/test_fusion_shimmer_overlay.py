@@ -369,6 +369,42 @@ def test_palette_is_russian_chat_with_bounded_durable_history(tmp_path, monkeypa
     assert persisted["history"][-1]["text"] == "Шаг 59"
 
 
+def test_palette_recreates_stale_instance_after_module_reload(tmp_path, monkeypatch):
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_palette_reload")
+    monkeypatch.setattr(module, "_PALETTE_STATE_FILE", tmp_path / "palette.json")
+    module._PALETTE_HANDLERS.clear()
+
+    class Palette:
+        def __init__(self):
+            self.deleted = False
+            self.isVisible = False
+        def deleteMe(self):
+            self.deleted = True
+
+    old = Palette()
+    fresh = Palette()
+
+    class Palettes:
+        def __init__(self):
+            self.add_calls = 0
+        def itemById(self, _palette_id):
+            return old if not old.deleted else None
+        def add(self, *_args):
+            self.add_calls += 1
+            return fresh
+
+    palettes = Palettes()
+    ui = SimpleNamespace(palettes=palettes)
+    ctx = SimpleNamespace(app=SimpleNamespace(userInterface=ui))
+
+    result = module._ensure_palette(ctx)
+
+    assert old.deleted is True
+    assert palettes.add_calls == 1
+    assert result is fresh
+    assert fresh.isVisible is True
+
+
 def test_palette_state_and_owner_inbox_are_durable_and_poll_once(tmp_path, monkeypatch):
     module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_palette_state")
     monkeypatch.setattr(module, "_PALETTE_STATE_FILE", tmp_path / "palette.json")
