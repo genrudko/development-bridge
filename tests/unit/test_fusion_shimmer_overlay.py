@@ -323,9 +323,50 @@ def test_server_overlay_exposes_cad_and_palette_tools():
         "op": "bridge.palette_state",
         "params": {"current": "Sketch", "next": "Extrude", "status": "running"},
     }
+    assert registered["_bridge_palette_state"]("Sketch", "Extrude", "waiting", "Какой размер?") == {
+        "op": "bridge.palette_state",
+        "params": {"current": "Sketch", "next": "Extrude", "status": "waiting", "message": "Какой размер?"},
+    }
     assert registered["_bridge_palette_poll"]() == {
         "op": "bridge.palette_poll", "params": {}
     }
+
+
+def test_palette_is_russian_chat_with_bounded_durable_history(tmp_path, monkeypatch):
+    module = _load("addin_bridge_cad.py", "fusion_shimmer_overlay_palette_chat")
+    monkeypatch.setattr(module, "_PALETTE_STATE_FILE", tmp_path / "palette.json")
+    monkeypatch.setattr(module, "_ensure_palette", lambda ctx: None)
+    ctx = SimpleNamespace()
+
+    html = module._PALETTE_HTML
+    assert "Статус" in html
+    assert "Сообщение" in html
+    assert "Отправить" in html
+    assert "Остановить после шага" in html
+    assert "Продолжить" in html
+    assert 'id="history"' in html
+    assert "Send correction" not in html
+    assert "Current step" not in html
+
+    state = module.palette_state(ctx, {
+        "current": "Основание готово",
+        "next": "Нужен размер гайки",
+        "status": "waiting",
+        "message": "Какой размер гайки?",
+    })
+    assert state["state"]["status"] == "waiting"
+    assert state["history"][-1] == {"role": "assistant", "text": "Какой размер гайки?"}
+
+    module._record_palette_message("correction", "М6, под ключ 10 мм")
+    persisted = module._load_palette_store()
+    assert persisted["history"][-1] == {"role": "user", "text": "М6, под ключ 10 мм"}
+
+    for index in range(60):
+        module.palette_state(ctx, {"message": f"Шаг {index}"})
+    persisted = module._load_palette_store()
+    assert len(persisted["history"]) == 50
+    assert persisted["history"][0]["text"] == "Шаг 10"
+    assert persisted["history"][-1]["text"] == "Шаг 59"
 
 
 def test_palette_state_and_owner_inbox_are_durable_and_poll_once(tmp_path, monkeypatch):

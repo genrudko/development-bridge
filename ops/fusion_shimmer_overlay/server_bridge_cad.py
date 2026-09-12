@@ -23,12 +23,14 @@ def register(mcp, client):
         )
 
     @mcp.tool()
-    def _bridge_palette_state(current: str = "", next: str = "", status: str = "running") -> dict:
-        """Update/show the owner Palette for the current CAD step."""
-        return client.call(
-            "bridge.palette_state",
-            {"current": current, "next": next, "status": status},
-        )
+    def _bridge_palette_state(
+        current: str = "", next: str = "", status: str = "running", message: str = ""
+    ) -> dict:
+        """Update/show the owner Palette and optionally append one assistant chat message."""
+        params = {"current": current, "next": next, "status": status}
+        if message:
+            params["message"] = message
+        return client.call("bridge.palette_state", params)
 
     @mcp.tool()
     def _bridge_palette_poll() -> dict:

@@ -1,8 +1,8 @@
 {
   "upstream_sha": "97a06e76c289420a721590ddcab334f5f3dc3178",
   "overlay_sha256": {
-    "addin_bridge_cad.py": "d12753262e1145ac017bfba382fd138bb02b2035768adc4fe90cf24e9a5cb451",
-    "server_bridge_cad.py": "6b3b181d503a9eed79109f0cf3c474f77bd16cbf236afcdc901f807191be77da"
+    "addin_bridge_cad.py": "1c4b5d20f46f18df7bd7e6ecdda4f0773f49883b13974ebf5c1ee7e80e7e7bfa",
+    "server_bridge_cad.py": "796b038aef70a9216070ca46c9117530971fe119a819494d4a65b1cabaa4e742"
   },
   "targets": {
     "addin_ops_init": {

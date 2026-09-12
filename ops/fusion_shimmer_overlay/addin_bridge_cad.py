@@ -29,24 +29,31 @@ _PALETTE_STATE_FILE = Path(
 
 _PALETTE_HTML = r"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
-body{font-family:Segoe UI,Arial,sans-serif;background:#242424;color:#eee;margin:0;padding:12px}
-.label{font-size:11px;color:#aaa;text-transform:uppercase;margin-top:10px}.value{font-size:14px;margin-top:3px;word-break:break-word}
-textarea{width:100%;box-sizing:border-box;min-height:72px;background:#181818;color:#eee;border:1px solid #555;border-radius:4px;padding:8px}
-button{margin:6px 5px 0 0;padding:7px 10px;border:0;border-radius:4px;cursor:pointer}#send{background:#4f8cff;color:white}#stop{background:#9b4545;color:white}#cont{background:#4b7a52;color:white}
-#ack{font-size:11px;color:#8bc58b;margin-top:7px;min-height:14px}
+*{box-sizing:border-box}body{font-family:Segoe UI,Arial,sans-serif;background:#242424;color:#eee;margin:0;padding:12px;font-size:13px}
+.header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.title{font-weight:600;font-size:15px}.status{font-size:11px;padding:3px 8px;border-radius:999px;background:#404040;color:#ddd}
+.context{background:#2d2d2d;border:1px solid #3e3e3e;border-radius:6px;padding:7px 9px;margin-bottom:9px;color:#bbb;font-size:11px;line-height:1.4}.context b{color:#e6e6e6;font-weight:500}
+#history{height:205px;overflow-y:auto;padding:4px 2px 6px;display:flex;flex-direction:column;gap:7px}.empty{color:#888;text-align:center;margin:auto 0;font-size:12px}
+.msg{max-width:88%;padding:7px 9px;border-radius:9px;white-space:pre-wrap;word-break:break-word;line-height:1.35}.assistant{align-self:flex-start;background:#353535;border:1px solid #464646}.user{align-self:flex-end;background:#365d8d;color:#fff}.system{align-self:center;background:transparent;color:#999;font-size:11px;padding:2px 4px;text-align:center}
+.label{font-size:11px;color:#aaa;margin:8px 0 4px}textarea{width:100%;min-height:62px;max-height:120px;resize:vertical;background:#181818;color:#eee;border:1px solid #555;border-radius:5px;padding:8px;font:inherit}
+.actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}button{padding:7px 10px;border:0;border-radius:4px;cursor:pointer;font:inherit}#send{background:#4f8cff;color:white;flex:1}#stop{background:#9b4545;color:white}#cont{background:#4b7a52;color:white}
+#ack{font-size:11px;color:#8bc58b;margin-top:6px;min-height:14px}
 </style></head><body>
-<div class="label">Status</div><div id="status" class="value">idle</div>
-<div class="label">Current step</div><div id="current" class="value">—</div>
-<div class="label">Next step</div><div id="next" class="value">—</div>
-<div class="label">Correction</div><textarea id="msg" placeholder="Что изменить?"></textarea>
-<button id="send">Send correction</button><button id="stop">Stop after step</button><button id="cont">Continue</button>
+<div class="header"><div class="title">Диалог с CAD-агентом</div><div class="status">Статус: <span id="status">Ожидание</span></div></div>
+<div class="context"><div>Сейчас: <b id="current">—</b></div><div>Дальше: <b id="next">—</b></div></div>
+<div id="history"><div class="empty">Сообщений пока нет</div></div>
+<div class="label">Сообщение</div><textarea id="msg" placeholder="Напишите сообщение или коррекцию…"></textarea>
+<div class="actions"><button id="send">Отправить</button><button id="stop">Остановить после шага</button><button id="cont">Продолжить</button></div>
 <div id="ack"></div>
 <script>
-function send(action,data){try{adsk.fusionSendData(action,data||'');document.getElementById('ack').textContent='Sent';}catch(e){document.getElementById('ack').textContent='Send failed';}}
-document.getElementById('send').onclick=function(){let v=document.getElementById('msg').value.trim();if(v){send('correction',v);document.getElementById('msg').value='';}};
-document.getElementById('stop').onclick=function(){send('stop','');};
-document.getElementById('cont').onclick=function(){send('continue','');};
-window.fusionJavaScriptHandler={handle:function(action,data){if(action!=='state')return 'ignored';let s={};try{s=JSON.parse(data||'{}')}catch(e){};document.getElementById('status').textContent=s.status||'idle';document.getElementById('current').textContent=s.current||'—';document.getElementById('next').textContent=s.next||'—';return 'ok';}};
+const statusNames={idle:'Ожидание',running:'Работаю',waiting:'Жду ответа',stopped:'Остановлен',completed:'Завершено'};
+function addBubble(role,text){if(!text)return;let h=document.getElementById('history');let empty=h.querySelector('.empty');if(empty)empty.remove();let d=document.createElement('div');d.className='msg '+(role==='user'?'user':role==='system'?'system':'assistant');d.textContent=text;h.appendChild(d);h.scrollTop=h.scrollHeight;}
+function renderHistory(items){let h=document.getElementById('history');h.innerHTML='';if(!Array.isArray(items)||!items.length){h.innerHTML='<div class="empty">Сообщений пока нет</div>';return;}items.forEach(x=>addBubble(x.role||'assistant',x.text||''));h.scrollTop=h.scrollHeight;}
+function send(action,data){try{adsk.fusionSendData(action,data||'');document.getElementById('ack').textContent='Отправлено';return true;}catch(e){document.getElementById('ack').textContent='Ошибка отправки';return false;}}
+document.getElementById('send').onclick=function(){let el=document.getElementById('msg'),v=el.value.trim();if(v&&send('correction',v)){addBubble('user',v);el.value='';}};
+document.getElementById('msg').addEventListener('keydown',function(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();document.getElementById('send').click();}});
+document.getElementById('stop').onclick=function(){if(send('stop',''))addBubble('system','Запрошена остановка после текущего шага');};
+document.getElementById('cont').onclick=function(){if(send('continue',''))addBubble('system','Запрошено продолжение работы');};
+window.fusionJavaScriptHandler={handle:function(action,data){if(action!=='state')return 'ignored';let p={};try{p=JSON.parse(data||'{}')}catch(e){};let s=p.state||p;document.getElementById('status').textContent=statusNames[s.status]||s.status||'Ожидание';document.getElementById('current').textContent=s.current||'—';document.getElementById('next').textContent=s.next||'—';if(Array.isArray(p.history))renderHistory(p.history);return 'ok';}};
 </script></body></html>"""
 
 DEFAULT_ALLOWED_OPS = frozenset(
@@ -74,6 +81,7 @@ def _default_palette_store():
             "continue_requested": False,
             "revision": 0,
         },
+        "history": [],
     }
 
 
@@ -84,6 +92,12 @@ def _load_palette_store():
         return _default_palette_store()
     if not isinstance(data, dict) or not isinstance(data.get("state"), dict) or not isinstance(data.get("inbox"), dict):
         return _default_palette_store()
+    if not isinstance(data.get("history"), list):
+        data["history"] = []
+    data["history"] = [
+        {"role": str(item.get("role") or "assistant"), "text": str(item.get("text") or "")[:2000]}
+        for item in data["history"] if isinstance(item, dict) and str(item.get("text") or "").strip()
+    ][-50:]
     return data
 
 
@@ -92,6 +106,15 @@ def _save_palette_store(data):
     tmp = _PALETTE_STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, _PALETTE_STATE_FILE)
+
+
+def _append_palette_history(data, role, text):
+    value = str(text or "").strip()[:2000]
+    if not value:
+        return
+    history = data.setdefault("history", [])
+    history.append({"role": role, "text": value})
+    del history[:-50]
 
 
 def _record_palette_message(action, text=""):
@@ -104,12 +127,15 @@ def _record_palette_message(action, text=""):
         if not value:
             return False
         inbox["correction"] = value[:2000]
+        _append_palette_history(data, "user", value)
     elif action == "stop":
         inbox["stop_requested"] = True
         inbox["continue_requested"] = False
+        _append_palette_history(data, "system", "Запрошена остановка после текущего шага")
     else:
         inbox["continue_requested"] = True
         inbox["stop_requested"] = False
+        _append_palette_history(data, "system", "Запрошено продолжение работы")
     inbox["revision"] = int(inbox.get("revision", 0)) + 1
     _save_palette_store(data)
     return True
@@ -166,11 +192,12 @@ def _ensure_palette(ctx):
     return palette
 
 
-def _send_palette_state(palette, state):
+def _send_palette_state(palette, data):
     if palette is None:
         return
     try:
-        palette.sendInfoToHTML("state", json.dumps(state, ensure_ascii=False))
+        payload = {"state": dict(data["state"]), "history": list(data.get("history", []))}
+        palette.sendInfoToHTML("state", json.dumps(payload, ensure_ascii=False))
     except Exception:
         pass
 
@@ -182,14 +209,21 @@ def palette_state(ctx, params):
     status = str(params.get("status") or "running").strip().lower()
     if status not in {"idle", "running", "stopped", "waiting", "completed"}:
         status = "running"
+    message = str(params.get("message") or "").strip()[:2000]
     data = _load_palette_store()
     state = data["state"]
-    state.update({"current": current, "next": next_step, "status": status})
+    if current:
+        state["current"] = current
+    if next_step:
+        state["next"] = next_step
+    state["status"] = status
     state["revision"] = int(state.get("revision", 0)) + 1
+    if message:
+        _append_palette_history(data, "assistant", message)
     _save_palette_store(data)
     palette = _ensure_palette(ctx)
-    _send_palette_state(palette, state)
-    return {"api_version": API_VERSION, "ok": True, "state": dict(state)}
+    _send_palette_state(palette, data)
+    return {"api_version": API_VERSION, "ok": True, "state": dict(state), "history": list(data.get("history", []))}
 
 
 def palette_poll(ctx, params):
