@@ -652,6 +652,28 @@ class FusionCadService:
             if isinstance(effect, Mapping) and isinstance(effect.get("op"), str)
         )
         if mode == "preview":
+            # Provider-native revisionIds can legitimately change across Fusion
+            # Undo even when the public P0 model is restored exactly. The
+            # authoritative Reference fingerprint/revision is the final preview
+            # coherence verdict; the post-Undo provider guard is then rebound to
+            # that unchanged public revision for subsequent external-change checks.
+            try:
+                post_revision = await self._observe_authoritative_for_hands(
+                    route.reference_node, document_ref
+                )
+            except Exception:
+                self._invalidate_hands_binding(rich_node, document_ref, revision.revision)
+                raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN) from None
+            generation_after_preview = self._hands_session_generation(rich_node)
+            if (
+                generation_after_preview is None
+                or generation_after_preview != bound_generation
+                or post_revision.revision != revision.revision
+            ):
+                self._invalidate_hands_binding(rich_node, document_ref, revision.revision)
+                raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
+            self._hands_provider_guards[key] = evidence.guard_after
+            self._hands_provider_guard_sessions[key] = (rich_node, bound_generation)
             return CadResult(
                 document=DocumentState(
                     document_ref=document_ref,
@@ -663,7 +685,7 @@ class FusionCadService:
                     {
                         "mode": mode,
                         "committed": evidence.committed,
-                        "baseline_restored": evidence.baseline_restored,
+                        "baseline_restored": True,
                         "effect_ops": effect_ops,
                     }
                 ),

@@ -178,6 +178,30 @@ async def test_preview_waits_for_post_undo_guard_before_reporting_restored():
 
 
 @pytest.mark.asyncio
+async def test_preview_returns_post_undo_guard_for_authoritative_reconciliation_when_provider_revision_id_changes():
+    desktop = FakeDesktop([
+        {
+            "api_version": PRIVATE_API_VERSION,
+            "document_ref": "doc_a",
+            "mode": "preview",
+            "guard_before": GUARD_A,
+            "preview_guard": GUARD_C,
+            "effects": [{"op": "feature.extrude"}],
+            "entities": {"created": [], "changed": []},
+            "committed": False,
+            "rollback_pending": True,
+        },
+        {"api_version": PRIVATE_API_VERSION, "guard": GUARD_B, "document_ref": "doc_a"},
+    ])
+    evidence = await ShimmerHandsAdapter(desktop).apply(
+        "rich-a", "doc_a", mode="preview", expected_guard=GUARD_A,
+        operations=[{"op": "feature.extrude", "params": {}}],
+    )
+    assert evidence.baseline_restored is False
+    assert evidence.guard_after == GUARD_B
+
+
+@pytest.mark.asyncio
 async def test_adapter_resolves_externalized_apply_receipt_before_private_decode():
     payload = {
         "api_version": PRIVATE_API_VERSION,

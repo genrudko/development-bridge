@@ -239,9 +239,11 @@ class ShimmerHandsAdapter:
                     expected_session_generation=expected_session_generation,
                 )
                 after = post_undo.guard
+                # Fusion may advance volatile native revisionIds across an Undo even
+                # when the authoritative model fingerprint is exactly restored.
+                # Preserve that provider-local mismatch as evidence; the service
+                # performs the final authoritative revision/fingerprint check.
                 restored = after == before
-                if not restored:
-                    raise FusionCadError(ErrorCode.OPERATION_UNCERTAIN)
             else:
                 if (
                     not isinstance(after, str)

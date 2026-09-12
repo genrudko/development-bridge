@@ -134,6 +134,39 @@ async def test_hands_bindings_for_same_document_revision_stay_independent_per_ri
 
 
 @pytest.mark.asyncio
+async def test_preview_reconciles_changed_post_undo_provider_guard_against_unchanged_authoritative_revision(monkeypatch):
+    desktop = FakeDesktop([
+        {
+            "api_version": PRIVATE_API_VERSION,
+            "document_ref": "doc_a",
+            "mode": "preview",
+            "guard_before": GUARD_A,
+            "preview_guard": GUARD_C,
+            "effects": [{"op": "feature.extrude"}],
+            "entities": {"created": [], "changed": []},
+            "committed": False,
+            "rollback_pending": True,
+        },
+        {"api_version": PRIVATE_API_VERSION, "guard": GUARD_B, "document_ref": "doc_a"},
+    ])
+    service = FusionCadService(desktop, provider_router=Router())
+    old = service.revision_tracker.observe("doc_a", "1" * 64)
+    _seed_hands_binding(service, old.revision, GUARD_A)
+    observed = []
+    async def observe(_node, document_ref):
+        observed.append(document_ref)
+        return service.revision_tracker.current(document_ref)
+    monkeypatch.setattr(service, "_observe_authoritative_for_hands", observe)
+    result = await service.apply_hands_provider(
+        "logical-a", "doc_a", expected_revision=old.revision, mode="preview",
+        operations=[{"op": "feature.extrude", "params": {}}],
+    )
+    assert result.data["baseline_restored"] is True
+    assert service.get_hands_provider_guard("rich-a", "doc_a", old.revision) == GUARD_B
+    assert observed == ["doc_a"]
+
+
+@pytest.mark.asyncio
 async def test_public_hands_binds_current_rich_provider_instead_of_consuming_other_route_binding(monkeypatch):
     desktop = FakeDesktop([
         {"api_version": PRIVATE_API_VERSION, "guard": GUARD_B, "document_ref": "doc_a"},
@@ -228,7 +261,7 @@ async def test_apply_rejects_opaque_ref_kind_mismatch_before_provider_call():
 
 
 @pytest.mark.asyncio
-async def test_preview_does_not_register_created_native_tokens():
+async def test_preview_does_not_register_created_native_tokens(monkeypatch):
     desktop = FakeDesktop([{
         "api_version": PRIVATE_API_VERSION,
         "document_ref": "doc_a",
@@ -239,6 +272,11 @@ async def test_preview_does_not_register_created_native_tokens():
     service = FusionCadService(desktop, provider_router=Router())
     service.revision_tracker.observe("doc_a", "a" * 64)
     _seed_hands_binding(service, "rev_1", GUARD_A)
+
+    async def observe(_node, document_ref):
+        return service.revision_tracker.current(document_ref)
+
+    monkeypatch.setattr(service, "_observe_authoritative_for_hands", observe)
 
     result = await service.apply_hands_provider(
         "logical-a", "doc_a", expected_revision="rev_1", mode="preview", operations=[]
