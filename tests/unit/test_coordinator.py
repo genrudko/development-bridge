@@ -162,6 +162,23 @@ async def test_resilient_events_batch_before_first_delivery_and_deduplicate():
 
 
 @pytest.mark.asyncio
+async def test_resilient_coalesce_keeps_visible_overflow_for_model_ack_batch():
+    service = CoordinatorService()
+    first_message = "A" * 490
+    correction = "SYNTHETIC_BOUNDARY_CORRECTION_20260912"
+    first = await service.arm_resilient(first_message, channel_id="route-g2")
+    second = await service.arm_resilient(correction, channel_id="route-g2")
+    assert second["continuation_id"] == first["continuation_id"]
+    assert second["batch_size"] == 1
+    assert second["queued_events"] == 1
+    claim = await service.claim("route-g2")
+    assert claim["message"] == first_message
+    acked = await service.model_ack(first["continuation_id"])
+    assert acked["batched_messages"] == [correction]
+    assert acked["batched_count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_non_resilient_arm_coalesce_never_downgrades_existing_resilient_wake():
     service = CoordinatorService()
     armed = await service.arm_resilient(

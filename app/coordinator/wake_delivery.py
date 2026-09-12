@@ -59,7 +59,7 @@ class CoordinatorWakeDeliveryService:
             "inspect the durable Bridge job/result state, and continue the current bounded task."
         )
         if collapsed:
-            bounded_reason = collapsed[:500]
+            bounded_reason = collapsed[: CoordinatorService.MAX_VISIBLE_CONTINUATION_REASON_CHARS]
             return f"{prefix} {bounded_reason}"
         return prefix
 

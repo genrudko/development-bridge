@@ -57,6 +57,7 @@ class CoordinatorService:
     MAX_CHANNELS = 64
     MAX_MESSAGE_CHARS = 4000
     MAX_BATCH_MESSAGE_CHARS = 32000
+    MAX_VISIBLE_CONTINUATION_REASON_CHARS = 500
     MAX_BATCH_EVENTS = 128
     MAX_ESCALATION_MESSAGE_CHARS = 3500
     MAX_TRANSPORT_NAME_CHARS = 128
@@ -489,7 +490,12 @@ class CoordinatorService:
         if len(current) + len(wake.queued_messages) >= self.MAX_BATCH_EVENTS:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "Coordinator batch capacity is full", retryable=True, details={"channel_id": channel_id})
         combined = self.BATCH_SEPARATOR.join([*current, message])
-        merge_current = wake.delivery_attempts == 0 and wake.claim_id is None and not wake.model_acknowledged and len(combined) <= self.MAX_BATCH_MESSAGE_CHARS
+        merge_current = (
+            wake.delivery_attempts == 0
+            and wake.claim_id is None
+            and not wake.model_acknowledged
+            and len(combined) <= self.MAX_VISIBLE_CONTINUATION_REASON_CHARS
+        )
         if merge_current:
             wake.message = combined
             wake.browser_preflight_authorized_at = None
