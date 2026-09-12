@@ -1,7 +1,7 @@
 # Fusion CAD Agent P2 — Fresh Reuse / Provider Evidence
 
 **Date:** 2026-09-13
-**Status:** research evidence; architecture decision intentionally not yet approved
+**Status:** research evidence; Option A owner-approved 2026-09-13; canonical design: `docs/superpowers/specs/2026-09-13-fusion-cad-agent-api-v1-p2-reuse-design.md`
 **Branch:** `research/fusion-cad-p2-reuse-design`
 **Baseline:** `c4cfba1232c47325e52cd3f9852aa60c7db8ac43`
 
@@ -21,7 +21,7 @@ At research start `main == origin/main == c4cfba1232c47325e52cd3f9852aa60c7db8ac
 | --- | --- | --- | --- | --- |
 | `jhk-a1/cad-copilot` | `d18c69240fb27ccc6a9867a3c357fb37db954b85` | last commit 2026-06-27; current checkout `447/447` tests green with declared Anthropic extra | MIT | **design donor**, not runtime dependency: Command IR, allowlisting, expected-geometry/proof, DFM certificate, identity/rollback patterns |
 | Trimesh | `fcf660feb0a14c68fd3945789e8ed77e260f9167`; 5.1.0 | representative throwaway accuracy/performance spikes completed | MIT | **mesh-evidence engine candidate** |
-| OrcaSlicer | `c21e48450c44fbf9b08d4ed2647d7921899f47dd` | official CLI supports headless transform/arrange/orient/slice/export | AGPL-3.0 | **separate-process optional provider only**; no copied/linked code without separate licensing decision |
+| OrcaSlicer | `c21e48450c44fbf9b08d4ed2647d7921899f47dd` | official CLI supports headless settings/filament loading, transform/arrange/orient, slice, project-3MF export, and effective-settings export | AGPL-3.0 | **separate-process optional provider only** for slicer evidence + Print Preparation; no copied/linked code without separate licensing decision |
 | `faust-machines/fusion360-mcp-server` | `8bb5cb0400c551ac9fe74a02e6be09782064f5a8` | last commit 2026-09-10; current env `348 passed, 3 failed` from MCP SDK field-name compatibility | MIT | active Fusion operation donor/reference, not wholesale runtime replacement |
 | `er-fo/CADAgent` | `42e5348eea5ea0d4c8383608bfa7974e6bff1abc` | last commit 2026-08-02; 30 test files; self-host backend is supported path | MIT | UI/whole-product reference; do not duplicate backend architecture |
 | `Bhooorya/text-to-cad` | `e21bec0bebb89cf22120b84424581ca89154378e` | 2026-08-15 initial commit; current checkout `6/6` tests green | MIT | small JSON-plan donor only |
@@ -47,6 +47,8 @@ Primary sources:
 - <https://github.com/OrcaSlicer/OrcaSlicer>
 - <https://pypi.org/project/trimesh/5.1.0/>
 - <https://github.com/3MFConsortium/lib3mf>
+
+Fresh 2026-09-13 Orca CLI re-check confirms `--load-settings`, `--load-filaments`, `--export-3mf`, `--export-settings`, and normal setting overrides. Historical Orca issue #14718 (now closed upstream) showed that preset inheritance could silently fall back to hardcoded defaults in older releases; therefore Print Preparation must qualify the exact installed provider/profile bundle and verify exported effective settings rather than trusting a preset name or leaf JSON alone.
 
 ## 4. Throwaway Trimesh + CadQuery qualification
 
@@ -107,21 +109,20 @@ Static mesh connectivity cannot establish slicer layer-order “unsupported isla
 | External 3MF validation | **defer lib3mf** | add only on proven external-validation gap |
 | Offline geometry oracle | **optional CadQuery, test-only** | one oracle only; not runtime CAD |
 | Old Schedule P2 golden | **delete/replace** | representative real-part corpus + fresh disposable unsaved live Fusion gate; protected Schedule designs remain untouched |
+| Print-ready 3MF carrying printer/nozzle/filament/process configuration | **optional Orca provider + tiny glue** | preserve neutral Fusion `model.3mf`; produce separate Orca `print-project.3mf` plus effective-settings/provenance artifacts |
+| Automatic “optimal” slicer settings | **bounded objective-driven selection** | choose best candidate among actually sliced/validated allowlisted candidates; never claim global optimum |
 
 ## 6. Resulting minimal P2 product scope
 
-P2 reduces to three responsibilities:
+P2 reduces to four responsibilities:
 
 1. **Revision-bound engineering evidence** over authoritative Fusion state, enriched by mesh/external-provider evidence where appropriate.
 2. **Provider composition**: Fusion-native facts first; Trimesh for mesh evidence; Orca/Fusion Automation as optional external providers; every conclusion remains attributable.
 3. **Versioned recipe intent**: small declarative recipe definitions and deterministic plan/proof metadata over existing semantic CAD operations. Execution is capability-gated by transaction semantics that genuinely exist; P2 does not build another Safe Executor.
+4. **Print Preparation**: optional Orca-backed composition of a qualified machine/nozzle/filament/process profile with a revision-bound neutral 3MF, bounded candidate evaluation, and a reproducible `print-project.3mf` plus effective-settings/provider evidence.
 
-## 7. Architecture decision intentionally open
+## 7. Architecture decision
 
-Research supports three owner-review candidates:
+On 2026-09-13 the owner approved **Option A — Thin evidence facade + provider adapters + minimal recipe layer**, extended with optional Orca-backed Print Preparation. Options B and C remain rejected as the primary P2 substrate.
 
-- **A — Thin evidence facade + provider adapters + minimal recipe layer** (research recommendation).
-- **B — JHK-like unified Command IR / Safe Executor as central P2 substrate.**
-- **C — Provider-first P2, delegating most DFM/orientation/packing to Orca/Fusion Automation and normalizing results.**
-
-Trade-offs and the public contract are reviewed with the owner before the canonical P2 design spec is written. This document is evidence, not design approval.
+The canonical design is `docs/superpowers/specs/2026-09-13-fusion-cad-agent-api-v1-p2-reuse-design.md`. This research document remains the measured evidence basis, not implementation authorization.

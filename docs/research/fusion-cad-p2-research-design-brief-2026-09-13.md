@@ -2,6 +2,8 @@
 
 **Status:** authorized for research and architecture/design only. **Do not implement P2 from this brief.**
 
+**Owner decision 2026-09-13:** Option A approved, including optional Orca-backed Print Preparation. Canonical design: `docs/superpowers/specs/2026-09-13-fusion-cad-agent-api-v1-p2-reuse-design.md`. Implementation remains a separate owner-approved phase.
+
 ## Why this brief exists
 
 P0 is closed and the current P0.5/P1 operational loop is live-accepted: Reference + Eyes + Shimmer-backed Hands + Russian Fusion Palette + read receipts + same-turn correction + resilient automatic turn continuation/restart recovery. Normal CAD modeling may continue on canonical `main` while P2 is researched separately.
