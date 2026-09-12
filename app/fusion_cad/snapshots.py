@@ -792,15 +792,29 @@ def normalize_sketch_read(
     """Normalize a sketch read result without inventing unsupported DOF counts."""
     name = str(raw.get("name", "Sketch"))
     ref_str = str(raw.get("ref") or raw.get("id") or "ent_sketch_0")
+    raw_native = raw.get("entityToken") or raw.get("native_token") or raw.get("id")
+    native_token = (
+        str(raw_native).strip()
+        if raw_native is not None and str(raw_native).strip()
+        else None
+    )
     if ref_registry is not None:
-        issued = ref_registry.issue(
-            document_ref=document_ref,
-            kind="sketch",
-            name=name,
-            native_token=str(raw.get("entityToken") or raw.get("id") or ""),
-            opaque_ref=ref_str if re.match(ENTITY_REF_PATTERN, ref_str) else None,
+        existing = (
+            ref_registry.get_internal_record(ref_str, document_ref)
+            if re.match(ENTITY_REF_PATTERN, ref_str)
+            else None
         )
-        final_ref = issued.ref
+        if native_token is None and existing is not None and existing.kind == "sketch":
+            final_ref = existing.ref
+        else:
+            issued = ref_registry.issue(
+                document_ref=document_ref,
+                kind="sketch",
+                name=name,
+                native_token=native_token,
+                opaque_ref=ref_str if re.match(ENTITY_REF_PATTERN, ref_str) else None,
+            )
+            final_ref = issued.ref
     else:
         final_ref = _safe_ent_ref(ref_str, "sk")
 

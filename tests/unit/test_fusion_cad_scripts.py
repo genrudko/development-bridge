@@ -22,6 +22,21 @@ def test_bundle_embeds_utf8_payload_as_json_not_python_source():
     assert "fusion.cad/v1" in script
 
 
+def test_read_sketch_fragment_matches_authoritative_native_token_and_fails_closed():
+    script = FusionCadScriptBundle().build(
+        "read",
+        {
+            "operation": "sketch",
+            "ref": "ent_sk_live",
+            "kind": "sketch",
+            "native_token": "private-sketch-token",
+        },
+    )
+    assert 'target_native = PAYLOAD.get("native_token")' in script
+    assert 'sk.get("native_token") == target_native' in script
+    assert 'Authoritative sketch token was not found in the active design' in script
+
+
 def test_bundle_rejects_raw_string_and_non_serializable():
     bundle = FusionCadScriptBundle()
     with pytest.raises(BridgeError) as exc:

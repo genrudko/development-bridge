@@ -5192,6 +5192,53 @@ async def test_fusion_read_feature_tree_fidelity(
 
 
 @pytest.mark.asyncio
+async def test_fusion_read_sketch_dispatches_private_native_hint_without_public_leak(
+    mock_desktop_service: DesktopNodeService,
+):
+    cad_service = FusionCadService(mock_desktop_service)
+    cad_service.set_node_capabilities(
+        "desk-1",
+        CapabilityMatrix.from_records([
+            CapabilityRecord(name="design.access", state="supported"),
+            CapabilityRecord(name="sketch.access", state="supported"),
+        ]),
+    )
+    secret = "private-sketch-token"
+    public_ref = cad_service.ref_registry.issue(
+        document_ref="doc_1", kind="sketch", native_token=secret,
+        name="HandsLiveSketch", opaque_ref="ent_sk_live",
+    ).ref
+    mock_desktop_service.tools.return_value = {"tools": []}
+    mock_desktop_service.call = AsyncMock(return_value={
+        "content": [{"type": "text", "text": json.dumps({
+            "api_version": "fusion.cad/v1", "status": "succeeded",
+            "summary": "Sketch read",
+            "document": {"document_ref": "doc_1", "model_revision": "rev_1"},
+            "data": {"sketch": {
+                "ref": public_ref, "name": "HandsLiveSketch", "native_token": secret,
+                "profiles": [], "constraints": [], "dimensions": [], "geometry": {},
+            }},
+        })}], "isError": False,
+    })
+
+    result = await cad_service.execute(
+        {"node_id": "desk-1", "operation": "sketch", "document_ref": "doc_1", "ref": public_ref},
+        group="read",
+    )
+    dispatched = mock_desktop_service.call.call_args.args
+    payload_line = next(
+        line for line in dispatched[2]["object"]["script"].splitlines()
+        if line.startswith("PAYLOAD_RAW = ")
+    )
+    transport_payload = json.loads(json.loads(payload_line[len("PAYLOAD_RAW = "):]))
+    assert transport_payload["ref"] == public_ref
+    assert transport_payload["kind"] == "sketch"
+    assert transport_payload["native_token"] == secret
+    assert transport_payload["name"] == "HandsLiveSketch"
+    assert secret not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_fusion_read_sketch_and_parameters(
     mock_desktop_service: DesktopNodeService,
 ):

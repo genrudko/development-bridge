@@ -52,6 +52,23 @@ def _resolve(scope, design, *, token="SECRET_NATIVE_TOKEN", kind="body"):
     )
 
 
+def test_shared_native_resolver_supports_autodesk_basevector_sequence():
+    scope = _scope()
+    body = _Entity("adsk::fusion::BRepBody")
+
+    class _BaseVector:
+        def __init__(self, items):
+            self._items = list(items)
+        def __len__(self):
+            return len(self._items)
+        def __iter__(self):
+            return iter(self._items)
+        def __getitem__(self, index):
+            return self._items[index]
+
+    assert _resolve(scope, _Design(_BaseVector([body]))) is body
+
+
 def test_shared_native_resolver_returns_exact_single_entity():
     scope = _scope()
     body = _Entity("adsk::fusion::BRepBody")

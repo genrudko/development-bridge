@@ -1427,7 +1427,24 @@ def _native_entity_candidates(resolved, ref):
     try:
         count_value = getattr(resolved, "count")
     except AttributeError:
-        return [resolved]
+        try:
+            length = len(resolved)
+        except (TypeError, AttributeError):
+            return [resolved]
+        except Exception:
+            raise FusionScriptError(
+                "REF_STALE",
+                "Authoritative native entity collection could not be inspected safely",
+                details={"ref": ref},
+            ) from None
+        try:
+            return [resolved[index] for index in range(length)]
+        except Exception:
+            raise FusionScriptError(
+                "REF_STALE",
+                "Authoritative native entity collection could not be inspected safely",
+                details={"ref": ref},
+            ) from None
     except Exception:
         raise FusionScriptError(
             "REF_STALE",

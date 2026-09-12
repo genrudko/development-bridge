@@ -799,14 +799,27 @@ def run(_context=None):
 
     if op == "sketch":
         target_ref = PAYLOAD.get("ref", "")
+        target_native = PAYLOAD.get("native_token")
         sketches = canonical_data.get("sketches", [])
         matching_sketch = None
         for sk in sketches:
-            if sk.get("ref") == target_ref or sk.get("name") == target_ref or sk.get("id") == target_ref:
+            if (
+                (target_native and sk.get("native_token") == target_native)
+                or sk.get("ref") == target_ref
+                or sk.get("name") == target_ref
+                or sk.get("id") == target_ref
+            ):
                 matching_sketch = dict(sk)
+                matching_sketch["ref"] = target_ref
                 break
         if matching_sketch is None:
-            resolved = resolve_fusion_entity({"ref": target_ref, "kind": "sketch"})
+            if target_native:
+                raise FusionScriptError(
+                    "REF_STALE",
+                    "Authoritative sketch token was not found in the active design",
+                    details={"ref": target_ref},
+                )
+            resolved = resolve_fusion_entity({**PAYLOAD, "kind": "sketch"})
             record = resolved.get("record") or {}
             matching_sketch = {
                 "ref": target_ref,

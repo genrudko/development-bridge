@@ -4,6 +4,7 @@ import pytest
 
 from app.api.errors import ErrorCode
 from app.fusion_cad.errors import FusionCadError
+from app.fusion_cad.refs import EntityRefRegistry
 from app.fusion_cad.snapshots import (
     FeatureDependency,
     ModelSnapshot,
@@ -246,6 +247,17 @@ def test_feature_tree_dependencies_never_upgrade_inferred_to_exact():
     # Falsification: verify that attempting to upgrade an inferred dependency fails
     dep = FeatureDependency(ref="ent_b", dependency_type="inferred")
     assert dep.dependency_type == "inferred"
+
+
+def test_sketch_read_missing_native_token_preserves_existing_token_backed_ref():
+    registry = EntityRefRegistry()
+    public_ref = registry.issue(document_ref="doc_live", kind="sketch", native_token="private-sketch-token", name="HandsLiveSketch", opaque_ref="ent_live_sketch").ref
+    result = normalize_sketch_read({"ref": public_ref, "name": "HandsLiveSketch", "profiles": []}, ref_registry=registry, document_ref="doc_live")
+    record = registry.get_internal_record(public_ref, "doc_live")
+    assert result.ref == public_ref
+    assert record is not None
+    assert record.native_token == "private-sketch-token"
+    assert registry.get_internal_record_by_native_token("doc_live", "private-sketch-token") is record
 
 
 def test_sketch_read_does_not_invent_unsupported_dof():

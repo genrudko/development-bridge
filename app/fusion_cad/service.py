@@ -3954,7 +3954,7 @@ class FusionCadService:
         if effective_bundle_group == "view" and op == "pick":
             self._prepare_pick_payload(payload, node_id)
 
-        if effective_bundle_group == "read" and op == "entity":
+        if effective_bundle_group == "read" and op in ("entity", "sketch"):
             raw_ref = payload.get("ref")
             if isinstance(raw_ref, str) and re.match(ENTITY_REF_PATTERN, raw_ref):
                 doc_ref = (
@@ -3975,6 +3975,12 @@ class FusionCadService:
                             details={"ref": raw_ref, "active_document_ref": doc_ref},
                         )
                 if record is not None:
+                    if op == "sketch" and record.kind != "sketch":
+                        raise FusionCadError(
+                            ErrorCode.TYPE_MISMATCH,
+                            "Sketch read target is not a sketch",
+                            details={"ref": raw_ref, "document_ref": record.document_ref},
+                        )
                     if not record.native_token:
                         raise FusionCadError(
                             ErrorCode.CAPABILITY_UNAVAILABLE,
