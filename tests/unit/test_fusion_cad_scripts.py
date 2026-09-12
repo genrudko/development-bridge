@@ -1263,6 +1263,7 @@ def test_model_snapshot_accepts_nested_occurrence_proxy_without_entity_token(mon
     result = scope["_output"]
     assert result["status"] == "succeeded"
     assert result["data"]["features"][0]["id"].startswith("occproxy_")
+    assert result["data"]["components"][0]["entityToken"] == "root-token"
 
 def test_p0_rendered_bundles_fit_default_desktop_argument_limit() -> None:
     """Default desktop relay must carry every static P0 Fusion script bundle."""

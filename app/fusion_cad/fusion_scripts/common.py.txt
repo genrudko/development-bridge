@@ -580,6 +580,11 @@ def collect_model_fingerprint(payload=None):
                 c_items.append({
                     "name": str(getattr(c, "name", "")),
                     "id": str(getattr(c, "id", "") or getattr(c, "entityToken", "")),
+                    # Preserve the actual Autodesk token separately for exact
+                    # post-commit attestation. Component.id is not guaranteed
+                    # to equal entityToken. This evidence field is excluded
+                    # from the model fingerprint below to keep revision semantics stable.
+                    "entityToken": str(getattr(c, "entityToken", "") or ""),
                 })
             except Exception as exc:
                 raise FusionScriptError("FUSION_API_ERROR", f"Failed to read component data: {exc}") from exc
@@ -1381,7 +1386,16 @@ def collect_model_fingerprint(payload=None):
                 "authoritative fingerprint cannot silently omit mutation-sensitive groups",
             )
 
-    serialized = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    fingerprint_payload = dict(canonical)
+    # entityToken on components is transport/attestation evidence. The stable
+    # component identity already participates through id, so adding this field
+    # must not cause a revision bump by itself.
+    if "components" in canonical:
+        fingerprint_payload["components"] = [
+            {key: value for key, value in item.items() if key != "entityToken"}
+            for item in canonical["components"]
+        ]
+    serialized = json.dumps(fingerprint_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     fp = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     return fp, canonical, safe_doc_ref
 
