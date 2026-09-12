@@ -261,6 +261,15 @@ def test_windows_tcp_table_listener_ownership_is_exact_and_fail_closed():
     )
 
 
+def test_windows_tcp_table_listener_ownership_accepts_winapi_tail_padding():
+    module = _gui_namespace()
+    expected = 4242
+    padded = _tcp_table((2, 18768, expected)) + (b"\x00" * 8)
+    assert module["listener_owned_by_pid"](
+        18768, expected, table_reader=lambda: padded, platform="nt"
+    )
+
+
 def _hands_gui_fixture(module, monkeypatch, *, owner):
     module["HANDS_MCP_PORT"] = 18768
     proc = SimpleNamespace(pid=4242, poll=lambda: None)

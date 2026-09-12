@@ -171,7 +171,7 @@ def listener_owned_by_pid(port: int, pid: int, *, table_reader=None,
         if data is None or len(data) < 4:
             return False
         count = struct.unpack_from("<I", data)[0]
-        if len(data) != 4 + count * 24:
+        if len(data) < 4 + count * 24:
             return False
         owners = []
         for index in range(count):
