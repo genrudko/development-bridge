@@ -100,6 +100,54 @@ def test_openrouter_executor_loads_max_turns_from_env():
     assert settings.executors.openrouter.max_turns == 75
 
 
+def test_cline_executor_defaults_are_frozen_disabled_and_explicit():
+    settings = load_settings(environ={})
+    cline = settings.executors.cline
+    assert cline.enabled is False
+    assert cline.executable == Path("~/.local/bin/cline")
+    assert cline.provider == "cline-pass"
+    assert cline.model == "cline-pass/deepseek-v4-flash"
+    assert cline.config_directory == Path("~/.cline")
+
+
+def test_cline_executor_defaults_never_route_through_payg():
+    settings = load_settings(environ={})
+    cline = settings.executors.cline
+    assert "deepseek/deepseek-v4.1-flash" not in (cline.model, cline.provider)
+    assert cline.provider == "cline-pass"
+    assert cline.model == "cline-pass/deepseek-v4-flash"
+
+
+def test_cline_executor_loads_overrides_from_env():
+    settings = load_settings(
+        environ={
+            "DEVELOPMENT_BRIDGE_CLINE_ENABLED": "true",
+            "DEVELOPMENT_BRIDGE_CLINE_MODEL": "anthropic/claude-sonnet-4",
+            "DEVELOPMENT_BRIDGE_CLINE_PROVIDER": "cline-pass",
+            "DEVELOPMENT_BRIDGE_CLINE_EXECUTABLE": "/opt/cline/bin/cline",
+        }
+    )
+    cline = settings.executors.cline
+    assert cline.enabled is True
+    assert cline.model == "anthropic/claude-sonnet-4"
+    assert cline.provider == "cline-pass"
+    assert cline.executable == Path("/opt/cline/bin/cline")
+
+
+def test_cline_executor_rejects_malformed_model():
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"executors": {"cline": {"model": "bad slug"}}})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("probe_timeout_seconds", 0), ("task_timeout_seconds", 0),
+    ("output_limit_bytes", 1023), ("output_limit_bytes", 1048577),
+])
+def test_cline_executor_rejects_out_of_bounds_values(field, value):
+    with pytest.raises(ValidationError):
+        BridgeSettings.model_validate({"executors": {"cline": {field: value}}})
+
+
 @pytest.mark.parametrize("field,value", [
     ("probe_timeout_seconds", 0), ("task_timeout_seconds", 3601),
     ("output_limit_bytes", 1023), ("output_limit_bytes", 1048577),

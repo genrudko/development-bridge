@@ -125,6 +125,23 @@ class OpenRouterExecutorSettings(BaseModel):
     output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
 
 
+class ClineExecutorSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    executable: Path = Path("~/.local/bin/cline")
+    provider: str = Field(default="cline-pass", pattern=IDENTIFIER_PATTERN)
+    model: str = Field(
+        default="cline-pass/deepseek-v4-flash",
+        min_length=3,
+        max_length=128,
+        pattern=OPENROUTER_MODEL_PATTERN,
+    )
+    config_directory: Path = Path("~/.cline")
+    probe_timeout_seconds: float = Field(default=20, gt=0, le=60)
+    task_timeout_seconds: float = Field(default=900, gt=0, le=3600)
+    output_limit_bytes: int = Field(default=262_144, ge=1024, le=1_048_576)
+
+
 class ExecutorSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     antigravity: AntigravityExecutorSettings = Field(
@@ -133,6 +150,7 @@ class ExecutorSettings(BaseModel):
     openrouter: OpenRouterExecutorSettings = Field(
         default_factory=OpenRouterExecutorSettings
     )
+    cline: ClineExecutorSettings = Field(default_factory=ClineExecutorSettings)
 
 
 def _default_managed_repository_root() -> Path:
@@ -741,6 +759,28 @@ def load_settings(
         }
         openrouter = OpenRouterExecutorSettings.model_validate(full_or)
         executors = settings.executors.model_copy(update={"openrouter": openrouter})
+        environment_updates["executors"] = executors
+
+    cline_updates: dict[str, Any] = {}
+    if raw_cline_enabled := environment.get("DEVELOPMENT_BRIDGE_CLINE_ENABLED"):
+        normalized = raw_cline_enabled.strip().lower()
+        if normalized not in {"1", "true", "yes", "on", "0", "false", "no", "off"}:
+            raise ValueError("DEVELOPMENT_BRIDGE_CLINE_ENABLED must be a boolean")
+        cline_updates["enabled"] = normalized in {"1", "true", "yes", "on"}
+    if cline_model := environment.get("DEVELOPMENT_BRIDGE_CLINE_MODEL"):
+        cline_updates["model"] = cline_model
+    if cline_provider := environment.get("DEVELOPMENT_BRIDGE_CLINE_PROVIDER"):
+        cline_updates["provider"] = cline_provider
+    if cline_executable := environment.get("DEVELOPMENT_BRIDGE_CLINE_EXECUTABLE"):
+        cline_updates["executable"] = cline_executable
+    if cline_config_directory := environment.get("DEVELOPMENT_BRIDGE_CLINE_CONFIG_DIRECTORY"):
+        cline_updates["config_directory"] = cline_config_directory
+
+    if cline_updates:
+        current_cline = settings.executors.cline
+        full_cline = {**current_cline.model_dump(), **cline_updates}
+        cline = ClineExecutorSettings.model_validate(full_cline)
+        executors = settings.executors.model_copy(update={"cline": cline})
         environment_updates["executors"] = executors
 
     if environment_updates:

@@ -6,6 +6,24 @@ from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
 from app.container import ApplicationContainer
 from app.executors import ExecutorName, ExecutorRequest, TaskKind
+from app.settings import (
+    AntigravityExecutorSettings,
+    ClineExecutorSettings,
+    OpenRouterExecutorSettings,
+)
+
+_MODEL_EXECUTORS = (ExecutorName.OPENROUTER, ExecutorName.CLINE)
+
+
+def _configured_settings(
+    container: ApplicationContainer, executor_name: ExecutorName | None
+) -> AntigravityExecutorSettings | OpenRouterExecutorSettings | ClineExecutorSettings:
+    executors = container.settings.executors
+    if executor_name is ExecutorName.OPENROUTER:
+        return executors.openrouter
+    if executor_name is ExecutorName.CLINE:
+        return executors.cline
+    return executors.antigravity
 
 
 def executor_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
@@ -19,16 +37,12 @@ def executor_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...
     async def executor_start(ctx, params, request_context):
         arguments = params.arguments
         executor_name = ExecutorName(arguments["executor"]) if arguments.get("executor") else None
-        configured = (
-            container.settings.executors.openrouter
-            if executor_name is ExecutorName.OPENROUTER
-            else container.settings.executors.antigravity
-        )
+        configured = _configured_settings(container, executor_name)
         model = arguments.get("model")
-        if model is not None and executor_name is not ExecutorName.OPENROUTER:
+        if model is not None and executor_name not in _MODEL_EXECUTORS:
             raise BridgeError(
                 ErrorCode.INVALID_ARGUMENT,
-                "model parameter is only supported for the openrouter executor",
+                "model parameter is only supported for the openrouter and cline executors",
             )
         request = ExecutorRequest(
             task=arguments["task"], task_kind=TaskKind(arguments["task_kind"]),
@@ -54,7 +68,7 @@ def executor_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...
             inputSchema={"type": "object", "properties": {**base,
                 "task": {"type": "string", "minLength": 1, "maxLength": 65536},
                 "task_kind": {"type": "string", "enum": ["implementation", "review", "other"]},
-                "executor": {"type": "string", "enum": ["codex", "antigravity", "openrouter"]},
+                "executor": {"type": "string", "enum": ["codex", "antigravity", "openrouter", "cline"]},
                 "model": {"type": "string", "minLength": 1, "maxLength": 128},
                 "worktree_branch": {"type": "string", "minLength": 1, "maxLength": 1024},
                 "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},

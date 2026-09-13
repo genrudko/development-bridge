@@ -9,6 +9,8 @@ from app.executors.models import (
     normalize_quota,
 )
 from app.executors.antigravity import AntigravityExecutor, AsyncioProcessRunner, ProcessResult, ProcessRunner
+from app.executors.cline import ClineExecutor
+from app.executors.cline_auth import load_configured_providers, local_auth_configured
 from app.executors.codex import CodexExecutor
 from app.executors.openrouter import OpenRouterExecutor
 from app.executors.selector import ExecutorSelector
@@ -28,6 +30,9 @@ __all__ = [
     "ProcessResult",
     "ProcessRunner",
     "CodexExecutor",
+    "ClineExecutor",
+    "load_configured_providers",
+    "local_auth_configured",
     "OpenRouterExecutor",
     "ExecutorSelector",
     "ExecutorService",

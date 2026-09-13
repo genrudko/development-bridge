@@ -19,6 +19,16 @@ jobs:
 #     model: gemini-3.1-pro
 #     quota_cache_path: ~/.local/state/development-bridge/antigravity-quota.json
 #     quota_cache_max_age_seconds: 120
+# Explicit-only Cline CLI executor. Disabled by default; never auto-selected.
+#   cline:
+#     enabled: false
+#     executable: ~/.local/bin/cline
+#     provider: cline-pass
+#     model: cline-pass/deepseek-v4-flash
+#     config_directory: ~/.cline
+#     probe_timeout_seconds: 20
+#     task_timeout_seconds: 900
+#     output_limit_bytes: 262144
 # desktop_nodes:
 #   offline_after_seconds: 45
 #   claim_timeout_seconds: 25

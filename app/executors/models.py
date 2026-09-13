@@ -10,6 +10,7 @@ class ExecutorName(StrEnum):
     CODEX = "codex"
     ANTIGRAVITY = "antigravity"
     OPENROUTER = "openrouter"
+    CLINE = "cline"
 
 
 class QuotaState(StrEnum):

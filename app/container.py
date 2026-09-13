@@ -28,6 +28,7 @@ from app.desktop_nodes import DesktopNodeService
 from app.executors import (
     AntigravityExecutor,
     AsyncioProcessRunner,
+    ClineExecutor,
     ExecutorSelector,
     ExecutorService,
     OpenRouterExecutor,
@@ -288,6 +289,7 @@ def build_container(
         AntigravityExecutor(configured.executors.antigravity, AsyncioProcessRunner()),
         ExecutorSelector(),
         openrouter=OpenRouterExecutor(configured.executors.openrouter),
+        cline=ClineExecutor(configured.executors.cline, AsyncioProcessRunner()),
     )
     job_artifact_exports = JobArtifactExportService(
         jobs,

@@ -14,7 +14,7 @@ def test_executor_tools_have_exact_closed_schemas():
     props = start["properties"]
     assert props["task"]["maxLength"] == 65536
     assert props["task_kind"]["enum"] == ["implementation", "review", "other"]
-    assert props["executor"]["enum"] == ["codex", "antigravity", "openrouter"]
+    assert props["executor"]["enum"] == ["codex", "antigravity", "openrouter", "cline"]
     assert props["model"]["type"] == "string" and props["model"]["maxLength"] == 128
     assert props["worktree_branch"]["type"] == "string" and props["worktree_branch"]["maxLength"] == 1024
     assert "worktree_path" not in props

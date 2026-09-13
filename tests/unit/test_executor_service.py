@@ -42,11 +42,20 @@ def repository(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_status_uses_repository_busy_and_returns_three_executors(repository):
+async def test_status_uses_repository_busy_and_returns_four_executors(repository):
     jobs, antigravity = Jobs(True), Antigravity(status())
-    result = await ExecutorService(jobs, antigravity, ExecutorSelector()).status(repository)
+    cline = FakeCline()
+    result = await ExecutorService(
+        jobs, antigravity, ExecutorSelector(), cline=cline
+    ).status(repository)
     assert antigravity.probes == [True]
-    assert [item["executor"] for item in result["executors"]] == ["codex", "antigravity", "openrouter"]
+    assert cline.probes == [True]
+    assert [item["executor"] for item in result["executors"]] == [
+        "codex",
+        "antigravity",
+        "openrouter",
+        "cline",
+    ]
 
 
 @pytest.mark.asyncio
@@ -229,9 +238,9 @@ async def test_model_on_non_openrouter_rejected(repository):
         model="qwen/qwen3-coder-next",
     )
     with pytest.raises(BridgeError) as exc_info:
-        await ExecutorService(jobs, antigravity, ExecutorSelector(), openrouter=openrouter).start(
-            repository, req, "req_1"
-        )
+        await ExecutorService(
+            jobs, antigravity, ExecutorSelector(), openrouter=openrouter
+        ).start(repository, req, "req_1")
     assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
 
 
@@ -297,3 +306,142 @@ async def test_openrouter_worktree_selector_launches_from_selected_root_but_queu
     assert args[0] is repository
     assert kwargs["execution_root"] == linked
     assert kwargs["worktree_branch"] == "feature/linked"
+class FakeCline:
+    def __init__(self, available=True, authenticated=True, last_error=None):
+        self.available = available
+        self.authenticated = authenticated
+        self.last_error = last_error
+        self.probes = []
+        self.launch_roots = []
+
+    async def probe(self, *, busy):
+        self.probes.append(busy)
+        return ExecutorStatus(
+            ExecutorName.CLINE,
+            self.available,
+            self.authenticated,
+            busy,
+            "cline-pass/deepseek-v4-flash",
+            QuotaState.UNKNOWN,
+            None,
+            None,
+            self.last_error,
+            None,
+            "3.0.61",
+        )
+
+    def launch(self, repository, request, status):
+        self.launch_roots.append(repository.root)
+        if not status.available or not status.authenticated:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION, "blocked", details={"reason": status.last_error}
+            )
+        model = request.model or "cline-pass/deepseek-v4-flash"
+        return ExecutorLaunch(
+            "python3",
+            ("cline_worker.py", "--model", model),
+            "prompt",
+            ("HOME", "SSH_CONNECTION"),
+            ExecutorName.CLINE,
+            model,
+            QuotaState.UNKNOWN,
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_cline_submits_durable_execution_and_persists_model(repository):
+    jobs = Jobs()
+    antigravity = Antigravity(status())
+    cline = FakeCline()
+    req = ExecutorRequest(
+        "task",
+        TaskKind.IMPLEMENTATION,
+        ExecutorName.CLINE,
+        100,
+        2048,
+        "same",
+        model="anthropic/claude-sonnet-4",
+    )
+    job = await ExecutorService(
+        jobs, antigravity, ExecutorSelector(), cline=cline
+    ).start(repository, req, "req_1")
+    assert job.job_id == "job_1"
+    assert len(jobs.calls) == 1
+    kwargs = jobs.calls[0][1]
+    assert kwargs["executor"] == "cline"
+    assert kwargs["executor_model"] == "anthropic/claude-sonnet-4"
+    assert kwargs["executor_quota_state"] == "unknown"
+    assert kwargs["require_repository_idle"] is False
+    assert cline.launch_roots == [repository.root]
+
+
+@pytest.mark.asyncio
+async def test_cline_default_model_when_no_override(repository):
+    jobs = Jobs()
+    antigravity = Antigravity(status())
+    cline = FakeCline()
+    req = ExecutorRequest(
+        "task", TaskKind.IMPLEMENTATION, ExecutorName.CLINE, 100, 2048, "same"
+    )
+    await ExecutorService(jobs, antigravity, ExecutorSelector(), cline=cline).start(
+        repository, req, "req_1"
+    )
+    assert jobs.calls[0][1]["executor_model"] == "cline-pass/deepseek-v4-flash"
+
+
+@pytest.mark.asyncio
+async def test_cline_auth_blocked_fails_closed_without_job(repository):
+    jobs = Jobs()
+    antigravity = Antigravity(status())
+    cline = FakeCline(authenticated=False, last_error="auth_required")
+    req = ExecutorRequest(
+        "task", TaskKind.IMPLEMENTATION, ExecutorName.CLINE, 100, 2048, "same"
+    )
+    with pytest.raises(BridgeError) as exc_info:
+        await ExecutorService(jobs, antigravity, ExecutorSelector(), cline=cline).start(
+            repository, req, "req_1"
+        )
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+    assert exc_info.value.details.get("reason") == "auth_required"
+    assert jobs.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cline_worktree_selector_launches_from_selected_root(repository, monkeypatch):
+    jobs = Jobs()
+    antigravity = Antigravity(status())
+    cline = FakeCline()
+    linked = repository.root / "linked"
+    linked.mkdir()
+
+    async def resolve(repo, branch):
+        assert repo is repository
+        assert branch == "feature/linked"
+        return linked
+
+    monkeypatch.setattr("app.executors.service.resolve_repository_worktree", resolve)
+    req = ExecutorRequest(
+        "task", TaskKind.IMPLEMENTATION, ExecutorName.CLINE, 100, 2048, "same",
+        worktree_branch="feature/linked",
+    )
+    await ExecutorService(jobs, antigravity, ExecutorSelector(), cline=cline).start(
+        repository, req, "req_1"
+    )
+    assert cline.launch_roots == [linked]
+    args, kwargs = jobs.calls[0]
+    assert args[0] is repository
+    assert kwargs["execution_root"] == linked
+    assert kwargs["worktree_branch"] == "feature/linked"
+
+
+@pytest.mark.asyncio
+async def test_cline_is_never_selected_automatically(repository):
+    jobs = Jobs()
+    antigravity = Antigravity(status(quota=QuotaState.UNKNOWN))
+    cline = FakeCline()
+    req = ExecutorRequest("task", TaskKind.IMPLEMENTATION, None, 100, 2048, "same")
+    await ExecutorService(jobs, antigravity, ExecutorSelector(), cline=cline).start(
+        repository, req, "req_1"
+    )
+    assert jobs.calls[0][1]["executor"] in {"codex", "antigravity"}
+    assert cline.probes == []

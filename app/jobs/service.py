@@ -1065,7 +1065,7 @@ class JobService:
 
     @staticmethod
     def _executor_result_failure(job: JobRecord) -> str | None:
-        if job.executor not in {"antigravity", "openrouter"}:
+        if job.executor not in {"antigravity", "openrouter", "cline"}:
             return None
         if job.executor == "antigravity":
             diagnostic = job.stderr[:16_384].decode("utf-8", errors="replace").lower()
