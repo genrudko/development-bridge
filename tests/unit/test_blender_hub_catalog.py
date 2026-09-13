@@ -197,3 +197,106 @@ async def test_listed_metadata_mutation_cannot_relax_snapshotted_classification(
     assert not second_started.is_set()
     release_first.set()
     await asyncio.gather(first_call, second_call)
+
+
+def test_registration_deep_snapshots_all_descriptor_evidence():
+    metadata = {"readOnlyHint": True, "nested": {"source": "upstream"}}
+    input_schema = {
+        "type": "object",
+        "properties": {"mesh": {"type": "string"}},
+    }
+    output_schema = {"type": "object", "required": ["vertices"]}
+    publication_metadata = {
+        "icons": [{"src": "mesh.png"}],
+        "_meta": {"category": "geometry"},
+    }
+    catalog = NamespacedToolCatalog()
+    catalog.register_provider(
+        "research-main",
+        "research",
+        [
+            ProviderTool(
+                "inspect",
+                _return_provider,
+                metadata,
+                title="Inspect Mesh",
+                description="Returns mesh facts",
+                input_schema=input_schema,
+                output_schema=output_schema,
+                publication_metadata=publication_metadata,
+            )
+        ],
+    )
+
+    metadata["readOnlyHint"] = False
+    metadata["nested"]["source"] = "changed"
+    input_schema["properties"]["mesh"]["type"] = "integer"
+    output_schema["required"].append("faces")
+    publication_metadata["icons"][0]["src"] = "changed.png"
+    publication_metadata["_meta"]["category"] = "changed"
+
+    listed = catalog.list_tools()[0]
+    assert listed.title == "Inspect Mesh"
+    assert listed.description == "Returns mesh facts"
+    assert listed.metadata == {
+        "readOnlyHint": True,
+        "nested": {"source": "upstream"},
+    }
+    assert listed.input_schema == {
+        "type": "object",
+        "properties": {"mesh": {"type": "string"}},
+    }
+    assert listed.output_schema == {"type": "object", "required": ["vertices"]}
+    assert listed.publication_metadata == {
+        "icons": [{"src": "mesh.png"}],
+        "_meta": {"category": "geometry"},
+    }
+    assert listed.mutating is False
+
+
+def test_list_tools_returns_defensive_descriptor_snapshots():
+    catalog = NamespacedToolCatalog()
+    catalog.register_provider(
+        "research-main",
+        "research",
+        [
+            ProviderTool(
+                "inspect",
+                _return_provider,
+                {"readOnlyHint": True},
+                input_schema={"required": ["mesh"]},
+                output_schema={"properties": {"vertices": {"type": "integer"}}},
+                publication_metadata={"icons": [{"src": "mesh.png"}]},
+            )
+        ],
+    )
+
+    listed = catalog.list_tools()[0]
+    listed.metadata["readOnlyHint"] = False
+    listed.input_schema["required"][0] = "changed"
+    listed.output_schema["properties"]["vertices"]["type"] = "string"
+    listed.publication_metadata["icons"][0]["src"] = "changed.png"
+
+    fresh = catalog.list_tools()[0]
+    assert fresh.handler is _return_provider
+    assert fresh.metadata == {"readOnlyHint": True}
+    assert fresh.input_schema == {"required": ["mesh"]}
+    assert fresh.output_schema == {
+        "properties": {"vertices": {"type": "integer"}}
+    }
+    assert fresh.publication_metadata == {"icons": [{"src": "mesh.png"}]}
+    assert fresh.mutating is False
+
+
+def test_registration_rejects_json_invalid_descriptor_evidence_atomically():
+    catalog = NamespacedToolCatalog()
+    catalog.register_provider("good", "good", [tool("existing")])
+
+    with pytest.raises(TypeError):
+        catalog.register_provider(
+            "good",
+            "replacement",
+            [ProviderTool("invalid", _return_provider, input_schema={"x": object()})],
+        )
+
+    assert [item.qualified_name for item in catalog.list_tools()] == ["good.existing"]
