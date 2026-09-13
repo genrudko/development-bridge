@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import math
+import os
 import re
+from contextlib import AsyncExitStack
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeAlias
+from typing import Protocol, TypeAlias
 from urllib.parse import urlsplit
+
+import httpx2
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z", re.ASCII)
 _ENVIRONMENT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z", re.ASCII)
@@ -232,3 +240,211 @@ class UpstreamTool:
             "publication_metadata",
             immutable_json_mapping(self.publication_metadata),
         )
+
+
+class ProviderSession(Protocol):
+    async def initialize(self) -> None: ...
+
+    async def list_tools(self) -> tuple[UpstreamTool, ...]: ...
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, object]
+    ) -> object: ...
+
+    async def close(self) -> None: ...
+
+
+class ProviderConnector(Protocol):
+    async def connect(self, config: ProviderConfig) -> ProviderSession: ...
+
+
+class ProviderSessionFailure(Exception):
+    def __init__(self, provider_id: str, phase: str, exception_type: str) -> None:
+        self.provider_id = provider_id
+        self.phase = phase
+        self.exception_type = exception_type
+        super().__init__(f"provider {provider_id} failed during {phase} ({exception_type})")
+
+
+class ProviderConnectionError(ProviderSessionFailure):
+    def __init__(
+        self, provider_id: str, phase: str = "connect", exception_type: str = "Exception"
+    ) -> None:
+        super().__init__(provider_id, phase, exception_type)
+
+
+@dataclass(frozen=True, slots=True)
+class _CleanupIssue:
+    exception_type: str
+    phase: str
+
+
+async def _cleanup_once(stack: AsyncExitStack, phase: str) -> _CleanupIssue | None:
+    try:
+        await stack.aclose()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        exception_type = type(exc).__name__
+    else:
+        return None
+    return _CleanupIssue(exception_type, phase)
+
+
+def _convert_tool(tool: object) -> UpstreamTool:
+    dumped = tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+    annotations_model = getattr(tool, "annotations", None)
+    annotations = (
+        annotations_model.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if annotations_model is not None
+        else {}
+    )
+    publication = {
+        key: dumped[key] for key in ("execution", "icons", "_meta") if key in dumped
+    }
+    return UpstreamTool(
+        name=dumped["name"],
+        title=dumped.get("title"),
+        description=dumped.get("description"),
+        input_schema=dumped["inputSchema"],
+        output_schema=dumped.get("outputSchema"),
+        annotations=annotations,
+        publication_metadata=publication,
+    )
+
+
+class _McpProviderSession:
+    def __init__(
+        self,
+        provider_id: str,
+        read_timeout_seconds: float | None,
+        stack: AsyncExitStack,
+        session: ClientSession,
+    ) -> None:
+        self._provider_id = provider_id
+        self._read_timeout_seconds = read_timeout_seconds
+        self._stack: AsyncExitStack | None = stack
+        self._session = session
+
+    async def initialize(self) -> None:
+        failure_type: str | None = None
+        try:
+            await self._session.initialize()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure_type = type(exc).__name__
+        if failure_type is not None:
+            raise ProviderSessionFailure(
+                self._provider_id, "initialize", failure_type
+            ) from None
+
+    async def list_tools(self) -> tuple[UpstreamTool, ...]:
+        failure_type: str | None = None
+        result = None
+        try:
+            result = await self._session.list_tools()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure_type = type(exc).__name__
+        if failure_type is not None:
+            raise ProviderSessionFailure(self._provider_id, "list", failure_type) from None
+        assert result is not None
+        return tuple(_convert_tool(tool) for tool in result.tools)
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, object]
+    ) -> object:
+        failure_type: str | None = None
+        result = None
+        try:
+            result = await self._session.call_tool(
+                name,
+                arguments,
+                read_timeout_seconds=self._read_timeout_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure_type = type(exc).__name__
+        if failure_type is not None:
+            raise ProviderSessionFailure(self._provider_id, "call", failure_type) from None
+        assert result is not None
+        return result.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    async def close(self) -> None:
+        stack, self._stack = self._stack, None
+        if stack is None:
+            return
+        issue = await _cleanup_once(stack, "close")
+        if issue is not None:
+            raise ProviderSessionFailure(
+                self._provider_id, issue.phase, issue.exception_type
+            ) from None
+
+
+async def _finish_connection(
+    config: ProviderConfig,
+    stack: AsyncExitStack,
+    enter_transport: object,
+) -> ProviderSession:
+    failure_type: str | None = None
+    try:
+        read_stream, write_stream = await stack.enter_async_context(enter_transport)
+        session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+    except asyncio.CancelledError:
+        await _cleanup_once(stack, "connect")
+        raise
+    except Exception as exc:
+        failure_type = type(exc).__name__
+    if failure_type is not None:
+        await _cleanup_once(stack, "connect")
+        raise ProviderConnectionError(
+            config.provider_id, exception_type=failure_type
+        ) from None
+    return _McpProviderSession(
+        config.provider_id, config.read_timeout_seconds, stack, session
+    )
+
+
+class StreamableHttpProvider:
+    async def connect(self, config: HttpProviderConfig) -> ProviderSession:
+        if not isinstance(config, HttpProviderConfig):
+            raise TypeError("config must be an HttpProviderConfig")
+        stack = AsyncExitStack()
+        failure_type: str | None = None
+        try:
+            client = await stack.enter_async_context(
+                httpx2.AsyncClient(
+                    follow_redirects=False,
+                    trust_env=False,
+                    timeout=httpx2.Timeout(connect=30, read=300, write=30, pool=30),
+                )
+            )
+        except asyncio.CancelledError:
+            await _cleanup_once(stack, "connect")
+            raise
+        except Exception as exc:
+            failure_type = type(exc).__name__
+        if failure_type is not None:
+            await _cleanup_once(stack, "connect")
+            raise ProviderConnectionError(
+                config.provider_id, exception_type=failure_type
+            ) from None
+        transport = streamable_http_client(config.url, http_client=client)
+        return await _finish_connection(config, stack, transport)
+
+
+class StdioProvider:
+    async def connect(self, config: StdioProviderConfig) -> ProviderSession:
+        if not isinstance(config, StdioProviderConfig):
+            raise TypeError("config must be a StdioProviderConfig")
+        stack = AsyncExitStack()
+        parameters = StdioServerParameters(
+            command=config.argv[0],
+            args=list(config.argv[1:]),
+            cwd=config.cwd,
+            env=build_stdio_environment(config, os.environ),
+        )
+        return await _finish_connection(config, stack, stdio_client(parameters))
