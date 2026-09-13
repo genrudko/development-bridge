@@ -29,11 +29,21 @@ class _PendingPrompt:
     future: asyncio.Future[Any]
 
 
+@dataclass(slots=True)
+class _TransitionRequest:
+    completed: Event
+    active: bool = True
+    won: bool = False
+
+
 class OperatorBroker:
     """Coordinate same-turn operator prompts across async and UI threads."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, transition_ack_timeout: float = 2.0) -> None:
+        if transition_ack_timeout <= 0:
+            raise ValueError("transition_ack_timeout must be positive")
         self._lock = RLock()
+        self._transition_ack_timeout = transition_ack_timeout
         self._pending: dict[str, _PendingPrompt] = {}
         self._notifications: list[OperatorNotification] = []
 
@@ -70,21 +80,22 @@ class OperatorBroker:
     def _transition(
         self, pending: _PendingPrompt, transition: Callable[[], object]
     ) -> bool:
-        result: list[bool] = []
-        completed = Event()
+        request = _TransitionRequest(completed=Event())
 
         def complete() -> None:
             with self._lock:
                 current = self._pending.get(pending.prompt.operation_id)
-                if current is not pending or pending.future.done():
-                    won = False
-                else:
+                if not request.active:
+                    return
+                request.active = False
+                if current is pending and not pending.future.done():
                     transition()
-                    won = True
+                    request.won = True
+                else:
+                    request.won = False
                 if self._pending.get(pending.prompt.operation_id) is pending:
                     self._pending.pop(pending.prompt.operation_id, None)
-            result.append(won)
-            completed.set()
+                request.completed.set()
 
         try:
             running_loop = asyncio.get_running_loop()
@@ -92,10 +103,33 @@ class OperatorBroker:
             running_loop = None
         if running_loop is pending.loop:
             complete()
-        else:
-            pending.loop.call_soon_threadsafe(complete)
-            completed.wait()
-        return result[0]
+            return request.won
+
+        with self._lock:
+            if self._pending.get(pending.prompt.operation_id) is not pending:
+                return False
+            if pending.loop.is_closed() or not pending.loop.is_running():
+                self._pending.pop(pending.prompt.operation_id, None)
+                request.active = False
+                return False
+            try:
+                pending.loop.call_soon_threadsafe(complete)
+            except RuntimeError:
+                request.active = False
+                if self._pending.get(pending.prompt.operation_id) is pending:
+                    self._pending.pop(pending.prompt.operation_id, None)
+                return False
+
+        if request.completed.wait(self._transition_ack_timeout):
+            return request.won
+
+        with self._lock:
+            if request.active:
+                request.active = False
+                if self._pending.get(pending.prompt.operation_id) is pending:
+                    self._pending.pop(pending.prompt.operation_id, None)
+                return False
+            return request.won
 
     def notify(self, notification: OperatorNotification) -> None:
         with self._lock:
