@@ -37,6 +37,7 @@ class CatalogTool:
     name: str
     handler: ToolHandler
     metadata: object
+    mutating: bool
 
     @property
     def qualified_name(self) -> str:
@@ -96,6 +97,7 @@ class NamespacedToolCatalog:
                 name=item.name,
                 handler=item.handler,
                 metadata=item.metadata,
+                mutating=is_mutating(item.metadata),
             )
             self._tools[entry.qualified_name] = entry
         self._statuses[provider_id] = ProviderStatus(
@@ -128,7 +130,7 @@ class NamespacedToolCatalog:
             raise ProviderUnavailable(
                 f"provider '{tool.provider_id}' is offline: {status.error or 'unknown error'}"
             )
-        if not is_mutating(tool.metadata):
+        if not tool.mutating:
             return await tool.handler(arguments)
         async with self._mutation_lock:
             return await tool.handler(arguments)

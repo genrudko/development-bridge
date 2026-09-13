@@ -35,6 +35,7 @@
 - [x] Implement fail-closed `is_mutating`; run GREEN.
 - [x] Write concurrency tests proving reads overlap and writes/unknown calls do not; run RED.
 - [x] Add one catalog-wide `asyncio.Lock` around mutating invocation; run GREEN.
+- [x] Snapshot fail-closed mutation classification at registration while retaining upstream metadata; prove later caller/listing mutation cannot alter locking.
 
 ### Task 2: Same-turn operator broker
 
@@ -49,6 +50,7 @@
 - [x] Implement loop-owned futures with thread-safe completion; run GREEN.
 - [x] Write timeout, cancellation, stale-answer, and nonblocking notification tests; run RED.
 - [x] Implement cleanup on every terminal path and immediate notification recording; run GREEN.
+- [x] Keep operation IDs reserved through the loop-owned terminal transition and make cross-thread answer/cancel acknowledgements report which transition won.
 
 ### Task 3: Replay-safe generic transport helper
 
@@ -63,6 +65,7 @@
 - [x] Implement the mutation branch; run GREEN.
 - [x] Write idempotent-read single-retry and non-idempotent-read no-retry tests; run RED.
 - [x] Implement the bounded reconnect/retry policy; run GREEN.
+- [x] Separate reconnect from replay accounting so attempts count only dispatches actually made.
 
 ### Task 4: Adversarial verification and milestone commit
 

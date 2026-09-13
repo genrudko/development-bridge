@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from threading import RLock
+from threading import Event, RLock
 from typing import Any
 
 
@@ -54,24 +54,48 @@ class OperatorBroker:
 
     def submit_answer(self, operation_id: str, answer: object) -> bool:
         with self._lock:
-            pending = self._pending.pop(operation_id, None)
+            pending = self._pending.get(operation_id)
         if pending is None:
             return False
 
-        def complete() -> None:
-            if not pending.future.done():
-                pending.future.set_result(answer)
-
-        pending.loop.call_soon_threadsafe(complete)
-        return True
+        return self._transition(pending, lambda: pending.future.set_result(answer))
 
     def cancel(self, operation_id: str) -> bool:
         with self._lock:
-            pending = self._pending.pop(operation_id, None)
+            pending = self._pending.get(operation_id)
         if pending is None:
             return False
-        pending.loop.call_soon_threadsafe(pending.future.cancel)
-        return True
+        return self._transition(pending, pending.future.cancel)
+
+    def _transition(
+        self, pending: _PendingPrompt, transition: Callable[[], object]
+    ) -> bool:
+        result: list[bool] = []
+        completed = Event()
+
+        def complete() -> None:
+            with self._lock:
+                current = self._pending.get(pending.prompt.operation_id)
+                if current is not pending or pending.future.done():
+                    won = False
+                else:
+                    transition()
+                    won = True
+                if self._pending.get(pending.prompt.operation_id) is pending:
+                    self._pending.pop(pending.prompt.operation_id, None)
+            result.append(won)
+            completed.set()
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is pending.loop:
+            complete()
+        else:
+            pending.loop.call_soon_threadsafe(complete)
+            completed.wait()
+        return result[0]
 
     def notify(self, notification: OperatorNotification) -> None:
         with self._lock:

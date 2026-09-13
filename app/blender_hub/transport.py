@@ -61,6 +61,14 @@ async def dispatch_with_replay_policy(
 
     try:
         await reconnect()
+    except TransportFailure as exc:
+        return TransportResult(
+            outcome=TransportOutcome.FAILED,
+            error=str(exc),
+            attempts=1,
+            reconnects=1,
+        )
+    try:
         value = await dispatch()
     except TransportFailure as exc:
         return TransportResult(

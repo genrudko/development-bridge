@@ -136,3 +136,64 @@ async def test_mutating_and_unknown_tools_share_one_global_lock():
     assert not second_started.is_set()
     release_first.set()
     assert await asyncio.gather(first_call, second_call) == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_registration_snapshots_classification_from_caller_metadata():
+    catalog = NamespacedToolCatalog()
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    read_started = asyncio.Event()
+
+    async def write(_arguments: dict[str, object]) -> None:
+        write_started.set()
+        await release_write.wait()
+
+    async def read(_arguments: dict[str, object]) -> None:
+        read_started.set()
+
+    read_metadata = {"readOnlyHint": True, "title": "Scene reader"}
+    catalog.register_provider("dcc-main", "dcc", [ProviderTool("write", write)])
+    catalog.register_provider(
+        "research-main", "research", [ProviderTool("read", read, read_metadata)]
+    )
+    read_metadata["readOnlyHint"] = False
+
+    write_call = asyncio.create_task(catalog.invoke("dcc.write", {}))
+    await write_started.wait()
+    read_call = asyncio.create_task(catalog.invoke("research.read", {}))
+    await asyncio.wait_for(read_started.wait(), timeout=0.5)
+    release_write.set()
+    await asyncio.gather(write_call, read_call)
+
+    assert catalog.list_tools()[1].metadata["title"] == "Scene reader"
+
+
+@pytest.mark.asyncio
+async def test_listed_metadata_mutation_cannot_relax_snapshotted_classification():
+    catalog = NamespacedToolCatalog()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def first(_arguments: dict[str, object]) -> None:
+        first_started.set()
+        await release_first.wait()
+
+    async def second(_arguments: dict[str, object]) -> None:
+        second_started.set()
+
+    catalog.register_provider("dcc-main", "dcc", [ProviderTool("first", first)])
+    catalog.register_provider("orca-main", "orca", [ProviderTool("second", second, {})])
+    listed_metadata = next(
+        item.metadata for item in catalog.list_tools() if item.qualified_name == "orca.second"
+    )
+    listed_metadata["readOnlyHint"] = True
+
+    first_call = asyncio.create_task(catalog.invoke("dcc.first", {}))
+    await first_started.wait()
+    second_call = asyncio.create_task(catalog.invoke("orca.second", {}))
+    await asyncio.sleep(0)
+    assert not second_started.is_set()
+    release_first.set()
+    await asyncio.gather(first_call, second_call)

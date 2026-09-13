@@ -81,6 +81,31 @@ async def test_idempotent_read_stops_after_one_failed_retry():
 
 
 @pytest.mark.asyncio
+async def test_idempotent_read_reconnect_failure_does_not_count_a_replay():
+    attempts = 0
+    reconnects = 0
+
+    async def dispatch():
+        nonlocal attempts
+        attempts += 1
+        raise TransportFailure("initial drop")
+
+    async def reconnect():
+        nonlocal reconnects
+        reconnects += 1
+        raise TransportFailure("reconnect failed")
+
+    result = await dispatch_with_replay_policy(
+        CallKind.IDEMPOTENT_READ, dispatch, reconnect
+    )
+
+    assert result.outcome is TransportOutcome.FAILED
+    assert result.error == "reconnect failed"
+    assert result.attempts == attempts == 1
+    assert result.reconnects == reconnects == 1
+
+
+@pytest.mark.asyncio
 async def test_non_idempotent_read_transport_loss_is_not_replayed():
     attempts = 0
     reconnects = 0
