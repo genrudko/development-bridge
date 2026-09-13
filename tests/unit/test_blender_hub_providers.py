@@ -5,6 +5,7 @@ import inspect
 import math
 import os
 import traceback
+from collections.abc import Iterator, Mapping
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -351,6 +352,46 @@ async def test_stdio_connector_revalidates_snapshot_before_side_effects(
     object.__setattr__(config, field, value)
 
     with pytest.raises((TypeError, ValueError)):
+        await providers.StdioProvider().connect(config)
+
+    assert touched == []
+
+
+@pytest.mark.asyncio
+async def test_stdio_connector_materializes_env_once_before_revalidation(monkeypatch):
+    touched: list[str] = []
+
+    class HostileEnvironment(Mapping[str, str]):
+        def __iter__(self) -> Iterator[str]:
+            return iter(("BAD-KEY",))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> str:
+            assert key == "BAD-KEY"
+            return "untrusted"
+
+        def items(self):
+            return {"SAFE": "validated"}.items()
+
+    def forbidden(label: str):
+        def fail(*_args: object, **_kwargs: object):
+            touched.append(label)
+            pytest.fail(f"{label} touched before stable env revalidation")
+
+        return fail
+
+    monkeypatch.setattr(providers, "build_stdio_environment", forbidden("environment"))
+    monkeypatch.setattr(providers, "StdioServerParameters", forbidden("parameters"))
+    monkeypatch.setattr(providers, "stdio_client", forbidden("stdio"))
+    monkeypatch.setattr(providers, "ClientSession", forbidden("session"))
+    config = StdioProviderConfig(
+        "stdio-local", "stdio", ProviderKind.ORCA, ("provider",), env={"SAFE": "yes"}
+    )
+    object.__setattr__(config, "env", HostileEnvironment())
+
+    with pytest.raises(ValueError, match="invalid environment key"):
         await providers.StdioProvider().connect(config)
 
     assert touched == []

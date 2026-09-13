@@ -159,13 +159,14 @@ def _http_config_snapshot(config: HttpProviderConfig) -> HttpProviderConfig:
 
 
 def _stdio_config_snapshot(config: StdioProviderConfig) -> StdioProviderConfig:
+    env_snapshot = dict(config.env)
     return StdioProviderConfig(
         provider_id=config.provider_id,
         namespace=config.namespace,
         kind=config.kind,
         argv=config.argv,
         cwd=config.cwd,
-        env=config.env,
+        env=env_snapshot,
         read_timeout_seconds=config.read_timeout_seconds,
     )
 
