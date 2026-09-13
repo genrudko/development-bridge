@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import app.blender_hub.providers as providers_module
+import app.blender_hub.supervisor as supervisor_module
 from app.blender_hub.catalog import NamespacedToolCatalog, ProviderState
 from app.blender_hub.providers import (
     HttpProviderConfig,
@@ -78,12 +82,49 @@ class FakeSession:
             raise self.close_error
 
 
+class ConversionFailingTool:
+    def __init__(self, conversion_error: BaseException) -> None:
+        self.conversion_error = conversion_error
+
+    def model_dump(self, **_kwargs):
+        raise self.conversion_error
+
+
+class ConversionSdkSession:
+    def __init__(self, conversion_error: BaseException) -> None:
+        self.tool = ConversionFailingTool(conversion_error)
+        self.list_succeeded = 0
+
+    async def initialize(self) -> None:
+        pass
+
+    async def list_tools(self):
+        result = SimpleNamespace(tools=(self.tool,))
+        self.list_succeeded += 1
+        return result
+
+
+class TrackingMcpProviderSession(providers_module._McpProviderSession):
+    def __init__(self, sdk_session: ConversionSdkSession) -> None:
+        super().__init__("research-main", None, AsyncExitStack(), sdk_session)
+        self.closed = 0
+
+    async def close(self) -> None:
+        self.closed += 1
+        await super().close()
+
+
 class QueueConnector:
-    def __init__(self, *outcomes: FakeSession | BaseException):
+    def __init__(
+        self,
+        *outcomes: FakeSession | TrackingMcpProviderSession | BaseException,
+    ):
         self.outcomes = list(outcomes)
         self.configs: list[object] = []
 
-    async def connect(self, config: object) -> FakeSession:
+    async def connect(
+        self, config: object
+    ) -> FakeSession | TrackingMcpProviderSession:
         self.configs.append(config)
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):
@@ -106,6 +147,19 @@ def status(catalog: NamespacedToolCatalog, provider_id: str):
 
 def published(catalog: NamespacedToolCatalog, provider_id: str):
     return tuple(t for t in catalog.list_tools() if t.provider_id == provider_id)
+
+
+def descriptor_evidence(tool):
+    return (
+        tool.name,
+        tool.title,
+        tool.description,
+        tool.input_schema,
+        tool.output_schema,
+        tool.metadata,
+        tool.publication_metadata,
+        tool.mutating,
+    )
 
 
 # Phase 1: destructive replacement lifecycle and provider isolation.
@@ -403,7 +457,11 @@ async def test_missing_prior_name_registration_failure_quarantines_retained_evid
 # Phase 3: bounded DCC surface policy.
 def dcc_tools(*, missing: str | None = None, extra: bool = False):
     names = ["search", "describe", "load_skill", "call"]
-    tools = [upstream(name, marker=f"dcc-{name}") for name in names if name != missing]
+    tools = [
+        upstream(name, read_only=name != "call", marker=f"dcc-{name}")
+        for name in names
+        if name != missing
+    ]
     if extra:
         tools.extend((upstream("scene_dump"), upstream("unsafe_alias")))
     return tuple(tools)
@@ -459,12 +517,20 @@ async def test_incomplete_dcc_refresh_republishes_exact_retained_evidence_unusab
     assert session.closed == 1
     fresh = {tool.name: tool for tool in published(catalog, "dcc-main")}
     assert set(fresh) == set(old)
-    assert fresh["search"].input_schema == old["search"].input_schema
-    assert fresh["search"].metadata == old["search"].metadata
+    assert {
+        name: descriptor_evidence(tool) for name, tool in fresh.items()
+    } == {
+        name: descriptor_evidence(tool) for name, tool in old.items()
+    }
     with pytest.raises(ProviderToolStale):
         await old["search"].handler({})
+    with pytest.raises(ProviderToolStale):
+        await old["call"].handler({})
     with pytest.raises(ProviderSessionUnavailable):
         await fresh["search"].handler({})
+    with pytest.raises(ProviderSessionUnavailable):
+        await fresh["call"].handler({})
+    assert session.calls == []
 
 
 @pytest.mark.asyncio
@@ -711,3 +777,340 @@ async def test_old_close_cancellation_wins_and_no_candidate_is_created():
     assert len(connector.configs) == 1
     assert candidate.closed == 0
     assert published(catalog, "research-main") == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["connect", "reconnect"])
+@pytest.mark.parametrize("stage", ["policy", "publication", "registration"])
+async def test_candidate_late_stage_cancellation_cleans_once_and_never_resurrects_old(
+    monkeypatch, operation: str, stage: str
+):
+    catalog = NamespacedToolCatalog()
+    old = FakeSession((upstream("old"),))
+    candidate = FakeSession((upstream("new"),))
+    connector = QueueConnector(*(old, candidate) if operation == "reconnect" else (candidate,))
+    supervisor = ProviderSupervisor([research_config()], catalog, lambda _c: connector)
+    old_handler = None
+    if operation == "reconnect":
+        await supervisor.connect("research-main")
+        old_handler = published(catalog, "research-main")[0].handler
+
+    cancellation = asyncio.CancelledError()
+    if stage == "policy":
+        monkeypatch.setattr(
+            supervisor_module, "_select_surface", lambda *_args: (_ for _ in ()).throw(cancellation)
+        )
+    elif stage == "publication":
+        monkeypatch.setattr(
+            supervisor, "_build_publication", lambda *_args: (_ for _ in ()).throw(cancellation)
+        )
+    else:
+        original = catalog.register_provider
+
+        def cancel_nonempty(provider_id, namespace, tools):
+            materialized = tuple(tools)
+            if materialized:
+                raise cancellation
+            return original(provider_id, namespace, materialized)
+
+        monkeypatch.setattr(catalog, "register_provider", cancel_nonempty)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await getattr(supervisor, operation)("research-main")
+
+    assert raised.value is cancellation
+    assert candidate.closed == 1
+    assert old.closed == (1 if operation == "reconnect" else 0)
+    assert published(catalog, "research-main") == ()
+    assert status(catalog, "research-main").state is ProviderState.OFFLINE
+    if old_handler is not None:
+        with pytest.raises(ProviderToolStale):
+            await old_handler({})
+        assert old.calls == []
+
+
+@pytest.mark.asyncio
+async def test_primary_candidate_cancellation_survives_sanitized_cleanup_failure():
+    primary = asyncio.CancelledError()
+    candidate = FakeSession(
+        (upstream("lookup"),),
+        list_error=primary,
+        close_error=ProviderSessionFailure("research-main", "close", "CleanupFailure"),
+    )
+    catalog = NamespacedToolCatalog()
+    supervisor = ProviderSupervisor(
+        [research_config()], catalog, lambda _c: QueueConnector(candidate)
+    )
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await supervisor.connect("research-main")
+
+    assert raised.value is primary
+    assert candidate.closed == 1
+    assert published(catalog, "research-main") == ()
+
+
+@pytest.mark.asyncio
+async def test_candidate_cleanup_cancellation_wins_over_primary_cancellation():
+    primary = asyncio.CancelledError()
+    cleanup = asyncio.CancelledError()
+    candidate = FakeSession(
+        (upstream("lookup"),), list_error=primary, close_error=cleanup
+    )
+    catalog = NamespacedToolCatalog()
+    supervisor = ProviderSupervisor(
+        [research_config()], catalog, lambda _c: QueueConnector(candidate)
+    )
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await supervisor.connect("research-main")
+
+    assert raised.value is cleanup
+    assert candidate.closed == 1
+    assert published(catalog, "research-main") == ()
+
+
+@pytest.mark.asyncio
+async def test_registration_returns_before_runtime_commit_without_await_boundary(monkeypatch):
+    catalog = NamespacedToolCatalog()
+    candidate = FakeSession((upstream("lookup"),))
+    supervisor = ProviderSupervisor(
+        [research_config()], catalog, lambda _c: QueueConnector(candidate)
+    )
+    runtime = supervisor._runtimes["research-main"]
+    original = catalog.register_provider
+    observations = []
+
+    def observe_registration(provider_id, namespace, tools):
+        materialized = tuple(tools)
+        result = original(provider_id, namespace, materialized)
+        if materialized:
+            observations.append(
+                (runtime.session, runtime.usable, runtime.selected, runtime.publication_generation)
+            )
+        return result
+
+    monkeypatch.setattr(catalog, "register_provider", observe_registration)
+
+    result = await supervisor.connect("research-main")
+
+    assert observations == [(None, False, (), 1)]
+    assert result.state is ProviderState.ONLINE
+    assert runtime.session is candidate and runtime.usable is True
+    assert tuple(tool.name for tool in runtime.selected) == ("lookup",)
+
+
+@pytest.mark.asyncio
+async def test_queued_mutating_old_handler_becomes_stale_without_reverse_lock_deadlock():
+    catalog = NamespacedToolCatalog()
+    session = FakeSession((upstream("write", read_only=False, marker="v1"),))
+    supervisor = ProviderSupervisor(
+        [research_config()], catalog, lambda _c: QueueConnector(session)
+    )
+    await supervisor.connect("research-main")
+    old = published(catalog, "research-main")[0]
+
+    await catalog._mutation_lock.acquire()
+    queued = asyncio.create_task(catalog.invoke("research.write", {}))
+    await asyncio.sleep(0)
+    session.tools = (upstream("write", read_only=False, marker="v2"),)
+    refreshed = asyncio.create_task(supervisor.refresh("research-main"))
+    await asyncio.wait_for(refreshed, timeout=0.5)
+    catalog._mutation_lock.release()
+
+    with pytest.raises(ProviderToolStale):
+        await asyncio.wait_for(queued, timeout=0.5)
+    assert session.calls == []
+    assert await supervisor.invoke("research.write", {}) == {"ok": True}
+    assert session.calls == [("write", {})]
+    assert old.mutating is True
+
+
+@pytest.mark.asyncio
+async def test_unusable_retained_surface_recovers_only_after_explicit_reconnect():
+    catalog = NamespacedToolCatalog()
+    failed = FakeSession((upstream("lookup"),))
+    recovered = FakeSession((upstream("lookup", marker="recovered"),))
+    connector = QueueConnector(failed, recovered)
+    supervisor = ProviderSupervisor([research_config()], catalog, lambda _c: connector)
+    await supervisor.connect("research-main")
+    failed.list_error = ProviderSessionFailure("research-main", "list", "SdkDown")
+    await supervisor.refresh("research-main")
+
+    with pytest.raises(ProviderSessionUnavailable):
+        await supervisor.invoke("research.lookup", {})
+    assert len(connector.configs) == 1
+
+    assert (await supervisor.reconnect("research-main")).state is ProviderState.ONLINE
+    assert await supervisor.invoke("research.lookup", {}) == {"ok": True}
+    assert recovered.calls == [("lookup", {})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["connect", "reconnect"])
+@pytest.mark.parametrize("outcome", ["cancel", "ordinary"])
+@pytest.mark.parametrize(
+    "stage", ["initialize", "list", "conversion", "policy", "publication", "registration"]
+)
+async def test_every_candidate_stage_exit_is_destructive_owned_and_recoverable(
+    monkeypatch, operation: str, outcome: str, stage: str
+):
+    catalog = NamespacedToolCatalog()
+    primary: BaseException = (
+        asyncio.CancelledError()
+        if outcome == "cancel"
+        else RuntimeError("CANDIDATE_STAGE_SECRET")
+    )
+    old = FakeSession((upstream("old"),))
+    conversion_sdk = ConversionSdkSession(primary) if stage == "conversion" else None
+    candidate = (
+        TrackingMcpProviderSession(conversion_sdk)
+        if conversion_sdk is not None
+        else FakeSession((upstream("new"),))
+    )
+    recovered = FakeSession((upstream("recovered"),))
+    outcomes = (old, candidate, recovered) if operation == "reconnect" else (candidate, recovered)
+    connector = QueueConnector(*outcomes)
+    supervisor = ProviderSupervisor([research_config()], catalog, lambda _c: connector)
+    old_handler = None
+    if operation == "reconnect":
+        await supervisor.connect("research-main")
+        old_handler = published(catalog, "research-main")[0].handler
+    runtime = supervisor._runtimes["research-main"]
+    generation_before = runtime.publication_generation
+
+    if stage == "initialize":
+        candidate.initialize_error = primary
+    elif stage == "list":
+        candidate.list_error = primary
+    elif stage == "policy":
+        monkeypatch.setattr(
+            supervisor_module, "_select_surface", lambda *_args: (_ for _ in ()).throw(primary)
+        )
+    elif stage == "publication":
+        monkeypatch.setattr(
+            supervisor, "_build_publication", lambda *_args: (_ for _ in ()).throw(primary)
+        )
+    else:
+        original = catalog.register_provider
+
+        def reject_nonempty(provider_id, namespace, tools):
+            materialized = tuple(tools)
+            if materialized:
+                raise primary
+            return original(provider_id, namespace, materialized)
+
+        monkeypatch.setattr(catalog, "register_provider", reject_nonempty)
+
+    with pytest.raises(type(primary)) as raised:
+        await getattr(supervisor, operation)("research-main")
+
+    assert raised.value is primary
+    if stage == "conversion":
+        assert conversion_sdk is not None
+        assert conversion_sdk.list_succeeded == 1
+    assert candidate.closed == 1
+    assert old.closed == (1 if operation == "reconnect" else 0)
+    assert runtime.session is None and runtime.usable is False
+    assert runtime.publication_generation == generation_before + 1
+    assert published(catalog, "research-main") == ()
+    current = status(catalog, "research-main")
+    assert current.state is ProviderState.OFFLINE
+    assert "CANDIDATE_STAGE_SECRET" not in (current.error or "")
+    if old_handler is not None:
+        with pytest.raises(ProviderToolStale):
+            await old_handler({})
+        assert old.calls == []
+
+    monkeypatch.undo()
+    recovered_status = await supervisor.reconnect("research-main")
+    assert recovered_status.state is ProviderState.ONLINE
+    assert [tool.name for tool in published(catalog, "research-main")] == ["recovered"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["connect", "reconnect"])
+@pytest.mark.parametrize("stage", ["initialize", "list"])
+async def test_typed_candidate_sdk_failures_cleanup_destructive_transaction(
+    operation: str, stage: str
+):
+    catalog = NamespacedToolCatalog()
+    old = FakeSession((upstream("old"),))
+    failure = ProviderSessionFailure("research-main", stage, "SdkFailure")
+    candidate = FakeSession(
+        (upstream("new"),),
+        **({"initialize_error": failure} if stage == "initialize" else {"list_error": failure}),
+    )
+    recovered = FakeSession((upstream("recovered"),))
+    connector = QueueConnector(
+        *((old, candidate, recovered) if operation == "reconnect" else (candidate, recovered))
+    )
+    supervisor = ProviderSupervisor([research_config()], catalog, lambda _c: connector)
+    if operation == "reconnect":
+        await supervisor.connect("research-main")
+
+    result = await getattr(supervisor, operation)("research-main")
+
+    runtime = supervisor._runtimes["research-main"]
+    assert result.state is ProviderState.OFFLINE
+    assert candidate.closed == 1
+    assert old.closed == (1 if operation == "reconnect" else 0)
+    assert runtime.session is None and runtime.usable is False
+    assert published(catalog, "research-main") == ()
+    assert (await supervisor.reconnect("research-main")).state is ProviderState.ONLINE
+
+
+@pytest.mark.asyncio
+async def test_successful_refresh_commits_only_after_registration_returns(monkeypatch):
+    catalog = NamespacedToolCatalog()
+    session = FakeSession((upstream("lookup", marker="v1"),))
+    supervisor = ProviderSupervisor(
+        [research_config()], catalog, lambda _c: QueueConnector(session)
+    )
+    await supervisor.connect("research-main")
+    runtime = supervisor._runtimes["research-main"]
+    prior_generation = runtime.publication_generation
+    prior_selected = runtime.selected
+    session.tools = (upstream("lookup", marker="v2"),)
+    original = catalog.register_provider
+    observed = []
+
+    def observe(provider_id, namespace, tools):
+        materialized = tuple(tools)
+        result = original(provider_id, namespace, materialized)
+        observed.append(
+            (runtime.session, runtime.usable, runtime.selected, runtime.publication_generation)
+        )
+        return result
+
+    monkeypatch.setattr(catalog, "register_provider", observe)
+
+    result = await supervisor.refresh("research-main")
+
+    assert observed == [(session, True, prior_selected, prior_generation)]
+    assert result.state is ProviderState.ONLINE
+    assert runtime.session is session and runtime.usable is True
+    assert runtime.publication_generation == prior_generation + 1
+    assert runtime.selected[0].input_schema["marker"] == "v2"
+
+
+@pytest.mark.asyncio
+async def test_ordinary_refresh_failure_propagates_without_poisoning_session():
+    catalog = NamespacedToolCatalog()
+    primary = ValueError("conversion-programming-error")
+    session = FakeSession((upstream("lookup"),), list_error=primary)
+    supervisor = ProviderSupervisor(
+        [research_config()], catalog, lambda _c: QueueConnector(session)
+    )
+    session.list_error = None
+    await supervisor.connect("research-main")
+    session.list_error = primary
+
+    with pytest.raises(ValueError) as raised:
+        await supervisor.refresh("research-main")
+
+    assert raised.value is primary
+    assert session.closed == 0
+    assert status(catalog, "research-main").state is ProviderState.ONLINE
+    session.list_error = None
+    assert await supervisor.invoke("research.lookup", {}) == {"ok": True}

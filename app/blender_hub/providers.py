@@ -67,16 +67,19 @@ def _validate_http_url(url: str) -> None:
         raise TypeError("url must be a string")
     if url != url.strip() or any(ord(character) < 32 for character in url):
         raise ValueError("provider URL must not contain whitespace controls")
+    invalid_url = False
     try:
         parsed = urlsplit(url)
         port = parsed.port
-    except ValueError as exc:
-        raise ValueError("invalid provider URL") from exc
+    except ValueError:
+        invalid_url = True
+    if invalid_url:
+        raise ValueError("invalid provider URL") from None
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("provider URL must be absolute HTTP or HTTPS")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("provider URL must not contain user-info")
-    if parsed.query or parsed.fragment:
+    if "?" in url or "#" in url:
         raise ValueError("provider URL must not contain query or fragment")
     if "%" in parsed.netloc or "\\" in parsed.netloc:
         raise ValueError("provider URL authority must not be encoded")

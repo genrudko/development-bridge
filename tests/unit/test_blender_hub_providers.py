@@ -54,6 +54,9 @@ def test_http_config_accepts_only_explicit_loopback_endpoints(url: str):
         "http://user@127.0.0.1:8080/mcp",
         "http://127.0.0.1:8080/mcp?token=x",
         "http://127.0.0.1:8080/mcp#fragment",
+        "http://127.0.0.1:8080/mcp?",
+        "http://127.0.0.1:8080/mcp#",
+        "http://127.0.0.1:8080/mcp?#",
         "ftp://127.0.0.1:21/mcp",
         "//127.0.0.1:8080/mcp",
         "127.0.0.1:8080/mcp",
@@ -68,6 +71,23 @@ def test_http_config_accepts_only_explicit_loopback_endpoints(url: str):
 def test_http_config_rejects_noncanonical_or_deceptive_urls(url: str):
     with pytest.raises(ValueError):
         HttpProviderConfig("local", "tools", ProviderKind.RESEARCH, url)
+
+
+def test_malformed_port_error_drops_raw_parser_chain_and_value():
+    secret = "PORT_CONFIGURATION_SECRET"
+
+    with pytest.raises(ValueError) as caught:
+        HttpProviderConfig(
+            "local",
+            "tools",
+            ProviderKind.RESEARCH,
+            f"http://localhost:{secret}/mcp",
+        )
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert secret not in rendered
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 @pytest.mark.parametrize(
@@ -804,7 +824,7 @@ async def test_conversion_error_remains_original_and_session_usable(monkeypatch)
     class Sdk:
         count = 0
 
-        async def initialize(self): pass
+        async def initialize(self): return None
         async def list_tools(self):
             self.count += 1
             return SimpleNamespace(tools=[BadTool()] if self.count == 1 else [])
@@ -826,7 +846,7 @@ async def test_call_result_conversion_error_is_not_a_session_failure(monkeypatch
     class Sdk:
         count = 0
 
-        async def initialize(self): pass
+        async def initialize(self): return None
         async def list_tools(self): return SimpleNamespace(tools=[])
         async def call_tool(self, *_args, **_kwargs):
             self.count += 1
