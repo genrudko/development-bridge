@@ -37,9 +37,11 @@ def test_catalog_registers_namespaced_tools_and_rejects_duplicate_atomically():
 @pytest.mark.asyncio
 async def test_offline_provider_is_isolated_from_catalog_and_healthy_provider():
     catalog = NamespacedToolCatalog()
-    catalog.register_provider("dcc-main", "dcc", [tool("scene.get", {"readOnly": True})])
     catalog.register_provider(
-        "research-main", "research", [tool("lookup", {"readOnly": True})]
+        "dcc-main", "dcc", [tool("scene.get", {"readOnlyHint": True})]
+    )
+    catalog.register_provider(
+        "research-main", "research", [tool("lookup", {"readOnlyHint": True})]
     )
     catalog.set_provider_status("dcc-main", ProviderState.OFFLINE, "connection refused")
 
@@ -59,13 +61,14 @@ async def test_offline_provider_is_isolated_from_catalog_and_healthy_provider():
 @pytest.mark.parametrize(
     ("metadata", "expected"),
     [
-        ({"readOnly": True}, False),
+        ({"readOnlyHint": True}, False),
         (None, True),
         ({}, True),
-        ({"readOnly": False}, True),
-        ({"readOnly": "yes"}, True),
-        ({"readOnly": True, "destructive": True}, True),
-        ({"readOnly": True, "destructive": "yes"}, False),
+        ({"readOnlyHint": False}, True),
+        ({"readOnlyHint": "yes"}, True),
+        ({"readOnlyHint": True, "destructiveHint": True}, True),
+        ({"readOnlyHint": True, "destructiveHint": "yes"}, True),
+        ({"readOnly": True}, True),
     ],
 )
 def test_classification_is_fail_closed_and_destructive_true_wins(metadata, expected):
@@ -88,12 +91,12 @@ async def test_read_only_tools_from_different_providers_can_overlap():
         return "read"
 
     catalog.register_provider(
-        "dcc-main", "dcc", [ProviderTool("read", read, {"readOnly": True})]
+        "dcc-main", "dcc", [ProviderTool("read", read, {"readOnlyHint": True})]
     )
     catalog.register_provider(
         "research-main",
         "research",
-        [ProviderTool("read", read, {"readOnly": True})],
+        [ProviderTool("read", read, {"readOnlyHint": True})],
     )
 
     calls = [

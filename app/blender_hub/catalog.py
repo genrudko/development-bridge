@@ -55,9 +55,10 @@ def is_mutating(metadata: object) -> bool:
     """Classify conservatively; only a literal read-only hint bypasses locking."""
     if not isinstance(metadata, Mapping):
         return True
-    if metadata.get("destructive") is True:
+    destructive_hint = metadata.get("destructiveHint", False)
+    if not isinstance(destructive_hint, bool) or destructive_hint:
         return True
-    return metadata.get("readOnly") is not True
+    return metadata.get("readOnlyHint") is not True
 
 
 class NamespacedToolCatalog:

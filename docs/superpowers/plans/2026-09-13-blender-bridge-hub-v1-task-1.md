@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Blender Hub remains a thin multiplexer/supervisor/glue layer; Blender knowledge remains upstream.
-- Only explicit read-only metadata bypasses the global write lock; destructive metadata wins conflicts.
+- MCP ToolAnnotations field names are `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`. Only explicit `readOnlyHint: true` bypasses the global write lock; `destructiveHint: true` wins conflicts, malformed hints fail closed, and informal aliases are not trusted.
 - No public MCP wiring, network implementation, Windows/Blender action, Print Pipeline, or remote shell capability is part of Task 1.
 - Strict RED → GREEN TDD is required for every production behavior.
 
@@ -31,7 +31,7 @@
 
 - [x] Write focused registration/status tests and run them to observe missing-module RED.
 - [x] Implement typed descriptors, atomic duplicate detection, provider-local state, and catalog listing; run GREEN.
-- [x] Write classification tests for explicit read-only, absent/unknown metadata, and destructive conflict; run RED.
+- [x] Write classification tests for canonical `readOnlyHint`, absent/unknown metadata, malformed hints, legacy aliases, and `destructiveHint` conflict; run RED.
 - [x] Implement fail-closed `is_mutating`; run GREEN.
 - [x] Write concurrency tests proving reads overlap and writes/unknown calls do not; run RED.
 - [x] Add one catalog-wide `asyncio.Lock` around mutating invocation; run GREEN.
