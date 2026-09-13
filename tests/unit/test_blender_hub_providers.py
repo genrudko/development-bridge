@@ -289,6 +289,74 @@ class _AsyncContext:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("url", "http://example.com:8080/mcp"),
+        ("read_timeout_seconds", math.nan),
+    ],
+)
+async def test_http_connector_revalidates_snapshot_before_side_effects(
+    monkeypatch, field: str, value: object
+):
+    touched: list[str] = []
+
+    def forbidden(label: str):
+        def fail(*_args: object, **_kwargs: object):
+            touched.append(label)
+            pytest.fail(f"{label} touched before config revalidation")
+
+        return fail
+
+    monkeypatch.setattr(providers.httpx2, "AsyncClient", forbidden("client"))
+    monkeypatch.setattr(providers, "streamable_http_client", forbidden("transport"))
+    monkeypatch.setattr(providers, "ClientSession", forbidden("session"))
+    config = HttpProviderConfig(
+        "http-local", "http", ProviderKind.RESEARCH,
+        "http://localhost:8080/mcp", 2.0,
+    )
+    object.__setattr__(config, field, value)
+
+    with pytest.raises(ValueError):
+        await providers.StreamableHttpProvider().connect(config)
+
+    assert touched == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("argv", ()),
+        ("env", {"BAD-KEY": "secret"}),
+        ("cwd", "/tmp"),
+        ("read_timeout_seconds", math.inf),
+    ],
+)
+async def test_stdio_connector_revalidates_snapshot_before_side_effects(
+    monkeypatch, field: str, value: object
+):
+    touched: list[str] = []
+
+    def forbidden(*_args: object, **_kwargs: object):
+        touched.append("stdio")
+        pytest.fail("stdio factory touched before config revalidation")
+
+    monkeypatch.setattr(providers, "stdio_client", forbidden)
+    monkeypatch.setattr(providers, "ClientSession", forbidden)
+    config = StdioProviderConfig(
+        "stdio-local", "stdio", ProviderKind.ORCA,
+        ("provider", "--stdio"), Path("/opt/provider"), {"OK": "yes"}, 2.0,
+    )
+    object.__setattr__(config, field, value)
+
+    with pytest.raises((TypeError, ValueError)):
+        await providers.StdioProvider().connect(config)
+
+    assert touched == []
+
+
+@pytest.mark.asyncio
 async def test_http_connector_owns_explicit_client_and_stages_session(monkeypatch):
     events: list[str] = []
     captured: dict[str, object] = {}
@@ -418,6 +486,77 @@ async def test_every_http_context_entry_failure_cleans_partial_stack_once(
 
 
 @pytest.mark.asyncio
+async def test_http_transport_factory_failure_is_sanitized_and_cleaned_once(monkeypatch):
+    events: list[str] = []
+
+    class FailingExit(_AsyncContext):
+        async def __aexit__(self, *_args: object):
+            events.append("exit:http")
+            raise ExceptionGroup(
+                "CLEANUP_GROUP_SECRET", [RuntimeError("CLEANUP_INNER_SECRET")]
+            )
+
+    def failing_transport(*_args: object, **_kwargs: object):
+        events.append("factory:transport")
+        raise LookupError("PRIMARY_FACTORY_SECRET")
+
+    monkeypatch.setattr(
+        providers.httpx2, "AsyncClient",
+        lambda **_kwargs: FailingExit(object(), events, "http"),
+    )
+    monkeypatch.setattr(providers, "streamable_http_client", failing_transport)
+    monkeypatch.setattr(
+        providers, "ClientSession",
+        lambda *_args: pytest.fail("session touched after transport factory failure"),
+    )
+    config = HttpProviderConfig(
+        "safe", "safe", ProviderKind.RESEARCH, "http://localhost:8124/mcp"
+    )
+
+    with pytest.raises(providers.ProviderConnectionError) as caught:
+        await providers.StreamableHttpProvider().connect(config)
+
+    error = caught.value
+    rendered = "".join(traceback.format_exception(error)) + _exception_graph_text(error)
+    assert (error.provider_id, error.phase, error.exception_type) == (
+        "safe", "connect", "LookupError"
+    )
+    assert error.__cause__ is None and error.__context__ is None
+    assert all(secret not in rendered for secret in (
+        "PRIMARY_FACTORY_SECRET", "CLEANUP_GROUP_SECRET", "CLEANUP_INNER_SECRET"
+    ))
+    assert events == ["enter:http", "factory:transport", "exit:http"]
+
+
+@pytest.mark.asyncio
+async def test_http_transport_factory_failure_cleanup_cancellation_wins(monkeypatch):
+    events: list[str] = []
+
+    class CancelExit(_AsyncContext):
+        async def __aexit__(self, *_args: object):
+            events.append("exit:http")
+            raise asyncio.CancelledError
+
+    def failing_transport(*_args: object, **_kwargs: object):
+        events.append("factory:transport")
+        raise RuntimeError("PRIMARY_FACTORY_SECRET")
+
+    monkeypatch.setattr(
+        providers.httpx2, "AsyncClient",
+        lambda **_kwargs: CancelExit(object(), events, "http"),
+    )
+    monkeypatch.setattr(providers, "streamable_http_client", failing_transport)
+    config = HttpProviderConfig(
+        "cancel", "cancel", ProviderKind.RESEARCH, "http://localhost:8125/mcp"
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await providers.StreamableHttpProvider().connect(config)
+
+    assert events == ["enter:http", "factory:transport", "exit:http"]
+
+
+@pytest.mark.asyncio
 async def test_stdio_connector_uses_public_sdk_and_exact_hub_fragment(monkeypatch):
     events: list[str] = []
     captured: dict[str, object] = {}
@@ -453,6 +592,42 @@ async def test_stdio_connector_uses_public_sdk_and_exact_hub_fragment(monkeypatc
     assert captured["streams"] == ("read", "write")
     await session.close()
     assert events == ["enter:stdio", "enter:session", "exit:session", "exit:stdio"]
+
+
+@pytest.mark.asyncio
+async def test_stdio_transport_factory_failure_is_sanitized_and_cleaned_once(monkeypatch):
+    cleanup_calls = 0
+    original_cleanup = providers._cleanup_once
+
+    async def counted_cleanup(stack, phase):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        return await original_cleanup(stack, phase)
+
+    def failing_stdio(_parameters: object):
+        raise OSError("STDIO_FACTORY_SECRET")
+
+    monkeypatch.setattr(providers, "_cleanup_once", counted_cleanup)
+    monkeypatch.setattr(providers, "stdio_client", failing_stdio)
+    monkeypatch.setattr(
+        providers, "ClientSession",
+        lambda *_args: pytest.fail("session touched after stdio factory failure"),
+    )
+    config = StdioProviderConfig(
+        "stdio-safe", "stdio", ProviderKind.ORCA, ("provider", "--stdio")
+    )
+
+    with pytest.raises(providers.ProviderConnectionError) as caught:
+        await providers.StdioProvider().connect(config)
+
+    error = caught.value
+    rendered = "".join(traceback.format_exception(error)) + _exception_graph_text(error)
+    assert (error.provider_id, error.phase, error.exception_type) == (
+        "stdio-safe", "connect", "OSError"
+    )
+    assert error.__cause__ is None and error.__context__ is None
+    assert "STDIO_FACTORY_SECRET" not in rendered
+    assert cleanup_calls == 1
 
 
 def test_pinned_stdio_sdk_environment_contract(monkeypatch):

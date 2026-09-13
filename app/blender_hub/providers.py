@@ -5,7 +5,7 @@ import math
 import os
 import re
 from contextlib import AsyncExitStack
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -146,6 +146,28 @@ class StdioProviderConfig:
 
 
 ProviderConfig: TypeAlias = HttpProviderConfig | StdioProviderConfig
+
+
+def _http_config_snapshot(config: HttpProviderConfig) -> HttpProviderConfig:
+    return HttpProviderConfig(
+        provider_id=config.provider_id,
+        namespace=config.namespace,
+        kind=config.kind,
+        url=config.url,
+        read_timeout_seconds=config.read_timeout_seconds,
+    )
+
+
+def _stdio_config_snapshot(config: StdioProviderConfig) -> StdioProviderConfig:
+    return StdioProviderConfig(
+        provider_id=config.provider_id,
+        namespace=config.namespace,
+        kind=config.kind,
+        argv=config.argv,
+        cwd=config.cwd,
+        env=config.env,
+        read_timeout_seconds=config.read_timeout_seconds,
+    )
 
 
 def validate_provider_configs(
@@ -408,10 +430,32 @@ async def _finish_connection(
     )
 
 
+async def _transport_factory(
+    config: ProviderConfig,
+    stack: AsyncExitStack,
+    factory: Callable[[], object],
+) -> object:
+    failure_type: str | None = None
+    try:
+        transport = factory()
+    except asyncio.CancelledError:
+        await _cleanup_once(stack, "connect")
+        raise
+    except Exception as exc:
+        failure_type = type(exc).__name__
+    if failure_type is not None:
+        await _cleanup_once(stack, "connect")
+        raise ProviderConnectionError(
+            config.provider_id, exception_type=failure_type
+        ) from None
+    return transport
+
+
 class StreamableHttpProvider:
     async def connect(self, config: HttpProviderConfig) -> ProviderSession:
         if not isinstance(config, HttpProviderConfig):
             raise TypeError("config must be an HttpProviderConfig")
+        config = _http_config_snapshot(config)
         stack = AsyncExitStack()
         failure_type: str | None = None
         try:
@@ -432,7 +476,11 @@ class StreamableHttpProvider:
             raise ProviderConnectionError(
                 config.provider_id, exception_type=failure_type
             ) from None
-        transport = streamable_http_client(config.url, http_client=client)
+        transport = await _transport_factory(
+            config,
+            stack,
+            lambda: streamable_http_client(config.url, http_client=client),
+        )
         return await _finish_connection(config, stack, transport)
 
 
@@ -440,6 +488,7 @@ class StdioProvider:
     async def connect(self, config: StdioProviderConfig) -> ProviderSession:
         if not isinstance(config, StdioProviderConfig):
             raise TypeError("config must be a StdioProviderConfig")
+        config = _stdio_config_snapshot(config)
         stack = AsyncExitStack()
         parameters = StdioServerParameters(
             command=config.argv[0],
@@ -447,4 +496,7 @@ class StdioProvider:
             cwd=config.cwd,
             env=build_stdio_environment(config, os.environ),
         )
-        return await _finish_connection(config, stack, stdio_client(parameters))
+        transport = await _transport_factory(
+            config, stack, lambda: stdio_client(parameters)
+        )
+        return await _finish_connection(config, stack, transport)
