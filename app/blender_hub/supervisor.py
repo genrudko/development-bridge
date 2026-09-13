@@ -443,8 +443,15 @@ class ProviderSupervisor:
 
     async def close_all(self) -> tuple[ProviderStatus, ...]:
         statuses = []
+        primary: Exception | None = None
         for provider_id in self._runtimes:
-            statuses.append(await self.close(provider_id))
+            try:
+                statuses.append(await self.close(provider_id))
+            except Exception as exc:
+                if primary is None:
+                    primary = exc
+        if primary is not None:
+            raise primary from None
         return tuple(statuses)
 
     async def invoke(

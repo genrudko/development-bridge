@@ -270,6 +270,26 @@ async def test_close_all_continues_siblings_after_sanitized_close_failure():
     assert catalog.list_tools() == ()
 
 
+@pytest.mark.asyncio
+async def test_close_all_continues_siblings_then_reraises_unexpected_close_failure():
+    catalog = NamespacedToolCatalog()
+    primary = RuntimeError("close-programming-secret")
+    bad = FakeSession((upstream("bad"),), close_error=primary)
+    good = FakeSession((upstream("good"),))
+    connectors = {"bad": QueueConnector(bad), "good": QueueConnector(good)}
+    configs = [research_config("bad", "badns"), research_config("good", "goodns")]
+    supervisor = ProviderSupervisor(configs, catalog, lambda c: connectors[c.provider_id])
+    await asyncio.gather(supervisor.connect("bad"), supervisor.connect("good"))
+
+    with pytest.raises(RuntimeError) as raised:
+        await supervisor.close_all()
+
+    assert raised.value is primary
+    assert raised.value.__cause__ is None
+    assert bad.closed == good.closed == 1
+    assert catalog.list_tools() == ()
+
+
 # Phase 2: generation, registration, and refresh.
 @pytest.mark.asyncio
 async def test_refresh_replaces_generation_and_makes_captured_handler_stale():
