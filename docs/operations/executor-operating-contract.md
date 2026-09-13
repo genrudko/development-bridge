@@ -59,7 +59,7 @@ At minimum:
 6. **Repository hygiene:** run `git diff --check`, inspect `git diff --stat`/relevant diff, and confirm final status contains only intended files.
 7. **Live acceptance gate:** browser/UI/E2E is allowed only when offline review and verification are already green. Run the smallest deliberate live acceptance once. Do not repeat a successful live acceptance without new evidence.
 
-If the debug sweep finds a defect, fix it and rerun the affected offline checks. Do not stack workarounds on an unproven diagnosis. If the failure is auth, quota, operator input, credential, service policy, or unsafe topology change, stop and return a proven blocker instead of modifying infrastructure without permission.
+If the debug sweep finds a defect, fix it and rerun the affected offline checks. Do not stack workarounds on an unproven diagnosis. Auth, quota, operator input, credential, service policy, or unsafe topology boundaries must not be bypassed. A boundary affecting one mechanism is not automatically a blocker for the bounded outcome: use another permitted path when one exists. Stop and return a proven blocker only when the boundary prevents the requested outcome and no materially applicable permitted path remains, rather than modifying infrastructure without permission.
 
 ## 6. Retry and rework discipline
 

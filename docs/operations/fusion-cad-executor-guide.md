@@ -3,6 +3,36 @@
 This runbook applies to any coding/review executor working on `fusion.cad/v1` or its Development Bridge/Fusion transport.
 It complements `AGENTS.md`, `docs/operations/executor-operating-contract.md`, the canonical Fusion CAD design spec, and `docs/operations/fusion-cad-agent-acceptance.md`.
 
+## 0. Mission-first execution contract
+
+For an ordinary delegated CAD task, the primary objective is to complete the requested CAD artifact and verify that it satisfies the brief. Safety, revision, capability, provenance, and no-save rules constrain **how** the work is done; they are not separate work items and must not replace the requested modeling task unless continuing would actually violate an invariant.
+
+Use this internal execution loop and keep moving without owner interaction:
+
+1. understand the brief and preserve its design intent;
+2. choose the best currently permitted modeling path;
+3. perform the smallest useful mutation;
+4. verify it with the available read / inspect / view / screenshot evidence;
+5. correct the model when the gate fails;
+6. continue to the next meaningful modeling step;
+7. validate and export only when the requested artifact is actually ready.
+
+A failed tool call, failed implementation technique, unavailable semantic capability, or blocked execution channel is **not** by itself a task blocker. Change implementation and continue while another materially applicable permitted path remains. Do not turn ordinary modeling into infrastructure research merely because the preferred path is degraded.
+
+For modeling work, use the following fallback order as applicable:
+
+1. supported specialized `fusion_*` mutation;
+2. another structured/native Fusion or Shimmer capability;
+3. a composition of smaller permitted operations;
+4. an explicitly permitted bounded raw Fusion/Autodesk API execution path;
+5. a different geometric construction strategy that still satisfies the brief.
+
+Do not bypass an OpenAI/system safety gate. Treat that **specific channel** as unavailable and continue with other permitted paths. Never ask the owner to run a raw script manually merely because an autonomous execution path failed.
+
+A blocker is proven only when every materially applicable permitted path for the requested outcome has either been attempted or ruled out by concrete evidence. The blocker report must be concise: name the required outcome, the remaining missing capability, and the evidence that no permitted autonomous path remains. Do not dump a capability-audit diary on the owner.
+
+Verification gates are internal execution gates, not conversational stop points. If a screenshot or geometric gate shows the model is wrong (for example, the silhouette still looks like a cylinder/can instead of the requested organic form), revise the geometry and re-check it. Do not lower the design target merely to obtain a successful mutation.
+
 ## 1. Operating principle
 
 Treat `fusion.cad/v1` as the normal agent interface to Autodesk Fusion.
@@ -18,7 +48,7 @@ Default to the public semantic tools:
 - `fusion_validate` — model hygiene, reference integrity, mechanical validation;
 - `fusion_transaction` — staged mutation, preview, diff, rollback/abort, commit.
 
-Use `fusion_tools`, `fusion_call`, `fusion_submit`, raw `fusion_mcp_execute`, or direct Autodesk Python only as an escape hatch for bounded diagnosis, transport repair, or a task that explicitly requires them. Do not replace a working semantic path with raw Python because raw execution appears easier.
+Prefer the public semantic tools when they are supported and fit the task. `fusion_tools`, `fusion_call`, `fusion_submit`, raw `fusion_mcp_execute`, and direct Autodesk Python are fallback execution paths when the task explicitly permits them or when the semantic path cannot perform the requested modeling operation. Do not replace a healthy semantic path with raw Python merely because raw execution looks easier, but do not stop the modeling task just to preserve a preferred abstraction layer.
 
 ## 2. Owner interaction boundary
 
@@ -41,7 +71,7 @@ Ask the owner only when a genuine owner decision is required, for example:
 - choosing between materially different user-visible behavior, risk, destructive scope, cost, or product direction;
 - accepting a proven limitation that changes the requested outcome.
 
-A technical difficulty is not automatically an owner blocker. Diagnose it first.
+A technical difficulty is not automatically an owner blocker. Diagnose it, switch implementation when possible, and continue autonomously. Do not ask the owner to choose a lower-level Fusion technique or to execute code manually.
 
 ## 3. Required start state
 
@@ -53,19 +83,21 @@ Before changing Fusion CAD code:
 4. For live work, check `fusion_node_status` first. Confirm the target node is online, `fusion_available=true`, and inspect `pending_commands` plus `uncertain_operations`.
 5. If the Fusion runtime or relay session changed, read `fusion_read(operation="capabilities")` before depending on a capability. Do not infer support from class/API presence alone.
 
+For ordinary modeling, this startup check is not permission to reopen P0/P1 infrastructure qualification. Probe only what the current modeling decision needs, then build. If a preferred capability is degraded, follow the mission-first fallback ladder instead of auditing unrelated capability families.
+
 For destructive or acceptance mutations, use a disposable document/copy unless the task explicitly authorizes the original.
 
 ## 4. Capability honesty is load-bearing
 
 Capability state is part of the contract:
 
-- `supported` — the requested contract path may be used;
-- `degraded` — do not silently bypass the limitation with an unverified alternate path;
-- `unavailable` — fail closed; do not pretend the feature exists.
+- `supported` — that public contract path may be used;
+- `degraded` — do not claim that public contract is fully available, but an explicitly permitted independent fallback may still be used for the artifact task;
+- `unavailable` — fail closed for that public contract path; do not pretend the feature exists.
 
 A capability may be `degraded` even when an Autodesk class or method exists. Runtime proof can be stricter than API presence.
 
-When a public semantic tool returns `CAPABILITY_DEGRADED` or a documented unavailable result that agrees with the capability matrix, that is correct behavior, not a reason to force a raw workaround.
+`CAPABILITY_DEGRADED` / `CAPABILITY_UNAVAILABLE` is evidence about the **public semantic path**, not automatically a stop condition for the delegated CAD artifact. If the current task permits an independent fallback path, use it with its own verification and keep the public capability claim honest. Never report that `fusion.cad/v1` supports a feature merely because a raw or provider-specific path succeeded.
 
 ## 5. Revision and mutation safety
 
@@ -137,9 +169,9 @@ Executors must not:
 
 Large public semantic results may be externalized through the existing retained external-result mechanism instead of being returned inline. That is normal.
 
-## 10. Raw Fusion MCP use
+## 10. Raw Fusion fallback execution
 
-Raw `fusion_mcp_execute` is diagnostic/escape-hatch infrastructure.
+Raw `fusion_mcp_execute` is a bounded fallback execution path, not the preferred public modeling contract. It may be used when the current task explicitly permits it and the semantic path cannot perform the required operation.
 If raw execution is required:
 
 - use an exact bounded script;
@@ -150,7 +182,7 @@ If raw execution is required:
 - restore disposable acceptance changes if the task requires restoration;
 - label diagnostic raw failures separately from product-domain failures.
 
-Do not claim a public `fusion.cad/v1` feature works merely because a hand-written raw Python probe works. Public acceptance must exercise the public semantic tool.
+Do not claim a public `fusion.cad/v1` feature works merely because a hand-written raw Python probe works. Public acceptance must exercise the public semantic tool. For an artifact/modeling task, however, a permitted raw path may complete the artifact even while the public semantic capability remains honestly degraded. If a platform safety gate blocks raw execution, do not work around that gate; mark only that channel unavailable and continue down the permitted fallback ladder.
 
 ## 11. Verification before handoff/deploy
 
@@ -232,7 +264,8 @@ For an ordinary disposable CAD task, prefer this loop:
 5. poll owner Palette messages before the next meaningful CAD step;
 6. if the owner corrected the plan, apply that correction in the same model turn when safe;
 7. re-observe visually **and** semantically;
-8. close the disposable document unsaved when the bounded live exercise is complete.
+8. if the visual/semantic gate fails, correct the model and repeat the local loop without stopping for owner input;
+9. close the disposable document unsaved when the bounded live exercise is complete.
 
 Palette behavior on the accepted runtime:
 
