@@ -127,6 +127,7 @@ def test_real_cdp_workflow_scopes_search_waits_for_transition_and_render():
       const evaluations = [];
       const commands = [];
       let snapshot = 0;
+      let typed = false;
       let locationChecks = 0;
       let turnChecks = 0;
       const client = {{
@@ -134,24 +135,30 @@ def test_real_cdp_workflow_scopes_search_waits_for_transition_and_render():
         close() {{}},
         async call(method, params = {{}}) {{
           commands.push({{method, params}});
+          if (method === 'Input.dispatchKeyEvent' && params.type === 'char') {{ typed = true; snapshot = 0; }}
           if (method !== 'Runtime.evaluate') return {{}};
           const expression = params.expression;
           evaluations.push(expression);
           let value;
           if (expression.includes('canonical(location.href)')) value = ++locationChecks >= 2;
-          else if (expression.includes('.some((turn)')) value = ++turnChecks >= 2;
-          else if (expression.includes('.map((turn)')) value = [
-            {{role:'user', text:'user content'}},
-            {{role:'assistant', text:'assistant preface\\n' + marker + '\\nassistant suffix'}},
-          ];
+          else if (expression.includes('.map((turn)')) {{
+            turnChecks += 1;
+            value = [
+              {{role:'user', text:'user content'}},
+              {{role:'assistant', text:'assistant preface\\n' + marker + '\\nassistant suffix'}},
+            ];
+          }}
           else if (expression.includes('input.value ===')) value = true;
           else if (expression.includes('const loading =')) {{
-            const states = [
-              {{loading:false, hrefs:['/c/stale'], noResults:false}},
+            const states = typed ? [
               {{loading:true, hrefs:['/c/stale'], noResults:false}},
               {{loading:false, hrefs:['/c/final'], noResults:false}},
               {{loading:false, hrefs:['/c/final'], noResults:false}},
               {{loading:false, hrefs:['/c/final'], noResults:false}},
+            ] : [
+              {{loading:false, hrefs:['/c/stale'], noResults:false}},
+              {{loading:false, hrefs:['/c/stale'], noResults:false}},
+              {{loading:false, hrefs:['/c/stale'], noResults:false}},
             ];
             value = states[Math.min(snapshot++, states.length - 1)];
           }} else if (expression.includes('/auth/login')) value = false;
@@ -182,6 +189,100 @@ def test_real_cdp_workflow_scopes_search_waits_for_transition_and_render():
     assert "globalThis.__dbridgeGlobalSearchInput" in expressions
     assert '[data-message-author-role="user"]' in expressions
     assert '[data-message-author-role="assistant"]' in expressions
+
+
+def test_search_freshness_starts_after_clear_has_settled():
+    marker = "DBRIDGE_BIND bnd_clear-causality"
+    body = f"""
+      const marker = {json.dumps(marker)};
+      let snapshot = 0;
+      const client = {{
+        async connect() {{}}, close() {{}},
+        async call(method, params = {{}}) {{
+          if (method !== 'Runtime.evaluate') return {{}};
+          const expression = params.expression;
+          let value = true;
+          if (expression.includes('canonical(location.href)')) value = true;
+          else if (expression.includes('.some((turn)')) value = true;
+          else if (expression.includes('.map((turn)')) value = [{{role:'assistant', text:marker}}];
+          else if (expression.includes('input.value ===')) value = true;
+          else if (expression.includes('const loading =')) {{
+            const states = [
+              {{loading:false, hrefs:['/c/old'], noResults:false}},
+              {{loading:true, hrefs:[], noResults:false}},
+              {{loading:false, hrefs:['/c/cleared-one', '/c/cleared-two'], noResults:false}},
+              {{loading:false, hrefs:['/c/cleared-one', '/c/cleared-two'], noResults:false}},
+              {{loading:false, hrefs:['/c/cleared-one', '/c/cleared-two'], noResults:false}},
+              {{loading:true, hrefs:['/c/cleared-one', '/c/cleared-two'], noResults:false}},
+              {{loading:false, hrefs:['/c/final'], noResults:false}},
+              {{loading:false, hrefs:['/c/final'], noResults:false}},
+              {{loading:false, hrefs:['/c/final'], noResults:false}},
+            ];
+            value = states[Math.min(snapshot++, states.length - 1)];
+          }} else if (expression.includes('/auth/login')) value = false;
+          return {{result:{{value}}}};
+        }},
+      }};
+      return helper.resolveViaCdp('http://fake-cdp', marker, {{
+        fetchImpl: async () => ({{ok:true, json:async () => [{{type:'page', url:'https://chatgpt.com/', webSocketDebuggerUrl:'ws://fake'}}]}}),
+        clientFactory: () => client, waitStepMs:0, readinessTimeoutMs:100, searchTimeoutMs:100,
+      }});
+    """
+
+    assert run_async_module(body) == {
+        "status": "unique",
+        "candidate_url": "https://chatgpt.com/c/final",
+    }
+
+
+def test_candidate_verification_waits_for_stable_complete_turn_snapshot():
+    marker = "DBRIDGE_BIND bnd_late-duplicate"
+    body = f"""
+      const marker = {json.dumps(marker)};
+      let messageSnapshot = 0;
+      let searchSnapshot = 0;
+      let typed = false;
+      const client = {{
+        async connect() {{}}, close() {{}},
+        async call(method, params = {{}}) {{
+          if (method === 'Input.dispatchKeyEvent' && params.type === 'char') {{ typed = true; searchSnapshot = 0; }}
+          if (method !== 'Runtime.evaluate') return {{}};
+          const expression = params.expression;
+          let value = true;
+          if (expression.includes('canonical(location.href)')) value = true;
+          else if (expression.includes('.some((turn)')) value = true;
+          else if (expression.includes('.map((turn)')) {{
+            const snapshots = [
+              [{{role:'assistant', text:marker}}],
+              [{{role:'assistant', text:marker}}, {{role:'user', text:marker}}],
+              [{{role:'assistant', text:marker}}, {{role:'user', text:marker}}],
+              [{{role:'assistant', text:marker}}, {{role:'user', text:marker}}],
+            ];
+            value = snapshots[Math.min(messageSnapshot++, snapshots.length - 1)];
+          }} else if (expression.includes('input.value ===')) value = true;
+          else if (expression.includes('const loading =')) {{
+            const snapshots = typed ? [
+              {{loading:true, hrefs:['/c/old'], noResults:false}},
+              {{loading:false, hrefs:['/c/final'], noResults:false}},
+              {{loading:false, hrefs:['/c/final'], noResults:false}},
+              {{loading:false, hrefs:['/c/final'], noResults:false}},
+            ] : [
+              {{loading:false, hrefs:['/c/old'], noResults:false}},
+              {{loading:false, hrefs:['/c/old'], noResults:false}},
+              {{loading:false, hrefs:['/c/old'], noResults:false}},
+            ];
+            value = snapshots[Math.min(searchSnapshot++, snapshots.length - 1)];
+          }} else if (expression.includes('/auth/login')) value = false;
+          return {{result:{{value}}}};
+        }},
+      }};
+      return helper.resolveViaCdp('http://fake-cdp', marker, {{
+        fetchImpl: async () => ({{ok:true, json:async () => [{{type:'page', url:'https://chatgpt.com/', webSocketDebuggerUrl:'ws://fake'}}]}}),
+        clientFactory: () => client, waitStepMs:0, readinessTimeoutMs:100, searchTimeoutMs:100,
+      }});
+    """
+
+    assert run_async_module(body) == {"status": "ambiguous"}
 
 
 def test_portal_visibility_and_live_search_state_do_not_depend_on_offset_parent():
@@ -220,6 +321,31 @@ def test_portal_visibility_and_live_search_state_do_not_depend_on_offset_parent(
         "visible": True,
         "hidden": False,
         "snapshot": {"loading": True, "hrefs": [], "noResults": True},
+    }
+
+
+def test_search_snapshot_excludes_hidden_result_anchors():
+    body = """
+      const base = {
+        isConnected: true, hidden: false,
+        getAttribute(name) { return name === 'href' ? this.href : null; },
+        getClientRects() { return [{width:10, height:10}]; },
+      };
+      const visibleAnchor = {...base, href:'/c/visible'};
+      const hiddenAnchor = {...base, href:'/c/hidden', hidden:true};
+      const scope = {
+        ...base,
+        getAttribute() { return null; },
+        querySelectorAll(selector) { return selector === 'a[href]' ? [visibleAnchor, hiddenAnchor] : []; },
+      };
+      const styleFor = () => ({display:'block', visibility:'visible', opacity:'1'});
+      return helper.snapshotSearchScope(base, scope, styleFor);
+    """
+
+    assert run_async_module(body) == {
+        "loading": False,
+        "hrefs": ["/c/visible"],
+        "noResults": False,
     }
 
 

@@ -76,7 +76,9 @@ export function snapshotSearchScope(input, scope, styleFor = globalThis.getCompu
   const loading = [...scope.querySelectorAll(
     '[aria-busy="true"], [role="progressbar"], [class*="loading"]'
   )].some((element) => visible(element, styleFor)) || scope.getAttribute("aria-busy") === "true";
-  const hrefs = [...scope.querySelectorAll("a[href]")].map((element) => element.getAttribute("href"));
+  const hrefs = [...scope.querySelectorAll("a[href]")]
+    .filter((element) => visible(element, styleFor))
+    .map((element) => element.getAttribute("href"));
   const noResults = [...scope.querySelectorAll(
     '[data-testid*="no-result"], [role="status"], [class*="noResults"]'
   )].some((element) => visible(element, styleFor) &&
@@ -216,6 +218,57 @@ async function waitForSettledSearchHrefs(client, baseline, timeoutMs = 15_000, w
   throw new Error("Search did not settle");
 }
 
+async function waitForStableSearchBaseline(client, timeoutMs = 15_000, waitStepMs = WAIT_STEP_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = null;
+  let stableSamples = 0;
+  while (Date.now() < deadline) {
+    const snapshot = await evaluate(client, SEARCH_SNAPSHOT_EXPRESSION);
+    const signature = JSON.stringify(snapshot);
+    if (snapshot && !snapshot.loading) {
+      stableSamples = signature === previous ? stableSamples + 1 : 0;
+      previous = signature;
+      if (stableSamples >= 2) return snapshot;
+    } else {
+      previous = null;
+      stableSamples = 0;
+    }
+    await delay(waitStepMs);
+  }
+  throw new Error("Cleared search did not settle");
+}
+
+const MESSAGE_TURNS_EXPRESSION = `(() => {
+  const visible = ${VISIBLE_ELEMENT_SOURCE};
+  return [...document.querySelectorAll('[data-testid^="conversation-turn-"]')]
+    .filter((turn) => visible(turn))
+    .map((turn) => {
+      const message = turn.querySelector('[data-message-author-role="user"], [data-message-author-role="assistant"]');
+      return message ? { role: message.getAttribute('data-message-author-role'),
+        text: message.innerText || message.textContent || '' } : null;
+    }).filter(Boolean);
+})()`;
+
+async function waitForStableMessageTurns(client, timeoutMs = 10_000, waitStepMs = WAIT_STEP_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = null;
+  let stableSamples = 0;
+  while (Date.now() < deadline) {
+    const turns = await evaluate(client, MESSAGE_TURNS_EXPRESSION);
+    const signature = JSON.stringify(turns);
+    if (Array.isArray(turns) && turns.length > 0) {
+      stableSamples = signature === previous ? stableSamples + 1 : 0;
+      previous = signature;
+      if (stableSamples >= 2) return turns;
+    } else {
+      previous = null;
+      stableSamples = 0;
+    }
+    await delay(waitStepMs);
+  }
+  throw new Error("Conversation turns did not settle");
+}
+
 async function selectPage(browserEndpoint, { fetchImpl = fetch,
   discoveryTimeoutMs = DISCOVERY_TIMEOUT_MS } = {}) {
   const endpoint = browserEndpoint.replace(/\/$/, "");
@@ -281,12 +334,16 @@ export async function resolveViaCdp(browserEndpoint, marker, options = {}) {
       input.focus(); input.select();
       return document.activeElement === input;
     })()`, readinessTimeoutMs, waitStepMs);
-    const baseline = await evaluate(client, SEARCH_SNAPSHOT_EXPRESSION);
-
     await client.call("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", modifiers: 2 });
     await client.call("Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA", modifiers: 2 });
     await client.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace" });
     await client.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace" });
+    const cleared = await evaluate(client, `(() => {
+      const input = globalThis.__dbridgeGlobalSearchInput;
+      return Boolean(input?.isConnected && document.activeElement === input && input.value === '');
+    })()`);
+    if (!cleared) return { status: "transient" };
+    const baseline = await waitForStableSearchBaseline(client, searchTimeoutMs, waitStepMs);
     for (const character of marker) await client.call("Input.dispatchKeyEvent", { type: "char", text: character });
     const exactValue = await evaluate(client, `(() => {
       const visible = ${VISIBLE_ELEMENT_SOURCE};
@@ -317,23 +374,7 @@ export async function resolveViaCdp(browserEndpoint, marker, options = {}) {
       return document.readyState === 'complete' && canonical(location.href) === ${expectedLocation};
     })()`, readinessTimeoutMs, waitStepMs);
     if (await evaluate(client, EXPLICIT_INTERVENTION_EXPRESSION)) return { status: "owner_input_required" };
-    await waitFor(client, `(() => {
-      const visible = ${VISIBLE_ELEMENT_SOURCE};
-      return [...document.querySelectorAll('[data-testid^="conversation-turn-"]')]
-      .some((turn) => visible(turn) &&
-        turn.querySelector('[data-message-author-role="user"], [data-message-author-role="assistant"]'));
-    })()`,
-      readinessTimeoutMs, waitStepMs);
-    const messageTurns = await evaluate(client, `(() => {
-      const visible = ${VISIBLE_ELEMENT_SOURCE};
-      return [...document.querySelectorAll('[data-testid^="conversation-turn-"]')]
-        .filter((turn) => visible(turn))
-        .map((turn) => {
-          const message = turn.querySelector('[data-message-author-role="user"], [data-message-author-role="assistant"]');
-          return message ? { role: message.getAttribute('data-message-author-role'),
-            text: message.innerText || message.textContent || '' } : null;
-        }).filter(Boolean);
-    })()`);
+    const messageTurns = await waitForStableMessageTurns(client, readinessTimeoutMs, waitStepMs);
     return resolveFixture([classified.candidate_url], messageTurns, marker);
   } finally { client.close(); }
 }
