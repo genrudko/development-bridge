@@ -1177,3 +1177,185 @@ async def test_rollover_prepare_rejects_existing_route_durable_waiter(tmp_path):
         )
     assert container.route_registry.pending_rollover("bridge") is None
     await container.jobs.stop()
+
+
+# --- Wake v2 browser binder HTTP tests ---
+
+BINDER_TOKEN = "test-browser-binder-secret"
+BINDER_HEADERS = {"Authorization": f"Bearer {BINDER_TOKEN}"}
+BINDER_PENDING_URL = "/mcp/x/route-control/binder/pending"
+BINDER_COMPLETE_URL = "/mcp/x/route-control/binder/complete"
+
+
+def create_binder_test_app(tmp_path):
+    settings = BridgeSettings.model_validate(
+        {
+            "server": {"public_base_url": "https://bridge.example.com"},
+            "coordinator": {
+                "route_registry_path": tmp_path / "routes.json",
+                "browser_binder_token": BINDER_TOKEN,
+            },
+        }
+    )
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-infra/c/conv-initial",
+        "telegram-bridge-g0",
+        "Development Bridge Infra",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    return app, container, settings
+
+
+@pytest.mark.asyncio
+async def test_binder_endpoints_are_disabled_without_dedicated_secret(tmp_path):
+    app, container, _settings = create_test_app(tmp_path)
+    before = container.route_registry.resolve("bridge")
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.get(BINDER_PENDING_URL, headers=BINDER_HEADERS)
+    assert response.status_code == 404
+    assert container.route_registry.resolve("bridge") == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong-secret"}])
+async def test_binder_pending_requires_dedicated_bearer_without_mutation(tmp_path, headers):
+    app, container, _settings = create_binder_test_app(tmp_path)
+    container.route_control.prepare_bind("bridge", session_id=None)
+    before = container.route_registry.resolve("bridge")
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.get(BINDER_PENDING_URL, headers=headers)
+    assert response.status_code == 401
+    assert container.route_registry.resolve("bridge") == before
+
+
+@pytest.mark.asyncio
+async def test_binder_pending_exposes_only_safe_route_state(tmp_path):
+    app, container, _settings = create_binder_test_app(tmp_path)
+    prepared = container.route_control.prepare_bind("bridge", session_id=None)
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.get(BINDER_PENDING_URL, headers=BINDER_HEADERS)
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"ok": True, "pending": [{"route_id": "bridge", "state": "prepared", "generation": 0}]}
+    dumped = response.text
+    assert prepared["operation_id"] not in dumped
+    assert "operation_id" not in dumped
+    assert "token" not in dumped
+    assert "conv-initial" not in dumped
+    assert "g-p-infra" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_binder_complete_binds_active_chatgpt_tab_without_exposing_target(tmp_path):
+    app, container, _settings = create_binder_test_app(tmp_path)
+    prepared = container.route_control.prepare_bind("bridge", session_id=None)
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.post(
+            BINDER_COMPLETE_URL,
+            headers=BINDER_HEADERS,
+            json={
+                "route_id": "bridge",
+                "generation": 0,
+                "url": "https://chatgpt.com/g/g-p-infra/c/conv-binder-new",
+            },
+        )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "route_id": "bridge", "state": "bound", "generation": 1}
+    assert prepared["operation_id"] not in response.text
+    assert "conv-binder-new" not in response.text
+    current = container.route_registry.resolve("bridge")
+    assert current["conversation_id"] == "conv-binder-new"
+    assert current["generation"] == 1
+
+
+@pytest.mark.asyncio
+async def test_binder_complete_wrong_site_fails_without_active_binding_change(tmp_path):
+    app, container, _settings = create_binder_test_app(tmp_path)
+    container.route_control.prepare_bind("bridge", session_id=None)
+    before = container.route_registry.resolve("bridge")
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.post(
+            BINDER_COMPLETE_URL,
+            headers=BINDER_HEADERS,
+            json={"route_id": "bridge", "generation": 0, "url": "https://example.com/not-chatgpt"},
+        )
+    assert response.status_code == 400
+    assert container.route_registry.resolve("bridge") == before
+
+
+@pytest.mark.asyncio
+async def test_binder_complete_stale_pending_fails_without_active_binding_change(tmp_path):
+    app, container, _settings = create_binder_test_app(tmp_path)
+    container.route_control.prepare_bind("bridge", session_id=None)
+    raw = container.route_registry._load()
+    raw["current_binds"]["bridge"]["created_at"] = "2020-01-01T00:00:00+00:00"
+    container.route_registry._save(raw)
+    before = container.route_registry.resolve("bridge")
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.post(
+            BINDER_COMPLETE_URL,
+            headers=BINDER_HEADERS,
+            json={"route_id": "bridge", "generation": 0, "url": "https://chatgpt.com/g/g-p-infra/c/conv-stale"},
+        )
+    assert response.status_code == 400
+    assert container.route_registry.resolve("bridge") == before
+
+
+@pytest.mark.asyncio
+async def test_binder_complete_project_mismatch_fails_without_active_binding_change(tmp_path):
+    app, container, _settings = create_binder_test_app(tmp_path)
+    container.route_control.prepare_bind("bridge", session_id=None)
+    before = container.route_registry.resolve("bridge")
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.post(
+            BINDER_COMPLETE_URL,
+            headers=BINDER_HEADERS,
+            json={"route_id": "bridge", "generation": 0, "url": "https://chatgpt.com/g/g-p-other/c/conv-other"},
+        )
+    assert response.status_code == 409
+    assert container.route_registry.resolve("bridge") == before
+
+
+@pytest.mark.asyncio
+async def test_binder_complete_generation_race_fails_without_further_mutation(tmp_path):
+    app, container, _settings = create_binder_test_app(tmp_path)
+    container.route_control.prepare_bind("bridge", session_id=None)
+    raw = container.route_registry._load()
+    raw["routes"]["bridge"]["generation"] = 1
+    raw["routes"]["bridge"]["channel_id"] = "telegram-bridge-g1"
+    container.route_registry._save(raw)
+    before = container.route_registry.resolve("bridge")
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        response = await client.post(
+            BINDER_COMPLETE_URL,
+            headers=BINDER_HEADERS,
+            json={"route_id": "bridge", "generation": 0, "url": "https://chatgpt.com/g/g-p-infra/c/conv-race"},
+        )
+    assert response.status_code in {400, 409}
+    assert container.route_registry.resolve("bridge") == before
+
+
+@pytest.mark.asyncio
+async def test_binder_complete_replay_does_not_create_second_generation(tmp_path):
+    app, container, _settings = create_binder_test_app(tmp_path)
+    container.route_control.prepare_bind("bridge", session_id=None)
+    payload = {"route_id": "bridge", "generation": 0, "url": "https://chatgpt.com/g/g-p-infra/c/conv-replay"}
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="https://bridge.example.com") as client:
+        first = await client.post(BINDER_COMPLETE_URL, headers=BINDER_HEADERS, json=payload)
+        second = await client.post(BINDER_COMPLETE_URL, headers=BINDER_HEADERS, json=payload)
+    assert first.status_code == 200
+    assert second.status_code in {400, 409}
+    current = container.route_registry.resolve("bridge")
+    assert current["generation"] == 1
+    assert current["conversation_id"] == "conv-replay"

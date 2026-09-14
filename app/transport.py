@@ -811,6 +811,96 @@ def create_streamable_http_app(
         except (ValueError, TypeError):
             return {}
 
+    def _browser_binder_authorized(request: Request) -> bool:
+        configured = settings.coordinator.browser_binder_token
+        if configured is None:
+            return False
+        authorization = request.headers.get("authorization", "")
+        supplied = (
+            authorization.removeprefix("Bearer ")
+            if authorization.startswith("Bearer ")
+            else ""
+        )
+        return bool(supplied) and hmac.compare_digest(
+            supplied, configured.get_secret_value()
+        )
+
+    async def route_control_binder_pending(request: Request):
+        service = container.route_control
+        if service is None:
+            return JSONResponse(
+                {"ok": False, "error": "Route control is not configured"},
+                status_code=500,
+                headers=route_control_headers,
+            )
+        if not _browser_binder_authorized(request):
+            return JSONResponse(
+                {"ok": False, "error": "Unauthorized"},
+                status_code=401,
+                headers=route_control_headers,
+            )
+        return JSONResponse(
+            {"ok": True, "pending": service.binder_pending_entries()},
+            status_code=200,
+            headers=route_control_headers,
+        )
+
+    async def route_control_binder_complete(request: Request):
+        service = container.route_control
+        if service is None:
+            return JSONResponse(
+                {"ok": False, "error": "Route control is not configured"},
+                status_code=500,
+                headers=route_control_headers,
+            )
+        if not _browser_binder_authorized(request):
+            return JSONResponse(
+                {"ok": False, "error": "Unauthorized"},
+                status_code=401,
+                headers=route_control_headers,
+            )
+
+        body_data = await _parse_json_safely(request)
+        if set(body_data) - {"route_id", "generation", "url"}:
+            return JSONResponse(
+                {"ok": False, "error": "Unsupported binder request fields"},
+                status_code=400,
+                headers=route_control_headers,
+            )
+        try:
+            route_id = body_data.get("route_id")
+            url = body_data.get("url")
+            generation = body_data.get("generation")
+            if not isinstance(route_id, str) or not route_id:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "route_id is required")
+            if not isinstance(url, str) or not url:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "url is required")
+            if isinstance(generation, bool) or not isinstance(generation, int):
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "generation must be an integer")
+            result = service.complete_bind_for_binder(
+                route_id,
+                expected_generation=generation,
+                active_tab_url=url,
+            )
+            return JSONResponse(
+                {"ok": True, **result},
+                status_code=200,
+                headers=route_control_headers,
+            )
+        except BridgeError as error:
+            status_code = (
+                401
+                if error.code is ErrorCode.PERMISSION_DENIED
+                else 409
+                if error.code is ErrorCode.POLICY_VIOLATION
+                else 400
+            )
+            return JSONResponse(
+                _safe_route_control_error_payload(error),
+                status_code=status_code,
+                headers=route_control_headers,
+            )
+
     async def route_control_status(request: Request):
         service = container.route_control
         if service is None:
@@ -1118,6 +1208,24 @@ def create_streamable_http_app(
             name="route_control_return",
         )
     )
+    if settings.coordinator.browser_binder_token is not None:
+        custom_routes.append(
+            Route(
+                route_control_base_path + "/binder/pending",
+                endpoint=route_control_binder_pending,
+                methods=["GET"],
+                name="route_control_binder_pending",
+            )
+        )
+        custom_routes.append(
+            Route(
+                route_control_base_path + "/binder/complete",
+                endpoint=route_control_binder_complete,
+                methods=["POST"],
+                name="route_control_binder_complete",
+            )
+        )
+
     custom_routes.append(
         Route(
             route_control_base_path + "/status",

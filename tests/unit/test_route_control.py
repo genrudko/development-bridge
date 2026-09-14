@@ -1542,3 +1542,59 @@ def test_route_control_bootstrap_failed_return_leaves_no_route(test_setup):
     assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
     assert registry.resolve("badroute") is None
     assert registry.pending_current_bind("badroute") is None
+
+
+# --- Wake v2 browser binder tests ---
+
+def test_pending_current_binds_returns_all_live_records(test_setup):
+    registry, _trace_store, _service = test_setup
+    registry.bootstrap(
+        "other",
+        "https://chatgpt.com/g/g-p-other/c/conv-other",
+        "telegram-other-g0",
+        "Other",
+    )
+    first = registry.prepare_current_bind("bridge", session_id=None)
+    second = registry.prepare_current_bind("other", session_id=None)
+
+    pending = registry.pending_current_binds()
+
+    assert {item["route_id"] for item in pending} == {"bridge", "other"}
+    by_route = {item["route_id"]: item for item in pending}
+    assert by_route["bridge"]["token"] == first["token"]
+    assert by_route["other"]["token"] == second["token"]
+    assert all(item["state"] == "prepared" for item in pending)
+
+
+def test_pending_current_binds_removes_stale_records_from_registry(test_setup):
+    registry, _trace_store, _service = test_setup
+    registry.prepare_current_bind("bridge", session_id=None)
+    data = registry._load()
+    data["current_binds"]["bridge"]["created_at"] = "2020-01-01T00:00:00+00:00"
+    registry._save(data)
+
+    assert registry.pending_current_binds() == []
+    assert "bridge" not in (registry._load().get("current_binds") or {})
+
+
+def test_binder_pending_entries_strip_internal_bind_credentials(test_setup):
+    registry, _trace_store, service = test_setup
+    registry.prepare_current_bind("bridge", session_id=None)
+
+    assert service.binder_pending_entries() == [
+        {"route_id": "bridge", "state": "prepared", "generation": 0}
+    ]
+
+
+def test_complete_bind_for_binder_keeps_legacy_operation_internal(test_setup):
+    registry, _trace_store, service = test_setup
+    registry.prepare_current_bind("bridge", session_id=None)
+
+    result = service.complete_bind_for_binder(
+        "bridge",
+        expected_generation=0,
+        active_tab_url="https://chatgpt.com/g/g-p-infra/c/conv-new-binder",
+    )
+
+    assert result == {"route_id": "bridge", "state": "bound", "generation": 1}
+    assert registry.resolve("bridge")["conversation_id"] == "conv-new-binder"

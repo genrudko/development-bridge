@@ -190,6 +190,54 @@ class RouteControlService:
             "operation_url": operation_url,
         }
 
+    def binder_pending_entries(self) -> list[dict]:
+        entries: list[dict] = []
+        for pending in self.route_registry.pending_current_binds():
+            generation = 0 if pending.get("bootstrap") else int(pending.get("source_generation", 0))
+            entries.append(
+                {
+                    "route_id": str(pending["route_id"]),
+                    "state": str(pending.get("state") or "prepared"),
+                    "generation": generation,
+                }
+            )
+        return entries
+
+    def complete_bind_for_binder(
+        self,
+        route_id: str,
+        *,
+        expected_generation: int,
+        active_tab_url: str,
+    ) -> dict:
+        route_id = self.route_registry.validate_route_id(route_id)
+        pending = self.route_registry.pending_current_bind(route_id)
+        if pending is None:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "pending current-chat bind is missing or stale",
+            )
+
+        pending_generation = (
+            0
+            if pending.get("bootstrap")
+            else int(pending.get("source_generation", -1))
+        )
+        if int(expected_generation) != pending_generation:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "pending current-chat bind generation mismatch",
+            )
+
+        operation_id = str(pending["token"])
+        self.accept_bind_return(operation_id, active_tab_url)
+        committed = self.commit_bind(operation_id)
+        return {
+            "route_id": str(committed["route_id"]),
+            "state": str(committed["state"]),
+            "generation": int(committed["generation"]),
+        }
+
     def accept_bind_return(self, operation_id: str, redirect_url: str | None) -> dict:
         diag_id = self.trace_store.find_by_operation_id(operation_id)
         existing_trace = self.trace_store.sanitized(diag_id) if diag_id is not None else None

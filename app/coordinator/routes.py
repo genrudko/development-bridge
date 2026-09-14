@@ -335,6 +335,32 @@ class RouteRegistry:
             return None
         return {**pending, "route_id": route_id}
 
+    def pending_current_binds(self) -> list[dict]:
+        data = self._load()
+        binds = data.get("current_binds")
+        if not isinstance(binds, dict):
+            return []
+
+        live: list[dict] = []
+        changed = False
+        routes = data.get("routes") or {}
+        for route_id, pending in list(binds.items()):
+            if not isinstance(pending, dict):
+                binds.pop(route_id, None)
+                changed = True
+                continue
+            route = routes.get(route_id) if isinstance(routes, dict) else None
+            if self._current_bind_is_stale(pending, route):
+                binds.pop(route_id, None)
+                changed = True
+                continue
+            live.append({**pending, "route_id": route_id})
+
+        if changed:
+            data["current_binds"] = binds
+            self._save(data)
+        return live
+
     def discard_current_bind(self, route_id: str, token: str) -> bool:
         route_id = self.validate_route_id(route_id)
         data = self._load()
