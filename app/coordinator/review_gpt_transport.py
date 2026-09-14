@@ -445,9 +445,17 @@ class ReviewGptWakeTransport:
                 status, detail="Rendezvous helper exited unsuccessfully"
             )
 
+        def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            payload: dict[str, object] = {}
+            for key, value in pairs:
+                if key in payload:
+                    raise ValueError("Duplicate rendezvous helper key")
+                payload[key] = value
+            return payload
+
         try:
-            payload = json.loads(result.stdout)
-        except (json.JSONDecodeError, TypeError):
+            payload = json.loads(result.stdout, object_pairs_hook=reject_duplicate_keys)
+        except (ValueError, TypeError):
             return RendezvousResolution(
                 "transient", detail="Rendezvous helper output was malformed"
             )

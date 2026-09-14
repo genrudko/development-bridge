@@ -116,6 +116,10 @@ async def test_resolve_bind_marker_accepts_strict_helper_statuses(
     "stdout",
     [
         "not-json",
+        pytest.param(
+            '{"status":"zero","status":"unique","candidate_url":"https://chatgpt.com/c/secret"}',
+            id="duplicate-status",
+        ),
         "[]",
         '{"status":"unknown"}',
         '{"status":"zero","candidate_url":"https://chatgpt.com/c/secret-zero"}',
