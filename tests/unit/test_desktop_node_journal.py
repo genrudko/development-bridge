@@ -211,6 +211,85 @@ async def test_async_submit_status_and_result_roundtrip(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_stale_async_submit_is_terminal_without_unobserved_future_exception(tmp_path):
+    service = DesktopNodeService(configured(tmp_path, call_timeout_seconds=1))
+    tools = [{"name": "dcc.call"}]
+    await service.register(
+        "blender-hub", tools, None, ready=True, protocol_profile="mcp-v1",
+    )
+    await service.submit(
+        "blender-hub", "dcc.call", {},
+        {"operation_id": "op-stale-async", "mutation": True},
+    )
+    node = service._nodes["blender-hub"]
+    command = next(iter(node.commands.values()))
+    future = command.future
+
+    await service.register(
+        "blender-hub", tools, None, ready=True, protocol_profile="mcp-v1",
+    )
+
+    assert future.cancelled()
+    assert await service.claim("blender-hub", 0) is None
+    assert service.operation_status("blender-hub", "op-stale-async")["status"] == "session_changed"
+
+    with pytest.raises(BridgeError) as unavailable:
+        service.operation_result("blender-hub", "op-stale-async")
+    assert unavailable.value.code is ErrorCode.DESKTOP_NODE_OFFLINE
+    assert unavailable.value.retryable is True
+    assert unavailable.value.details == {
+        "operation_id": "op-stale-async",
+        "status": "session_changed",
+    }
+
+    with pytest.raises(BridgeError) as rejected:
+        await service.submit_result(
+            "blender-hub", command.command_id,
+            {"content": [], "isError": False},
+        )
+    assert rejected.value.code is ErrorCode.INVALID_ARGUMENT
+    assert service.operation_status("blender-hub", "op-stale-async")["status"] == "session_changed"
+
+
+@pytest.mark.asyncio
+async def test_session_changed_rejects_result_lookup_and_fabricated_late_result(tmp_path):
+    service = DesktopNodeService(configured(tmp_path, call_timeout_seconds=1))
+    tools = [{"name": "dcc.call"}]
+    await service.register(
+        "blender-hub", tools, None, ready=True, protocol_profile="mcp-v1",
+    )
+    await service.submit(
+        "blender-hub", "dcc.call", {},
+        {"operation_id": "op-stale-terminal", "mutation": True},
+    )
+    command = next(iter(service._nodes["blender-hub"].commands.values()))
+    await service.register(
+        "blender-hub", tools, None, ready=True, protocol_profile="mcp-v1",
+    )
+    # Consume the current buggy exception so this Finding-B test remains warning-free.
+    if not command.future.cancelled():
+        with pytest.raises(BridgeError):
+            await command.future
+
+    with pytest.raises(BridgeError) as unavailable:
+        service.operation_result("blender-hub", "op-stale-terminal")
+    assert unavailable.value.code is ErrorCode.DESKTOP_NODE_OFFLINE
+    assert unavailable.value.retryable is True
+    assert unavailable.value.details == {
+        "operation_id": "op-stale-terminal",
+        "status": "session_changed",
+    }
+
+    with pytest.raises(BridgeError) as rejected:
+        await service.submit_result(
+            "blender-hub", command.command_id,
+            {"content": [], "isError": False},
+        )
+    assert rejected.value.code is ErrorCode.INVALID_ARGUMENT
+    assert service.operation_status("blender-hub", "op-stale-terminal")["status"] == "session_changed"
+
+
+@pytest.mark.asyncio
 async def test_async_submit_survives_synchronous_call_timeout(tmp_path):
     service = DesktopNodeService(configured(
         tmp_path,
@@ -330,3 +409,42 @@ async def test_bridge_cad_exception_transport_success_is_journal_success(tmp_pat
     await service.submit_result("desk-1", command["command_id"], raw)
     await call
     assert service.operation_status("desk-1", "op-domain-transport-success")["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_mcp_profile_bypasses_fusion_result_decoding_and_uses_top_level_error(tmp_path, monkeypatch):
+    service = DesktopNodeService(configured(tmp_path, call_timeout_seconds=1))
+    await service.register(
+        "blender-hub", [{"name": "dcc.call"}], None,
+        ready=True, protocol_profile="mcp-v1",
+    )
+
+    def unexpected_fusion_decode(_result):
+        raise AssertionError("mcp-v1 must not decode Fusion result payloads")
+
+    monkeypatch.setattr(
+        "app.desktop_nodes.service.extract_bridge_cad_result", unexpected_fusion_decode,
+    )
+    ordinary = asyncio.create_task(service.call(
+        "blender-hub", "dcc.call", {},
+        {"operation_id": "op-mcp-ordinary", "mutation": False},
+    ))
+    command = await service.claim("blender-hub", 0.2)
+    result = {
+        "content": [{"type": "text", "text": '{"status":"failed","error":{"code":"CAD_FAILURE"}}'}],
+        "structuredContent": {"status": "failed"},
+        "isError": False,
+    }
+    await service.submit_result("blender-hub", command["command_id"], result)
+    assert await ordinary == result
+    assert service.operation_status("blender-hub", "op-mcp-ordinary")["status"] == "succeeded"
+
+    failed = asyncio.create_task(service.call(
+        "blender-hub", "dcc.call", {},
+        {"operation_id": "op-mcp-error", "mutation": False},
+    ))
+    command = await service.claim("blender-hub", 0.2)
+    error_result = {"content": [{"type": "text", "text": "provider failed"}], "isError": True}
+    await service.submit_result("blender-hub", command["command_id"], error_result)
+    assert await failed == error_result
+    assert service.operation_status("blender-hub", "op-mcp-error")["status"] == "failed"

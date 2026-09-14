@@ -10,6 +10,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from secrets import compare_digest, token_urlsafe
 from typing import Any, ClassVar
@@ -22,6 +23,11 @@ from app.desktop_nodes.journal import OperationJournal
 from app.settings import DesktopNodeSettings
 
 
+class DesktopProtocolProfile(str, Enum):
+    FUSION_V1 = "fusion-v1"
+    MCP_V1 = "mcp-v1"
+
+
 @dataclass(slots=True)
 class PendingCommand:
     command_id: str
@@ -30,6 +36,8 @@ class PendingCommand:
     future: asyncio.Future[dict[str, Any]]
     operation_id: str
     mutation: bool
+    session_generation: int
+    protocol_profile: DesktopProtocolProfile
     claimed: bool = False
     retain_result: bool = False
 
@@ -40,7 +48,8 @@ class NodeState:
     last_seen: float
     last_seen_wall: float
     tools: list[dict[str, Any]] = field(default_factory=list)
-    fusion_available: bool = False
+    ready: bool = False
+    protocol_profile: DesktopProtocolProfile = DesktopProtocolProfile.FUSION_V1
     queue: deque[PendingCommand] = field(default_factory=deque)
     commands: dict[str, PendingCommand] = field(default_factory=dict)
     result_delivery_degraded: bool = False
@@ -507,7 +516,9 @@ class DesktopNodeService:
     _MAX_TOOL_NAME_LENGTH = 200
     _MAX_JOURNAL_METADATA_BYTES = 8192
     _MUTATING_TOOLS: ClassVar[frozenset[str]] = frozenset({"fusion_mcp_execute", "fusion_mcp_update"})
-    _TERMINAL_OPERATION_STATES: ClassVar[frozenset[str]] = frozenset({"succeeded", "failed", "late_succeeded", "late_failed"})
+    _TERMINAL_OPERATION_STATES: ClassVar[frozenset[str]] = frozenset({
+        "succeeded", "failed", "late_succeeded", "late_failed", "session_changed",
+    })
 
     def __init__(self, settings: DesktopNodeSettings, public_base_url: str | None = None, endpoint: str = "/mcp") -> None:
         self.settings = settings
@@ -641,10 +652,78 @@ class DesktopNodeService:
         node.result_delivery_degraded = degraded
         node.result_outbox_count = outbox
 
-    async def register(self, node_id: str, tools: list[dict[str, Any]], fusion_available: bool, telemetry: dict[str, Any] | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _resolve_protocol(
+        fusion_available: bool | None,
+        ready: bool | None,
+        protocol_profile: str | DesktopProtocolProfile | None,
+        *,
+        current: NodeState | None = None,
+    ) -> tuple[bool, DesktopProtocolProfile]:
+        if fusion_available is not None and not isinstance(fusion_available, bool):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "fusion_available must be boolean")
+        if ready is not None and not isinstance(ready, bool):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "ready must be boolean")
+        try:
+            profile = (
+                current.protocol_profile
+                if protocol_profile is None and current is not None
+                else DesktopProtocolProfile(protocol_profile or DesktopProtocolProfile.FUSION_V1)
+            )
+        except (TypeError, ValueError) as exc:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Desktop protocol profile is invalid") from exc
+        if profile is DesktopProtocolProfile.MCP_V1:
+            if ready is None and (current is None or protocol_profile is not None):
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "mcp-v1 requires explicit ready")
+            if fusion_available is not None:
+                raise BridgeError(ErrorCode.INVALID_ARGUMENT, "fusion_available is only valid for fusion-v1")
+        resolved_ready = current.ready if ready is None and current is not None else ready
+        if resolved_ready is None:
+            resolved_ready = fusion_available if fusion_available is not None else False
+        if fusion_available is not None and ready is not None and fusion_available != ready:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Conflicting desktop readiness fields")
+        return resolved_ready, profile
+
+    def _terminalize_stale_command(self, node: NodeState, command: PendingCommand) -> None:
+        node.commands.pop(command.command_id, None)
+        try:
+            node.queue.remove(command)
+        except ValueError:
+            pass
+        details = {
+            "status": "session_changed",
+            "expected_session_generation": command.session_generation,
+            "current_session_generation": node.session_generation,
+        }
+        self._journal.update(
+            command.operation_id, status="session_changed", completed_at=time.time(),
+        )
+        if not command.future.done():
+            if command.retain_result:
+                command.future.cancel()
+            else:
+                command.future.set_exception(BridgeError(
+                    ErrorCode.DESKTOP_NODE_OFFLINE,
+                    "Desktop node session changed before command dispatch",
+                    retryable=True,
+                    details=details,
+                ))
+
+    def _reject_stale_queued_commands(self, node: NodeState) -> None:
+        for command in tuple(node.queue):
+            if command.claimed or command.session_generation == node.session_generation:
+                continue
+            self._terminalize_stale_command(node, command)
+
+    async def register(
+        self, node_id: str, tools: list[dict[str, Any]], fusion_available: bool | None = None,
+        telemetry: dict[str, Any] | None = None, *, ready: bool | None = None,
+        protocol_profile: str | DesktopProtocolProfile | None = None,
+    ) -> dict[str, Any]:
         self._configured()
         self._validate_node_id(node_id)
         self._validate_tools(tools)
+        resolved_ready, resolved_profile = self._resolve_protocol(fusion_available, ready, protocol_profile)
         async with self._condition:
             node = self._nodes.get(node_id)
             if node is None:
@@ -652,32 +731,43 @@ class DesktopNodeService:
                 self._nodes[node_id] = node
             else:
                 node.session_generation += 1
+                self._reject_stale_queued_commands(node)
             self._touch(node)
             node.tools = tools
-            node.fusion_available = fusion_available
+            node.ready = resolved_ready
+            node.protocol_profile = resolved_profile
             self._apply_telemetry(node, telemetry)
             self._condition.notify_all()
         return self.status(node_id)
 
-    async def heartbeat(self, node_id: str, tools: list[dict[str, Any]] | None = None, fusion_available: bool | None = None, telemetry: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def heartbeat(
+        self, node_id: str, tools: list[dict[str, Any]] | None = None,
+        fusion_available: bool | None = None, telemetry: dict[str, Any] | None = None, *,
+        ready: bool | None = None,
+        protocol_profile: str | DesktopProtocolProfile | None = None,
+    ) -> dict[str, Any]:
         self._configured()
         self._validate_node_id(node_id)
         if tools is not None:
             self._validate_tools(tools)
         async with self._condition:
             node = self._node(node_id)
+            resolved_ready, resolved_profile = self._resolve_protocol(
+                fusion_available, ready, protocol_profile, current=node,
+            )
             self._touch(node)
             generation_bump = False
             if tools is not None:
                 if tools != node.tools:
                     generation_bump = True
                 node.tools = tools
-            if fusion_available is not None:
-                if fusion_available != node.fusion_available:
-                    generation_bump = True
-                node.fusion_available = fusion_available
+            if resolved_ready != node.ready or resolved_profile is not node.protocol_profile:
+                generation_bump = True
+            node.ready = resolved_ready
+            node.protocol_profile = resolved_profile
             if generation_bump:
                 node.session_generation += 1
+                self._reject_stale_queued_commands(node)
             self._apply_telemetry(node, telemetry)
             self._condition.notify_all()
         return self.status(node_id)
@@ -697,7 +787,9 @@ class DesktopNodeService:
             "last_seen": node.last_seen_wall,
             "age_seconds": max(0.0, self._now() - node.last_seen),
             "online": self._online(node),
-            "fusion_available": node.fusion_available,
+            "ready": node.ready,
+            "protocol_profile": node.protocol_profile.value,
+            "fusion_available": node.ready if node.protocol_profile is DesktopProtocolProfile.FUSION_V1 else False,
             "tool_count": len(node.tools),
             "pending_commands": len(node.commands),
             "claimed_commands": sum(command.claimed for command in node.commands.values()),
@@ -722,7 +814,7 @@ class DesktopNodeService:
         loop = asyncio.get_running_loop()
         async with self._condition:
             node = self._node(node_id)
-            if not self._online(node) or not node.fusion_available:
+            if not self._online(node) or not node.ready:
                 raise BridgeError(ErrorCode.DESKTOP_NODE_OFFLINE, "Desktop node or Fusion is offline", retryable=True)
             discovered = {item.get("name") for item in node.tools}
             if tool_name not in discovered:
@@ -731,7 +823,9 @@ class DesktopNodeService:
                 raise BridgeError(ErrorCode.DESKTOP_NODE_BUSY, "Desktop node command queue is full", retryable=True)
             command = PendingCommand(
                 token_urlsafe(18), tool_name, arguments, loop.create_future(),
-                operation["operation_id"], operation["mutation"], retain_result=True,
+                operation["operation_id"], operation["mutation"], node.session_generation,
+                node.protocol_profile,
+                retain_result=True,
             )
             snapshot = {
                 **operation, "command_id": command.command_id, "node_id": node_id,
@@ -766,6 +860,13 @@ class DesktopNodeService:
             raise BridgeError(
                 ErrorCode.INVALID_ARGUMENT,
                 "Fusion operation was never claimed and cannot produce a result",
+                details={"operation_id": operation_id, "status": status},
+            )
+        if status == "session_changed":
+            raise BridgeError(
+                ErrorCode.DESKTOP_NODE_OFFLINE,
+                "Desktop node session changed before command dispatch",
+                retryable=True,
                 details={"operation_id": operation_id, "status": status},
             )
         if status not in self._TERMINAL_OPERATION_STATES:
@@ -854,8 +955,18 @@ class DesktopNodeService:
         arguments: dict[str, Any],
         journal: dict[str, Any] | None = None,
         expected_session_generation: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         self._configured()
+        effective_timeout = self.settings.call_timeout_seconds if timeout_seconds is None else timeout_seconds
+        if (
+            isinstance(effective_timeout, bool)
+            or not isinstance(effective_timeout, (int, float))
+            or not math.isfinite(effective_timeout)
+            or effective_timeout <= 0
+            or effective_timeout > 600
+        ):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Desktop command timeout is invalid")
         if self._json_size(arguments) > self.settings.max_arguments_bytes:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Fusion tool arguments are too large")
         operation = self._operation_metadata(tool_name, journal)
@@ -876,7 +987,7 @@ class DesktopNodeService:
                         "current_session_generation": node.session_generation,
                     },
                 )
-            if not self._online(node) or not node.fusion_available:
+            if not self._online(node) or not node.ready:
                 raise BridgeError(ErrorCode.DESKTOP_NODE_OFFLINE, "Desktop node or Fusion is offline", retryable=True)
             discovered = {item.get("name") for item in node.tools}
             if tool_name not in discovered:
@@ -890,6 +1001,8 @@ class DesktopNodeService:
                 loop.create_future(),
                 operation["operation_id"],
                 operation["mutation"],
+                node.session_generation,
+                node.protocol_profile,
             )
             snapshot = {
                 **operation,
@@ -911,7 +1024,7 @@ class DesktopNodeService:
             node.commands[command.command_id] = command
             self._condition.notify_all()
         try:
-            return await asyncio.wait_for(asyncio.shield(command.future), self.settings.call_timeout_seconds)
+            return await asyncio.wait_for(asyncio.shield(command.future), effective_timeout)
         except asyncio.CancelledError:
             status = "uncertain" if command.claimed and command.mutation else "cancelled"
             await self._remove_command(node, command, status)
@@ -948,6 +1061,9 @@ class DesktopNodeService:
                 while node.queue:
                     command = node.queue.popleft()
                     if command.command_id in node.commands:
+                        if command.session_generation != node.session_generation:
+                            self._terminalize_stale_command(node, command)
+                            continue
                         command.claimed = True
                         node.last_claim = time.time()
                         self._journal.update(command.operation_id, status="claimed", claimed_at=time.time())
@@ -956,6 +1072,7 @@ class DesktopNodeService:
                             "tool_name": command.tool_name,
                             "arguments": command.arguments,
                             "operation_id": command.operation_id,
+                            "session_generation": command.session_generation,
                         }
                 remaining = deadline - self._now()
                 if remaining <= 0:
@@ -980,6 +1097,9 @@ class DesktopNodeService:
             else self._json_hash(result)
         )
         has_is_error = "isError" in result and result.get("isError") is not False
+        node = self._node(node_id)
+        pending = node.commands.get(command_id)
+        command_profile = pending.protocol_profile if pending is not None else node.protocol_profile
 
         def _explicit_operation_uncertain(payload: Any) -> bool:
             if not isinstance(payload, dict):
@@ -990,15 +1110,22 @@ class DesktopNodeService:
                 and error.get("code") == ErrorCode.OPERATION_UNCERTAIN.value
             )
 
-        transported = extract_bridge_cad_result(result)
+        transported = (
+            extract_bridge_cad_result(result)
+            if command_profile is DesktopProtocolProfile.FUSION_V1
+            else None
+        )
         classification_payload = transported if transported is not None else result
         result_uncertain = _explicit_operation_uncertain(classification_payload)
-        result_failed = bool(
-            (has_is_error if transported is None else False)
-            or classification_payload.get("status") in ("failed", "error")
-            or "error" in classification_payload
-        )
-        if transported is None and isinstance(result.get("content"), list):
+        if command_profile is DesktopProtocolProfile.MCP_V1:
+            result_failed = has_is_error
+        else:
+            result_failed = bool(
+                (has_is_error if transported is None else False)
+                or classification_payload.get("status") in ("failed", "error")
+                or "error" in classification_payload
+            )
+        if command_profile is DesktopProtocolProfile.FUSION_V1 and transported is None and isinstance(result.get("content"), list):
             for block in result["content"]:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = block.get("text", "")

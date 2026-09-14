@@ -19,6 +19,87 @@ def configured(**updates):
 
 
 @pytest.mark.asyncio
+async def test_legacy_fusion_available_registers_fusion_profile_ready():
+    service = DesktopNodeService(configured())
+    status = await service.register("desk-1", [{"name": "fusion_mcp_read"}], True)
+    assert status["ready"] is True
+    assert status["protocol_profile"] == "fusion-v1"
+    assert status["fusion_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_profile_registers_ready_without_fusion_alias():
+    service = DesktopNodeService(configured())
+    status = await service.register(
+        "blender-hub", [{"name": "dcc.search"}], None,
+        ready=True, protocol_profile="mcp-v1",
+    )
+    assert status["ready"] is True
+    assert status["protocol_profile"] == "mcp-v1"
+    assert status["fusion_available"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fusion_available", "ready", "protocol_profile"),
+    [
+        (True, False, "fusion-v1"),
+        (True, True, "mcp-v1"),
+        (None, None, "mcp-v1"),
+        (None, True, "unknown-v1"),
+        (1, None, None),
+        (None, 1, "mcp-v1"),
+    ],
+)
+async def test_invalid_profile_or_ready_inputs_fail_before_registration_mutation(
+    fusion_available, ready, protocol_profile,
+):
+    service = DesktopNodeService(configured())
+    await service.register("desk-1", [{"name": "original"}], True)
+    before = service.status("desk-1")
+    with pytest.raises(BridgeError) as raised:
+        await service.register(
+            "desk-1", [{"name": "replacement"}], fusion_available,
+            ready=ready, protocol_profile=protocol_profile,
+        )
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+    after = service.status("desk-1")
+    assert after["session_generation"] == before["session_generation"]
+    assert service.tools("desk-1")["tools"] == [{"name": "original"}]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_profile_readiness_and_tools_control_generation():
+    service = DesktopNodeService(configured())
+    registered = await service.register(
+        "blender-hub", [{"name": "dcc.search"}], None,
+        ready=True, protocol_profile="mcp-v1",
+    )
+    unchanged = await service.heartbeat(
+        "blender-hub", [{"name": "dcc.search"}], None,
+        ready=True, protocol_profile="mcp-v1",
+    )
+    assert unchanged["session_generation"] == registered["session_generation"]
+    not_ready = await service.heartbeat("blender-hub", ready=False)
+    assert not_ready["session_generation"] == registered["session_generation"] + 1
+    changed_tools = await service.heartbeat("blender-hub", [{"name": "dcc.call"}])
+    assert changed_tools["session_generation"] == registered["session_generation"] + 2
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_cannot_switch_to_mcp_profile_without_explicit_ready():
+    service = DesktopNodeService(configured())
+    await service.register("desk-1", [{"name": "fusion_mcp_read"}], True)
+    before = service.status("desk-1")
+    with pytest.raises(BridgeError) as raised:
+        await service.heartbeat("desk-1", protocol_profile="mcp-v1")
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+    after = service.status("desk-1")
+    assert after["session_generation"] == before["session_generation"]
+    assert after["protocol_profile"] == "fusion-v1"
+
+
+@pytest.mark.asyncio
 async def test_service_roundtrip_discovery_and_tool_result():
     service = DesktopNodeService(configured(call_timeout_seconds=1))
     await service.register("desk-1", [{"name": "make_box", "inputSchema": {"type": "object"}}], True)
@@ -444,6 +525,118 @@ async def test_call_expected_session_generation_rejects_reconnected_node_before_
 
     assert exc_info.value.code == ErrorCode.DESKTOP_NODE_OFFLINE
     assert exc_info.value.details["status"] == "session_changed"
+    assert service.status("desk-1")["pending_commands"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("generation_change", ["register", "heartbeat"])
+async def test_queued_command_is_rejected_when_session_generation_changes(generation_change):
+    service = DesktopNodeService(configured(call_timeout_seconds=1))
+    tools = [{"name": "dcc.call"}]
+    await service.register(
+        "blender-hub", tools, None, ready=True, protocol_profile="mcp-v1",
+    )
+    call = asyncio.create_task(service.call(
+        "blender-hub", "dcc.call", {}, {"operation_id": f"op-stale-{generation_change}", "mutation": True},
+    ))
+    await asyncio.sleep(0)
+    assert service.status("blender-hub")["pending_commands"] == 1
+
+    if generation_change == "register":
+        await service.register(
+            "blender-hub", tools, None, ready=True, protocol_profile="mcp-v1",
+        )
+    else:
+        await service.heartbeat("blender-hub", ready=False)
+
+    with pytest.raises(BridgeError) as raised:
+        await call
+    assert raised.value.code is ErrorCode.DESKTOP_NODE_OFFLINE
+    assert raised.value.retryable is True
+    assert raised.value.details["status"] == "session_changed"
+    assert await service.claim("blender-hub", 0) is None
+    assert service.status("blender-hub")["pending_commands"] == 0
+    assert service.operation_status(
+        "blender-hub", f"op-stale-{generation_change}",
+    )["status"] == "session_changed"
+
+
+@pytest.mark.asyncio
+async def test_claim_includes_enqueued_session_generation():
+    service = DesktopNodeService(configured(call_timeout_seconds=1))
+    await service.register(
+        "blender-hub", [{"name": "dcc.search"}], None,
+        ready=True, protocol_profile="mcp-v1",
+    )
+    call = asyncio.create_task(service.call("blender-hub", "dcc.search", {}))
+    claimed = await service.claim("blender-hub", 0.2)
+    assert claimed is not None
+    assert claimed["session_generation"] == service.get_session_generation("blender-hub")
+    await service.submit_result("blender-hub", claimed["command_id"], {"content": [], "isError": False})
+    await call
+
+
+@pytest.mark.asyncio
+async def test_claimed_command_keeps_generation_ownership_across_reregister():
+    service = DesktopNodeService(configured(call_timeout_seconds=1))
+    tools = [{"name": "dcc.call"}]
+    first = await service.register(
+        "blender-hub", tools, None, ready=True, protocol_profile="mcp-v1",
+    )
+    call = asyncio.create_task(service.call(
+        "blender-hub", "dcc.call", {},
+        {"operation_id": "op-claimed-old-generation", "mutation": True},
+    ))
+    command = await service.claim("blender-hub", 0.2)
+    assert command is not None
+    assert command["session_generation"] == first["session_generation"]
+
+    second = await service.register(
+        "blender-hub", tools, None, ready=True, protocol_profile="mcp-v1",
+    )
+    assert second["session_generation"] == first["session_generation"] + 1
+    assert service.operation_status(
+        "blender-hub", "op-claimed-old-generation",
+    )["status"] == "running"
+
+    result = {"content": [{"type": "text", "text": "done"}], "isError": False}
+    await service.submit_result("blender-hub", command["command_id"], result)
+    assert await call == result
+    assert service.operation_status(
+        "blender-hub", "op-claimed-old-generation",
+    )["status"] == "succeeded"
+
+
+def test_desktop_call_timeout_default_and_ceiling():
+    assert DesktopNodeSettings(token="secret").call_timeout_seconds == 300
+    assert DesktopNodeSettings(token="secret", call_timeout_seconds=600).call_timeout_seconds == 600
+
+
+@pytest.mark.asyncio
+async def test_call_accepts_bounded_timeout_override_without_mutating_settings():
+    service = DesktopNodeService(configured(call_timeout_seconds=1))
+    await service.register(
+        "blender-hub", [{"name": "operator.ask"}], None,
+        ready=True, protocol_profile="mcp-v1",
+    )
+    call = asyncio.create_task(service.call(
+        "blender-hub", "operator.ask", {}, timeout_seconds=360,
+    ))
+    command = await service.claim("blender-hub", 0.2)
+    assert command is not None
+    await service.submit_result("blender-hub", command["command_id"], {"content": [], "isError": False})
+    assert await call == {"content": [], "isError": False}
+    assert service.settings.call_timeout_seconds == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout_seconds", [0, -1, float("nan"), float("inf"), 601])
+async def test_invalid_timeout_override_fails_before_enqueue(timeout_seconds):
+    service = DesktopNodeService(configured(call_timeout_seconds=1))
+    await service.register("desk-1", [{"name": "read"}], True)
+    with pytest.raises(BridgeError) as raised:
+        await service.call("desk-1", "read", {}, timeout_seconds=timeout_seconds)
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
     assert service.status("desk-1")["pending_commands"] == 0
 
 

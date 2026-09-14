@@ -34,6 +34,47 @@ async def test_agent_routes_auth_registration_and_bounds():
 
 
 @pytest.mark.asyncio
+async def test_agent_routes_accept_generic_profile_register_and_heartbeat():
+    transport = httpx2.ASGITransport(app=app_with("secret"))
+    headers = {"Authorization": "Bearer secret"}
+    async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        registered = await client.post(
+            "/mcp/desktop-nodes/blender-hub/register", headers=headers,
+            json={"ready": True, "protocol_profile": "mcp-v1", "tools": [{"name": "dcc.search"}]},
+        )
+        assert registered.status_code == 200
+        assert registered.json()["ready"] is True
+        assert registered.json()["protocol_profile"] == "mcp-v1"
+        assert registered.json()["fusion_available"] is False
+
+        heartbeat = await client.post(
+            "/mcp/desktop-nodes/blender-hub/heartbeat", headers=headers,
+            json={"ready": False, "protocol_profile": "mcp-v1"},
+        )
+        assert heartbeat.status_code == 200
+        assert heartbeat.json()["ready"] is False
+        assert heartbeat.json()["session_generation"] == registered.json()["session_generation"] + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    {"ready": "true", "protocol_profile": "mcp-v1", "tools": []},
+    {"ready": True, "protocol_profile": "unknown-v1", "tools": []},
+    {"ready": True, "fusion_available": False, "protocol_profile": "fusion-v1", "tools": []},
+    {"protocol_profile": "mcp-v1", "tools": []},
+])
+async def test_agent_register_route_rejects_malformed_profile_combinations(body):
+    transport = httpx2.ASGITransport(app=app_with("secret"))
+    async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        response = await client.post(
+            "/mcp/desktop-nodes/desk/register",
+            headers={"Authorization": "Bearer secret"}, json=body,
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "INVALID_ARGUMENT"
+
+
+@pytest.mark.asyncio
 async def test_agent_routes_are_hidden_without_token():
     transport = httpx2.ASGITransport(app=app_with())
     async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:

@@ -127,9 +127,23 @@ def create_streamable_http_app(
             if not isinstance(body, dict):
                 raise ValueError
             if action == "register":
-                return JSONResponse(await desktop.register(node_id, body.get("tools", []), bool(body.get("fusion_available", False)), body.get("telemetry")))
+                return JSONResponse(await desktop.register(
+                    node_id,
+                    body.get("tools", []),
+                    body.get("fusion_available"),
+                    body.get("telemetry"),
+                    ready=body.get("ready"),
+                    protocol_profile=body.get("protocol_profile"),
+                ))
             if action == "heartbeat":
-                return JSONResponse(await desktop.heartbeat(node_id, body.get("tools"), body.get("fusion_available"), body.get("telemetry")))
+                return JSONResponse(await desktop.heartbeat(
+                    node_id,
+                    body.get("tools"),
+                    body.get("fusion_available"),
+                    body.get("telemetry"),
+                    ready=body.get("ready"),
+                    protocol_profile=body.get("protocol_profile"),
+                ))
             if action == "result-upload-start":
                 return JSONResponse(desktop.begin_result_upload(node_id, body["command_id"], body["size_bytes"], body["sha256"]))
             if action == "result-upload-chunk":
