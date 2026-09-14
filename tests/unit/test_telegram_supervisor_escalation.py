@@ -43,8 +43,12 @@ async def test_telegram_supervisor_resolves_due_escalation_after_notice(tmp_path
     await supervisor._drain_escalations_once()
 
     assert notices == ["final fallback"]
-    assert (await coordinator.model_ack(armed["continuation_id"]))["acknowledged"] is False
+    late_ack = await coordinator.model_ack(armed["continuation_id"])
+    assert late_ack["acknowledged"] is True
     assert (await coordinator.status("route-g2"))["state"] == "idle"
+
+    await supervisor._drain_escalations_once()
+    assert notices == ["final fallback"]
 
 
 

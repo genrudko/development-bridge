@@ -1329,6 +1329,20 @@ class CoordinatorService:
             for channel_id, wake in list(self._pending.items()):
                 if wake.continuation_id != continuation_id:
                     continue
+                if (
+                    wake.transport_delivered
+                    and wake.model_ack_required
+                    and not wake.model_acknowledged
+                ):
+                    wake.escalation_at = None
+                    wake.escalation_message = None
+                    self._save_state()
+                    return {
+                        "continuation_id": continuation_id,
+                        "channel_id": channel_id,
+                        "resolved": True,
+                        "awaiting_model_ack": True,
+                    }
                 del self._pending[channel_id]
                 self._save_state()
                 return {
