@@ -1,3 +1,4 @@
+from .bind_rendezvous import BindRendezvousService
 from .review_gpt_transport import ReviewGptWakeTransport
 from .route_control import RouteControlService
 from .route_control_diagnostics import RouteControlTraceStore
@@ -14,6 +15,7 @@ from .wake_transport import (
 )
 
 __all__ = [
+    "BindRendezvousService",
     "CoordinatorService",
     "CoordinatorWakeDeliveryService",
     "ReviewGptWakeTransport",
