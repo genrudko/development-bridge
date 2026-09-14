@@ -19,6 +19,7 @@ from pathlib import Path
 from collections.abc import Mapping
 
 API_VERSION = "bridge.shimmer/v1"
+OVERLAY_REVISION = "bridge-overlay-2026-09-14-r1"
 TRANSACTION_NAME = "bridge_cad_shimmer"
 
 PALETTE_ID = "DevelopmentBridgeFusionPalette"
@@ -1183,6 +1184,10 @@ except (ImportError, ModuleNotFoundError):  # standalone test/import outside Shi
     op = None
 
 if op is not None:
+
+    @op("bridge.overlay_info", summary="Return Development Bridge overlay revision.", readonly=True)
+    def bridge_overlay_info(ctx, params):
+        return {"api_version": API_VERSION, "overlay_revision": OVERLAY_REVISION}
 
     @op("bridge.cad_guard", summary="Return Development Bridge private CAD provider guard.", readonly=True)
     def bridge_cad_guard(ctx, params):

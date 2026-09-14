@@ -350,24 +350,60 @@ def test_hands_addin_ops_probe_requires_auth_and_both_bridge_ops(tmp_path):
     seen = []
 
     class Response:
+        def __init__(self, payload): self.payload = payload
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def read(self): return json.dumps({"ops": ["system.reload", "bridge.cad_guard", "bridge.cad_apply"]}).encode()
+        def read(self): return json.dumps(self.payload).encode()
 
     def opener(request, timeout):
-        seen.append((request.full_url, request.get_header("Authorization"), timeout))
-        return Response()
+        seen.append((request.method, request.full_url, request.get_header("Authorization"), timeout))
+        if request.full_url.endswith("/ops"):
+            return Response({"ops": ["system.reload", "bridge.cad_guard", "bridge.cad_apply", "bridge.overlay_info"]})
+        return Response({"ok": True, "result": {"overlay_revision": runtime.SHIMMER_OVERLAY_REVISION}})
 
     result = runtime.probe_hands_addin_ops(token_file=token_file, opener=opener)
 
     assert result.ready
-    assert seen == [("http://127.0.0.1:9000/ops", "Bearer local-secret", runtime.ADDIN_API_TIMEOUT)]
+    assert seen == [
+        ("GET", "http://127.0.0.1:9000/ops", "Bearer local-secret", runtime.ADDIN_API_TIMEOUT),
+        ("POST", "http://127.0.0.1:9000/rpc", "Bearer local-secret", runtime.ADDIN_API_TIMEOUT),
+    ]
     assert "local-secret" not in repr(result)
 
-    class MissingResponse(Response):
-        def read(self): return json.dumps({"ops": ["system.reload", "bridge.cad_guard"]}).encode()
+    assert not runtime.probe_hands_addin_ops(
+        token_file=token_file,
+        opener=lambda *_a, **_k: Response({"ops": ["system.reload", "bridge.cad_guard"]}),
+    ).ready
 
-    assert not runtime.probe_hands_addin_ops(token_file=token_file, opener=lambda *_a, **_k: MissingResponse()).ready
+
+def test_hands_addin_probe_requires_current_overlay_revision(tmp_path):
+    runtime = _hands_runtime_module()
+    token_file = tmp_path / "token"
+    token_file.write_text("local-secret\n", encoding="utf-8")
+
+    class Response:
+        def __init__(self, payload): self.payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self): return json.dumps(self.payload).encode()
+
+    def current_opener(request, timeout):
+        if request.full_url.endswith("/ops"):
+            return Response({"ops": ["bridge.cad_guard", "bridge.cad_apply", "bridge.overlay_info"]})
+        assert json.loads(request.data.decode()) == {"op": "bridge.overlay_info", "params": {}}
+        return Response({"ok": True, "result": {"overlay_revision": runtime.SHIMMER_OVERLAY_REVISION}})
+
+    current = runtime.probe_hands_addin_ops(token_file=token_file, opener=current_opener)
+    assert current.ready
+
+    def stale_opener(request, timeout):
+        if request.full_url.endswith("/ops"):
+            return Response({"ops": ["bridge.cad_guard", "bridge.cad_apply", "bridge.overlay_info"]})
+        return Response({"ok": True, "result": {"overlay_revision": "old-overlay"}})
+
+    stale = runtime.probe_hands_addin_ops(token_file=token_file, opener=stale_opener)
+    assert not stale.ready
+    assert "revision" in stale.detail.lower()
 
 
 def test_hands_reload_uses_pinned_shimmer_rpc_contract(tmp_path):
@@ -533,17 +569,34 @@ def test_gui_package_self_bootstraps_curated_assets_into_managed_launcher():
     assert all(item not in bootstrap for item in forbidden)
     assert "Startup" not in bootstrap and "schtasks" not in bootstrap
 
-def test_unified_bootstrap_installs_missing_optional_provider_runtimes_together():
+def test_unified_bootstrap_reconciles_optional_provider_runtimes_together():
     bootstrap = (ROOT / "agents" / "START_FUSION_GUI.ps1").read_text(encoding="utf-8-sig")
     readme = (ROOT / "agents" / "FUSION_GUI_README.txt").read_text(encoding="utf-8")
     assert "INSTALL_FUSION_HANDS.ps1" in bootstrap
-    assert "Invoke-OptionalProviderInstaller" in bootstrap
+    assert "Invoke-OptionalProviderReconciler" in bootstrap
     assert "periscope\\server\\.venv\\Scripts\\python.exe" in bootstrap
     assert "shimmer-sidecar\\venv\\Scripts\\fusion-mcp.exe" in bootstrap
     assert "INSTALL_FUSION_EYES.ps1" in bootstrap
     assert "install the qualified PERISCOPE runtime once" not in readme
     assert "keep the existing pinned Shimmer installation" not in readme
-    assert "installs missing qualified Eyes and Hands runtimes" in readme
+    assert "reconciles qualified Eyes and Hands runtimes" in readme
+
+
+def test_unified_bootstrap_reconciles_existing_optional_provider_runtimes_on_every_package_launch():
+    bootstrap = (ROOT / "agents" / "START_FUSION_GUI.ps1").read_text(encoding="utf-8-sig")
+    assert "Invoke-OptionalProviderReconciler" in bootstrap
+    assert 'Invoke-OptionalProviderReconciler "Eyes" $EyesInstaller $EyesRuntime' in bootstrap
+    assert 'Invoke-OptionalProviderReconciler "Hands" $HandsInstaller $HandsRuntime' in bootstrap
+    reconciler = bootstrap[bootstrap.index("function Invoke-OptionalProviderReconciler"):bootstrap.index("$EyesInstaller", bootstrap.index("function Invoke-OptionalProviderReconciler"))]
+    assert "{ return }" not in reconciler
+    assert "& $Installer *>> $BootstrapLog" in reconciler
+
+
+def test_hands_installer_reconciles_bridge_managed_overlay_instead_of_requiring_pristine_addin():
+    installer = (ROOT / "agents" / "INSTALL_FUSION_HANDS.ps1").read_text(encoding="utf-8-sig")
+    assert "reconcile_overlay" in installer
+    assert "known managed overlay" in installer
+    assert "refusing to overwrite an existing unqualified Fusion360MCP add-in" not in installer
 
 
 def test_hands_installer_is_pinned_hash_guarded_and_non_destructive():
@@ -557,7 +610,7 @@ def test_hands_installer_is_pinned_hash_guarded_and_non_destructive():
     assert "gen_token.py" in installer
     assert "Claude Desktop" not in installer
     assert "Remove-Item $AddinTarget -Recurse" not in installer
-    assert "refusing to overwrite an existing unqualified Fusion360MCP add-in" in installer
+    assert "known managed overlay" in installer
 
 
 def test_managed_launcher_bundle_keeps_reference_fallback_available():

@@ -80,24 +80,24 @@ try {
     }
 
     $BootstrapLog = Join-Path $ManagedRoot "bootstrap-install.log"
-    function Invoke-OptionalProviderInstaller([string] $Name, [string] $Installer, [string] $Runtime) {
-        if (Test-Path -LiteralPath $Runtime -PathType Leaf) { return }
+    function Invoke-OptionalProviderReconciler([string] $Name, [string] $Installer, [string] $Runtime) {
         try {
-            ("[{0}] installing missing {1} runtime" -f (Get-Date -Format s), $Name) | Add-Content -LiteralPath $BootstrapLog -Encoding UTF8
+            $Action = if (Test-Path -LiteralPath $Runtime -PathType Leaf) { "reconciling existing" } else { "installing missing" }
+            ("[{0}] {1} {2} runtime" -f (Get-Date -Format s), $Action, $Name) | Add-Content -LiteralPath $BootstrapLog -Encoding UTF8
             & $Installer *>> $BootstrapLog
             if (-not (Test-Path -LiteralPath $Runtime -PathType Leaf)) {
-                throw "$Name installer completed without creating its qualified runtime"
+                throw "$Name installer/reconciler completed without a qualified runtime"
             }
         } catch {
-            ("[{0}] {1} install degraded: {2}" -f (Get-Date -Format s), $Name, $_.Exception.Message) | Add-Content -LiteralPath $BootstrapLog -Encoding UTF8
+            ("[{0}] {1} reconcile degraded: {2}" -f (Get-Date -Format s), $Name, $_.Exception.Message) | Add-Content -LiteralPath $BootstrapLog -Encoding UTF8
         }
     }
     $EyesInstaller = Join-Path $ManagedRoot "INSTALL_FUSION_EYES.ps1"
     $EyesRuntime = Join-Path $env:LOCALAPPDATA "DevelopmentBridgeFusion\periscope\server\.venv\Scripts\python.exe"
     $HandsInstaller = Join-Path $ManagedRoot "INSTALL_FUSION_HANDS.ps1"
     $HandsRuntime = Join-Path $env:LOCALAPPDATA "DevelopmentBridgeFusion\shimmer-sidecar\venv\Scripts\fusion-mcp.exe"
-    Invoke-OptionalProviderInstaller "Eyes" $EyesInstaller $EyesRuntime
-    Invoke-OptionalProviderInstaller "Hands" $HandsInstaller $HandsRuntime
+    Invoke-OptionalProviderReconciler "Eyes" $EyesInstaller $EyesRuntime
+    Invoke-OptionalProviderReconciler "Hands" $HandsInstaller $HandsRuntime
 
     Start-Process -FilePath $PythonW -ArgumentList ('"' + $Gui + '"') -WorkingDirectory $ManagedRoot
 } catch {

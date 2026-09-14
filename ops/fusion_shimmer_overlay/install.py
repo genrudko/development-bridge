@@ -137,30 +137,38 @@ def inspect_overlay(repo, *, expected_upstream_sha=None, manifest=None, overlay_
         addin_source, server_source = _overlay_sources(source, spec)
     except (KeyError, OSError, TypeError, OverlayInstallError) as exc:
         return {"state": "mismatch", "detail": f"overlay input unavailable: {exc}"}
-    preimage = (
-        _sha256(addin_data) == addin_target.get("sha256_before")
-        and _sha256(server_data) == server_target.get("sha256_before")
-    )
-    try:
-        expected_addin = _patch_addin_ops_init(addin_data) if preimage else None
-        expected_server = _patch_server_tools_init(server_data) if preimage else None
-    except OverlayInstallError:
-        expected_addin = expected_server = None
+    addin_pristine = _sha256(addin_data) == addin_target.get("sha256_before")
+    server_pristine = _sha256(server_data) == server_target.get("sha256_before")
     overlay_files = (addin_path.parent / "bridge_cad.py", server_path.parent / "bridge_cad.py")
-    if preimage and not any(path.exists() for path in overlay_files):
+    if addin_pristine and server_pristine and not any(path.exists() for path in overlay_files):
         return {"state": "unapplied", "detail": "qualified overlay is not applied"}
-    if not preimage:
-        # Reconstruct qualified postimages by removing only our exact anchors.
-        addin_before = addin_data.replace(b"    api,\n    bridge_cad,\n    assembly,\n", b"    api,\n    assembly,\n", 1)
-        server_before = server_data.replace(b"        api,\n        bridge_cad,\n        assembly,\n", b"        api,\n        assembly,\n", 1).replace(
-            b"    bridge_cad.register(mcp, client)\n\n    # Read-only generic-API helpers",
-            b"    # Read-only generic-API helpers", 1,
-        )
-        if (_sha256(addin_before) == addin_target.get("sha256_before")
-                and _sha256(server_before) == server_target.get("sha256_before")):
-            expected_addin, expected_server = addin_data, server_data
+
+    # A qualified applied state requires BOTH registration files to be the exact
+    # Bridge-patched form of the pinned upstream. Mixed pristine/patched state is
+    # corruption, not an acceptable partial application.
+    addin_before = addin_data.replace(
+        b"    api,\n    bridge_cad,\n    assembly,\n",
+        b"    api,\n    assembly,\n", 1,
+    )
+    server_before = server_data.replace(
+        b"        api,\n        bridge_cad,\n        assembly,\n",
+        b"        api,\n        assembly,\n", 1,
+    ).replace(
+        b"    bridge_cad.register(mcp, client)\n\n    # Read-only generic-API helpers",
+        b"    # Read-only generic-API helpers", 1,
+    )
+    addin_patched = (
+        not addin_pristine
+        and addin_before != addin_data
+        and _sha256(addin_before) == addin_target.get("sha256_before")
+    )
+    server_patched = (
+        not server_pristine
+        and server_before != server_data
+        and _sha256(server_before) == server_target.get("sha256_before")
+    )
     applied = (
-        expected_addin == addin_data and expected_server == server_data
+        addin_patched and server_patched
         and overlay_files[0].is_file() and overlay_files[0].read_bytes() == addin_source
         and overlay_files[1].is_file() and overlay_files[1].read_bytes() == server_source
     )
@@ -168,6 +176,120 @@ def inspect_overlay(repo, *, expected_upstream_sha=None, manifest=None, overlay_
         return {"state": "applied", "detail": "qualified overlay is applied"}
     return {"state": "mismatch", "detail": "live/source overlay hash mismatch"}
 
+
+
+def _known_managed_overlay_pair(spec: dict, addin_data: bytes, server_data: bytes) -> bool:
+    pair = {
+        "addin_bridge_cad.py": _sha256(addin_data),
+        "server_bridge_cad.py": _sha256(server_data),
+    }
+    history = spec.get("managed_overlay_history", [])
+    return isinstance(history, list) and any(isinstance(item, dict) and item == pair for item in history)
+
+
+def reconcile_overlay(repo, *, expected_upstream_sha=None, manifest=None, overlay_dir=None,
+                      runtime_paths=None):
+    """Install current overlay or migrate an exact older Bridge-managed overlay.
+
+    Unknown/tampered runtime state remains fail-closed.  A managed migration is
+    allowed only when both registration files are exact pristine/current-patched
+    forms of the pinned upstream and both live overlay hashes are an exact pair
+    recorded in ``managed_overlay_history``.
+    """
+    repo = Path(repo).resolve()
+    source = HERE if overlay_dir is None else Path(overlay_dir).resolve()
+    spec = dict(manifest) if manifest is not None else json.loads(
+        (source / "manifest.json").read_text(encoding="utf-8")
+    )
+    state = inspect_overlay(
+        repo, expected_upstream_sha=expected_upstream_sha, manifest=spec,
+        overlay_dir=source, runtime_paths=runtime_paths,
+    )
+    if state["state"] == "applied":
+        return {"status": "already_applied", "detail": state["detail"]}
+    if state["state"] == "unapplied":
+        return apply_overlay(
+            repo, expected_upstream_sha=expected_upstream_sha, manifest=spec,
+            overlay_dir=source, runtime_paths=runtime_paths,
+        )
+    if state["state"] == "missing":
+        raise OverlayInstallError("Shimmer runtime is not installed")
+
+    pinned = spec.get("upstream_sha")
+    targets = spec.get("targets")
+    if not isinstance(pinned, str) or not isinstance(targets, dict):
+        raise OverlayInstallError("overlay manifest is invalid")
+    if expected_upstream_sha is not None and expected_upstream_sha != pinned:
+        raise OverlayInstallError("requested upstream SHA does not match pinned upstream manifest")
+    if _upstream_revision(repo, pinned, targets) != pinned:
+        raise OverlayInstallError("upstream SHA mismatch")
+    paths = _target_paths(repo, targets, runtime_paths)
+    addin_path = paths["addin_ops_init"]
+    server_path = paths["server_tools_init"]
+    try:
+        source_addin_pre = (repo / targets["addin_ops_init"]["path"]).read_bytes()
+        source_server_pre = (repo / targets["server_tools_init"]["path"]).read_bytes()
+        addin_data = addin_path.read_bytes()
+        server_data = server_path.read_bytes()
+        current_addin, current_server = _overlay_sources(source, spec)
+        addin_live = addin_path.parent / "bridge_cad.py"
+        server_live = server_path.parent / "bridge_cad.py"
+        old_addin = addin_live.read_bytes()
+        old_server = server_live.read_bytes()
+    except (KeyError, OSError, TypeError, OverlayInstallError) as exc:
+        raise OverlayInstallError("runtime is not an exact known managed overlay") from exc
+
+    if (_sha256(source_addin_pre) != targets["addin_ops_init"].get("sha256_before")
+            or _sha256(source_server_pre) != targets["server_tools_init"].get("sha256_before")):
+        raise OverlayInstallError("pinned source preimage mismatch")
+    patched_addin = _patch_addin_ops_init(source_addin_pre)
+    patched_server = _patch_server_tools_init(source_server_pre)
+    if addin_data not in {source_addin_pre, patched_addin} or server_data not in {source_server_pre, patched_server}:
+        raise OverlayInstallError("runtime is not an exact known managed overlay")
+    if not _known_managed_overlay_pair(spec, old_addin, old_server):
+        raise OverlayInstallError("runtime is not an exact known managed overlay")
+
+    prepared = {
+        addin_path: patched_addin,
+        server_path: patched_server,
+        addin_live: current_addin,
+        server_live: current_server,
+    }
+    originals = {path: path.read_bytes() if path.exists() else None for path in prepared}
+    temporary = {}
+    try:
+        for path, data in prepared.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+            with open(descriptor, "wb", closefd=True) as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary[path] = Path(name)
+        for path in prepared:
+            temporary[path].replace(path)
+        verified = inspect_overlay(
+            repo, expected_upstream_sha=expected_upstream_sha, manifest=spec,
+            overlay_dir=source, runtime_paths=runtime_paths,
+        )
+        if verified["state"] != "applied":
+            raise OverlayInstallError("managed overlay upgrade postimage verification failed")
+    except (OSError, OverlayInstallError) as exc:
+        for temp_path in temporary.values():
+            temp_path.unlink(missing_ok=True)
+        rollback_failed = False
+        for path, original in originals.items():
+            try:
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_bytes(original)
+            except OSError:
+                rollback_failed = True
+        if rollback_failed:
+            raise OverlayInstallError("managed overlay upgrade failed and rollback was incomplete") from exc
+        raise OverlayInstallError("managed overlay upgrade failed; original layout restored") from exc
+    return {"status": "upgraded", "upstream_sha": pinned, "files": [str(path) for path in prepared]}
 
 def apply_overlay(repo, *, expected_upstream_sha=None, manifest=None, overlay_dir=None,
                   runtime_paths=None):
@@ -287,3 +409,23 @@ def apply_overlay(repo, *, expected_upstream_sha=None, manifest=None, overlay_di
         "upstream_sha": actual_head,
         "files": [str(path) for path in prepared],
     }
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Qualified Shimmer overlay installer/reconciler")
+    sub = parser.add_subparsers(dest="command", required=True)
+    reconcile = sub.add_parser("reconcile_overlay")
+    reconcile.add_argument("--repo", required=True)
+    reconcile.add_argument("--expected-upstream-sha", required=True)
+    reconcile.add_argument("--addin-init", required=True)
+    reconcile.add_argument("--server-init", required=True)
+    args = parser.parse_args()
+    if args.command == "reconcile_overlay":
+        result = reconcile_overlay(
+            Path(args.repo),
+            expected_upstream_sha=args.expected_upstream_sha,
+            runtime_paths={"addin_ops_init": Path(args.addin_init), "server_tools_init": Path(args.server_init)},
+        )
+        print(json.dumps(result, sort_keys=True))

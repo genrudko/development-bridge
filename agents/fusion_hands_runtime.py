@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Mapping
 
 SHIMMER_UPSTREAM_SHA = "97a06e76c289420a721590ddcab334f5f3dc3178"
+SHIMMER_OVERLAY_REVISION = "bridge-overlay-2026-09-14-r1"
 HANDS_NODE_ID = "fusion-hands"
 HANDS_MCP_HOST = "127.0.0.1"
 HANDS_MCP_PORT = 18768
@@ -18,7 +19,7 @@ HANDS_MCP_URL = "http://127.0.0.1:18768/mcp"
 SHIMMER_ADDIN_PORT = 9000
 SHIMMER_ADDIN_URL = "http://127.0.0.1:9000"
 ADDIN_API_TIMEOUT = 0.65
-REQUIRED_BRIDGE_OPS = frozenset({"bridge.cad_guard", "bridge.cad_apply"})
+REQUIRED_BRIDGE_OPS = frozenset({"bridge.cad_guard", "bridge.cad_apply", "bridge.overlay_info"})
 DEFAULT_BRIDGE_URL = "https://mcp.vigilante.website"
 
 
@@ -85,15 +86,39 @@ def _addin_request(
     return json.loads(body.decode("utf-8"))
 
 
+def _overlay_revision(value: object) -> str | None:
+    if isinstance(value, dict):
+        revision = value.get("overlay_revision")
+        if isinstance(revision, str):
+            return revision
+        for item in value.values():
+            found = _overlay_revision(item)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _overlay_revision(item)
+            if found is not None:
+                return found
+    return None
+
+
 def probe_hands_addin_ops(
     *, token_file: Path | None = None, opener=urllib.request.urlopen,
 ) -> HandsAddinState:
     try:
-        result = _addin_request("GET", "/ops", token_file=token_file or _default_token_file(), opener=opener)
+        resolved_token = token_file or _default_token_file()
+        result = _addin_request("GET", "/ops", token_file=resolved_token, opener=opener)
         missing = REQUIRED_BRIDGE_OPS - _operation_names(result)
         if missing:
             return HandsAddinState(False, "required Bridge operations are not loaded")
-        return HandsAddinState(True, "required Bridge operations are loaded")
+        info = _addin_request(
+            "POST", "/rpc", token_file=resolved_token, opener=opener,
+            payload={"op": "bridge.overlay_info", "params": {}},
+        )
+        if _overlay_revision(info) != SHIMMER_OVERLAY_REVISION:
+            return HandsAddinState(False, "loaded Bridge overlay revision is stale")
+        return HandsAddinState(True, "required Bridge operations and overlay revision are loaded")
     except RuntimeError:
         return HandsAddinState(False, "local add-in auth unavailable")
     except Exception as exc:

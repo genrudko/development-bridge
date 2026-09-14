@@ -466,6 +466,85 @@ def test_palette_state_and_owner_inbox_are_durable_and_poll_once(tmp_path, monke
     assert (tmp_path / "palette.json").is_file()
 
 
+def _managed_overlay_upgrade_fixture(tmp_path, module):
+    pin = "managed-pin"
+    repo = tmp_path / f"extract-{pin}" / f"self-host-fusion360-MCP-{pin}"
+    source_addin = repo / "addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py"
+    source_server = repo / "server/fusion_mcp/tools/__init__.py"
+    addin_pre = b"from . import (\n    api,\n    assembly,\n)\n"
+    server_pre = (b"from fusion_mcp.tools import (\n        api,\n        assembly,\n)\n\n"
+                  b"def register_all(mcp, client):\n"
+                  b"    # Read-only generic-API helpers (introspect/docs) are always available.\n"
+                  b"    api.register(mcp, client)\n")
+    source_addin.parent.mkdir(parents=True); source_server.parent.mkdir(parents=True)
+    source_addin.write_bytes(addin_pre); source_server.write_bytes(server_pre)
+    installed = tmp_path / "installed"
+    addin_init = installed / "addin/ops/__init__.py"; server_init = installed / "server/tools/__init__.py"
+    addin_init.parent.mkdir(parents=True); server_init.parent.mkdir(parents=True)
+    addin_init.write_bytes(module._patch_addin_ops_init(addin_pre)); server_init.write_bytes(module._patch_server_tools_init(server_pre))
+    addin_live = addin_init.parent / "bridge_cad.py"; server_live = server_init.parent / "bridge_cad.py"
+    old_addin=b"old managed addin\n"; old_server=b"old managed server\n"
+    addin_live.write_bytes(old_addin); server_live.write_bytes(old_server)
+    overlay = tmp_path / "overlay"; overlay.mkdir()
+    new_addin=b"current managed addin\n"; new_server=b"current managed server\n"
+    (overlay/"addin_bridge_cad.py").write_bytes(new_addin); (overlay/"server_bridge_cad.py").write_bytes(new_server)
+    manifest={
+        "upstream_sha":pin,
+        "overlay_sha256":{"addin_bridge_cad.py":hashlib.sha256(new_addin).hexdigest(),"server_bridge_cad.py":hashlib.sha256(new_server).hexdigest()},
+        "managed_overlay_history":[{"addin_bridge_cad.py":hashlib.sha256(old_addin).hexdigest(),"server_bridge_cad.py":hashlib.sha256(old_server).hexdigest()}],
+        "targets":{
+            "addin_ops_init":{"path":"addin/Fusion360MCP/fusion_mcp_addin/ops/__init__.py","sha256_before":hashlib.sha256(addin_pre).hexdigest()},
+            "server_tools_init":{"path":"server/fusion_mcp/tools/__init__.py","sha256_before":hashlib.sha256(server_pre).hexdigest()},
+        },
+    }
+    (overlay/"manifest.json").write_text(json.dumps(manifest),encoding="utf-8")
+    runtime_paths={"addin_ops_init":addin_init,"server_tools_init":server_init}
+    return repo,overlay,manifest,runtime_paths,addin_live,server_live,new_addin,new_server
+
+
+def test_inspect_overlay_rejects_mixed_registration_state_even_with_current_overlay_files(tmp_path):
+    module = _load("install.py", "fusion_shimmer_overlay_mixed_registration")
+    repo, overlay, manifest, runtime_paths, addin_live, server_live, _new_addin, _new_server = _managed_overlay_upgrade_fixture(tmp_path, module)
+    source_addin = repo / manifest["targets"]["addin_ops_init"]["path"]
+    # Mixed/tampered state: add-in registration is Bridge-patched, server registration is pristine,
+    # while both overlay modules themselves are current. This must never classify as applied.
+    Path(runtime_paths["addin_ops_init"]).write_bytes(module._patch_addin_ops_init(source_addin.read_bytes()))
+    source_server = repo / manifest["targets"]["server_tools_init"]["path"]
+    Path(runtime_paths["server_tools_init"]).write_bytes(source_server.read_bytes())
+    addin_live.write_bytes((overlay / "addin_bridge_cad.py").read_bytes())
+    server_live.write_bytes((overlay / "server_bridge_cad.py").read_bytes())
+
+    state = module.inspect_overlay(
+        repo,
+        expected_upstream_sha=manifest["upstream_sha"],
+        manifest=manifest,
+        overlay_dir=overlay,
+        runtime_paths=runtime_paths,
+    )
+    assert state["state"] == "mismatch"
+
+
+def test_installer_reconciles_exact_known_previous_managed_overlay(tmp_path):
+    module=_load("install.py","fusion_shimmer_overlay_install_managed_upgrade")
+    repo,overlay,manifest,runtime_paths,addin_live,server_live,new_addin,new_server=_managed_overlay_upgrade_fixture(tmp_path,module)
+    before={k:Path(v).read_bytes() for k,v in runtime_paths.items()}
+    result=module.reconcile_overlay(repo,expected_upstream_sha=manifest["upstream_sha"],manifest=manifest,overlay_dir=overlay,runtime_paths=runtime_paths)
+    assert result["status"] == "upgraded"
+    assert addin_live.read_bytes()==new_addin and server_live.read_bytes()==new_server
+    assert {k:Path(v).read_bytes() for k,v in runtime_paths.items()} == before
+    assert module.inspect_overlay(repo,expected_upstream_sha=manifest["upstream_sha"],manifest=manifest,overlay_dir=overlay,runtime_paths=runtime_paths)["state"] == "applied"
+
+
+def test_installer_refuses_unknown_overlay_during_reconcile_without_writes(tmp_path):
+    module=_load("install.py","fusion_shimmer_overlay_install_unknown_upgrade")
+    repo,overlay,manifest,runtime_paths,addin_live,server_live,_new_addin,_new_server=_managed_overlay_upgrade_fixture(tmp_path,module)
+    addin_live.write_bytes(b"unknown external edit\n")
+    snapshot=[Path(runtime_paths["addin_ops_init"]).read_bytes(),Path(runtime_paths["server_tools_init"]).read_bytes(),addin_live.read_bytes(),server_live.read_bytes()]
+    with pytest.raises(module.OverlayInstallError,match="known managed overlay"):
+        module.reconcile_overlay(repo,expected_upstream_sha=manifest["upstream_sha"],manifest=manifest,overlay_dir=overlay,runtime_paths=runtime_paths)
+    assert [Path(runtime_paths["addin_ops_init"]).read_bytes(),Path(runtime_paths["server_tools_init"]).read_bytes(),addin_live.read_bytes(),server_live.read_bytes()] == snapshot
+
+
 def test_installer_fails_closed_before_writes_on_wrong_upstream_sha(tmp_path):
     module = _load("install.py", "fusion_shimmer_overlay_install_sha")
     repo = tmp_path / "shimmer"

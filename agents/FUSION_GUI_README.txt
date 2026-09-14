@@ -16,10 +16,12 @@ First run:
   the curated launcher bundle under
   LocalAppData\DevelopmentBridgeFusion\launcher and runs that managed copy;
 - the bootstrap creates .venv and installs mcp==2.0.0 if needed;
-- the same one-time bootstrap installs missing qualified Eyes and Hands runtimes
-  under LocalAppData\DevelopmentBridgeFusion. Eyes is pinned PERISCOPE; Hands is
-  the exact pinned Shimmer archive/server/add-in. Provider installer failures are
-  logged to bootstrap-install.log and degrade only that optional provider;
+- every package launch reconciles qualified Eyes and Hands runtimes under
+  LocalAppData\DevelopmentBridgeFusion. Missing runtimes are installed; existing
+  Bridge-managed runtimes are validated/upgraded to the bundled qualified state.
+  Eyes is pinned PERISCOPE; Hands is the exact pinned Shimmer archive/server/add-in.
+  Unknown/tampered provider state still fails closed. Reconcile failures are logged
+  to bootstrap-install.log and degrade only that optional provider;
 - the Shimmer runtime lives under DevelopmentBridgeFusion\shimmer-sidecar:
   fusion-mcp.exe is in venv\Scripts, the package is in
   venv\Lib\site-packages\fusion_mcp, and the exact SHA-named extracted source

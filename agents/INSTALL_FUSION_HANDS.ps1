@@ -11,6 +11,7 @@ $Archive = Join-Path $Sidecar ("shimmer-" + $Pin + ".zip")
 $Venv = Join-Path $Sidecar "venv"
 $Python = Join-Path $Venv "Scripts\python.exe"
 $FusionExe = Join-Path $Venv "Scripts\fusion-mcp.exe"
+$ServerTarget = Join-Path $Venv "Lib\site-packages\fusion_mcp\tools\__init__.py"
 $OverlayRoot = Join-Path $Root "fusion_shimmer_overlay"
 $ManifestPath = Join-Path $OverlayRoot "manifest.json"
 $AddinSource = Join-Path $Source "addin\Fusion360MCP"
@@ -60,24 +61,19 @@ function Ensure-PinnedSource {
     }
 }
 
-function Ensure-QualifiedAddin([object] $Manifest) {
+function Ensure-AddinPresent([object] $Manifest) {
     $OpsRelative = [string]$Manifest.targets.addin_ops_init.path
-    $SourceOps = Join-Path $Source $OpsRelative
-    $RelativeInsideAddin = $OpsRelative.Substring("addin/Fusion360MCP/".Length).Replace('/', '\')
+    $RelativeInsideAddin = $OpsRelative.Substring("addin/Fusion360MCP/".Length).Replace('/', '\\')
     $TargetOps = Join-Path $AddinTarget $RelativeInsideAddin
-    if (Test-Path -LiteralPath $AddinTarget -PathType Container) {
-        if (-not (Test-Path -LiteralPath $TargetOps -PathType Leaf) -or
-            (Get-Sha256 $TargetOps) -ne ([string]$Manifest.targets.addin_ops_init.sha256_before).ToLowerInvariant()) {
-            throw "refusing to overwrite an existing unqualified Fusion360MCP add-in"
-        }
-        return
+    if (-not (Test-Path -LiteralPath $AddinTarget -PathType Container)) {
+        $Parent = Split-Path -Parent $AddinTarget
+        New-Item -ItemType Directory -Force -Path $Parent | Out-Null
+        Copy-Item -LiteralPath $AddinSource -Destination $AddinTarget -Recurse
     }
-    $Parent = Split-Path -Parent $AddinTarget
-    New-Item -ItemType Directory -Force -Path $Parent | Out-Null
-    Copy-Item -LiteralPath $AddinSource -Destination $AddinTarget -Recurse
-    if ((Get-Sha256 $TargetOps) -ne ([string]$Manifest.targets.addin_ops_init.sha256_before).ToLowerInvariant()) {
-        throw "Installed Fusion360MCP add-in preimage verification failed."
+    if (-not (Test-Path -LiteralPath $TargetOps -PathType Leaf)) {
+        throw "Fusion360MCP add-in registration target is missing; runtime is not an exact current or known managed overlay"
     }
+    return $TargetOps
 }
 
 Ensure-PinnedSource
@@ -90,15 +86,19 @@ if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
     if ($LASTEXITCODE -ne 0) { throw "Could not create the Shimmer sidecar venv." }
 }
 $InstallTarget = $Source + "[http]"
-& $Python -m pip install --disable-pip-version-check --upgrade $InstallTarget *> $null
-if ($LASTEXITCODE -ne 0) { throw "Could not install the pinned Shimmer sidecar." }
-if (-not (Test-Path -LiteralPath $FusionExe -PathType Leaf)) { throw "Pinned Shimmer fusion-mcp.exe is missing after install." }
-
-$ServerTarget = Join-Path $Venv "Lib\site-packages\fusion_mcp\tools\__init__.py"
-if ((Get-Sha256 $ServerTarget) -ne ([string]$Manifest.targets.server_tools_init.sha256_before).ToLowerInvariant()) {
-    throw "Installed Shimmer server preimage hash mismatch."
+if (-not (Test-Path -LiteralPath $FusionExe -PathType Leaf) -or -not (Test-Path -LiteralPath $ServerTarget -PathType Leaf)) {
+    & $Python -m pip install --disable-pip-version-check --upgrade $InstallTarget *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not install the pinned Shimmer sidecar." }
 }
-Ensure-QualifiedAddin $Manifest
+if (-not (Test-Path -LiteralPath $FusionExe -PathType Leaf)) { throw "Pinned Shimmer fusion-mcp.exe is missing after install." }
+if (-not (Test-Path -LiteralPath $ServerTarget -PathType Leaf)) { throw "Pinned Shimmer server registration target is missing after install." }
+$TargetOps = Ensure-AddinPresent $Manifest
+
+$OverlayInstaller = Join-Path $OverlayRoot "install.py"
+& $Python $OverlayInstaller reconcile_overlay --repo $Source --expected-upstream-sha $Pin --addin-init $TargetOps --server-init $ServerTarget *> $null
+if ($LASTEXITCODE -ne 0) {
+    throw "Hands reconcile_overlay failed: runtime is not an exact current or known managed overlay"
+}
 
 # Reuse upstream token generation but do not modify any external MCP-client configuration.
 & $Python (Join-Path $Source "install\gen_token.py") *> $null
@@ -111,6 +111,6 @@ if (-not (Test-Path -LiteralPath $SettingsPath -PathType Leaf)) {
         ConvertTo-Json | Set-Content -LiteralPath $SettingsPath -Encoding UTF8
 }
 
-Write-Host "Pinned Shimmer Hands runtime installed and preimage-verified."
+Write-Host "Pinned Shimmer Hands runtime installed/reconciled and hash-verified."
 Write-Host "Shimmer pin: $Pin"
-Write-Host "The Fusion Bridge GUI will apply and verify the guarded overlay before starting fusion-hands."
+Write-Host "The Fusion Bridge GUI will verify the reconciled guarded overlay before starting fusion-hands."
