@@ -1269,6 +1269,8 @@ async def test_binder_complete_binds_active_chatgpt_tab_without_exposing_target(
     assert response.json() == {"ok": True, "route_id": "bridge", "state": "bound", "generation": 1}
     assert prepared["operation_id"] not in response.text
     assert "conv-binder-new" not in response.text
+    for trace_path in container.route_control_trace_store.state_dir.glob("*.json"):
+        assert "conv-binder-new" not in trace_path.read_text(encoding="utf-8")
     current = container.route_registry.resolve("bridge")
     assert current["conversation_id"] == "conv-binder-new"
     assert current["generation"] == 1

@@ -230,7 +230,11 @@ class RouteControlService:
             )
 
         operation_id = str(pending["token"])
-        self.accept_bind_return(operation_id, active_tab_url)
+        self.accept_bind_return(
+            operation_id,
+            active_tab_url,
+            retain_return_target=False,
+        )
         committed = self.commit_bind(operation_id)
         return {
             "route_id": str(committed["route_id"]),
@@ -238,7 +242,13 @@ class RouteControlService:
             "generation": int(committed["generation"]),
         }
 
-    def accept_bind_return(self, operation_id: str, redirect_url: str | None) -> dict:
+    def accept_bind_return(
+        self,
+        operation_id: str,
+        redirect_url: str | None,
+        *,
+        retain_return_target: bool = True,
+    ) -> dict:
         diag_id = self.trace_store.find_by_operation_id(operation_id)
         existing_trace = self.trace_store.sanitized(diag_id) if diag_id is not None else None
         if existing_trace and existing_trace.get("status") in ("ok", "failed"):
@@ -292,7 +302,7 @@ class RouteControlService:
             diag_id,
             "return_received",
             "ok",
-            details={"raw_redirect_url": redirect_url},
+            details={"raw_redirect_url": redirect_url} if retain_return_target else None,
         )
 
         try:
