@@ -11,10 +11,29 @@ from app.settings import BridgeSettings
 from app.transport import create_streamable_http_app
 
 
-def app_with(token=None, max_request_bytes=262144):
-    settings = BridgeSettings.model_validate({"desktop_nodes": {"token": token, "max_request_bytes": max_request_bytes}})
+def app_with(token=None, max_request_bytes=262144, *, blender=False):
+    settings = BridgeSettings.model_validate({"desktop_nodes": {"token": token, "max_request_bytes": max_request_bytes}, "blender": {"enabled": blender}})
     container = build_container(settings)
-    return create_streamable_http_app(create_server(container), settings, container)
+    app = create_streamable_http_app(create_server(container), settings, container)
+    app.state.container = container
+    return app
+
+
+@pytest.mark.asyncio
+async def test_blender_registration_publishes_exact_committed_generation_atomically():
+    app = app_with("secret", blender=True)
+    headers = {"Authorization": "Bearer secret"}
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        good = await client.post("/mcp/desktop-nodes/blender-hub/register", headers=headers, json={"ready": True, "protocol_profile": "mcp-v1", "tools": [{"name": "dcc.search", "inputSchema": {"type": "object"}}]})
+        assert good.status_code == 200
+        assert app.state.container.blender_relay.snapshot().session_generation == good.json()["session_generation"]
+        bad = await client.post("/mcp/desktop-nodes/blender-hub/register", headers=headers, json={"ready": True, "protocol_profile": "mcp-v1", "tools": [{"name": "not_namespaced", "inputSchema": {"type": "object"}}]})
+        assert bad.status_code in {400, 409}
+        assert len(bad.json()["error"]) < 256
+        assert app.state.container.blender_relay.snapshot().session_generation == good.json()["session_generation"]
+        with pytest.raises(RuntimeError, match="Blender desktop relay unavailable"):
+            await app.state.container.blender_relay.invoke("dcc.search", {})
 
 
 @pytest.mark.asyncio

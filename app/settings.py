@@ -317,6 +317,31 @@ class DesktopNodeSettings(BaseModel):
     journal_max_bytes: int = Field(default=5_242_880, ge=65_536, le=67_108_864)
 
 
+class BlenderBridgeSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    enabled: bool = False
+    node_id: Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")] = "blender-hub"
+    mount_path: str = "/blender"
+    mcp_path: str = "/mcp"
+    operator_ask_timeout_seconds: float = Field(default=300, gt=0, le=300)
+    call_timeout_seconds: float = Field(default=360, gt=0, le=600)
+
+    @model_validator(mode="after")
+    def paths_and_timeouts_are_unambiguous(self) -> BlenderBridgeSettings:
+        for name, value in (("mount_path", self.mount_path), ("mcp_path", self.mcp_path)):
+            if (
+                not value.startswith("/") or value == "/" or value.endswith("/")
+                or "//" in value or "." in value.split("/") or ".." in value.split("/")
+                or not all(character.isascii() and (character.isalnum() or character in "_-/") for character in value)
+            ):
+                raise ValueError(f"blender.{name} must be one canonical absolute path segment")
+        if "/" in self.mount_path[1:] or "/" in self.mcp_path[1:]:
+            raise ValueError("blender paths must each contain one segment")
+        if self.call_timeout_seconds <= self.operator_ask_timeout_seconds:
+            raise ValueError("blender call timeout must exceed operator ask timeout")
+        return self
+
+
 FusionNodeId = Annotated[
     str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ]
@@ -435,6 +460,7 @@ class BridgeSettings(BaseModel):
     )
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     desktop_nodes: DesktopNodeSettings = Field(default_factory=DesktopNodeSettings)
+    blender: BlenderBridgeSettings = Field(default_factory=BlenderBridgeSettings)
     fusion_cad: FusionCadSettings = Field(default_factory=FusionCadSettings)
     eod_browser: EodBrowserSettings = Field(default_factory=EodBrowserSettings)
     operator_dashboard: OperatorDashboardSettings = Field(

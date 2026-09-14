@@ -7,6 +7,7 @@ from app.api.errors import BridgeError, ErrorCode
 from app.audit import AuditSink, LoggingAuditSink
 from app.auth import BridgeOAuthProvider, OAuthStore
 from app.bridge_restart import BridgeRestartService
+from app.blender_relay import BlenderRelayService
 from app.capabilities import CapabilityPolicy
 from app.changes import ChangeRevisionCalculator, ChangeService
 from app.chatgpt_share import (
@@ -103,6 +104,7 @@ class ApplicationContainer:
     commands: RepositoryCommandService
     bridge_restart: BridgeRestartService
     desktop_nodes: DesktopNodeService
+    blender_relay: BlenderRelayService | None = None
     fusion_cad: FusionCadService | None = None
     coordinator_wake_delivery: CoordinatorWakeDeliveryService | None = None
     route_control: RouteControlService | None = None
@@ -457,6 +459,15 @@ def build_container(
             poll_interval_seconds=wake_settings.poll_interval_seconds,
         )
     commands = RepositoryCommandService(jobs, policy)
+    desktop_nodes = DesktopNodeService(
+        configured.desktop_nodes,
+        str(configured.server.public_base_url) if configured.server.public_base_url else None,
+        configured.server.endpoint,
+    )
+    blender_relay = (
+        BlenderRelayService(configured.blender, desktop_nodes)
+        if configured.blender.enabled else None
+    )
     return ApplicationContainer(
         settings=configured,
         projects=projects,
@@ -495,11 +506,8 @@ def build_container(
         route_control=route_control,
         commands=commands,
         bridge_restart=BridgeRestartService(jobs),
-        desktop_nodes=(desktop_nodes := DesktopNodeService(
-            configured.desktop_nodes,
-            str(configured.server.public_base_url) if configured.server.public_base_url else None,
-            configured.server.endpoint,
-        )),
+        desktop_nodes=desktop_nodes,
+        blender_relay=blender_relay,
         fusion_cad=FusionCadService(
             desktop_nodes,
             provider_router=FusionCadProviderRouter(configured.fusion_cad),

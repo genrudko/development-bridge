@@ -127,14 +127,22 @@ def create_streamable_http_app(
             if not isinstance(body, dict):
                 raise ValueError
             if action == "register":
-                return JSONResponse(await desktop.register(
+                status = await desktop.register(
                     node_id,
                     body.get("tools", []),
                     body.get("fusion_available"),
                     body.get("telemetry"),
                     ready=body.get("ready"),
                     protocol_profile=body.get("protocol_profile"),
-                ))
+                )
+                if container.blender_relay is not None and node_id == settings.blender.node_id:
+                    container.blender_relay.accept_registration(
+                        node_id,
+                        status["session_generation"],
+                        status["protocol_profile"],
+                        body.get("tools", []),
+                    )
+                return JSONResponse(status)
             if action == "heartbeat":
                 return JSONResponse(await desktop.heartbeat(
                     node_id,
