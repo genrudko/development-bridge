@@ -16,8 +16,16 @@ default for local development.
 
 ## Current APIs
 
-Start each new coordinator chat with `bridge_guide`; it returns bounded
-operating guidance and the complete live tool catalog grouped by category.
+GPTAdmin is the canonical local MCP hub for Development Bridge. On the VPS, route
+Bridge-native calls through GPTAdmin target `development-bridge`; in ChatGPT the
+canonical ingress path is `Remote Desktop Commander -> VPS -> GPTAdmin ->
+development-bridge -> Development Bridge`. The custom `Dev_Bridge` namespace is
+not the authoritative ingress and may disappear independently of Bridge runtime
+health. See [the MCP hub routing contract](docs/operations/mcp-hub-routing.md).
+
+After reaching the `development-bridge` target, call `bridge_guide` first in a
+new coordinator context; it returns bounded operating guidance and the live
+compact tool surface plus discovery guidance for hidden capabilities.
 
 The Bridge exposes:
 

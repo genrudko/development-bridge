@@ -2,6 +2,12 @@
 
 This runbook applies to Codex, Antigravity, and any future coding executor launched through Development Bridge. ChatGPT/Development Bridge remains the coordinator and acceptance authority; the coding agent is a bounded implementation/review worker.
 
+## 0. Canonical MCP ingress
+
+GPTAdmin is the canonical VPS-local MCP hub. When an executor needs a Bridge-native capability, route through GPTAdmin target `development-bridge`; do not start a private `mcp-remote`, connect directly to `mcp.vigilante.website`, repair OAuth state, or treat a missing ChatGPT `Dev_Bridge` namespace as evidence that Bridge is unavailable. The direct namespace is optional convenience only.
+
+GPTAdmin is transport/federation, not an alternate policy plane. All Bridge-owned Git/GitHub guards, durable job semantics, coordinator wake/ACK behavior, and Fusion safety invariants remain authoritative behind the hub. The GPTAdmin target `development-bridge` and the internal coordinator route `bridge` are different identifiers. See `docs/operations/mcp-hub-routing.md` for topology, diagnosis order, and the operator-only emergency fallback.
+
 ## 1. One bounded outcome per executor job
 
 The coordinator must give the executor one complete engineering outcome with:

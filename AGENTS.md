@@ -5,6 +5,16 @@
 This repository implements Development Bridge.
 Do not modify external production deployments unless explicitly requested.
 
+## Canonical MCP access and routing
+
+- GPTAdmin on the VPS is the canonical MCP hub. Its local endpoint is `127.0.0.1:9001`; the canonical target for this service is `development-bridge`.
+- ChatGPT's canonical ingress path is `Remote Desktop Commander -> VPS -> GPTAdmin -> development-bridge -> Development Bridge`. VPS-side executors go directly through GPTAdmin and do not need RDC.
+- The ChatGPT custom `Dev_Bridge` namespace is optional convenience only. If it disappears from a turn, do not infer that Development Bridge is down; verify the GPTAdmin target first.
+- Normal executors must not create ad-hoc `mcp-remote` processes, connect directly to `https://mcp.vigilante.website/mcp`, re-register OAuth clients, or repair OAuth state. Use the hub contract instead.
+- GPTAdmin is transport/federation only; it never bypasses Bridge-native policy, durable jobs, Git/GitHub guards, coordinator routing, or Fusion safety invariants.
+- `development-bridge` is the GPTAdmin MCP target; `bridge` is a logical coordinator route inside Development Bridge. Do not conflate them.
+- Canonical details and fallback order: `docs/operations/mcp-hub-routing.md`.
+
 ## Economy Mode
 
 Treat model/tool round-trips, coordinator chat context, and live ChatGPT Web traffic as scarce resources.
