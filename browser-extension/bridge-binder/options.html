@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bridge Binder — настройки</title>
+  <style>
+    body { font: 15px system-ui, sans-serif; max-width: 720px; margin: 32px auto; padding: 0 20px; }
+    label { display: block; margin-top: 16px; }
+    input { width: 100%; box-sizing: border-box; padding: 9px; margin-top: 6px; }
+    button { margin-top: 18px; padding: 9px 16px; }
+    #status { margin-top: 14px; }
+  </style>
+</head>
+<body>
+  <h1>Development Bridge Binder</h1>
+  <p>Укажите полный route-control URL Bridge, заканчивающийся на <code>/x/route-control</code>.</p>
+  <label>Route-control URL <input id="routeControlBaseUrl" type="url" placeholder="https://bridge.example/mcp/x/route-control"></label>
+  <label>Browser Binder token <input id="binderToken" type="password" autocomplete="off"></label>
+  <button id="saveButton" type="button">Сохранить</button>
+  <div id="status" role="status"></div>
+  <script src="options.js"></script>
+</body>
+</html>

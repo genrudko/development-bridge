@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bridge Binder</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; min-width: 320px; margin: 16px; }
+    label, select, button { display: block; width: 100%; box-sizing: border-box; }
+    select, button { margin-top: 8px; padding: 8px; }
+    #status { margin-top: 12px; white-space: pre-wrap; }
+    .secondary { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <strong>Development Bridge Binder</strong>
+  <label for="pendingRoutes">Ожидающий маршрут</label>
+  <select id="pendingRoutes"><option value="">Загрузка…</option></select>
+  <button id="bindButton" type="button">Привязать эту вкладку</button>
+  <button id="refreshButton" type="button" class="secondary">Обновить</button>
+  <div id="status" role="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

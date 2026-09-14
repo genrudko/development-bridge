@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Development Bridge Browser Binder",
+  "version": "0.1.0",
+  "description": "Explicitly binds the active ChatGPT conversation to a pending Development Bridge route.",
+  "permissions": ["storage", "tabs", "activeTab"],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "optional_host_permissions": ["https://*/*"],
+  "action": {
+    "default_title": "Bridge Binder",
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "development-bridge-binder@local"
+    }
+  }
+}
