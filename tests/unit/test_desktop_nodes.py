@@ -100,6 +100,69 @@ async def test_heartbeat_cannot_switch_to_mcp_profile_without_explicit_ready():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["register", "heartbeat"])
+@pytest.mark.parametrize(
+    "telemetry",
+    [
+        "not-an-object",
+        {"result_delivery_degraded": "yes", "result_outbox_count": 3},
+        {"result_delivery_degraded": False, "result_outbox_count": -1},
+    ],
+)
+async def test_invalid_telemetry_is_atomic_for_existing_node_with_queued_call(
+    operation, telemetry,
+):
+    service = DesktopNodeService(configured(call_timeout_seconds=1))
+    original_tools = [{"name": "original"}]
+    registered = await service.register(
+        "desk-1", original_tools, None,
+        {"result_delivery_degraded": True, "result_outbox_count": 2},
+        ready=True, protocol_profile="mcp-v1",
+    )
+    generation = registered["session_generation"]
+    call = asyncio.create_task(service.call(
+        "desk-1", "original", {},
+        {"operation_id": f"op-invalid-telemetry-{operation}", "mutation": False},
+    ))
+    await asyncio.sleep(0)
+    node = service._nodes["desk-1"]
+    liveness = (node.last_seen, node.last_seen_wall)
+
+    with pytest.raises(BridgeError) as raised:
+        if operation == "register":
+            await service.register(
+                "desk-1", [{"name": "replacement"}], None, telemetry,
+                ready=False, protocol_profile="mcp-v1",
+            )
+        else:
+            await service.heartbeat(
+                "desk-1", [{"name": "replacement"}], telemetry=telemetry,
+                ready=False, protocol_profile="mcp-v1",
+            )
+
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+    assert service.get_session_generation("desk-1") == generation
+    assert service.tools("desk-1")["tools"] == original_tools
+    status = service.status("desk-1")
+    assert status["ready"] is True
+    assert status["protocol_profile"] == "mcp-v1"
+    assert status["result_delivery_degraded"] is True
+    assert status["result_outbox_count"] == 2
+    assert (node.last_seen, node.last_seen_wall) == liveness
+    assert status["pending_commands"] == 1
+    assert service.operation_status(
+        "desk-1", f"op-invalid-telemetry-{operation}",
+    )["status"] == "queued"
+
+    claimed = await service.claim("desk-1", 0.2)
+    assert claimed is not None
+    assert claimed["session_generation"] == generation
+    result = {"content": [], "isError": False}
+    await service.submit_result("desk-1", claimed["command_id"], result)
+    assert await call == result
+
+
+@pytest.mark.asyncio
 async def test_service_roundtrip_discovery_and_tool_result():
     service = DesktopNodeService(configured(call_timeout_seconds=1))
     await service.register("desk-1", [{"name": "make_box", "inputSchema": {"type": "object"}}], True)

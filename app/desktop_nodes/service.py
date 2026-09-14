@@ -642,15 +642,21 @@ class DesktopNodeService:
         node.last_seen_wall = time.time()
 
     @staticmethod
-    def _apply_telemetry(node: NodeState, telemetry: dict[str, Any] | None) -> None:
+    def _validate_telemetry(telemetry: Any) -> tuple[bool, int] | None:
         if telemetry is None:
-            return
+            return None
+        if not isinstance(telemetry, dict):
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Desktop result delivery telemetry is invalid")
         degraded = telemetry.get("result_delivery_degraded")
         outbox = telemetry.get("result_outbox_count")
         if not isinstance(degraded, bool) or not isinstance(outbox, int) or isinstance(outbox, bool) or not 0 <= outbox <= 10000:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "Desktop result delivery telemetry is invalid")
-        node.result_delivery_degraded = degraded
-        node.result_outbox_count = outbox
+        return degraded, outbox
+
+    @staticmethod
+    def _commit_telemetry(node: NodeState, telemetry: tuple[bool, int] | None) -> None:
+        if telemetry is not None:
+            node.result_delivery_degraded, node.result_outbox_count = telemetry
 
     @staticmethod
     def _resolve_protocol(
@@ -724,6 +730,7 @@ class DesktopNodeService:
         self._validate_node_id(node_id)
         self._validate_tools(tools)
         resolved_ready, resolved_profile = self._resolve_protocol(fusion_available, ready, protocol_profile)
+        resolved_telemetry = self._validate_telemetry(telemetry)
         async with self._condition:
             node = self._nodes.get(node_id)
             if node is None:
@@ -736,7 +743,7 @@ class DesktopNodeService:
             node.tools = tools
             node.ready = resolved_ready
             node.protocol_profile = resolved_profile
-            self._apply_telemetry(node, telemetry)
+            self._commit_telemetry(node, resolved_telemetry)
             self._condition.notify_all()
         return self.status(node_id)
 
@@ -750,6 +757,7 @@ class DesktopNodeService:
         self._validate_node_id(node_id)
         if tools is not None:
             self._validate_tools(tools)
+        resolved_telemetry = self._validate_telemetry(telemetry)
         async with self._condition:
             node = self._node(node_id)
             resolved_ready, resolved_profile = self._resolve_protocol(
@@ -768,7 +776,7 @@ class DesktopNodeService:
             if generation_bump:
                 node.session_generation += 1
                 self._reject_stale_queued_commands(node)
-            self._apply_telemetry(node, telemetry)
+            self._commit_telemetry(node, resolved_telemetry)
             self._condition.notify_all()
         return self.status(node_id)
 

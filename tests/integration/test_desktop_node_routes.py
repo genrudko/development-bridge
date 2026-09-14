@@ -75,6 +75,39 @@ async def test_agent_register_route_rejects_malformed_profile_combinations(body)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["register", "heartbeat"])
+@pytest.mark.parametrize(
+    "telemetry",
+    [
+        ["not", "an", "object"],
+        {"result_delivery_degraded": "yes", "result_outbox_count": 1},
+        {"result_delivery_degraded": False, "result_outbox_count": 10001},
+    ],
+)
+async def test_agent_routes_bound_malformed_telemetry_as_invalid_argument(
+    operation, telemetry,
+):
+    transport = httpx2.ASGITransport(
+        app=app_with("secret"), raise_app_exceptions=False,
+    )
+    headers = {"Authorization": "Bearer secret"}
+    async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        if operation == "heartbeat":
+            registered = await client.post(
+                "/mcp/desktop-nodes/desk/register", headers=headers,
+                json={"fusion_available": True, "tools": [{"name": "ping"}]},
+            )
+            assert registered.status_code == 200
+        response = await client.post(
+            f"/mcp/desktop-nodes/desk/{operation}", headers=headers,
+            json={"fusion_available": True, "tools": [{"name": "ping"}], "telemetry": telemetry},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_ARGUMENT"
+
+
+@pytest.mark.asyncio
 async def test_agent_routes_are_hidden_without_token():
     transport = httpx2.ASGITransport(app=app_with())
     async with httpx2.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
