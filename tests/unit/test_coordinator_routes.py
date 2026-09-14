@@ -541,6 +541,88 @@ def test_bind_current_allows_sessionless_modern_mcp_request(tmp_path: Path):
     assert pending["token"] not in result.content[0].text
     assert "conv-old" not in result.content[0].text
     assert route_control["operation_url"] not in result.content[0].text
+def test_bind_prepare_is_sessionless_and_meta_carries_no_route_control_data(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old",
+        "telegram-bridge-g4",
+    )
+    registry = build_tool_registry(container)
+    tool = registry.get("coordinator_route_bind_prepare")
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-bind-prepare-sessionless"),
+    ))
+    data = json.loads(result.content[0].text)["data"]
+    assert data == {
+        "route_id": "bridge",
+        "state": "bind_pending",
+        "generation": 0,
+    }
+    assert set(data.keys()) == {"route_id", "state", "generation"}
+
+    pending = container.route_registry.pending_current_bind("bridge")
+    assert pending is not None
+    assert pending["session_id"] is None
+
+    # The hub-safe result must carry no operation/control credentials, no URLs,
+    # and no route-control metadata in either content or MCP _meta.
+    assert result.structured_content == data
+    assert not result.meta
+    meta = result.meta or {}
+    assert "route_control" not in meta
+    assert "operation_url" not in meta
+    assert "operation_id" not in meta
+    assert "control_token" not in meta
+    assert "nonce" not in meta
+    assert "ui" not in meta
+    assert pending["token"] not in result.content[0].text
+    assert "conv-old" not in result.content[0].text
+
+
+def test_bind_prepare_bootstrap_missing_route_is_sessionless_and_safe(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    registry = build_tool_registry(container)
+    tool = registry.get("coordinator_route_bind_prepare")
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "newroute", "bootstrap_if_missing": True}),
+        SimpleNamespace(request_id="req-bind-prepare-bootstrap"),
+    ))
+    data = json.loads(result.content[0].text)["data"]
+    assert data == {
+        "route_id": "newroute",
+        "state": "bind_pending",
+        "generation": 0,
+    }
+    pending = container.route_registry.pending_current_bind("newroute")
+    assert pending is not None
+    assert pending["session_id"] is None
+    assert pending["bootstrap"] is True
+    assert result.structured_content == data
+    assert not result.meta
+    assert pending["token"] not in result.content[0].text
+
+    # A missing route without bootstrap must still fail closed with no pending bind.
+    with pytest.raises(BridgeError) as exc:
+        asyncio.run(tool.handler(
+            None,
+            SimpleNamespace(arguments={"route_id": "unbound-route"}),
+            SimpleNamespace(request_id="req-bind-prepare-unknown"),
+        ))
+    assert exc.value.code is ErrorCode.INVALID_ARGUMENT
+    assert container.route_registry.pending_current_bind("unbound-route") is None
+
+
+
 
 
 def test_bind_current_does_not_issue_or_mutate_delivery_lease(tmp_path: Path):

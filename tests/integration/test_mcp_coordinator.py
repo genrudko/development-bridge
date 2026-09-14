@@ -366,7 +366,7 @@ async def test_compact_dashboard_live_state_resource(tmp_path):
 
                     listed = await session.list_tools()
                     names = {tool.name for tool in listed.tools}
-                    assert len(names) == 13
+                    assert len(names) == 14
                     assert "work_progress_update" not in names
                     assert "coordinator_exec_and_wake" not in names
                     assert "coordinator_wake_on_jobs" not in names

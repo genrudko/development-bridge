@@ -171,6 +171,47 @@ def _resolve_mount_destination(container: ApplicationContainer, ctx, arguments: 
     return _bind_session(container, ctx, binding) if bind else binding
 
 
+def _prepare_current_bind(
+    container: ApplicationContainer,
+    *,
+    route_id: str,
+    allow_project_change: bool,
+    bootstrap_if_missing: bool,
+    session_id: str | None,
+) -> dict:
+    """Factor the shared current-bind prepare logic used by both bind tools."""
+    from app.api.errors import BridgeError, ErrorCode
+
+    route_id = container.route_registry.validate_route_id(route_id)
+    route = container.route_registry.resolve(route_id)
+    if route is None and not bootstrap_if_missing:
+        raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+    if session_id is not None and route is not None:
+        container.coordinator.unbind_session(session_id)
+    if container.route_control is not None:
+        return container.route_control.prepare_bind(
+            route_id,
+            session_id=session_id,
+            allow_project_change=bool(allow_project_change),
+            bootstrap_if_missing=bootstrap_if_missing,
+        )
+    pending = container.route_registry.prepare_current_bind(
+        route_id,
+        session_id=session_id,
+        allow_project_change=bool(allow_project_change),
+        bootstrap_if_missing=bootstrap_if_missing,
+    )
+    generation = int(route.get("generation", 0)) if route else 0
+    return {
+        "route_id": route_id,
+        "state": "bind_pending",
+        "generation": generation,
+        "operation_id": pending["token"],
+        "diagnostic_id": "bind-fallback",
+        "operation_url": f"/x/route-control/bind/{pending['token']}",
+    }
+
+
 def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
     route_contexts = RouteContextStore(default_route_context_path(container.route_registry.path))
 
@@ -229,40 +270,14 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         return result
 
     async def bind_current(ctx, params, request_context):
-        from app.api.errors import BridgeError, ErrorCode
-
         arguments = params.arguments or {}
-        route_id = container.route_registry.validate_route_id(arguments["route_id"])
-        bootstrap_if_missing = bool(arguments.get("bootstrap_if_missing", False))
-        session_id = _session_id(ctx)
-        route = container.route_registry.resolve(route_id)
-        if route is None and not bootstrap_if_missing:
-            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
-        if session_id is not None and route is not None:
-            container.coordinator.unbind_session(session_id)
-        if container.route_control is not None:
-            prepared = container.route_control.prepare_bind(
-                route_id,
-                session_id=session_id,
-                allow_project_change=bool(arguments.get("allow_project_change", False)),
-                bootstrap_if_missing=bootstrap_if_missing,
-            )
-        else:
-            pending = container.route_registry.prepare_current_bind(
-                route_id,
-                session_id=session_id,
-                allow_project_change=bool(arguments.get("allow_project_change", False)),
-                bootstrap_if_missing=bootstrap_if_missing,
-            )
-            generation = int(route.get("generation", 0)) if route else 0
-            prepared = {
-                "route_id": route_id,
-                "state": "bind_pending",
-                "generation": generation,
-                "operation_id": pending["token"],
-                "diagnostic_id": "bind-fallback",
-                "operation_url": f"/x/route-control/bind/{pending['token']}",
-            }
+        prepared = _prepare_current_bind(
+            container,
+            route_id=str(arguments["route_id"]),
+            allow_project_change=bool(arguments.get("allow_project_change", False)),
+            bootstrap_if_missing=bool(arguments.get("bootstrap_if_missing", False)),
+            session_id=_session_id(ctx),
+        )
         safe_data = {
             "route_id": prepared["route_id"],
             "state": prepared["state"],
@@ -286,6 +301,24 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             **COORDINATOR_UI_META,
             "route_control": rc_meta,
         }
+        return result
+
+    async def bind_prepare(ctx, params, request_context):
+        arguments = params.arguments or {}
+        prepared = _prepare_current_bind(
+            container,
+            route_id=str(arguments["route_id"]),
+            allow_project_change=bool(arguments.get("allow_project_change", False)),
+            bootstrap_if_missing=bool(arguments.get("bootstrap_if_missing", False)),
+            session_id=_session_id(ctx),
+        )
+        safe_data = {
+            "route_id": prepared["route_id"],
+            "state": prepared["state"],
+            "generation": prepared["generation"],
+        }
+        result = to_mcp_result(success(request_context.request_id, safe_data))
+        result.structured_content = safe_data
         return result
 
 
@@ -594,6 +627,24 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 _meta=common_meta,
             ),
             bind_current,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_bind_prepare",
+                description="Prepare a current-chat bind for a logical route through hub-safe ingress (RDC -> GPTAdmin -> development-bridge) without MCP session identity. Reuses the existing route-control prepare state machine and returns only safe logical state {route_id, state, generation}; the bind itself is completed out of band, so physical ChatGPT targets and control credentials never appear in the model-visible result. Cross-project changes fail closed unless allow_project_change=true explicitly authorizes this one migration; bootstrap_if_missing=true may create a missing route.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
+                        "allow_project_change": {"type": "boolean", "default": False},
+                        "bootstrap_if_missing": {"type": "boolean", "default": False},
+                    },
+                    "required": ["route_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            bind_prepare,
             "coordinator-x",
         ),
         RegisteredTool(

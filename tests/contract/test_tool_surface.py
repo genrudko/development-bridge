@@ -1,5 +1,6 @@
 from app.container import build_container
 from app.settings import BridgeSettings
+from app.tools.compact import COMPACT_VISIBLE_TOOLS, exposed_tool_definitions
 from app.tools.registry import build_tool_registry
 
 SUPPORTED_TOOLS = {
@@ -84,6 +85,7 @@ SUPPORTED_TOOLS = {
     "chatgpt_share_read",
     "coordinator_x_mount",
     "coordinator_route_bind_current",
+    "coordinator_route_bind_prepare",
     "coordinator_route_takeover",
     "coordinator_route_list",
     "coordinator_route_control_status",
@@ -124,7 +126,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 114
+    assert len(registry.definitions) == 115
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",
@@ -171,3 +173,21 @@ def test_bind_current_schema_includes_bootstrap_if_missing():
     assert schema["properties"]["allow_project_change"]["default"] is False
     assert schema["properties"]["bootstrap_if_missing"]["type"] == "boolean"
     assert schema["properties"]["bootstrap_if_missing"]["default"] is False
+
+def test_bind_prepare_schema_and_compact_visibility():
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    tool = registry.get("coordinator_route_bind_prepare")
+    assert tool is not None
+    schema = tool.definition.input_schema
+    assert schema["type"] == "object"
+    assert schema["required"] == ["route_id"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["route_id"]["pattern"] == "^[a-z][a-z0-9-]{0,30}$"
+    assert schema["properties"]["allow_project_change"]["type"] == "boolean"
+    assert schema["properties"]["allow_project_change"]["default"] is False
+    assert schema["properties"]["bootstrap_if_missing"]["type"] == "boolean"
+    assert schema["properties"]["bootstrap_if_missing"]["default"] is False
+    assert not tool.definition.meta
+    assert "coordinator_route_bind_prepare" in COMPACT_VISIBLE_TOOLS
+    compact_names = {item.name for item in exposed_tool_definitions(registry, "compact")}
+    assert "coordinator_route_bind_prepare" in compact_names

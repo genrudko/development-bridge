@@ -39,6 +39,7 @@ COMPACT_VISIBLE_TOOLS = (
     "bridge_restart",
     "coordinator_x_mount",
     "coordinator_route_bind_current",
+    "coordinator_route_bind_prepare",
     "coordinator_ack",
 )
 
