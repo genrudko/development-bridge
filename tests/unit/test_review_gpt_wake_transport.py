@@ -9,6 +9,7 @@ import pytest
 
 from app.coordinator.review_gpt_transport import (
     ProcessResult,
+    RendezvousResolution,
     ReviewGptWakeTransport,
     canonical_chat_url,
     deterministic_receipt_path,
@@ -55,6 +56,166 @@ class FakeProcessRunner:
             stdout=self.stdout,
             stderr=self.stderr,
         )
+
+
+def _rendezvous_transport(tmp_path: Path, runner, **kwargs) -> ReviewGptWakeTransport:
+    return ReviewGptWakeTransport(
+        node_path="/configured/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=tmp_path / "receipts",
+        process_runner=runner,
+        rendezvous_helper_path="/configured/chatgpt_nonce_rendezvous.mjs",
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"status": "zero"}, RendezvousResolution("zero")),
+        ({"status": "ambiguous"}, RendezvousResolution("ambiguous")),
+        ({"status": "transient"}, RendezvousResolution("transient")),
+        (
+            {"status": "owner_input_required"},
+            RendezvousResolution("owner_input_required"),
+        ),
+        (
+            {"status": "unique", "candidate_url": "https://chatgpt.com/c/conv-123"},
+            RendezvousResolution(
+                "unique", candidate_url="https://chatgpt.com/c/conv-123"
+            ),
+        ),
+    ],
+)
+async def test_resolve_bind_marker_accepts_strict_helper_statuses(
+    tmp_path: Path, payload: dict, expected: RendezvousResolution
+):
+    runner = FakeProcessRunner(stdout=json.dumps(payload))
+    transport = _rendezvous_transport(tmp_path, runner)
+
+    result = await transport.resolve_bind_marker("DBRIDGE_BIND bnd_test")
+
+    assert result == expected
+    argv, timeout = runner.calls[0]
+    assert list(argv) == [
+        "/configured/node",
+        "/configured/chatgpt_nonce_rendezvous.mjs",
+        "--browser-endpoint",
+        "http://127.0.0.1:9222",
+        "--marker",
+        "DBRIDGE_BIND bnd_test",
+    ]
+    assert timeout == 60.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "not-json",
+        "[]",
+        '{"status":"unknown"}',
+        '{"status":"zero","candidate_url":"https://chatgpt.com/c/secret-zero"}',
+        '{"status":"ambiguous","candidate_url":"https://chatgpt.com/c/secret-many"}',
+        '{"status":"unique"}',
+        '{"status":"unique","candidate_url":"https://example.com/c/secret"}',
+        '{"status":"unique","candidate_url":"https://chatgpt.com/c/a?secret=1"}',
+        '{"status":"zero","extra":"https://chatgpt.com/c/secret-extra"}',
+    ],
+)
+async def test_resolve_bind_marker_rejects_malformed_or_unsafe_helper_output(
+    tmp_path: Path, stdout: str
+):
+    transport = _rendezvous_transport(tmp_path, FakeProcessRunner(stdout=stdout))
+
+    result = await transport.resolve_bind_marker("DBRIDGE_BIND bnd_test")
+
+    assert result.status == "transient"
+    assert result.candidate_url is None
+    assert len(result.detail or "") <= 500
+    assert "https://" not in (result.detail or "")
+    assert "secret" not in (result.detail or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runner", "status"),
+    [
+        (FakeProcessRunner(exit_code=1, stderr="temporary search failure https://chatgpt.com/c/secret"), "transient"),
+        (FakeProcessRunner(exit_code=1, stderr="Cloudflare challenge at https://chatgpt.com/c/secret"), "owner_input_required"),
+        (FakeProcessRunner(exc=TimeoutError("timeout https://chatgpt.com/c/secret")), "transient"),
+        (FakeProcessRunner(exc=ConnectionRefusedError("ECONNREFUSED https://chatgpt.com/c/secret")), "owner_input_required"),
+    ],
+)
+async def test_resolve_bind_marker_sanitizes_process_failures(
+    tmp_path: Path, runner: FakeProcessRunner, status: str
+):
+    result = await _rendezvous_transport(tmp_path, runner).resolve_bind_marker(
+        "DBRIDGE_BIND bnd_test"
+    )
+
+    assert result.status == status
+    assert result.candidate_url is None
+    assert "https://" not in (result.detail or "")
+    assert "secret" not in (result.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_resolve_bind_marker_reuses_on_demand_browser_lifecycle(tmp_path: Path):
+    state = {"browser": False}
+
+    def on_run(argv, timeout):
+        args = list(argv)
+        if args == ["browserctl", "start"]:
+            state["browser"] = True
+        elif args == ["browserctl", "stop"]:
+            state["browser"] = False
+        else:
+            assert state["browser"] is True
+
+    async def endpoint_probe(endpoint):
+        return state["browser"]
+
+    runner = FakeProcessRunner(stdout='{"status":"zero"}', on_run=on_run)
+    transport = _rendezvous_transport(
+        tmp_path,
+        runner,
+        browser_start_command=("browserctl", "start"),
+        browser_stop_command=("browserctl", "stop"),
+        browser_endpoint_probe=endpoint_probe,
+    )
+
+    result = await transport.resolve_bind_marker("DBRIDGE_BIND bnd_test")
+
+    assert result.status == "zero"
+    assert state["browser"] is False
+    assert [list(argv) for argv, _ in runner.calls][0] == ["browserctl", "start"]
+    assert [list(argv) for argv, _ in runner.calls][-1] == ["browserctl", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_bind_marker_serializes_with_existing_operation_lock(tmp_path: Path):
+    state = {"active": 0, "overlap": False}
+
+    class Runner:
+        async def __call__(self, argv, timeout):
+            state["active"] += 1
+            state["overlap"] = state["overlap"] or state["active"] > 1
+            await asyncio.sleep(0.02)
+            state["active"] -= 1
+            return ProcessResult(0, stdout='{"status":"zero"}')
+
+    transport = _rendezvous_transport(tmp_path, Runner())
+    first, second = await asyncio.gather(
+        transport.resolve_bind_marker("DBRIDGE_BIND bnd_one"),
+        transport.resolve_bind_marker("DBRIDGE_BIND bnd_two"),
+    )
+
+    assert first.status == second.status == "zero"
+    assert state["overlap"] is False
 
 
 def _make_valid_receipt_dict(

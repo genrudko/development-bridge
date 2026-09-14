@@ -22,6 +22,12 @@ from app.coordinator.wake_transport import (
 )
 
 MAX_DETAIL_CHARS = 500
+RENDEZVOUS_STATUSES = frozenset(
+    {"zero", "unique", "ambiguous", "owner_input_required", "transient"}
+)
+DEFAULT_RENDEZVOUS_HELPER_PATH = (
+    Path(__file__).resolve().parents[2] / "scripts" / "chatgpt_nonce_rendezvous.mjs"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +35,13 @@ class ProcessResult:
     exit_code: int
     stdout: str = ""
     stderr: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RendezvousResolution:
+    status: str
+    candidate_url: str | None = None
+    detail: str | None = None
 
 
 AsyncProcessRunner = Callable[[Sequence[str], float], Awaitable[ProcessResult]]
@@ -204,6 +217,7 @@ class ReviewGptWakeTransport:
         browser_endpoint_probe: BrowserEndpointProbe | None = None,
         model_observation_attempts: int = 3,
         model_observation_delay_seconds: float = 0.75,
+        rendezvous_helper_path: str | Path = DEFAULT_RENDEZVOUS_HELPER_PATH,
     ) -> None:
         self._node_path = Path(node_path).expanduser()
         self._cli_path = Path(cli_path).expanduser()
@@ -218,6 +232,7 @@ class ReviewGptWakeTransport:
         self._browser_endpoint_probe = browser_endpoint_probe or default_browser_endpoint_probe
         self._model_observation_attempts = max(1, min(int(model_observation_attempts), 8))
         self._model_observation_delay_seconds = max(0.0, min(float(model_observation_delay_seconds), 5.0))
+        self._rendezvous_helper_path = Path(rendezvous_helper_path).expanduser()
         self._operation_lock = asyncio.Lock()
         if bool(self._browser_start_command) != bool(self._browser_stop_command):
             raise ValueError("browser_start_command and browser_stop_command must be configured together")
@@ -397,6 +412,109 @@ class ReviewGptWakeTransport:
     async def probe(self, target: WakeTarget) -> WakeProbeResult:
         async with self._operation_lock:
             return await self._probe_unlocked(target)
+
+    async def _resolve_bind_marker_connected(
+        self, marker: str
+    ) -> RendezvousResolution:
+        argv = [
+            str(self._node_path),
+            str(self._rendezvous_helper_path),
+            "--browser-endpoint",
+            self._browser_endpoint,
+            "--marker",
+            marker,
+        ]
+        try:
+            result = await self._runner(argv, self._timeout_seconds)
+        except Exception as exc:
+            status = (
+                "owner_input_required"
+                if is_owner_input_required_error(str(exc))
+                else "transient"
+            )
+            return RendezvousResolution(status, detail="Rendezvous helper process failed")
+
+        if result.exit_code != 0:
+            evidence = f"{result.stderr}\n{result.stdout}"
+            status = (
+                "owner_input_required"
+                if is_owner_input_required_error(evidence)
+                else "transient"
+            )
+            return RendezvousResolution(
+                status, detail="Rendezvous helper exited unsuccessfully"
+            )
+
+        try:
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError):
+            return RendezvousResolution(
+                "transient", detail="Rendezvous helper output was malformed"
+            )
+        if not isinstance(payload, dict):
+            return RendezvousResolution(
+                "transient", detail="Rendezvous helper output was malformed"
+            )
+
+        status = payload.get("status")
+        if status not in RENDEZVOUS_STATUSES:
+            return RendezvousResolution(
+                "transient", detail="Rendezvous helper output was invalid"
+            )
+        expected_keys = {"status", "candidate_url"} if status == "unique" else {"status"}
+        if set(payload) != expected_keys:
+            return RendezvousResolution(
+                "transient", detail="Rendezvous helper output was invalid"
+            )
+        if status != "unique":
+            return RendezvousResolution(status)
+
+        candidate_url = payload.get("candidate_url")
+        if not isinstance(candidate_url, str) or not candidate_url:
+            return RendezvousResolution(
+                "transient", detail="Rendezvous helper candidate was invalid"
+            )
+        try:
+            parsed = parse_chatgpt_target(candidate_url)
+        except BridgeError:
+            return RendezvousResolution(
+                "transient", detail="Rendezvous helper candidate was invalid"
+            )
+        if parsed.route_url != candidate_url:
+            return RendezvousResolution(
+                "transient", detail="Rendezvous helper candidate was invalid"
+            )
+        return RendezvousResolution("unique", candidate_url=candidate_url)
+
+    async def _resolve_bind_marker_unlocked(
+        self, marker: str
+    ) -> RendezvousResolution:
+        if not self.on_demand_browser:
+            return await self._resolve_bind_marker_connected(marker)
+
+        start_error = await self._start_browser()
+        if start_error is not None:
+            await self._stop_browser()
+            status = (
+                "owner_input_required"
+                if is_owner_input_required_error(start_error)
+                else "transient"
+            )
+            return RendezvousResolution(status, detail="Rendezvous browser start failed")
+
+        try:
+            result = await self._resolve_bind_marker_connected(marker)
+        finally:
+            cleanup_error = await self._stop_browser()
+        if cleanup_error is not None:
+            return RendezvousResolution(
+                "transient", detail="Rendezvous browser cleanup failed"
+            )
+        return result
+
+    async def resolve_bind_marker(self, marker: str) -> RendezvousResolution:
+        async with self._operation_lock:
+            return await self._resolve_bind_marker_unlocked(marker)
 
     async def _deliver_connected(
         self,
