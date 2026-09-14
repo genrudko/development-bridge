@@ -56,7 +56,8 @@ class CoordinatorWakeDeliveryService:
         prefix = (
             f"DBRIDGE_CONTINUE {continuation_id}. "
             "Call coordinator_ack for this continuation_id, process any batched messages it returns, "
-            "inspect the durable Bridge job/result state, and continue the current bounded task."
+            "inspect the durable Bridge job/result state, and continue the current bounded task. "
+            "Canonical ingress/re-entry: RDC -> GPTAdmin -> development-bridge."
         )
         if collapsed:
             bounded_reason = collapsed[: CoordinatorService.MAX_VISIBLE_CONTINUATION_REASON_CHARS]

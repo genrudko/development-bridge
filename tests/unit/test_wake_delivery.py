@@ -377,17 +377,39 @@ def test_prompt_formatting_and_bounded_reason(
     assert prompt.startswith(
         "DBRIDGE_CONTINUE cont_test123. Call coordinator_ack for this continuation_id, "
         "process any batched messages it returns, inspect the durable Bridge job/result state, "
-        "and continue the current bounded task."
+        "and continue the current bounded task. Canonical ingress/re-entry: "
+        "RDC -> GPTAdmin -> development-bridge."
     )
     prefix = (
         "DBRIDGE_CONTINUE cont_test123. Call coordinator_ack for this continuation_id, "
         "process any batched messages it returns, inspect the durable Bridge job/result state, "
-        "and continue the current bounded task."
+        "and continue the current bounded task. Canonical ingress/re-entry: "
+        "RDC -> GPTAdmin -> development-bridge."
     )
     reason = prompt[len(prefix) :].strip()
     assert len(reason) <= 500
     assert "\n" not in reason
     assert "\t" not in reason
+
+
+def test_continuation_prompt_names_canonical_ingress_and_single_ack_instruction(
+    coordinator: CoordinatorService,
+    route_registry: RouteRegistry,
+):
+    service = CoordinatorWakeDeliveryService(
+        coordinator,
+        route_registry,
+        enabled=True,
+    )
+    prompt = service.build_continuation_prompt(
+        "cont_exact123",
+        "Durable work is ready to resume.",
+    )
+
+    assert "RDC -> GPTAdmin -> development-bridge" in prompt
+    assert prompt.count("coordinator_ack") == 1
+    assert "Call coordinator_ack for this continuation_id" in prompt
+    assert "inspect the durable Bridge job/result state" in prompt
 
 
 @pytest.mark.asyncio
