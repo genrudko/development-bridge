@@ -471,6 +471,23 @@ def test_route_binding_guidance_forbids_model_visible_physical_identity_and_lega
     assert "native mobile" in combined.lower()
 
 
+def test_canonical_browser_binder_and_wake_reentry_guidance():
+    root = Path(__file__).parents[2]
+    agent_rules = (root / "AGENTS.md").read_text(encoding="utf-8")
+    wake_runbook = (root / "docs/operations/review-gpt-coordinator-wake.md").read_text(encoding="utf-8")
+    hub_runbook = (root / "docs/operations/mcp-hub-routing.md").read_text(encoding="utf-8")
+    combined = f"{agent_rules}\n{wake_runbook}\n{hub_runbook}"
+
+    assert "RDC -> GPTAdmin -> development-bridge" in combined
+    assert "coordinator_route_bind_prepare" in combined
+    assert "Browser Binder" in combined
+    assert "coordinator_route_bind_current" in combined
+    assert "compatibility" in combined.lower()
+    assert "Dev_Bridge" in combined
+    assert "does not prove" in combined
+    assert "coordinator_ack" in wake_runbook
+
+
 def test_only_explicit_mount_and_bind_advertise_coordinator_app():
     registry = build_tool_registry(build_container(BridgeSettings()))
     ui_tools = {

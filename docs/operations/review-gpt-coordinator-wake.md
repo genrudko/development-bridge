@@ -19,16 +19,19 @@ Do not replace the Project URL with a guessed canonical `/c/<conversation-id>` r
 
 ReviewGPT is a wake delivery/probe transport only. It does not identify the currently invoking ChatGPT conversation and it must not use Global Search or marker turns for route binding.
 
-When an existing logical route must be rebound to the exact physical ChatGPT conversation that invoked Bridge:
+When an existing logical route must be rebound to the exact physical ChatGPT conversation, the canonical flow is `RDC -> GPTAdmin -> development-bridge`:
 
-1. invoke `coordinator_route_bind_current` directly, never through delegated `bridge_call`;
-2. render/use the MCP bind-card;
-3. the App calls `openExternal(..., redirectUrl: true)` and the guarded route-control endpoint validates the returned target, project policy, token, and generation before commit;
-4. a same-conversation result is idempotent; cross-project, replay, expired-token, missing-return-target, or generation-race cases fail closed.
+1. call hidden `coordinator_route_bind_prepare(route_id=...)` through GPTAdmin; only `route_id`, pending `state`, and pre-bind `generation` are model-visible;
+2. on the intended ChatGPT desktop/Web tab, the owner explicitly clicks **Bind** in the Browser Binder WebExtension; if more than one route is pending, the owner selects the route first;
+3. Browser Binder sends the active `chatgpt.com` tab URL out of band to the dedicated binder API using its dedicated bearer, while the pending operation is identified only by `route_id + generation`;
+4. Bridge resolves the hidden legacy bind token internally and reuses the existing candidate/commit guards for project policy, expiry, generation races, and replay;
+5. a same-conversation result is idempotent and all rejected cases leave the active binding unchanged.
 
-**Model-visible identity boundary:** Never ask the owner to paste or copy a physical ChatGPT conversation URL. Physical conversation URLs, `conversation_id`, `project_id`, MCP/session identity, bind/rollover/control token, nonce, `redirectUrl`/return target, and equivalent physical binding material stay outside model-visible chat and prompts. Logical `route_id` and safe diagnostic IDs are the supported model-visible handles. There is no marker/search fallback.
+`coordinator_route_bind_current` remains compatibility-only for a live direct MCP App session with the legacy bind-card. It is not the canonical hub path and must not be required merely because the direct ChatGPT `Dev_Bridge` namespace is absent.
 
-Native mobile new-bind is currently a ChatGPT host/WebView limitation: the client can open the Bridge page but does not supply the return target. Existing bound routes can still be controlled from mobile; establish a new physical binding from desktop/Web instead of adding a marker/search fallback.
+**Model-visible identity boundary:** Never ask the owner to paste or copy a physical ChatGPT conversation URL. Physical conversation URLs, `conversation_id`, `project_id`, MCP/session identity, bind/rollover/control token, Browser Binder bearer, nonce, `redirectUrl`/return target, and equivalent physical binding material stay outside model-visible chat and prompts. Logical `route_id`, `generation`, and safe diagnostic IDs are the supported model-visible handles. There is no marker/search fallback.
+
+Native mobile new-bind remains unsuitable for this OOB browser-binding step because Browser Binder operates on the desktop/Web browser tab. Existing bound routes may still be controlled from mobile; establish a new physical binding from desktop/Web instead of adding marker/search discovery.
 
 ## On-demand browser lifecycle
 
@@ -45,7 +48,7 @@ Do not keep a persistent Chromium process merely to save startup time. Persisten
 
 ## Wake payload and ACK
 
-The user turn stays tiny and references the durable continuation ID. On a fresh model turn, call `coordinator_ack(<continuation_id>)` before continuing other work, process any returned `batched_messages`, then inspect the durable job/result once.
+The user turn stays tiny and references the durable continuation ID. Canonical re-entry is `RDC -> GPTAdmin -> development-bridge`; a missing direct `Dev_Bridge` namespace does not prove a Bridge outage. On the fresh model turn, call `coordinator_ack(<continuation_id>)` exactly once before continuing other work, process any returned `batched_messages`, then inspect the durable job/result once.
 
 Do not paste full job output into the wake prompt. The job database remains the source of execution evidence.
 

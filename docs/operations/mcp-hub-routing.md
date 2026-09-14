@@ -23,6 +23,19 @@ Do not conflate these identifiers:
 
 The first is MCP transport routing. The second is coordinator conversation routing.
 
+## New-chat binding and wake re-entry
+
+Use the abbreviated operator path `RDC -> GPTAdmin -> development-bridge` for both new-chat binding preparation and wake re-entry. It is the same canonical ingress shown above; `RDC` supplies the ChatGPT-to-VPS control channel, GPTAdmin selects the MCP target, and Development Bridge keeps all coordinator state and guards.
+
+For a new physical chat or an intentional rebind:
+
+1. call `coordinator_route_bind_prepare(route_id=...)` through GPTAdmin; the result contains only `route_id`, `state`, and the pre-bind `generation`;
+2. use the Browser Binder WebExtension on the intended active `chatgpt.com` tab and explicitly choose **Bind**; multiple pending routes require owner selection;
+3. Browser Binder completes the pending bind out of band using its dedicated bearer and `route_id + generation`; the physical tab URL and hidden legacy bind token never enter model-visible MCP content;
+4. `coordinator_route_bind_current` is compatibility-only for a live direct MCP App session and is not required for the canonical hub flow.
+
+For a delivered coordinator wake, re-enter through the same `RDC -> GPTAdmin -> development-bridge` path, call `coordinator_ack` once for the exact continuation ID, process batched messages, and continue from durable Bridge job/result state. Do not create a second wake queue or resend an uncertain delivery through another transport.
+
 ## What is not canonical
 
 Do not treat the ChatGPT custom `Dev_Bridge` namespace as the authoritative ingress. It may be used when present, but its disappearance proves only that the current ChatGPT turn lost that binding; it does not prove that Development Bridge or its OAuth endpoint is down.
