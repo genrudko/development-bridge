@@ -16,6 +16,7 @@ from app.chatgpt_share import (
 )
 from app.commands import RepositoryCommandService
 from app.coordinator import (
+    BindRendezvousService,
     CoordinatorService,
     CoordinatorWakeDeliveryService,
     ReviewGptWakeTransport,
@@ -108,6 +109,7 @@ class ApplicationContainer:
     coordinator_wake_delivery: CoordinatorWakeDeliveryService | None = None
     route_control: RouteControlService | None = None
     route_control_trace_store: RouteControlTraceStore | None = None
+    bind_rendezvous: BindRendezvousService | None = None
 
 
 def build_container(
@@ -458,6 +460,15 @@ def build_container(
             enabled=True,
             poll_interval_seconds=wake_settings.poll_interval_seconds,
         )
+    bind_rendezvous = None
+    resolver = getattr(transport, "resolve_bind_marker", None) if wake_settings.enabled else None
+    if callable(resolver):
+        bind_rendezvous = BindRendezvousService(
+            route_registry,
+            route_control,
+            resolver=resolver,
+        )
+        route_control.bind_rendezvous = bind_rendezvous
     commands = RepositoryCommandService(jobs, policy)
     return ApplicationContainer(
         settings=configured,
@@ -508,4 +519,5 @@ def build_container(
         ),
         coordinator_wake_delivery=coordinator_wake_delivery,
         route_control_trace_store=route_control_trace_store,
+        bind_rendezvous=bind_rendezvous,
     )

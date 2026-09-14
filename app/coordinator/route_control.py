@@ -33,6 +33,7 @@ class RouteControlService:
         self.public_base_url = public_base_url.rstrip("/") if public_base_url else None
         self.endpoint_prefix = endpoint_prefix.rstrip("/")
         self._control_tokens: dict[str, dict] = {}
+        self.bind_rendezvous = None
 
     def issue_control_token(self, route_id: str) -> dict:
         route_id = self.route_registry.validate_route_id(route_id)
@@ -512,6 +513,24 @@ class RouteControlService:
             ]
             pending_waiters = len(waiters)
 
+        rendezvous = {"state": "none"}
+        if self.bind_rendezvous is not None:
+            raw_rendezvous = self.bind_rendezvous.status(route_id)
+            safe_rendezvous_keys = (
+                "state",
+                "attempt_count",
+                "expires_at",
+                "next_attempt_at",
+                "terminal_error_code",
+                "resulting_generation",
+            )
+            rendezvous = {
+                key: raw_rendezvous[key]
+                for key in safe_rendezvous_keys
+                if key in raw_rendezvous
+            }
+            rendezvous.setdefault("state", "none")
+
         return {
             "route_id": route_id,
             "title": title,
@@ -522,6 +541,7 @@ class RouteControlService:
             "pending_durable_waiters": pending_waiters,
             "target_probe": "not_checked",
             "last_operation": last_op,
+            "rendezvous": rendezvous,
         }
 
     def resolve_return_target(self, diagnostic_id: str) -> str | None:

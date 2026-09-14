@@ -322,6 +322,29 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         return result
 
 
+    async def bind_rendezvous_prepare(ctx, params, request_context):
+        if container.bind_rendezvous is None:
+            raise BridgeError(
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+                "VPS bind rendezvous is not configured",
+            )
+        arguments = params.arguments or {}
+        prepared = container.bind_rendezvous.prepare(
+            str(arguments["route_id"]),
+            allow_project_change=bool(arguments.get("allow_project_change", False)),
+        )
+        safe_data = {
+            "route_id": prepared["route_id"],
+            "state": prepared["state"],
+            "generation": prepared["generation"],
+            "marker": prepared["marker"],
+            "expires_at": prepared["expires_at"],
+        }
+        result = to_mcp_result(success(request_context.request_id, safe_data))
+        result.structured_content = safe_data
+        return result
+
+
     async def takeover(ctx, params, request_context):
         arguments = params.arguments or {}
         route = container.route_registry.takeover(
@@ -645,6 +668,23 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                 },
             ),
             bind_prepare,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_route_bind_rendezvous_prepare",
+                description="Prepare a VPS-only current-chat bind rendezvous for an existing logical route. Emit the returned marker exactly once in visible chat text in the same turn so the authenticated ReviewGPT browser can discover and verify this conversation. The result contains only safe logical rendezvous state; no physical ChatGPT target, bind token, operation URL, or session identity is returned. Cross-project changes fail closed unless allow_project_change=true explicitly authorizes this one migration.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "route_id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,30}$"},
+                        "allow_project_change": {"type": "boolean", "default": False},
+                    },
+                    "required": ["route_id"],
+                    "additionalProperties": False,
+                },
+            ),
+            bind_rendezvous_prepare,
             "coordinator-x",
         ),
         RegisteredTool(

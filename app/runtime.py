@@ -45,18 +45,28 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
     @asynccontextmanager
     async def lifespan(server):
         await application.jobs.start()
-        if application.telegram_supervisor is not None:
-            await application.telegram_supervisor.start()
-        if application.coordinator_wake_delivery is not None:
-            await application.coordinator_wake_delivery.start()
         try:
+            if application.telegram_supervisor is not None:
+                await application.telegram_supervisor.start()
+            if application.coordinator_wake_delivery is not None:
+                await application.coordinator_wake_delivery.start()
+            if application.bind_rendezvous is not None:
+                await application.bind_rendezvous.start()
             yield application
         finally:
-            if application.coordinator_wake_delivery is not None:
-                await application.coordinator_wake_delivery.stop()
-            if application.telegram_supervisor is not None:
-                await application.telegram_supervisor.stop()
-            await application.jobs.stop()
+            try:
+                if application.bind_rendezvous is not None:
+                    await application.bind_rendezvous.stop()
+            finally:
+                try:
+                    if application.coordinator_wake_delivery is not None:
+                        await application.coordinator_wake_delivery.stop()
+                finally:
+                    try:
+                        if application.telegram_supervisor is not None:
+                            await application.telegram_supervisor.stop()
+                    finally:
+                        await application.jobs.stop()
 
     bridge_server = DevelopmentBridgeServer(application.settings.server.name, lifespan=lifespan)
     bridge_server.extensions["io.modelcontextprotocol/ui"] = {

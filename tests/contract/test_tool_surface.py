@@ -86,6 +86,7 @@ SUPPORTED_TOOLS = {
     "coordinator_x_mount",
     "coordinator_route_bind_current",
     "coordinator_route_bind_prepare",
+    "coordinator_route_bind_rendezvous_prepare",
     "coordinator_route_takeover",
     "coordinator_route_list",
     "coordinator_route_control_status",
@@ -126,7 +127,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 115
+    assert len(registry.definitions) == 116
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",
@@ -191,3 +192,23 @@ def test_bind_prepare_schema_and_compact_visibility():
     assert "coordinator_route_bind_prepare" in COMPACT_VISIBLE_TOOLS
     compact_names = {item.name for item in exposed_tool_definitions(registry, "compact")}
     assert "coordinator_route_bind_prepare" in compact_names
+
+
+def test_bind_rendezvous_prepare_schema_and_compact_visibility():
+    registry = build_tool_registry(build_container(BridgeSettings()))
+    tool = registry.get("coordinator_route_bind_rendezvous_prepare")
+    assert tool is not None
+    schema = tool.definition.input_schema
+    assert schema["type"] == "object"
+    assert schema["required"] == ["route_id"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["route_id"]["pattern"] == "^[a-z][a-z0-9-]{0,30}$"
+    assert schema["properties"]["allow_project_change"] == {"type": "boolean", "default": False}
+    description = tool.definition.description or ""
+    assert "exactly once" in description.lower()
+    assert "visible chat text" in description.lower()
+    assert "same turn" in description.lower()
+    assert not tool.definition.meta
+    assert "coordinator_route_bind_rendezvous_prepare" in COMPACT_VISIBLE_TOOLS
+    compact_names = {item.name for item in exposed_tool_definitions(registry, "compact")}
+    assert "coordinator_route_bind_rendezvous_prepare" in compact_names

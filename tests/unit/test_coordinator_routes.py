@@ -1359,3 +1359,114 @@ def test_missing_route_uncommitted_expired_or_failed_leaves_no_route(tmp_path: P
     assert exc.value.code is ErrorCode.INVALID_ARGUMENT
     assert registry.resolve("newroute") is None
     assert registry.snapshot().get("routes", {}) == {}
+
+
+def test_rendezvous_prepare_is_sessionless_exact_safe_envelope(tmp_path: Path):
+    class FakeRendezvous:
+        def __init__(self):
+            self.calls = []
+        def prepare(self, route_id, allow_project_change=False):
+            self.calls.append((route_id, allow_project_change))
+            return {
+                "route_id": route_id,
+                "state": "pending",
+                "generation": 4,
+                "marker": "DBRIDGE_BIND bnd_safe-marker",
+                "expires_at": "2026-09-15T01:00:00+00:00",
+            }
+        def status(self, route_id):
+            return {"route_id": route_id, "state": "pending"}
+
+    settings = BridgeSettings.model_validate({"coordinator": {"route_registry_path": tmp_path / "routes.json"}})
+    base = build_container(settings)
+    base.route_registry.bootstrap("bridge", "https://chatgpt.com/c/conv-old", "telegram-bridge-g4")
+    fake = FakeRendezvous()
+    container = dataclasses.replace(base, bind_rendezvous=fake)
+    tool = build_tool_registry(container).get("coordinator_route_bind_rendezvous_prepare")
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge", "allow_project_change": True}),
+        SimpleNamespace(request_id="req-rendezvous-prepare"),
+    ))
+    data = json.loads(result.content[0].text)["data"]
+    assert data == {
+        "route_id": "bridge",
+        "state": "pending",
+        "generation": 4,
+        "marker": "DBRIDGE_BIND bnd_safe-marker",
+        "expires_at": "2026-09-15T01:00:00+00:00",
+    }
+    assert result.structured_content == data
+    assert not result.meta
+    assert fake.calls == [("bridge", True)]
+
+
+def test_route_control_status_projects_only_safe_rendezvous_fields(tmp_path: Path):
+    class FakeRendezvous:
+        def status(self, route_id):
+            return {
+                "route_id": route_id,
+                "state": "owner_input_required",
+                "attempt_count": 3,
+                "expires_at": "2026-09-15T01:00:00+00:00",
+                "expires_at_epoch": 123.0,
+                "next_attempt_at": "2026-09-15T00:40:00+00:00",
+                "next_attempt_at_epoch": 120.0,
+                "terminal_error_code": None,
+                "resulting_generation": 5,
+                "marker": "DBRIDGE_BIND bnd_must-not-leak",
+                "nonce": "must-not-leak",
+                "candidate_url": "https://chatgpt.com/c/physical-secret",
+            }
+
+    settings = BridgeSettings.model_validate({"coordinator": {"route_registry_path": tmp_path / "routes.json"}})
+    container = build_container(settings)
+    container.route_registry.bootstrap("bridge", "https://chatgpt.com/c/conv-old", "telegram-bridge-g4")
+    container.route_control.bind_rendezvous = FakeRendezvous()
+    data = container.route_control.safe_status("bridge")
+    assert data["rendezvous"] == {
+        "state": "owner_input_required",
+        "attempt_count": 3,
+        "expires_at": "2026-09-15T01:00:00+00:00",
+        "next_attempt_at": "2026-09-15T00:40:00+00:00",
+        "terminal_error_code": None,
+        "resulting_generation": 5,
+    }
+    serialized = json.dumps(data)
+    assert "bnd_must-not-leak" not in serialized
+    assert "physical-secret" not in serialized
+    assert "nonce" not in serialized
+
+
+def test_container_wires_rendezvous_to_same_reviewgpt_transport(tmp_path: Path):
+    from app.coordinator.review_gpt_transport import RendezvousResolution
+    from app.coordinator.wake_transport import WakeDeliveryResult, WakeProbeResult
+
+    class DualTransport:
+        async def resolve_bind_marker(self, marker):
+            return RendezvousResolution("zero")
+        async def probe(self, target):
+            return WakeProbeResult(ready=True)
+        async def deliver(self, request):
+            return WakeDeliveryResult(disposition="delivered")
+
+    transport = DualTransport()
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "coordinator_wake_delivery": {
+            "enabled": True,
+            "review_gpt": {
+                "node_executable": "/usr/bin/node",
+                "cli_path": "/tmp/review-gpt.js",
+                "config_path": "/tmp/review-gpt.json",
+                "browser_endpoint": "http://127.0.0.1:9222",
+                "receipt_directory": str(tmp_path / "receipts"),
+            },
+        },
+    })
+    container = build_container(settings, review_gpt_transport=transport)
+    assert container.bind_rendezvous is not None
+    resolver = container.bind_rendezvous._resolver
+    assert getattr(resolver, "__self__", None) is transport
+    assert container.coordinator_wake_delivery.transport is transport
+    assert container.route_control.bind_rendezvous is container.bind_rendezvous

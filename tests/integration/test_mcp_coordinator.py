@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -366,7 +367,7 @@ async def test_compact_dashboard_live_state_resource(tmp_path):
 
                     listed = await session.list_tools()
                     names = {tool.name for tool in listed.tools}
-                    assert len(names) == 14
+                    assert len(names) == 15
                     assert "work_progress_update" not in names
                     assert "coordinator_exec_and_wake" not in names
                     assert "coordinator_wake_on_jobs" not in names
@@ -1495,3 +1496,71 @@ async def test_route_control_status_is_widgetless_safe_data(tmp_path):
     assert result.structured_content == data
     assert not (result.meta or {}).get("openai/outputTemplate")
     assert "route_control" not in (result.meta or {})
+
+
+@pytest.mark.asyncio
+async def test_rendezvous_prepare_mcp_and_lifecycle(tmp_path):
+    class FakeRendezvous:
+        def __init__(self):
+            self.started = 0
+            self.stopped = 0
+        async def start(self):
+            self.started += 1
+        async def stop(self):
+            self.stopped += 1
+        def prepare(self, route_id, allow_project_change=False):
+            return {
+                "route_id": route_id,
+                "state": "pending",
+                "generation": 0,
+                "marker": "DBRIDGE_BIND bnd_integration-safe",
+                "expires_at": "2026-09-15T01:00:00+00:00",
+            }
+        def status(self, route_id):
+            return {
+                "route_id": route_id,
+                "state": "pending",
+                "attempt_count": 0,
+                "expires_at": "2026-09-15T01:00:00+00:00",
+                "next_attempt_at": "2026-09-15T00:30:05+00:00",
+                "terminal_error_code": None,
+            }
+
+    settings = BridgeSettings.model_validate({
+        "server": {"tool_surface": "compact"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+        "jobs": {"database_path": tmp_path / "jobs.sqlite3"},
+    })
+    base = build_container(settings)
+    base.route_registry.bootstrap("bridge", "https://chatgpt.com/c/conv-old", "telegram-bridge-g0")
+    fake = FakeRendezvous()
+    base.route_control.bind_rendezvous = fake
+    container = replace(base, bind_rendezvous=fake)
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1") as client,
+        streamable_http_client("http://127.0.0.1/mcp", http_client=client) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        listed = await session.list_tools()
+        assert "coordinator_route_bind_rendezvous_prepare" in {tool.name for tool in listed.tools}
+        result = await session.call_tool("coordinator_route_bind_rendezvous_prepare", {"route_id": "bridge"})
+        data = json.loads(result.content[0].text)["data"]
+        assert data == {
+            "route_id": "bridge",
+            "state": "pending",
+            "generation": 0,
+            "marker": "DBRIDGE_BIND bnd_integration-safe",
+            "expires_at": "2026-09-15T01:00:00+00:00",
+        }
+        assert result.structured_content == data
+        status = await session.call_tool("coordinator_route_control_status", {"route_id": "bridge"})
+        status_data = json.loads(status.content[0].text)["data"]
+        assert status_data["rendezvous"]["state"] == "pending"
+        serialized = json.dumps(status_data)
+        assert "bnd_integration-safe" not in serialized
+        assert "conv-old" not in serialized
+        assert fake.started == 1
+    assert fake.stopped == 1

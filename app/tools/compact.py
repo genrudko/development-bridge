@@ -40,6 +40,7 @@ COMPACT_VISIBLE_TOOLS = (
     "coordinator_x_mount",
     "coordinator_route_bind_current",
     "coordinator_route_bind_prepare",
+    "coordinator_route_bind_rendezvous_prepare",
     "coordinator_ack",
 )
 
