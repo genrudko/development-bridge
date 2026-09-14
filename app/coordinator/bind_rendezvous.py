@@ -73,6 +73,7 @@ class BindRendezvousService:
         self._sleep = sleep
         self._poll_interval_seconds = max(0.001, float(poll_interval_seconds))
         self._task: asyncio.Task | None = None
+        self._attempt_locks: dict[str, asyncio.Lock] = {}
         self._records = self._load()
 
     def _load(self) -> dict[str, dict[str, Any]]:
@@ -242,16 +243,18 @@ class BindRendezvousService:
                 await self._sleep(self._poll_interval_seconds)
 
     async def run_due_once(self) -> None:
-        now = self._clock()
         for route_id in list(self._records):
-            record = self._records.get(route_id)
-            if record is None or record["state"] not in LIVE_STATES:
-                continue
-            if now >= record["expires_at"]:
-                self._terminal(record, "RENDEZVOUS_EXPIRED")
-                continue
-            if record["next_attempt_at"] is not None and now >= record["next_attempt_at"]:
-                await self._attempt(record)
+            lock = self._attempt_locks.setdefault(route_id, asyncio.Lock())
+            async with lock:
+                now = self._clock()
+                record = self._records.get(route_id)
+                if record is None or record["state"] not in LIVE_STATES:
+                    continue
+                if now >= record["expires_at"]:
+                    self._terminal(record, "RENDEZVOUS_EXPIRED")
+                    continue
+                if record["next_attempt_at"] is not None and now >= record["next_attempt_at"]:
+                    await self._attempt(record)
 
     async def _resolve(self, marker: str) -> RendezvousResolution:
         resolver = self._resolver
@@ -264,6 +267,8 @@ class BindRendezvousService:
         return result
 
     async def _attempt(self, record: dict[str, Any]) -> None:
+        record["attempt_count"] += 1
+        self._save()
         marker = f"DBRIDGE_BIND bnd_{record['nonce']}"
         try:
             resolution = await self._resolve(marker)
@@ -285,7 +290,11 @@ class BindRendezvousService:
             self._retry(record, "pending")
 
     def _retry(self, record: dict[str, Any], state: str) -> None:
-        record["attempt_count"] += 1
+        if self._records.get(record["route_id"]) is not record:
+            return
+        if self._clock() >= record["expires_at"]:
+            self._terminal(record, "RENDEZVOUS_EXPIRED")
+            return
         delay = RETRY_DELAYS[min(record["attempt_count"] - 1, len(RETRY_DELAYS) - 1)]
         record["state"] = state
         record["next_attempt_at"] = self._clock() + delay
@@ -302,6 +311,11 @@ class BindRendezvousService:
         operation_id: str | None = None
         route_id = record["route_id"]
         async with self.route_registry.route_lock(route_id):
+            if self._records.get(route_id) is not record or record["state"] not in LIVE_STATES:
+                return
+            if self._clock() >= record["expires_at"]:
+                self._terminal(record, "RENDEZVOUS_EXPIRED")
+                return
             route = self.route_registry.resolve(route_id)
             if route is None:
                 self._terminal(record, "RENDEZVOUS_ROUTE_DELETED")
@@ -317,10 +331,7 @@ class BindRendezvousService:
                     bootstrap_if_missing=False,
                 )
                 operation_id = str(prepared["operation_id"])
-                self.route_control.accept_bind_return(
-                    operation_id, candidate_url, retain_return_target=False
-                )
-                committed = self.route_control.commit_bind(operation_id)
+                committed = self.route_control.complete_ephemeral_bind(operation_id, candidate_url)
             except Exception as exc:
                 if operation_id is not None:
                     with suppress(Exception):

@@ -12,6 +12,44 @@ from app.coordinator.route_control_diagnostics import RouteControlTraceStore
 from app.coordinator.routes import RouteRegistry
 
 
+@pytest.mark.parametrize("failure", ["project", "generation", "expired", "candidate", "malformed"])
+def test_ephemeral_completion_reuses_guards(test_setup, failure):
+    registry, _, control = test_setup
+    operation = control.prepare_bind("bridge")["operation_id"]
+    candidate = "https://chatgpt.com/g/g-p-infra/c/ephemeral-new"
+    if failure == "project":
+        candidate = "https://chatgpt.com/g/g-p-other/c/ephemeral-new"
+    elif failure == "malformed":
+        candidate = "https://example.com/c/ephemeral-new"
+    elif failure == "candidate":
+        control.accept_bind_return(operation, candidate, retain_return_target=False)
+    else:
+        data = registry._load()
+        if failure == "generation":
+            data["routes"]["bridge"]["generation"] += 1
+        else:
+            data["current_binds"]["bridge"]["created_at"] = "2020-01-01T00:00:00+00:00"
+        registry._save(data)
+    before = registry.resolve("bridge")
+    with pytest.raises(BridgeError):
+        control.complete_ephemeral_bind(operation, candidate)
+    assert registry.resolve("bridge") == before
+
+
+def test_ephemeral_completion_consumes_token_and_keeps_trace_target_free(test_setup):
+    registry, traces, control = test_setup
+    prepared = control.prepare_bind("bridge")
+    operation = prepared["operation_id"]
+    target = "https://chatgpt.com/g/g-p-infra/c/ephemeral-new"
+    result = control.complete_ephemeral_bind(operation, target)
+    assert result["generation"] == 1
+    assert registry.pending_current_bind("bridge") is None
+    assert traces.get_return_target(prepared["diagnostic_id"]) is None
+    with pytest.raises(BridgeError):
+        control.complete_ephemeral_bind(operation, target)
+    assert registry.resolve("bridge")["generation"] == 1
+
+
 @pytest.fixture
 
 def test_setup(tmp_path: Path):

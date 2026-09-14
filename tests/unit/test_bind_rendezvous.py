@@ -171,18 +171,18 @@ async def test_unique_uses_internal_guarded_commit_once_and_propagates_policy(se
     candidate = "https://chatgpt.com/g/g-p-22222222222222222222222222222222/c/new"
     calls: list[tuple] = []
     original_prepare = control.prepare_bind
-    original_accept = control.accept_bind_return
-    original_commit = control.commit_bind
+    original_commit = control.complete_ephemeral_bind
     monkeypatch.setattr(control, "prepare_bind", lambda route_id, **kw: (calls.append(("prepare", route_id, kw)), original_prepare(route_id, **kw))[1])
-    monkeypatch.setattr(control, "accept_bind_return", lambda op, url, **kw: (calls.append(("accept", op, url, kw)), original_accept(op, url, **kw))[1])
-    monkeypatch.setattr(control, "commit_bind", lambda op: (calls.append(("commit", op)), original_commit(op))[1])
+    monkeypatch.setattr(control, "complete_ephemeral_bind", lambda op, url: (calls.append(("commit", op)), original_commit(op, url))[1])
     svc = service(setup, Resolver(RendezvousResolution("unique", candidate)), clock)
     svc.prepare("bridge", allow_project_change=True)
     await svc.run_due_once()
     assert svc.status("bridge")["state"] == "bound"
-    assert [item[0] for item in calls] == ["prepare", "accept", "commit"]
+    await svc.run_due_once()
+    assert [item[0] for item in calls] == ["prepare", "commit"]
     assert calls[0][2] == {"session_id": None, "allow_project_change": True, "bootstrap_if_missing": False}
-    assert calls[1][3] == {"retain_return_target": False}
+    diagnostic = control.trace_store.latest_diagnostic_id_for_route("bridge")
+    assert control.trace_store.get_return_target(diagnostic) is None
     assert "operation_id" not in json.dumps(svc.status("bridge"))
 
 
@@ -228,3 +228,114 @@ async def test_start_stop_are_idempotent_and_worker_cancels_cleanly(setup):
     await svc.stop()
     await svc.stop()
     assert svc._task is None and task.done()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_lock_wait_expiry_and_cancellation_never_bind(setup, cancel):
+    registry, _ = setup
+    clock = Clock()
+    resolver = Resolver(RendezvousResolution("unique", "https://chatgpt.com/c/new"))
+    svc = service(setup, resolver, clock)
+    svc.prepare("bridge", allow_project_change=True)
+    before = registry.path.read_bytes()
+    async with registry.route_lock("bridge"):
+        task = asyncio.create_task(svc.run_due_once())
+        await asyncio.sleep(0)
+        assert len(resolver.markers) == 1 and not task.done()
+        clock.advance(1800)
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    if not cancel:
+        await task
+    else:
+        await svc.run_due_once()
+    assert registry.path.read_bytes() == before
+    assert svc.status("bridge")["terminal_error_code"] == "RENDEZVOUS_EXPIRED"
+
+
+@pytest.mark.asyncio
+async def test_unique_never_saves_pending_physical_candidate(setup, monkeypatch):
+    registry, _ = setup
+    saves = []
+    original = registry._save
+
+    def capture(data):
+        saves.append(json.loads(json.dumps(data)))
+        original(data)
+
+    monkeypatch.setattr(registry, "_save", capture)
+    svc = service(setup, Resolver(RendezvousResolution("unique", "https://chatgpt.com/c/ephemeral-target")), Clock())
+    svc.prepare("bridge", allow_project_change=True)
+    await svc.run_due_once()
+    assert svc.status("bridge")["state"] == "bound"
+    for saved in saves:
+        assert "candidate_url" not in json.dumps(saved)
+        # Identity is allowed only in the final active binding, with token consumed.
+        active = saved.pop("routes")["bridge"]
+        assert "ephemeral-target" not in json.dumps(saved)
+        if active["conversation_id"] == "ephemeral-target":
+            assert active["generation"] == 1
+            assert not saved.get("current_binds")
+
+
+@pytest.mark.asyncio
+async def test_overlapping_due_cycles_resolve_once_and_preserve_bound(setup):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def resolve(marker):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return RendezvousResolution("unique", "https://chatgpt.com/c/new")
+
+    svc = service(setup, resolve, Clock())
+    svc.prepare("bridge", allow_project_change=True)
+    first = asyncio.create_task(svc.run_due_once())
+    await entered.wait()
+    second = asyncio.create_task(svc.run_due_once())
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, second)
+    assert calls == 1
+    assert svc.status("bridge")["state"] == "bound"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", ["unique", "ambiguous", "policy_failure"])
+async def test_attempt_count_includes_terminal_results(setup, result):
+    resolution = RendezvousResolution(
+        "ambiguous" if result == "ambiguous" else "unique", "https://chatgpt.com/c/new"
+    )
+    svc = service(setup, Resolver(resolution), Clock())
+    svc.prepare("bridge", allow_project_change=result != "policy_failure")
+    await svc.run_due_once()
+    assert svc.status("bridge")["attempt_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_ephemeral_commit_discards_token_without_candidate_save(setup, monkeypatch):
+    registry, _ = setup
+    before = registry.resolve("bridge")
+    original = registry._save
+    writes = []
+
+    def fail_commit(data):
+        writes.append(json.loads(json.dumps(data)))
+        if data["routes"]["bridge"]["generation"] == 1:
+            raise OSError("injected commit failure")
+        original(data)
+
+    monkeypatch.setattr(registry, "_save", fail_commit)
+    svc = service(setup, Resolver(RendezvousResolution("unique", "https://chatgpt.com/c/new")), Clock())
+    svc.prepare("bridge", allow_project_change=True)
+    await svc.run_due_once()
+    assert svc.status("bridge")["terminal_error_code"] == "RENDEZVOUS_BIND_FAILED"
+    assert registry.resolve("bridge") == before
+    assert registry.pending_current_bind("bridge") is None
+    assert all("candidate_url" not in json.dumps(data) for data in writes)

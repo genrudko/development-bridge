@@ -553,12 +553,24 @@ class RouteRegistry:
         return {**pending, "route_id": route_id}
 
     def complete_current_bind(self, route_id: str, token: str, url: str | None = None) -> dict:
+        return self._complete_current_bind(route_id, token, url)
+
+    def complete_ephemeral_current_bind(self, route_id: str, token: str, url: str) -> dict:
+        """Validate a prepared token and commit without storing a pending candidate."""
+        return self._complete_current_bind(route_id, token, url, require_prepared=True)
+
+    def _complete_current_bind(
+        self, route_id: str, token: str, url: str | None, *, require_prepared: bool = False
+    ) -> dict:
         route_id = self.validate_route_id(route_id)
         data = self._load()
         route = data["routes"].get(route_id)
         pending = (data.get("current_binds") or {}).get(route_id)
         if not isinstance(pending, dict) or pending.get("token") != token:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
+
+        if require_prepared and (pending.get("state") != "prepared" or pending.get("bootstrap")):
+            raise BridgeError(ErrorCode.POLICY_VIOLATION, "ephemeral bind requires a prepared existing-route token")
 
         is_bootstrap = bool(pending.get("bootstrap"))
         if not is_bootstrap and route is None:

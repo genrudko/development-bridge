@@ -368,6 +368,16 @@ class RouteControlService:
         }
 
     def commit_bind(self, operation_id: str) -> dict:
+        return self._commit_bind(operation_id)
+
+    def complete_ephemeral_bind(self, operation_id: str, candidate_url: str) -> dict:
+        """Internal completion: candidate stays in memory until the atomic route commit.
+
+        The caller holds the route lock. No return target is retained in traces.
+        """
+        return self._commit_bind(operation_id, candidate_url=candidate_url)
+
+    def _commit_bind(self, operation_id: str, *, candidate_url: str | None = None) -> dict:
         diag_id = self.trace_store.find_by_operation_id(operation_id)
         if diag_id:
             existing_trace = self.trace_store.sanitized(diag_id)
@@ -392,7 +402,12 @@ class RouteControlService:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, "current-chat bind token is invalid or stale")
 
         try:
-            res = self.route_registry.complete_current_bind(route_id, operation_id)
+            if candidate_url is None:
+                res = self.route_registry.complete_current_bind(route_id, operation_id)
+            else:
+                res = self.route_registry.complete_ephemeral_current_bind(
+                    route_id, operation_id, candidate_url
+                )
         except BridgeError as exc:
             msg = str(exc)
             if "candidate is not ready" in msg or "not ready" in msg:
