@@ -199,6 +199,7 @@ def _default_route_registry_path() -> Path:
 class CoordinatorRoutingSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     route_registry_path: Path = Field(default_factory=_default_route_registry_path)
+    browser_binder_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
 
 
 class ReviewGptWakeSettings(BaseModel):
@@ -531,6 +532,10 @@ def load_settings(
             raise ValueError(
                 "X trigger token must be supplied through the deployment environment"
             )
+        if isinstance(raw.get("coordinator"), dict) and "browser_binder_token" in raw["coordinator"]:
+            raise ValueError(
+                "Browser binder token must be supplied through the deployment environment"
+            )
         if isinstance(raw.get("desktop_nodes"), dict) and "token" in raw["desktop_nodes"]:
             raise ValueError("Desktop node token must be supplied through the deployment environment")
         if isinstance(raw.get("operator_dashboard"), dict) and (
@@ -590,6 +595,8 @@ def load_settings(
     coordinator_updates: dict[str, Any] = {}
     if route_path := environment.get("DEVELOPMENT_BRIDGE_ROUTE_REGISTRY_PATH"):
         coordinator_updates["route_registry_path"] = Path(route_path)
+    if binder_token := environment.get("DEVELOPMENT_BRIDGE_COORDINATOR_BROWSER_BINDER_TOKEN"):
+        coordinator_updates["browser_binder_token"] = binder_token
     if coordinator_updates:
         environment_updates["coordinator"] = CoordinatorRoutingSettings.model_validate(
             {**settings.coordinator.model_dump(), **coordinator_updates}

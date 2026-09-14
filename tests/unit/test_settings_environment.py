@@ -151,3 +151,24 @@ def test_coordinator_wake_delivery_environment_overrides(tmp_path):
 def test_coordinator_wake_delivery_rejects_invalid_boolean_environment():
     with pytest.raises(ValueError, match="DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED must be a boolean"):
         load_settings(environ={"DEVELOPMENT_BRIDGE_COORDINATOR_WAKE_ENABLED": "maybe"})
+
+
+def test_coordinator_browser_binder_token_loaded_from_environment():
+    settings = load_settings(environ={
+        "DEVELOPMENT_BRIDGE_COORDINATOR_BROWSER_BINDER_TOKEN": "binder-secret",
+    })
+
+    assert settings.coordinator.browser_binder_token is not None
+    assert settings.coordinator.browser_binder_token.get_secret_value() == "binder-secret"
+    dumped = settings.model_dump()
+    assert "browser_binder_token" not in dumped["coordinator"]
+    assert "binder-secret" not in repr(settings)
+    assert "binder-secret" not in repr(dumped)
+
+
+def test_rejects_coordinator_browser_binder_token_in_yaml(tmp_path):
+    config = tmp_path / "bridge.yaml"
+    config.write_text("coordinator:\n  browser_binder_token: forbidden\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Browser binder token"):
+        load_settings(config, environ={})
