@@ -310,7 +310,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             route_id=str(arguments["route_id"]),
             allow_project_change=bool(arguments.get("allow_project_change", False)),
             bootstrap_if_missing=bool(arguments.get("bootstrap_if_missing", False)),
-            session_id=_session_id(ctx),
+            session_id=None,
         )
         safe_data = {
             "route_id": prepared["route_id"],

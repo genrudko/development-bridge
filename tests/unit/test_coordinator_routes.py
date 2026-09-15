@@ -585,6 +585,52 @@ def test_bind_prepare_is_sessionless_and_meta_carries_no_route_control_data(tmp_
     assert "conv-old" not in result.content[0].text
 
 
+def test_bind_prepare_ignores_transport_session_and_retries_across_sessions(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    route = container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-old",
+        "telegram-bridge-g4",
+    )
+    container.coordinator.bind_session(
+        "relay-session-a",
+        route["channel_id"],
+        route_id="bridge",
+        generation=route["generation"],
+        route_state="active",
+    )
+    registry = build_tool_registry(container)
+    tool = registry.get("coordinator_route_bind_prepare")
+
+    def ctx(session_id: str):
+        return SimpleNamespace(
+            session=SimpleNamespace(_connection=SimpleNamespace(session_id=session_id))
+        )
+
+    asyncio.run(tool.handler(
+        ctx("relay-session-a"),
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-bind-prepare-relay-a"),
+    ))
+    first_pending = container.route_registry.pending_current_bind("bridge")
+    assert first_pending is not None
+    assert first_pending["session_id"] is None
+    assert container.coordinator.session_binding("relay-session-a") is not None
+
+    asyncio.run(tool.handler(
+        ctx("relay-session-b"),
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(request_id="req-bind-prepare-relay-b"),
+    ))
+    second_pending = container.route_registry.pending_current_bind("bridge")
+    assert second_pending is not None
+    assert second_pending["token"] == first_pending["token"]
+    assert second_pending["session_id"] is None
+
+
 def test_bind_prepare_bootstrap_missing_route_is_sessionless_and_safe(tmp_path: Path):
     settings = BridgeSettings.model_validate({
         "coordinator": {"route_registry_path": tmp_path / "routes.json"},
