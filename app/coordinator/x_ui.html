@@ -299,6 +299,17 @@ async function request(name, init = {}) {
   return response.json();
 }
 
+async function sendChatMessage(text) {
+  if (typeof window.openai?.sendFollowUpMessage === "function") {
+    await window.openai.sendFollowUpMessage({ prompt: text, scrollToBottom: false });
+    return;
+  }
+  await app.sendMessage({
+    role: "user",
+    content: [{ type: "text", text }],
+  });
+}
+
 async function setProtocolContext(text) {
   if (!modelContextSupported) return false;
   try {
@@ -353,7 +364,7 @@ async function handleControl(data) {
     }
     const context = String(data.context || "").trim();
     if (context && context.length <= 8000) await setProtocolContext(context);
-    await app.sendMessage({ role: "user", content: [{ type: "text", text: message }] });
+    await sendChatMessage(message);
     rememberControlOperation(operationId);
     return { nonce: data.nonce, action, ok: true, channel_id: channelId };
   }
@@ -456,10 +467,7 @@ async function poll() {
       const fallback = `\n\n> Bridge ref: \`${claim.continuation_id}\` — acknowledge with coordinator_ack before other work.`;
       deliveredMessage = `### ⚡ Bridge · задача завершена\n\n${humanMessage}${batch}${retry}${fallback}`;
     }
-    await app.sendMessage({
-      role: "user",
-      content: [{ type: "text", text: deliveredMessage }],
-    });
+    await sendChatMessage(deliveredMessage);
     const ackUrl = new URL("ack", endpoint);
     ackUrl.searchParams.set("channel_id", channelId);
     ackUrl.searchParams.set("claim_id", claim.claim_id);

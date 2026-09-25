@@ -39,7 +39,10 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                     await session.initialize()
                     resources = await session.list_resources()
                     assert [str(item.uri) for item in resources.resources] == list(COORDINATOR_UI_URIS)
+                    assert COORDINATOR_UI_URI == "ui://development-bridge/coordinator-x-v6.html"
+                    assert COORDINATOR_UI_URIS[1] == "ui://development-bridge/coordinator-x-v5.html"
                     resource = await session.read_resource(COORDINATOR_UI_URI)
+                    assert "window.openai.sendFollowUpMessage" in resource.contents[0].text
                     assert "app.sendMessage" in resource.contents[0].text
                     assert "route_control" in resource.contents[0].text
                     assert "openExternal" in resource.contents[0].text
