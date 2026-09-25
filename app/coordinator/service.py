@@ -1084,6 +1084,45 @@ class CoordinatorService:
             await self._notify_delivery_best_effort(notice_payload)
         return result
 
+    async def reconcile_false_positive_delivery(
+        self, channel_id: str, continuation_id: str
+    ) -> dict:
+        """Reopen one delivered-but-uncommitted continuation for a guarded retry."""
+        channel_id = self.validate_channel(channel_id)
+        continuation_id = self.validate_continuation_id(continuation_id)
+        now = time.time()
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if wake is None or wake.continuation_id != continuation_id:
+                return {"channel_id": channel_id, "continuation_id": continuation_id, "reconciled": False}
+            if (
+                not wake.model_ack_required
+                or wake.model_acknowledged
+                or not wake.transport_delivered
+                or wake.claim_id is not None
+                or self._lease_active(wake, now)
+                or wake.delivery_attempts >= wake.max_delivery_attempts
+                or self._automatic_delivery_blocked(wake)
+            ):
+                return {"channel_id": channel_id, "continuation_id": continuation_id, "reconciled": False}
+            wake.transport_delivered = False
+            wake.transport_delivered_at = None
+            wake.last_transport_name = None
+            wake.last_transport_disposition = None
+            wake.last_transport_detail = None
+            wake.owner_input_required = False
+            wake.browser_preflight_authorized_at = None
+            wake.escalation_at = None
+            wake.available_at = now
+            self._save_state()
+            return {
+                "channel_id": channel_id,
+                "continuation_id": continuation_id,
+                "reconciled": True,
+                "delivery_attempts": wake.delivery_attempts,
+                "queued_events": len(wake.queued_messages),
+            }
+
     async def authorize_browser_preflight(
         self, channel_id: str, continuation_id: str
     ) -> dict:

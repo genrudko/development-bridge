@@ -147,6 +147,40 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                 },
             )
             assert transport.json()["transport_delivered"] is True
+            container.coordinator.MIN_WEB_TURN_INTERVAL_SECONDS = 0
+            container.coordinator._global_cooldown_until = 0
+            container.coordinator._cooldown_until["reconcile-42"] = 0
+            delivered_for_reconcile = await container.coordinator.arm_resilient(
+                "reconcile-me",
+                channel_id="reconcile-42",
+                delay_seconds=0,
+            )
+            reconcile_claim = await container.coordinator.claim(
+                "reconcile-42",
+                delivery_mode="direct",
+            )
+            await container.coordinator.finalize_transport(
+                "reconcile-42",
+                reconcile_claim["claim_id"],
+                "x",
+                "delivered",
+            )
+            reconcile = await client.post(
+                "/mcp/x/coordinator/transport/reconcile-false-positive",
+                params={
+                    "channel_id": "reconcile-42",
+                    "continuation_id": delivered_for_reconcile["continuation_id"],
+                },
+            )
+            assert reconcile.status_code == 200
+            assert reconcile.json()["reconciled"] is True
+            reconcile_status = await container.coordinator.status(
+                "reconcile-42",
+                delivery_mode="direct",
+            )
+            assert reconcile_status["state"] == "pending"
+            assert reconcile_status["ready"] is True
+
             revoke = await client.post(
                 "/mcp/x/coordinator/delivery-lease/revoke?channel_id=chat-42"
             )

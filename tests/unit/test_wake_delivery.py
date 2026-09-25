@@ -693,3 +693,68 @@ async def test_rollover_bootstrap_retries_only_proven_not_submitted(coordinator,
     else:
         assert result["state"] == "bootstrap_waiting"
         assert len(transport.deliver_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_false_positive_delivery_reopens_retry_without_resetting_attempts(
+    coordinator: CoordinatorService,
+):
+    coordinator.MIN_WEB_TURN_INTERVAL_SECONDS = 0
+    first = await coordinator.arm_resilient(
+        "first wake",
+        channel_id="coordinator",
+        delay_seconds=0,
+    )
+    claim = await coordinator.claim("coordinator", delivery_mode="direct")
+    assert claim["claimed"] is True
+    assert claim["delivery_attempt"] == 1
+    finalized = await coordinator.finalize_transport(
+        "coordinator",
+        claim["claim_id"],
+        "x",
+        "delivered",
+        detail="host API returned success",
+    )
+    assert finalized["transport_delivered"] is True
+
+    await coordinator.arm_resilient(
+        "queued wake",
+        channel_id="coordinator",
+        delay_seconds=0,
+    )
+
+    wrong = await coordinator.reconcile_false_positive_delivery(
+        "coordinator",
+        "cont_wrong12345",
+    )
+    assert wrong["reconciled"] is False
+
+    before = await coordinator.status("coordinator", delivery_mode="direct")
+    assert before["state"] == "waiting_model_ack"
+    assert before["transport_delivered"] is True
+    assert before["delivery_attempts"] == 1
+    assert before["queued_events"] == 1
+
+    reconciled = await coordinator.reconcile_false_positive_delivery(
+        "coordinator",
+        first["continuation_id"],
+    )
+    assert reconciled == {
+        "channel_id": "coordinator",
+        "continuation_id": first["continuation_id"],
+        "reconciled": True,
+        "delivery_attempts": 1,
+        "queued_events": 1,
+    }
+
+    after = await coordinator.status("coordinator", delivery_mode="direct")
+    assert after["state"] == "pending"
+    assert after["ready"] is True
+    assert after["transport_delivered"] is False
+    assert after["delivery_attempts"] == 1
+    assert after["queued_events"] == 1
+    assert after["continuation_id"] == first["continuation_id"]
+
+    second_claim = await coordinator.claim("coordinator", delivery_mode="direct")
+    assert second_claim["claimed"] is True
+    assert second_claim["delivery_attempt"] == 2

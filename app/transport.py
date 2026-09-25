@@ -399,6 +399,29 @@ def create_streamable_http_app(
         except BridgeError as error:
             return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
 
+    async def coordinator_reconcile_false_positive(request: Request):
+        client_host = request.client.host if request.client is not None else ""
+        if client_host not in {"127.0.0.1", "::1", "testclient"}:
+            return JSONResponse(
+                {"error": "Transport reconciliation is localhost-only"},
+                status_code=403,
+                headers=coordinator_ui_headers,
+            )
+        try:
+            return JSONResponse(
+                await container.coordinator.reconcile_false_positive_delivery(
+                    request.query_params.get("channel_id", "coordinator"),
+                    request.query_params.get("continuation_id", ""),
+                ),
+                headers=coordinator_ui_headers,
+            )
+        except BridgeError as error:
+            return JSONResponse(
+                {"error": error.message},
+                status_code=400,
+                headers=coordinator_ui_headers,
+            )
+
     async def coordinator_delivery_lease_revoke(request: Request):
         client_host = request.client.host if request.client is not None else ""
         if client_host not in {"127.0.0.1", "::1", "testclient"}:
@@ -1140,6 +1163,14 @@ def create_streamable_http_app(
             coordinator_observed,
             methods=["POST"],
             name="coordinator_x_observed",
+        )
+    )
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/transport/reconcile-false-positive",
+            coordinator_reconcile_false_positive,
+            methods=["POST"],
+            name="coordinator_x_reconcile_false_positive",
         )
     )
     custom_routes.append(
