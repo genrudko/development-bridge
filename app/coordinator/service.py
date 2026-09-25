@@ -1105,6 +1105,7 @@ class CoordinatorService:
                 or self._automatic_delivery_blocked(wake)
             ):
                 return {"channel_id": channel_id, "continuation_id": continuation_id, "reconciled": False}
+            wake.created_at = now
             wake.transport_delivered = False
             wake.transport_delivered_at = None
             wake.last_transport_name = None

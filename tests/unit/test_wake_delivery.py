@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -716,6 +717,9 @@ async def test_reconcile_false_positive_delivery_reopens_retry_without_resetting
         detail="host API returned success",
     )
     assert finalized["transport_delivered"] is True
+    coordinator._pending["coordinator"].created_at = (
+        time.time() - coordinator.MAX_UNDELIVERED_AGE_SECONDS - 5
+    )
 
     await coordinator.arm_resilient(
         "queued wake",
