@@ -1397,13 +1397,17 @@ async def test_lightweight_probe_uses_compact_cdp_state_without_thread_export(tm
         receipt_dir=tmp_path / "receipts",
         process_runner=runner,
         lightweight_probe=True,
+        timeout_seconds=120.0,
     )
 
     result = await transport.probe(target)
     assert result.ready is True
     assert result.owner_input_required is False
     assert len(runner.calls) == 1
-    assert all(list(argv)[2:4] != ["thread", "export"] for argv, _ in runner.calls)
+    argv, timeout = runner.calls[0]
+    assert list(argv)[-1] == "45000"
+    assert timeout == 50.0
+    assert all(list(call_argv)[2:4] != ["thread", "export"] for call_argv, _ in runner.calls)
 
 
 @pytest.mark.asyncio

@@ -300,9 +300,21 @@ class ReviewGptWakeTransport:
 
     async def _probe_connected_lightweight(self, target: WakeTarget) -> WakeProbeResult:
         _, probe_url = target_urls(target)
-        argv = [str(self._node_path), "-e", LIGHTWEIGHT_PROBE_NODE_SCRIPT, self._browser_endpoint, probe_url, "12000"]
+        probe_budget_seconds = max(3.0, min(self._timeout_seconds - 5.0, 45.0))
+        probe_process_timeout = min(
+            self._timeout_seconds,
+            probe_budget_seconds + 5.0,
+        )
+        argv = [
+            str(self._node_path),
+            "-e",
+            LIGHTWEIGHT_PROBE_NODE_SCRIPT,
+            self._browser_endpoint,
+            probe_url,
+            str(int(probe_budget_seconds * 1000)),
+        ]
         try:
-            result = await self._runner(argv, min(self._timeout_seconds, 15.0))
+            result = await self._runner(argv, probe_process_timeout)
         except Exception as exc:
             detail = str(exc)
             return WakeProbeResult(False, is_owner_input_required_error(detail), f"Lightweight probe process error: {_bound_detail(detail)}")
