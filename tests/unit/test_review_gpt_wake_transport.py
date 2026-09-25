@@ -49,7 +49,9 @@ class FakeProcessRunner:
         if self.exc is not None:
             raise self.exc
         if self.on_run is not None:
-            self.on_run(argv, timeout)
+            override = self.on_run(argv, timeout)
+            if isinstance(override, ProcessResult):
+                return override
         return ProcessResult(
             exit_code=self.exit_code,
             stdout=self.stdout,
@@ -1357,3 +1359,85 @@ async def test_on_demand_browser_operations_are_serialized(tmp_path: Path):
     assert first.ready is True
     assert second.ready is True
     assert state["overlap"] is False
+
+
+@pytest.mark.asyncio
+async def test_lightweight_probe_uses_compact_cdp_state_without_thread_export(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/g/g-p-123/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+
+    def on_run(argv, timeout):
+        args = list(argv)
+        assert args[1] == "-e"
+        assert "DBRIDGE_REVIEW_GPT_FAST_PROBE_V1" in args[2]
+        return ProcessResult(
+            0,
+            stdout=json.dumps(
+                {
+                    "chatUrl": target.route_url,
+                    "title": "Development Bridge Conversation",
+                    "hasComposer": True,
+                    "statusBusy": False,
+                    "stopVisible": False,
+                    "ownerInputRequired": False,
+                }
+            ),
+        )
+
+    runner = FakeProcessRunner(on_run=on_run)
+    transport = ReviewGptWakeTransport(
+        node_path="/usr/bin/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=tmp_path / "receipts",
+        process_runner=runner,
+        lightweight_probe=True,
+    )
+
+    result = await transport.probe(target)
+    assert result.ready is True
+    assert result.owner_input_required is False
+    assert len(runner.calls) == 1
+    assert all(list(argv)[2:4] != ["thread", "export"] for argv, _ in runner.calls)
+
+
+@pytest.mark.asyncio
+async def test_lightweight_probe_busy_is_transient_not_ready(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+
+    runner = FakeProcessRunner(
+        stdout=json.dumps(
+            {
+                "chatUrl": target.route_url,
+                "title": "Working",
+                "hasComposer": True,
+                "statusBusy": True,
+                "stopVisible": True,
+                "ownerInputRequired": False,
+            }
+        )
+    )
+    transport = ReviewGptWakeTransport(
+        node_path="/usr/bin/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=tmp_path / "receipts",
+        process_runner=runner,
+        lightweight_probe=True,
+    )
+
+    result = await transport.probe(target)
+    assert result.ready is False
+    assert result.owner_input_required is False
+    assert "actively generating" in (result.detail or "")

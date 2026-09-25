@@ -23,6 +23,24 @@ from app.coordinator.wake_transport import (
 
 MAX_DETAIL_CHARS = 500
 
+LIGHTWEIGHT_PROBE_NODE_SCRIPT = r'''// DBRIDGE_REVIEW_GPT_FAST_PROBE_V1
+(async()=>{
+const ep=process.argv[1].replace(/\/+$/,''),target=process.argv[2],end=Date.now()+Number(process.argv[3]||12000),sleep=m=>new Promise(r=>setTimeout(r,m));
+const pages=await fetch(ep+'/json/list').then(r=>r.json());
+const page=pages.find(x=>x.type==='page'&&String(x.url||'').includes('chatgpt.com'))||pages.find(x=>x.type==='page');
+if(!page)throw new Error('No browser page target');
+const ws=new WebSocket(page.webSocketDebuggerUrl);
+await new Promise((r,j)=>{ws.addEventListener('open',r,{once:true});ws.addEventListener('error',()=>j(new Error('CDP websocket open failed')),{once:true})});
+let seq=0;const pending=new Map();
+ws.addEventListener('message',e=>{const m=JSON.parse(String(e.data));if(!m.id)return;const q=pending.get(m.id);if(!q)return;pending.delete(m.id);m.error?q[1](new Error(m.error.message||'CDP error')):q[0](m.result)});
+const send=(method,params={})=>new Promise((r,j)=>{const id=++seq;pending.set(id,[r,j]);ws.send(JSON.stringify({id,method,params}))});
+await send('Page.enable');await send('Runtime.enable');await send('Page.navigate',{url:target});
+const inspect=()=>{const vis=e=>{if(!e)return false;const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'};const c=[...document.querySelectorAll('#prompt-textarea,[contenteditable="true"][role="textbox"]')].find(vis);const stop=[...document.querySelectorAll('button,[data-testid]')].find(e=>vis(e)&&(/stop/i.test(e.getAttribute('aria-label')||'')||/stop/i.test(e.getAttribute('data-testid')||'')));const t=document.title||'',b=(document.body?.innerText||'').slice(0,1200).toLowerCase(),path=location.pathname.toLowerCase();const owner=path.startsWith('/auth/')||t.toLowerCase().includes('just a moment')||(!c&&(b.includes('verify you are human')||b.startsWith('log in')||b.startsWith('sign up')));return {chatUrl:location.href.split('#')[0],title:t,hasComposer:!!c,stopVisible:!!stop,statusBusy:!!stop,ownerInputRequired:owner,readyState:document.readyState}};
+const expr='('+inspect.toString()+')()';
+let v=null;while(Date.now()<end){const r=await send('Runtime.evaluate',{expression:expr,returnByValue:true});v=r?.result?.value||null;if(v&&(v.ownerInputRequired||((v.chatUrl||'').replace(/\/$/,'')===target.replace(/\/$/,'')&&(v.hasComposer||v.stopVisible))))break;await sleep(250)}
+console.log(JSON.stringify(v||{chatUrl:'',title:'',hasComposer:false,stopVisible:false,statusBusy:false,ownerInputRequired:false}));ws.close();
+})().catch(e=>{console.error(String(e?.stack||e));process.exitCode=1});'''
+
 
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
@@ -202,6 +220,7 @@ class ReviewGptWakeTransport:
         browser_stop_command: Sequence[str] | None = None,
         browser_lifecycle_timeout_seconds: float = 30.0,
         browser_endpoint_probe: BrowserEndpointProbe | None = None,
+        lightweight_probe: bool = False,
         model_observation_attempts: int = 3,
         model_observation_delay_seconds: float = 0.75,
     ) -> None:
@@ -216,6 +235,7 @@ class ReviewGptWakeTransport:
         self._browser_stop_command = tuple(str(part) for part in (browser_stop_command or ()))
         self._browser_lifecycle_timeout_seconds = float(browser_lifecycle_timeout_seconds)
         self._browser_endpoint_probe = browser_endpoint_probe or default_browser_endpoint_probe
+        self._lightweight_probe = bool(lightweight_probe)
         self._model_observation_attempts = max(1, min(int(model_observation_attempts), 8))
         self._model_observation_delay_seconds = max(0.0, min(float(model_observation_delay_seconds), 5.0))
         self._operation_lock = asyncio.Lock()
@@ -278,7 +298,39 @@ class ReviewGptWakeTransport:
             return f"Browser endpoint readiness probe failed after stop: {_bound_detail(str(exc))}"
         return None
 
+    async def _probe_connected_lightweight(self, target: WakeTarget) -> WakeProbeResult:
+        _, probe_url = target_urls(target)
+        argv = [str(self._node_path), "-e", LIGHTWEIGHT_PROBE_NODE_SCRIPT, self._browser_endpoint, probe_url, "12000"]
+        try:
+            result = await self._runner(argv, min(self._timeout_seconds, 15.0))
+        except Exception as exc:
+            detail = str(exc)
+            return WakeProbeResult(False, is_owner_input_required_error(detail), f"Lightweight probe process error: {_bound_detail(detail)}")
+        if result.exit_code != 0:
+            error_output = f"{result.stderr}\n{result.stdout}".strip()
+            return WakeProbeResult(False, is_owner_input_required_error(error_output), f"Lightweight probe failed with exit code {result.exit_code}: {_bound_detail(result.stderr or result.stdout)}")
+        try:
+            lines = [line for line in result.stdout.splitlines() if line.strip()]
+            data = json.loads(lines[-1]) if lines else None
+        except (json.JSONDecodeError, IndexError):
+            data = None
+        if not isinstance(data, dict):
+            return WakeProbeResult(False, False, "Lightweight probe output is malformed JSON")
+        title = str(data.get("title", ""))
+        if bool(data.get("ownerInputRequired")) or is_owner_input_required_error(title):
+            return WakeProbeResult(False, True, "Target ChatGPT page requires login or Cloudflare verification")
+        chat_url = str(data.get("chatUrl", "")).strip().rstrip("/")
+        if chat_url != probe_url.rstrip("/"):
+            return WakeProbeResult(False, False, f"Target chat URL mismatch (expected: {probe_url}, found: {chat_url})")
+        if bool(data.get("statusBusy")) or bool(data.get("stopVisible")):
+            return WakeProbeResult(False, False, "ChatGPT target is actively generating (statusBusy or stopVisible)")
+        if not bool(data.get("hasComposer")):
+            return WakeProbeResult(False, False, "ChatGPT target composer is not ready")
+        return WakeProbeResult(True, False, None)
+
     async def _probe_connected(self, target: WakeTarget) -> WakeProbeResult:
+        if self._lightweight_probe:
+            return await self._probe_connected_lightweight(target)
         _, probe_url = target_urls(target)
         temp_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
         temp_path = Path(temp_file.name)
