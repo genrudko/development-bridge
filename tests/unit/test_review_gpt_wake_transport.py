@@ -1441,3 +1441,72 @@ async def test_lightweight_probe_busy_is_transient_not_ready(tmp_path: Path):
     assert result.ready is False
     assert result.owner_input_required is False
     assert "actively generating" in (result.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_lightweight_probe_accepts_chatgpt_project_slug_canonicalization(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/g/g-p-123-shiftsalaryplanner/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+    runner = FakeProcessRunner(
+        stdout=json.dumps(
+            {
+                "chatUrl": "https://chatgpt.com/g/g-p-123/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+                "title": "Development Bridge Conversation",
+                "hasComposer": True,
+                "statusBusy": False,
+                "stopVisible": False,
+                "ownerInputRequired": False,
+            }
+        )
+    )
+    transport = ReviewGptWakeTransport(
+        node_path="/usr/bin/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=tmp_path / "receipts",
+        process_runner=runner,
+        lightweight_probe=True,
+    )
+    result = await transport.probe(target)
+    assert result.ready is True
+    assert result.owner_input_required is False
+
+
+@pytest.mark.asyncio
+async def test_lightweight_probe_rejects_different_conversation_after_canonicalization(tmp_path: Path):
+    target = WakeTarget(
+        route_id="r1",
+        channel_id="c1",
+        conversation_id="67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+        route_url="https://chatgpt.com/g/g-p-123-shiftsalaryplanner/c/67c1e309-548c-8005-b0ff-90a6ea5e01b3",
+    )
+    runner = FakeProcessRunner(
+        stdout=json.dumps(
+            {
+                "chatUrl": "https://chatgpt.com/g/g-p-123/c/00000000-0000-0000-0000-000000000000",
+                "title": "Other conversation",
+                "hasComposer": True,
+                "statusBusy": False,
+                "stopVisible": False,
+                "ownerInputRequired": False,
+            }
+        )
+    )
+    transport = ReviewGptWakeTransport(
+        node_path="/usr/bin/node",
+        cli_path="/opt/review-gpt/cli.js",
+        config_path=tmp_path / "config.json",
+        browser_endpoint="http://127.0.0.1:9222",
+        receipt_dir=tmp_path / "receipts",
+        process_runner=runner,
+        lightweight_probe=True,
+    )
+    result = await transport.probe(target)
+    assert result.ready is False
+    assert result.owner_input_required is False
+    assert "conversation" in (result.detail or "").lower()

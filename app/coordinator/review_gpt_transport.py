@@ -37,7 +37,7 @@ const send=(method,params={})=>new Promise((r,j)=>{const id=++seq;pending.set(id
 await send('Page.enable');await send('Runtime.enable');await send('Page.navigate',{url:target});
 const inspect=()=>{const vis=e=>{if(!e)return false;const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'};const c=[...document.querySelectorAll('#prompt-textarea,[contenteditable="true"][role="textbox"]')].find(vis);const stop=[...document.querySelectorAll('button,[data-testid]')].find(e=>vis(e)&&(/stop/i.test(e.getAttribute('aria-label')||'')||/stop/i.test(e.getAttribute('data-testid')||'')));const t=document.title||'',b=(document.body?.innerText||'').slice(0,1200).toLowerCase(),path=location.pathname.toLowerCase();const owner=path.startsWith('/auth/')||t.toLowerCase().includes('just a moment')||(!c&&(b.includes('verify you are human')||b.startsWith('log in')||b.startsWith('sign up')));return {chatUrl:location.href.split('#')[0],title:t,hasComposer:!!c,stopVisible:!!stop,statusBusy:!!stop,ownerInputRequired:owner,readyState:document.readyState}};
 const expr='('+inspect.toString()+')()';
-let v=null;while(Date.now()<end){const r=await send('Runtime.evaluate',{expression:expr,returnByValue:true});v=r?.result?.value||null;if(v&&(v.ownerInputRequired||((v.chatUrl||'').replace(/\/$/,'')===target.replace(/\/$/,'')&&(v.hasComposer||v.stopVisible))))break;await sleep(250)}
+let v=null;while(Date.now()<end){const r=await send('Runtime.evaluate',{expression:expr,returnByValue:true});v=r?.result?.value||null;if(v&&(v.ownerInputRequired||v.hasComposer||v.stopVisible))break;await sleep(250)}
 console.log(JSON.stringify(v||{chatUrl:'',title:'',hasComposer:false,stopVisible:false,statusBusy:false,ownerInputRequired:false}));ws.close();
 })().catch(e=>{console.error(String(e?.stack||e));process.exitCode=1});'''
 
@@ -319,9 +319,17 @@ class ReviewGptWakeTransport:
         title = str(data.get("title", ""))
         if bool(data.get("ownerInputRequired")) or is_owner_input_required_error(title):
             return WakeProbeResult(False, True, "Target ChatGPT page requires login or Cloudflare verification")
-        chat_url = str(data.get("chatUrl", "")).strip().rstrip("/")
-        if chat_url != probe_url.rstrip("/"):
-            return WakeProbeResult(False, False, f"Target chat URL mismatch (expected: {probe_url}, found: {chat_url})")
+        chat_url = str(data.get("chatUrl", "")).strip()
+        try:
+            observed_target = parse_chatgpt_target(chat_url)
+        except BridgeError:
+            return WakeProbeResult(False, False, f"Target conversation URL is invalid: {chat_url}")
+        if observed_target.conversation_id != target.conversation_id.strip():
+            return WakeProbeResult(
+                False,
+                False,
+                f"Target conversation mismatch (expected: {target.conversation_id.strip()}, found: {observed_target.conversation_id})",
+            )
         if bool(data.get("statusBusy")) or bool(data.get("stopVisible")):
             return WakeProbeResult(False, False, "ChatGPT target is actively generating (statusBusy or stopVisible)")
         if not bool(data.get("hasComposer")):
