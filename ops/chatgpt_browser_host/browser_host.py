@@ -418,7 +418,7 @@ class BrowserHost:
             request_id = int(time.time() * 1000) % 1_000_000_000
             expression = (
                 "[...document.querySelectorAll('iframe')]"
-                ".filter(f=>f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html')).length"
+                ".filter(f=>(f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html'))||(f.title==='Dev Bridge'&&f.src.includes('app=skybridge'))).length"
             )
             ws.send(json.dumps({
                 "id": request_id,
@@ -1096,7 +1096,7 @@ class BrowserHost:
                     return False
                 state = evaluate(r"""(()=>{
                   const frames=[...document.querySelectorAll('iframe')]
-                    .filter(f=>f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html'));
+                    .filter(f=>(f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html'))||(f.title==='Dev Bridge'&&f.src.includes('app=skybridge')));
                   if(frames.length) return {frames:frames.length};
                   const roots=[...document.querySelectorAll('*')].filter(e=>{
                     const s=getComputedStyle(e);
@@ -1123,7 +1123,7 @@ class BrowserHost:
                 time.sleep(0.75)
                 observed = evaluate(r"""(()=>{
                   const frames=[...document.querySelectorAll('iframe')]
-                    .filter(f=>f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html'));
+                    .filter(f=>(f.title.startsWith('ui://development-bridge/coordinator-x-v')&&f.title.endsWith('.html'))||(f.title==='Dev Bridge'&&f.src.includes('app=skybridge')));
                   const roots=[...document.querySelectorAll('*')].filter(e=>{
                     const s=getComputedStyle(e);
                     return e.tagName!=='NAV' && s.overflowY==='auto' &&

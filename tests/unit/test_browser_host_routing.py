@@ -123,6 +123,8 @@ def test_browser_host_accepts_versioned_coordinator_iframes(tmp_path: Path, monk
     expression = seen["request"]["params"]["expression"]
     assert "coordinator-x-v" in expression
     assert "startsWith" in expression
+    assert "Dev Bridge" in expression
+    assert "app=skybridge" in expression
     assert "coordinator-x-v1.html'" not in expression
 
 
@@ -1403,11 +1405,13 @@ def test_browser_host_preflight_recovery_can_run_while_preflight_is_pending(tmp_
     host = module.BrowserHost(_config(module, tmp_path))
     host.coordinator_local_status = lambda: {"state": "browser_preflight"}
 
+    seen = {}
     class FakeWS:
         def __init__(self):
             self.last = None
         def send(self, payload):
             self.last = __import__("json").loads(payload)
+            seen["expression"] = self.last["params"]["expression"]
         def recv(self):
             return __import__("json").dumps({
                 "id": self.last["id"],
@@ -1420,6 +1424,9 @@ def test_browser_host_preflight_recovery_can_run_while_preflight_is_pending(tmp_
     assert host.recover_listener(
         {"webSocketDebuggerUrl": "ws://fake"}, allow_during_preflight=True
     ) is True
+    assert "coordinator-x-v" in seen["expression"]
+    assert "Dev Bridge" in seen["expression"]
+    assert "app=skybridge" in seen["expression"]
 
 
 def test_browser_host_prepare_preflight_marks_listener_recovery_as_preflight_owned(tmp_path: Path):
