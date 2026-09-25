@@ -410,3 +410,55 @@ async def test_x_ack_revalidates_explicit_lease_after_waiting_for_coordinator_lo
     wake_after = service._pending.get("route-g9")
     assert wake_after is not None
     assert wake_after.transport_delivered is True
+
+
+@pytest.mark.asyncio
+async def test_delivery_lease_revoke_unblocks_direct_and_persists(tmp_path):
+    path = tmp_path / "wakes-revoke.json"
+    service = CoordinatorService(path)
+    service.MIN_WEB_TURN_INTERVAL_SECONDS = 0
+    lease = service.issue_delivery_lease(
+        "route-g9",
+        session_id="session-mobile",
+        route_id="route",
+        generation=9,
+    )
+    armed = await service.arm_resilient("wake", channel_id="route-g9", delay_seconds=0)
+
+    x_status = await service.status(
+        "route-g9",
+        delivery_lease=lease["lease_id"],
+        delivery_mode="x",
+    )
+    assert x_status["x_listener_active"] is True
+    direct_blocked = await service.status("route-g9", delivery_mode="direct")
+    assert direct_blocked["state"] == "x_listener_active"
+    assert direct_blocked["ready"] is False
+
+    revoked = service.revoke_delivery_lease("route-g9")
+    assert revoked == {"channel_id": "route-g9", "revoked": True}
+    assert service.delivery_lease("route-g9") is None
+
+    stale_x = await service.status(
+        "route-g9",
+        delivery_lease=lease["lease_id"],
+        delivery_mode="x",
+    )
+    assert stale_x["state"] == "standby"
+    assert stale_x["ready"] is False
+
+    direct_ready = await service.status("route-g9", delivery_mode="direct")
+    assert direct_ready["state"] == "pending"
+    assert direct_ready["ready"] is True
+    assert direct_ready["continuation_id"] == armed["continuation_id"]
+
+    restored = CoordinatorService(path)
+    assert restored.delivery_lease("route-g9") is None
+    restored_direct = await restored.status("route-g9", delivery_mode="direct")
+    assert restored_direct["state"] == "pending"
+    assert restored_direct["ready"] is True
+
+    assert service.revoke_delivery_lease("route-g9") == {
+        "channel_id": "route-g9",
+        "revoked": False,
+    }

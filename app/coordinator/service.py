@@ -315,6 +315,14 @@ class CoordinatorService:
         item = self._delivery_leases.get(channel)
         return {"channel_id": channel, **item} if item is not None else None
 
+    def revoke_delivery_lease(self, channel_id: str) -> dict[str, object]:
+        """Revoke only the X delivery owner for a channel, preserving wake and route state."""
+        channel = self.validate_channel(channel_id)
+        revoked = self._delivery_leases.pop(channel, None) is not None
+        if revoked:
+            self._save_state()
+        return {"channel_id": channel, "revoked": revoked}
+
     def _delivery_lease_is_current(self, channel_id: str, delivery_lease: str | None) -> bool:
         item = self._delivery_leases.get(channel_id)
         return (

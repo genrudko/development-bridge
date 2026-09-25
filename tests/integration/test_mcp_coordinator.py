@@ -147,6 +147,16 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                 },
             )
             assert transport.json()["transport_delivered"] is True
+            revoke = await client.post(
+                "/mcp/x/coordinator/delivery-lease/revoke?channel_id=chat-42"
+            )
+            assert revoke.status_code == 200
+            assert revoke.json() == {"channel_id": "chat-42", "revoked": True}
+            stale_after_revoke = await client.get(
+                f"/mcp/x/coordinator/status?channel_id=chat-42&delivery_lease={delivery_lease}"
+            )
+            assert stale_after_revoke.json()["state"] == "standby"
+
             observed = await client.post(
                 "/mcp/x/coordinator/observed",
                 params={
