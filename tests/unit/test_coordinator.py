@@ -24,6 +24,24 @@ async def test_wake_coalesces_and_rejects_without_growing_queue():
 
 
 @pytest.mark.asyncio
+async def test_single_wake_accepts_envelope_payload_above_legacy_4k_limit():
+    service = CoordinatorService()
+    payload = "E" * 6000
+    await service.arm_resilient(payload, channel_id="envelope", delay_seconds=0)
+    claim = await service.claim("envelope")
+    assert claim["claimed"] is True
+    assert claim["message"] == payload
+
+    with pytest.raises(BridgeError) as exc_info:
+        await service.arm_resilient(
+            "X" * (service.MAX_MESSAGE_CHARS + 1),
+            channel_id="too-long",
+            delay_seconds=0,
+        )
+    assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
 async def test_delay_claim_ack_and_lease_retry_prevent_duplicate_claims():
     service = CoordinatorService()
     service.LEASE_SECONDS = 0.02

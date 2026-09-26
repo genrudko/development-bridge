@@ -793,7 +793,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_-]{1,64}$",
                         },
-                        "message": {"type": "string", "minLength": 1, "maxLength": 4000},
+                        "message": {"type": "string", "minLength": 1, "maxLength": container.coordinator.MAX_MESSAGE_CHARS},
                         "delay_seconds": {
                             "type": "number", "minimum": 0, "maximum": 300,
                             "default": 12,
