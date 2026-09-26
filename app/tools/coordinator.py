@@ -9,6 +9,7 @@ from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
 from app.api.schemas import IDENTIFIER_SCHEMA
 from app.container import ApplicationContainer
+from app.chatgpt_host import chatgpt_session_fingerprint
 from app.coordinator.context import (
     MAX_CONTEXT_CHARS,
     RouteContextStore,
@@ -61,7 +62,14 @@ def _bind_session(container: ApplicationContainer, ctx, binding: dict) -> dict:
     return binding
 
 
-def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict, *, bind: bool = True) -> dict:
+def _resolve_destination(
+    container: ApplicationContainer,
+    ctx,
+    arguments: dict,
+    *,
+    request_context=None,
+    bind: bool = True,
+) -> dict:
     from app.api.errors import BridgeError, ErrorCode
 
     route_id = arguments.get("route_id")
@@ -104,7 +112,14 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict, 
         binding = _route_binding(container, route, route_state=str(route.get("route_state", "active")))
         return _bind_session(container, ctx, binding) if bind else binding
 
-    binding = container.coordinator.session_binding(_session_id(ctx))
+    session_id = _session_id(ctx)
+    binding = container.coordinator.session_binding(session_id)
+    if binding is None:
+        fingerprint = chatgpt_session_fingerprint(request_context, ctx)
+        host_route = container.route_registry.resolve_by_host_session_fingerprint(fingerprint)
+        if host_route is not None:
+            binding = _route_binding(container, host_route)
+            binding = _bind_session(container, ctx, binding)
     if binding is None:
         raise BridgeError(
             ErrorCode.POLICY_VIOLATION,
@@ -149,12 +164,57 @@ def _resolve_destination(container: ApplicationContainer, ctx, arguments: dict, 
     return dict(binding)
 
 
-def _resolve_mount_destination(container: ApplicationContainer, ctx, arguments: dict, *, bind: bool = True) -> dict:
+def _resolve_mount_destination(
+    container: ApplicationContainer,
+    ctx,
+    arguments: dict,
+    *,
+    request_context=None,
+    bind: bool = True,
+) -> dict:
     """Resolve the mount-only pending-generation exception without weakening wakes."""
     route_id = arguments.get("route_id")
     channel_id = arguments.get("channel_id")
-    if route_id is not None or channel_id is None:
-        return _resolve_destination(container, ctx, arguments, bind=bind)
+    if route_id is not None:
+        route_id = container.route_registry.validate_route_id(route_id)
+        route = container.route_registry.resolve(route_id)
+        if route is None:
+            return _resolve_destination(
+                container, ctx, arguments, request_context=request_context, bind=bind
+            )
+        fingerprint = chatgpt_session_fingerprint(request_context, ctx)
+        if not container.route_registry.is_bound(route):
+            if fingerprint is None:
+                from app.api.errors import BridgeError, ErrorCode
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Unbound logical route requires trusted ChatGPT host-session metadata for X binding",
+                    details={"route_id": route_id, "error_code": "HOST_SESSION_REQUIRED"},
+                )
+            route = container.route_registry.bind_host_session(route_id, fingerprint)
+        else:
+            route_fp = route.get("host_session_fingerprint")
+            if route_fp and fingerprint and route_fp != fingerprint:
+                from app.api.errors import BridgeError, ErrorCode
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Logical route is owned by another physical ChatGPT session",
+                    details={"route_id": route_id, "error_code": "HOST_SESSION_MISMATCH"},
+                )
+            if route.get("binding_state") == "x_bound" and fingerprint is None:
+                from app.api.errors import BridgeError, ErrorCode
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "X-bound logical route requires ChatGPT host-session metadata",
+                    details={"route_id": route_id, "error_code": "HOST_SESSION_REQUIRED"},
+                )
+        binding = _route_binding(container, route)
+        return _bind_session(container, ctx, binding) if bind else binding
+
+    if channel_id is None:
+        return _resolve_destination(
+            container, ctx, arguments, request_context=request_context, bind=bind
+        )
 
     channel = container.coordinator.validate_channel(channel_id)
     route = container.route_registry.mount_route_for_channel(channel)
@@ -182,7 +242,9 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             data = dict(ack)
             data["state"] = "acknowledged" if ack.get("acknowledged") else "not_found"
             return to_mcp_result(success(request_context.request_id, data))
-        destination = _resolve_mount_destination(container, ctx, arguments, bind=False)
+        destination = _resolve_mount_destination(
+            container, ctx, arguments, request_context=request_context, bind=False
+        )
         channel_id = str(destination["channel_id"])
         delivery = container.coordinator.issue_delivery_lease(
             channel_id,
@@ -235,6 +297,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         route_id = container.route_registry.validate_route_id(arguments["route_id"])
         bootstrap_if_missing = bool(arguments.get("bootstrap_if_missing", False))
         session_id = _session_id(ctx)
+        host_session_fingerprint = chatgpt_session_fingerprint(request_context, ctx)
         route = container.route_registry.resolve(route_id)
         if route is None and not bootstrap_if_missing:
             raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
@@ -244,6 +307,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             prepared = container.route_control.prepare_bind(
                 route_id,
                 session_id=session_id,
+                host_session_fingerprint=host_session_fingerprint,
                 allow_project_change=bool(arguments.get("allow_project_change", False)),
                 bootstrap_if_missing=bootstrap_if_missing,
             )
@@ -251,6 +315,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             pending = container.route_registry.prepare_current_bind(
                 route_id,
                 session_id=session_id,
+                host_session_fingerprint=host_session_fingerprint,
                 allow_project_change=bool(arguments.get("allow_project_change", False)),
                 bootstrap_if_missing=bootstrap_if_missing,
             )
@@ -409,7 +474,9 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
 
     async def continue_(ctx, params, request_context):
         arguments = params.arguments or {}
-        destination = _resolve_destination(container, ctx, arguments)
+        destination = _resolve_destination(
+            container, ctx, arguments, request_context=request_context
+        )
         route_id = destination.get("route_id")
         if route_id is not None:
             route_id_str = str(route_id)
@@ -444,7 +511,9 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
 
     async def wake_on_jobs(ctx, params, request_context):
         arguments = params.arguments or {}
-        destination = _resolve_destination(container, ctx, arguments)
+        destination = _resolve_destination(
+            container, ctx, arguments, request_context=request_context
+        )
         channel_id = str(destination["channel_id"])
         message = arguments.get("message")
 
@@ -495,7 +564,9 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
 
     async def exec_and_wake(ctx, params, request_context):
         arguments = params.arguments or {}
-        destination = _resolve_destination(container, ctx, arguments)
+        destination = _resolve_destination(
+            container, ctx, arguments, request_context=request_context
+        )
         channel_id = str(destination["channel_id"])
         repository = container.projects.repositories.get(arguments["project_id"], arguments["repository_id"])
         job = await container.jobs.start_execution(

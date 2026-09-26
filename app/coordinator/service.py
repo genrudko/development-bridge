@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from hashlib import sha256
 import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -42,6 +43,8 @@ class PendingWake:
     browser_preflight_authorized_at: float | None = None
     queued_messages: list[str] = field(default_factory=list)
     queued_escalation_messages: list[str] = field(default_factory=list)
+    frozen_message: str | None = None
+    message_sha256: str | None = None
 
 
 class CoordinatorService:
@@ -493,6 +496,7 @@ class CoordinatorService:
         merge_current = (
             wake.delivery_attempts == 0
             and wake.claim_id is None
+            and wake.frozen_message is None
             and not wake.model_acknowledged
             and len(combined) <= self.MAX_VISIBLE_CONTINUATION_REASON_CHARS
         )
@@ -959,6 +963,21 @@ class CoordinatorService:
                 or (wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts)
             ):
                 return {"channel_id": channel_id, "claimed": False}
+            if wake.frozen_message is None:
+                wake.frozen_message = wake.message
+                wake.message_sha256 = sha256(wake.frozen_message.encode("utf-8")).hexdigest()
+            elif wake.message_sha256 != sha256(wake.frozen_message.encode("utf-8")).hexdigest():
+                wake.last_transport_disposition = "uncertain"
+                wake.last_transport_detail = "persisted wake payload integrity mismatch"
+                wake.owner_input_required = True
+                self._save_state()
+                return {
+                    "channel_id": channel_id,
+                    "claimed": False,
+                    "state": "blocked",
+                    "error_code": "WAKE_PAYLOAD_INTEGRITY_MISMATCH",
+                }
+
             wake.claim_id = token_urlsafe(18)
             wake.lease_expires_at = now + self.LEASE_SECONDS
             wake.browser_preflight_authorized_at = None
@@ -974,7 +993,8 @@ class CoordinatorService:
                 "channel_id": channel_id,
                 "claimed": True,
                 "claim_id": wake.claim_id,
-                "message": wake.message,
+                "message": wake.frozen_message,
+                "message_sha256": wake.message_sha256,
                 "lease_seconds": self.LEASE_SECONDS,
             }
             if wake.continuation_id is not None:

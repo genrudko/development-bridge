@@ -1277,3 +1277,252 @@ def test_missing_route_uncommitted_expired_or_failed_leaves_no_route(tmp_path: P
     assert exc.value.code is ErrorCode.INVALID_ARGUMENT
     assert registry.resolve("newroute") is None
     assert registry.snapshot().get("routes", {}) == {}
+
+def test_bind_current_captures_host_session_without_model_visible_leak(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    registry = build_tool_registry(container)
+    tool = registry.get("coordinator_route_bind_current")
+    raw_session = "opaque-host-session-should-never-leak"
+    result = asyncio.run(tool.handler(
+        None,
+        SimpleNamespace(arguments={"route_id": "bridge"}),
+        SimpleNamespace(
+            request_id="req-bind-host-session",
+            meta={"openai/session": raw_session},
+        ),
+    ))
+
+    pending = container.route_registry.pending_current_bind("bridge")
+    assert pending is not None
+    fingerprint = pending["host_session_fingerprint"]
+    assert isinstance(fingerprint, str) and len(fingerprint) == 64
+    assert raw_session not in fingerprint
+
+    model_text = result.content[0].text
+    assert raw_session not in model_text
+    assert fingerprint not in model_text
+    assert raw_session not in json.dumps(result.structured_content)
+    assert fingerprint not in json.dumps(result.structured_content)
+    assert raw_session not in json.dumps(result.meta)
+    assert fingerprint not in json.dumps(result.meta)
+
+def test_host_session_fingerprint_restores_mcp_session_binding_after_restart(tmp_path: Path):
+    from app.chatgpt_host import chatgpt_session_fingerprint
+    from app.tools.coordinator import _resolve_destination
+
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+
+    host_meta = SimpleNamespace(meta={"openai/session": "stable-host-session"})
+    fingerprint = chatgpt_session_fingerprint(host_meta)
+    assert fingerprint is not None
+
+    raw = container.route_registry.snapshot()
+    raw["routes"]["bridge"]["host_session_fingerprint"] = fingerprint
+    container.route_registry.path.write_text(json.dumps(raw), encoding="utf-8")
+
+    # New MCP session after a Bridge restart has no RAM binding.
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(_connection=SimpleNamespace(session_id="fresh-mcp-session"))
+    )
+    assert container.coordinator.session_binding("fresh-mcp-session") is None
+
+    destination = _resolve_destination(
+        container,
+        ctx,
+        {},
+        request_context=host_meta,
+    )
+    assert destination["route_id"] == "bridge"
+    assert destination["channel_id"] == "telegram-bridge-g0"
+    restored = container.coordinator.session_binding("fresh-mcp-session")
+    assert restored is not None
+    assert restored["route_id"] == "bridge"
+    assert restored["generation"] == 0
+
+
+def test_host_session_fingerprint_ambiguity_fails_closed(tmp_path: Path):
+    from app.chatgpt_host import chatgpt_session_fingerprint
+    from app.tools.coordinator import _resolve_destination
+
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-a",
+        "telegram-bridge-g0",
+    )
+    container.route_registry.bootstrap(
+        "other",
+        "https://chatgpt.com/c/conv-b",
+        "telegram-other-g0",
+    )
+
+    host_meta = SimpleNamespace(meta={"openai/session": "same-host-session"})
+    fingerprint = chatgpt_session_fingerprint(host_meta)
+    raw = container.route_registry.snapshot()
+    raw["routes"]["bridge"]["host_session_fingerprint"] = fingerprint
+    raw["routes"]["other"]["host_session_fingerprint"] = fingerprint
+    container.route_registry.path.write_text(json.dumps(raw), encoding="utf-8")
+
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(_connection=SimpleNamespace(session_id="fresh-mcp-session"))
+    )
+    with pytest.raises(BridgeError) as exc:
+        _resolve_destination(container, ctx, {}, request_context=host_meta)
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
+    assert exc.value.details["error_code"] == "AMBIGUOUS_HOST_SESSION_ROUTE"
+    assert container.coordinator.session_binding("fresh-mcp-session") is None
+
+
+def test_x_only_host_binding_is_logically_bound_without_direct_target(tmp_path: Path):
+    from app.chatgpt_host import chatgpt_session_fingerprint
+
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    registry.unbind("bridge", expected_generation=0)
+    fp = chatgpt_session_fingerprint(
+        SimpleNamespace(meta={"openai/session": "host-x-only"})
+    )
+    assert fp is not None
+
+    bound = registry.bind_host_session("bridge", fp)
+    assert bound["changed"] is True
+    assert bound["binding_state"] == "x_bound"
+    assert bound["generation"] == 1
+    assert bound["channel_id"] == "telegram-bridge-g1"
+    assert registry.is_bound(bound) is True
+    assert registry.has_direct_target(bound) is False
+    assert "url" not in bound
+    assert "conversation_id" not in bound
+
+
+def test_x_only_host_binding_rejects_silent_owner_takeover(tmp_path: Path):
+    from app.chatgpt_host import chatgpt_session_fingerprint
+
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    registry.unbind("bridge", expected_generation=0)
+    first = chatgpt_session_fingerprint(
+        SimpleNamespace(meta={"openai/session": "host-one"})
+    )
+    second = chatgpt_session_fingerprint(
+        SimpleNamespace(meta={"openai/session": "host-two"})
+    )
+    registry.bind_host_session("bridge", first)
+
+    with pytest.raises(BridgeError) as exc:
+        registry.bind_host_session("bridge", second)
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
+    assert exc.value.details["error_code"] == "OWNER_CONFIRMATION_REQUIRED"
+    current = registry.resolve("bridge")
+    assert current["host_session_fingerprint"] == first
+
+
+def test_x_only_same_owner_oob_upgrade_adds_direct_target_without_generation_change(tmp_path: Path):
+    from app.chatgpt_host import chatgpt_session_fingerprint
+
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    registry.unbind("bridge", expected_generation=0)
+    fp = chatgpt_session_fingerprint(
+        SimpleNamespace(meta={"openai/session": "host-x-upgrade"})
+    )
+    x_bound = registry.bind_host_session("bridge", fp)
+    assert x_bound["generation"] == 1
+
+    pending = registry.prepare_current_bind(
+        "bridge",
+        session_id="mcp-x",
+        host_session_fingerprint=fp,
+    )
+    registry.record_current_bind_candidate(
+        "bridge",
+        pending["token"],
+        "https://chatgpt.com/g/g-p-project-x/c/conv-direct",
+    )
+    upgraded = registry.complete_current_bind("bridge", pending["token"])
+
+    assert upgraded["changed"] is True
+    assert upgraded["generation"] == 1
+    assert upgraded["channel_id"] == "telegram-bridge-g1"
+    assert upgraded["binding_state"] == "bound"
+    assert upgraded["conversation_id"] == "conv-direct"
+    assert registry.has_direct_target(upgraded) is True
+    assert upgraded["host_session_fingerprint"] == fp
+
+
+def test_x_only_route_cannot_prepare_physical_rollover_without_direct_target(tmp_path: Path):
+    from app.chatgpt_host import chatgpt_session_fingerprint
+
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    registry.unbind("bridge", expected_generation=0)
+    fp = chatgpt_session_fingerprint(
+        SimpleNamespace(meta={"openai/session": "host-x-rollover"})
+    )
+    registry.bind_host_session("bridge", fp)
+
+    with pytest.raises(BridgeError) as exc:
+        registry.prepare_rollover("bridge")
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
+    assert exc.value.details["error_code"] == "DIRECT_TARGET_REQUIRED"
+
+
+def test_host_session_cannot_own_two_active_routes(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    registry.bootstrap(
+        "first",
+        "https://chatgpt.com/c/first",
+        "telegram-first-g0",
+    )
+    registry.bootstrap(
+        "second",
+        "https://chatgpt.com/c/second",
+        "telegram-second-g0",
+    )
+    registry.unbind("first", expected_generation=0)
+    registry.unbind("second", expected_generation=0)
+
+    fingerprint = "a" * 64
+    first = registry.bind_host_session("first", fingerprint)
+    assert first["binding_state"] == "x_bound"
+
+    with pytest.raises(BridgeError) as exc:
+        registry.bind_host_session("second", fingerprint)
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
+    assert exc.value.details["error_code"] == "HOST_SESSION_ALREADY_BOUND"
+    assert registry.resolve("second")["binding_state"] == "unbound"

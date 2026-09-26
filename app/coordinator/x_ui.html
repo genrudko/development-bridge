@@ -133,12 +133,19 @@ function setRouteControlButtonsDisabled(disabled) {
 function applySafeStatus(st, errorMessage = "") {
   if (!st || typeof st !== "object") return;
   const isBound = st.state === "bound" || st.binding_state === "bound";
-  const stateLabel = isBound ? "Привязан" : "Отвязан";
-  const genLabel = st.generation !== undefined ? `g${st.generation}` : "";
+  const bindingMode = String(st.binding_mode || "");
+  const directWake = Boolean(st.direct_wake_available);
+  const stateLabel = isBound
+    ? (bindingMode === "x_only" ? "X привязан" : "Привязан")
+    : "Отвязан";
+  const genLabel = st.generation !== undefined ? "g" + st.generation : "";
   const pendingCoord = Number(st.pending_coordinator_wakes || 0);
   const pendingWaiters = Number(st.pending_durable_waiters || 0);
   const totalPending = pendingCoord + pendingWaiters;
-  let detail = `${st.route_id || "Маршрут"} (${genLabel})`;
+  let detail = (st.route_id || "Маршрут") + " (" + genLabel + ")";
+  if (isBound) {
+    detail += directWake ? " · direct wake: вкл" : " · direct wake: выкл";
+  }
   if (totalPending > 0) {
     detail += ` · wakes: ${totalPending}`;
   }
@@ -147,9 +154,65 @@ function applySafeStatus(st, errorMessage = "") {
     detail += ` · diag: ${diag}`;
   }
   if (errorMessage) {
-    render("error", `Ошибка · ${stateLabel}`, `${detail} · ${errorMessage}`);
+    render("error", "Ошибка · " + stateLabel, detail + " · " + errorMessage);
   } else {
     render(isBound ? "ready" : "working", stateLabel, detail);
+  }
+  if (isBound && bindingMode === "x_only" && currentRouteControl?.endpoints?.enable_direct) {
+    actionBtn.hidden = false;
+    actionBtn.disabled = false;
+    actionBtn.textContent = "Включить direct wake";
+    actionBtn.onclick = enableDirectWake;
+  } else if (isBound && directWake && currentRouteControl?.action !== "bind") {
+    actionBtn.hidden = true;
+    actionBtn.onclick = null;
+  }
+}
+
+async function enableDirectWake() {
+  if (!currentRouteControl?.control_token || !currentRouteControl?.endpoints?.enable_direct) {
+    render("error", "Нет авторизации", "Direct wake endpoint недоступен");
+    return;
+  }
+  if (typeof window.openai?.openExternal !== "function") {
+    render("error", "Не поддерживается", "openExternal недоступен в этом клиенте ChatGPT");
+    return;
+  }
+  actionBtn.disabled = true;
+  try {
+    const resp = await fetch(new URL(currentRouteControl.endpoints.enable_direct, window.location.href), {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + currentRouteControl.control_token,
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) {
+      const err = data.error || ("HTTP " + resp.status);
+      if (data.safe_status) applySafeStatus(data.safe_status, "Ошибка: " + err);
+      else render("error", "Ошибка", "Не удалось подготовить direct wake: " + err);
+      return;
+    }
+    if (data.state === "already_direct") {
+      actionBtn.hidden = true;
+      if (data.safe_status) applySafeStatus(data.safe_status);
+      return;
+    }
+    const operationUrl = String(data.operation_url || "");
+    if (!operationUrl) {
+      render("error", "Ошибка", "Bridge не вернул operation URL");
+      return;
+    }
+    render("working", "Direct wake", "Открываю подтверждение physical target…");
+    await window.openai.openExternal({ href: operationUrl, redirectUrl: true });
+    render("ready", "Ожидание", "Подтвердите direct target на странице Bridge");
+  } catch (error) {
+    console.error("Direct wake enable error", error);
+    render("error", "Сбой", "Не удалось включить direct wake");
+  } finally {
+    actionBtn.disabled = false;
   }
 }
 

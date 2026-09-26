@@ -108,3 +108,46 @@ def test_legacy_marker_search_discovery_surface_is_removed():
     assert "discover_and_bind_current_route" not in CoordinatorWakeDeliveryService.__dict__
     assert "discover_current_chat" not in ReviewGptWakeTransport.__dict__
     assert not (Path(__file__).parents[2] / "app/coordinator/review_gpt_discovery.mjs").exists()
+
+def test_current_bind_persists_host_session_fingerprint_only_after_commit(tmp_path: Path):
+    registry = _registry(tmp_path)
+    fingerprint = "a" * 64
+    pending = registry.prepare_current_bind(
+        "bridge",
+        session_id="mcp-session-1",
+        host_session_fingerprint=fingerprint,
+    )
+    assert pending["host_session_fingerprint"] == fingerprint
+    before = registry.resolve("bridge")
+    assert before is not None
+    assert "host_session_fingerprint" not in before
+
+    registry.record_current_bind_candidate(
+        "bridge",
+        pending["token"],
+        "https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/conv-new",
+    )
+    candidate = registry.resolve("bridge")
+    assert candidate is not None
+    assert "host_session_fingerprint" not in candidate
+
+    bound = registry.complete_current_bind("bridge", pending["token"])
+    assert bound["host_session_fingerprint"] == fingerprint
+    stored = registry.resolve("bridge")
+    assert stored is not None
+    assert stored["host_session_fingerprint"] == fingerprint
+
+
+def test_pending_bind_host_session_mismatch_is_not_reused(tmp_path: Path):
+    registry = _registry(tmp_path)
+    registry.prepare_current_bind(
+        "bridge",
+        session_id="mcp-session-1",
+        host_session_fingerprint="a" * 64,
+    )
+    with pytest.raises(BridgeError):
+        registry.prepare_current_bind(
+            "bridge",
+            session_id="mcp-session-1",
+            host_session_fingerprint="b" * 64,
+        )

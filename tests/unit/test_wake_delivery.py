@@ -671,3 +671,37 @@ async def test_rollover_bootstrap_retries_only_proven_not_submitted(coordinator,
     else:
         assert result["state"] == "bootstrap_waiting"
         assert len(transport.deliver_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_delivery_skips_x_only_route_without_claiming_continuation(
+    coordinator: CoordinatorService,
+    route_registry: RouteRegistry,
+):
+    route_registry.unbind("main", expected_generation=0)
+    x_route = route_registry.bind_host_session("main", "a" * 64)
+    assert x_route["binding_state"] == "x_bound"
+    assert route_registry.has_direct_target(x_route) is False
+
+    channel_id = x_route["channel_id"]
+    armed = await coordinator.arm_resilient(
+        "x-only pending",
+        channel_id=channel_id,
+        delay_seconds=0,
+    )
+    transport = MockWakeTransport()
+    service = CoordinatorWakeDeliveryService(
+        coordinator,
+        route_registry,
+        transport=transport,
+        enabled=True,
+    )
+
+    await service.run_once()
+
+    assert transport.probe_calls == []
+    assert transport.deliver_calls == []
+    status = await coordinator.status(channel_id, delivery_mode="direct")
+    assert status["continuation_id"] == armed["continuation_id"]
+    assert status["delivery_attempts"] == 0
+    assert status["transport_delivered"] is False

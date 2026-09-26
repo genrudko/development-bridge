@@ -1542,3 +1542,189 @@ def test_route_control_bootstrap_failed_return_leaves_no_route(test_setup):
     assert exc_info.value.code == ErrorCode.INVALID_ARGUMENT
     assert registry.resolve("badroute") is None
     assert registry.pending_current_bind("badroute") is None
+
+
+def test_route_control_token_survives_service_restart_without_persisting_bearer(tmp_path: Path):
+    reg_path = tmp_path / "routes.json"
+    registry1 = RouteRegistry(reg_path)
+    trace_store1 = RouteControlTraceStore(tmp_path / "traces")
+    service1 = RouteControlService(registry1, trace_store1)
+    registry1.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-1",
+        "telegram-bridge-g0",
+    )
+
+    descriptor = service1.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    assert token.startswith("rc_")
+
+    state_path = tmp_path / "route-control-tokens.json"
+    persisted = state_path.read_text(encoding="utf-8")
+    assert token not in persisted
+
+    registry2 = RouteRegistry(reg_path)
+    trace_store2 = RouteControlTraceStore(tmp_path / "traces")
+    service2 = RouteControlService(registry2, trace_store2)
+
+    verified = service2.verify_control_token(token, "bridge")
+    assert verified["route_id"] == "bridge"
+    assert verified["generation"] == 0
+    assert "token" not in verified
+
+
+def test_restarted_route_control_token_still_fails_closed_after_generation_change(tmp_path: Path):
+    reg_path = tmp_path / "routes.json"
+    registry1 = RouteRegistry(reg_path)
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service1 = RouteControlService(registry1, trace_store)
+    registry1.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    token = service1.issue_control_descriptor("bridge")["control_token"]
+
+    pending = registry1.prepare_current_bind("bridge", session_id="mcp-1")
+    registry1.record_current_bind_candidate(
+        "bridge", pending["token"], "https://chatgpt.com/c/conv-2"
+    )
+    registry1.complete_current_bind("bridge", pending["token"])
+    assert registry1.resolve("bridge")["generation"] == 1
+
+    service2 = RouteControlService(
+        RouteRegistry(reg_path),
+        RouteControlTraceStore(tmp_path / "traces"),
+    )
+    with pytest.raises(BridgeError) as exc:
+        service2.verify_control_token(token, "bridge")
+    assert exc.value.code is ErrorCode.POLICY_VIOLATION
+
+
+def test_forged_token_digest_is_not_accepted_after_restart(tmp_path: Path):
+    reg_path = tmp_path / "routes.json"
+    registry1 = RouteRegistry(reg_path)
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service1 = RouteControlService(registry1, trace_store)
+    registry1.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    service1.issue_control_descriptor("bridge")
+
+    service2 = RouteControlService(
+        RouteRegistry(reg_path),
+        RouteControlTraceStore(tmp_path / "traces"),
+    )
+    with pytest.raises(BridgeError) as exc:
+        service2.verify_control_token("rc_forged-token", "bridge")
+    assert exc.value.code is ErrorCode.PERMISSION_DENIED
+
+
+def test_route_control_token_uses_sliding_week_lease(tmp_path: Path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("app.coordinator.route_control.time.time", lambda: clock[0])
+    registry = RouteRegistry(tmp_path / "routes.json")
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service = RouteControlService(registry, trace_store)
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    token = service.issue_control_descriptor("bridge")["control_token"]
+    state_path = tmp_path / "route-control-tokens.json"
+    digest = service._control_token_digest(token)
+
+    first_state = json.loads(state_path.read_text(encoding="utf-8"))
+    first_expiry = first_state["tokens"][digest]["expires_at"]
+    assert first_expiry == 1000.0 + service.CONTROL_TOKEN_TTL_SECONDS
+
+    # Ordinary use far from expiry does not churn durable state.
+    clock[0] += 24 * 60 * 60
+    service.verify_control_token(token, "bridge")
+    unchanged = json.loads(state_path.read_text(encoding="utf-8"))
+    assert unchanged["tokens"][digest]["expires_at"] == first_expiry
+
+    # Entering the final-day refresh window extends the inactivity lease.
+    clock[0] = first_expiry - service.CONTROL_TOKEN_REFRESH_WINDOW_SECONDS + 1
+    service.verify_control_token(token, "bridge")
+    refreshed = json.loads(state_path.read_text(encoding="utf-8"))
+    assert refreshed["tokens"][digest]["expires_at"] == (
+        clock[0] + service.CONTROL_TOKEN_TTL_SECONDS
+    )
+
+
+def test_route_control_token_expires_after_week_of_inactivity(tmp_path: Path, monkeypatch):
+    clock = [2000.0]
+    monkeypatch.setattr("app.coordinator.route_control.time.time", lambda: clock[0])
+    registry = RouteRegistry(tmp_path / "routes.json")
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service = RouteControlService(registry, trace_store)
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    token = service.issue_control_descriptor("bridge")["control_token"]
+
+    clock[0] += service.CONTROL_TOKEN_TTL_SECONDS + 1
+    with pytest.raises(BridgeError) as exc:
+        service.verify_control_token(token, "bridge")
+    assert exc.value.code is ErrorCode.PERMISSION_DENIED
+
+
+def test_x_only_safe_status_distinguishes_direct_wake_capability(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service = RouteControlService(
+        registry,
+        trace_store,
+        public_base_url="https://bridge.example",
+        endpoint_prefix="/mcp/x/route-control",
+    )
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    registry.unbind("bridge", expected_generation=0)
+    route = registry.bind_host_session("bridge", "a" * 64)
+
+    status = service.safe_status("bridge")
+    assert status["state"] == "bound"
+    assert status["binding_mode"] == "x_only"
+    assert status["direct_wake_available"] is False
+    assert status["generation"] == route["generation"]
+
+    prepared = service.prepare_direct_target(
+        "bridge",
+        expected_generation=route["generation"],
+    )
+    assert prepared["state"] == "bind_pending"
+    assert prepared["generation"] == route["generation"]
+    assert prepared["operation_url"].startswith(
+        "https://bridge.example/mcp/x/route-control/bind/"
+    )
+
+    pending = registry.pending_current_bind("bridge")
+    assert pending is not None
+    assert pending["host_session_fingerprint"] == "a" * 64
+    assert pending["session_id"] is None
+
+
+def test_direct_bound_safe_status_reports_direct_capability(tmp_path: Path):
+    registry = RouteRegistry(tmp_path / "routes.json")
+    trace_store = RouteControlTraceStore(tmp_path / "traces")
+    service = RouteControlService(registry, trace_store)
+    registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-direct",
+        "telegram-bridge-g0",
+    )
+
+    status = service.safe_status("bridge")
+    assert status["state"] == "bound"
+    assert status["binding_mode"] == "direct"
+    assert status["direct_wake_available"] is True

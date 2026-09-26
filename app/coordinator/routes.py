@@ -102,12 +102,28 @@ class RouteRegistry:
         return route_id
 
     @staticmethod
-    def is_bound(route: dict | None) -> bool:
+    def has_direct_target(route: dict | None) -> bool:
+        return bool(
+            isinstance(route, dict)
+            and route.get("url")
+            and route.get("conversation_id")
+        )
+
+    @classmethod
+    def is_bound(cls, route: dict | None) -> bool:
         if not isinstance(route, dict):
             return False
-        if route.get("binding_state") not in (None, "bound"):
+        state = route.get("binding_state")
+        if state == "unbound":
             return False
-        return bool(route.get("url") and route.get("conversation_id"))
+        if state == "x_bound":
+            return bool(
+                route.get("host_session_fingerprint")
+                and route.get("channel_id")
+            )
+        if state not in (None, "bound"):
+            return False
+        return cls.has_direct_target(route)
 
     @classmethod
     def _normalize_route_record(cls, route: dict) -> dict:
@@ -170,6 +186,85 @@ class RouteRegistry:
         chats = list((data.get("chats") or {}).values())
         chats.sort(key=lambda item: str(item.get("last_seen", "")), reverse=True)
         return chats[: max(1, min(int(limit), 50))]
+
+    def bind_host_session(self, route_id: str, fingerprint: str) -> dict:
+        route_id = self.validate_route_id(route_id)
+        if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, "ChatGPT host-session fingerprint is invalid")
+        data = self._load()
+        route = data["routes"].get(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+
+        current_fp = route.get("host_session_fingerprint")
+        if self.is_bound(route):
+            if current_fp == fingerprint:
+                return {
+                    **self._normalize_route_record(route),
+                    "route_id": route_id,
+                    "changed": False,
+                }
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "Logical route is owned by another physical ChatGPT session",
+                details={"route_id": route_id, "error_code": "OWNER_CONFIRMATION_REQUIRED"},
+            )
+
+        conflicting_routes = [
+            other_route_id
+            for other_route_id, other_route in data["routes"].items()
+            if other_route_id != route_id
+            and self.is_bound(other_route)
+            and other_route.get("host_session_fingerprint") == fingerprint
+        ]
+        if conflicting_routes:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "ChatGPT host session is already bound to another logical route",
+                details={
+                    "route_id": route_id,
+                    "error_code": "HOST_SESSION_ALREADY_BOUND",
+                },
+            )
+
+        generation = int(route.get("generation", 0)) + 1
+        rebound = {
+            "title": route.get("title") or route_id,
+            "channel_id": f"telegram-{route_id}-g{generation}",
+            "generation": generation,
+            "binding_state": "x_bound",
+            "host_session_fingerprint": fingerprint,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        data["routes"][route_id] = rebound
+        data["requested_route"] = route_id
+        data["requested_at"] = rebound["updated_at"]
+        self._save(data)
+        return {**rebound, "route_id": route_id, "changed": True}
+
+    def resolve_by_host_session_fingerprint(self, fingerprint: str | None) -> dict | None:
+        if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            return None
+        data = self._load()
+        matches = []
+        for route_id, route in data["routes"].items():
+            if (
+                self.is_bound(route)
+                and route.get("host_session_fingerprint") == fingerprint
+            ):
+                matches.append({
+                    **self._normalize_route_record(route),
+                    "route_id": route_id,
+                })
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "ChatGPT host session matches multiple logical routes",
+                details={"error_code": "AMBIGUOUS_HOST_SESSION_ROUTE"},
+            )
+        return matches[0]
 
     def resolve(self, route_id: str | None = None) -> dict | None:
         data = self._load()
@@ -403,6 +498,7 @@ class RouteRegistry:
         route_id: str,
         *,
         session_id: str | None,
+        host_session_fingerprint: str | None = None,
         allow_project_change: bool = False,
         bootstrap_if_missing: bool = False,
     ) -> dict:
@@ -429,6 +525,7 @@ class RouteRegistry:
                 )
             ) and (
                 existing.get("session_id") == session_id
+                and existing.get("host_session_fingerprint") == host_session_fingerprint
                 and bool(existing.get("allow_project_change", False)) is bool(allow_project_change)
                 and existing.get("state") in {"prepared", "candidate"}
             ):
@@ -453,6 +550,7 @@ class RouteRegistry:
             "source_generation": source_generation,
             "channel_id": channel_id,
             "session_id": session_id,
+            "host_session_fingerprint": host_session_fingerprint,
             "allow_project_change": bool(allow_project_change),
             "created_at": datetime.now(UTC).isoformat(),
         }
@@ -506,7 +604,12 @@ class RouteRegistry:
         if not is_bootstrap:
             if int(route.get("generation", 0)) != int(pending.get("source_generation", -1)):
                 raise BridgeError(ErrorCode.POLICY_VIOLATION, "active route changed during current-chat bind")
-            if not self._current_bind_project_allowed(
+            same_x_owner = (
+                route.get("binding_state") == "x_bound"
+                and route.get("host_session_fingerprint")
+                and route.get("host_session_fingerprint") == pending.get("host_session_fingerprint")
+            )
+            if not same_x_owner and not self._current_bind_project_allowed(
                 route,
                 candidate_project_id=project_id,
                 candidate_conversation_id=conversation_id,
@@ -600,6 +703,8 @@ class RouteRegistry:
                 "binding_state": "bound",
                 "updated_at": datetime.now(UTC).isoformat(),
             }
+            if pending.get("host_session_fingerprint"):
+                route["host_session_fingerprint"] = pending["host_session_fingerprint"]
             data["routes"][route_id] = route
             if not data.get("default_route"):
                 data["default_route"] = route_id
@@ -614,7 +719,12 @@ class RouteRegistry:
                 "session_id": pending.get("session_id"),
             }
 
-        if not self._current_bind_project_allowed(
+        same_x_owner = (
+            route.get("binding_state") == "x_bound"
+            and route.get("host_session_fingerprint")
+            and route.get("host_session_fingerprint") == pending.get("host_session_fingerprint")
+        )
+        if not same_x_owner and not self._current_bind_project_allowed(
             route,
             candidate_project_id=project_id,
             candidate_conversation_id=conversation_id,
@@ -625,6 +735,11 @@ class RouteRegistry:
                 "current-chat bind candidate belongs to a different project",
             )
 
+        same_x_owner = (
+            route.get("binding_state") == "x_bound"
+            and route.get("host_session_fingerprint")
+            and route.get("host_session_fingerprint") == pending.get("host_session_fingerprint")
+        )
         is_already_bound = (
             self.is_bound(route)
             and route.get("conversation_id") == conversation_id
@@ -634,9 +749,22 @@ class RouteRegistry:
             )
         )
 
-        if is_already_bound:
+        if same_x_owner:
+            changed = True
+            route = {
+                **route,
+                "url": canonical,
+                "project_id": project_id,
+                "conversation_id": conversation_id,
+                "binding_state": "bound",
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+            data["routes"][route_id] = route
+        elif is_already_bound:
             changed = False
             route["binding_state"] = "bound"
+            if pending.get("host_session_fingerprint"):
+                route["host_session_fingerprint"] = pending["host_session_fingerprint"]
             data["routes"][route_id] = route
         else:
             changed = True
@@ -651,6 +779,8 @@ class RouteRegistry:
                 "binding_state": "bound",
                 "updated_at": datetime.now(UTC).isoformat(),
             }
+            if pending.get("host_session_fingerprint"):
+                route["host_session_fingerprint"] = pending["host_session_fingerprint"]
             data["routes"][route_id] = route
             data["requested_route"] = route_id
             data["requested_at"] = datetime.now(UTC).isoformat()
@@ -720,6 +850,12 @@ class RouteRegistry:
                 ErrorCode.POLICY_VIOLATION,
                 f"Route '{route_id}' is unbound; rollover cannot be prepared",
                 details={"route_id": route_id, "error_code": "ROUTE_UNBOUND"},
+            )
+        if not self.has_direct_target(route):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                f"Route '{route_id}' has no direct ChatGPT target; physical rollover is unavailable",
+                details={"route_id": route_id, "error_code": "DIRECT_TARGET_REQUIRED"},
             )
         rollovers = data.setdefault("rollovers", {})
         existing = rollovers.get(route_id)

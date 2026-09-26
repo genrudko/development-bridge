@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import httpx2
 import pytest
 
@@ -1177,3 +1178,114 @@ async def test_rollover_prepare_rejects_existing_route_durable_waiter(tmp_path):
         )
     assert container.route_registry.pending_rollover("bridge") is None
     await container.jobs.stop()
+
+
+@pytest.mark.asyncio
+async def test_existing_widget_control_token_survives_bridge_restart(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+
+    first = build_container(settings)
+    first.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-1",
+        "telegram-bridge-g0",
+    )
+    token = first.route_control.issue_control_descriptor("bridge")["control_token"]
+    state_path = tmp_path / "route-control-tokens.json"
+    assert state_path.exists()
+    assert token not in state_path.read_text(encoding="utf-8")
+
+    # Rebuild the full container/app as a process-restart analogue.
+    second = build_container(settings)
+    app = create_streamable_http_app(create_server(second), settings, second)
+    transport = httpx2.ASGITransport(app=app)
+    async with app.router.lifespan_context(app), httpx2.AsyncClient(
+        transport=transport,
+        base_url="http://127.0.0.1",
+    ) as client:
+        response = await client.get(
+            "/mcp/x/route-control/status?route_id=bridge",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["status"]["route_id"] == "bridge"
+    assert payload["status"]["generation"] == 0
+    assert token not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_x_only_widget_can_prepare_direct_target_without_model_tool_call(tmp_path: Path):
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    container.route_registry.unbind("bridge", expected_generation=0)
+    x_route = container.route_registry.bind_host_session("bridge", "b" * 64)
+    descriptor = container.route_control.issue_control_descriptor("bridge")
+    token = descriptor["control_token"]
+    assert descriptor["endpoints"]["enable_direct"].endswith(
+        "/mcp/x/route-control/enable-direct"
+    )
+
+    app = create_streamable_http_app(create_server(container), settings, container)
+    async with app.router.lifespan_context(app), httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app),
+        base_url="http://127.0.0.1",
+    ) as client:
+        response = await client.post(
+            "/mcp/x/route-control/enable-direct",
+            json={"route_id": "bridge"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["action"] == "enable_direct"
+    assert payload["state"] == "bind_pending"
+    assert payload["generation"] == x_route["generation"]
+    assert payload["operation_url"].startswith(
+        "https://bridge.example/mcp/x/route-control/bind/"
+    )
+    assert payload["safe_status"]["binding_mode"] == "x_only"
+    assert payload["safe_status"]["direct_wake_available"] is False
+    assert ("b" * 64) not in json.dumps(payload)
+
+    pending = container.route_registry.pending_current_bind("bridge")
+    assert pending is not None
+    container.route_registry.record_current_bind_candidate(
+        "bridge",
+        pending["token"],
+        "https://chatgpt.com/g/g-p-project-y/c/conv-direct",
+    )
+    upgraded = container.route_registry.complete_current_bind(
+        "bridge", pending["token"]
+    )
+    assert upgraded["generation"] == x_route["generation"]
+
+    final_status = container.route_control.safe_status("bridge")
+    assert final_status["binding_mode"] == "direct"
+    assert final_status["direct_wake_available"] is True
+
+
+def test_coordinator_widget_exposes_x_only_and_direct_wake_states():
+    from pathlib import Path
+
+    html = (Path(__file__).parents[2] / "app" / "coordinator" / "x_ui.html").read_text()
+    assert "X привязан" in html
+    assert "direct wake: вкл" in html
+    assert "direct wake: выкл" in html
+    assert "Включить direct wake" in html
+    assert "enable_direct" in html

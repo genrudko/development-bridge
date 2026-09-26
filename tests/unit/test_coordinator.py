@@ -913,3 +913,105 @@ async def test_delivery_notifier_failure_does_not_rollback_successful_wake():
     status = await service.status("route-notify-fail")
     assert status["state"] == "waiting_model_ack"
     assert status["transport_delivered"] is True
+
+@pytest.mark.asyncio
+async def test_first_claim_freezes_wake_message_and_hash_for_retry(tmp_path, monkeypatch):
+    clock = [10_000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    state_path = tmp_path / "coordinator.json"
+    service = CoordinatorService(state_path)
+    armed = await service.arm_resilient(
+        "A",
+        channel_id="route-freeze",
+        delay_seconds=0,
+        retry_delays_seconds=(0, 0),
+    )
+    first = await service.claim("route-freeze", delivery_mode="direct")
+    assert first["claimed"] is True
+    assert first["message"] == "A"
+    assert len(first["message_sha256"]) == 64
+
+    queued = await service.arm_resilient(
+        "B",
+        channel_id="route-freeze",
+        delay_seconds=0,
+        retry_delays_seconds=(0, 0),
+    )
+    assert queued["continuation_id"] == armed["continuation_id"]
+    pending = service._pending["route-freeze"]
+    assert pending.frozen_message == "A"
+    assert pending.queued_messages == ["B"]
+
+    await service.finalize_transport(
+        "route-freeze",
+        first["claim_id"],
+        "test",
+        "not_submitted",
+    )
+    clock[0] += service.LEASE_SECONDS + 1
+    retry = await service.claim("route-freeze", delivery_mode="direct")
+    assert retry["claimed"] is True
+    assert retry["message"] == first["message"]
+    assert retry["message_sha256"] == first["message_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_frozen_wake_identity_survives_restart(tmp_path, monkeypatch):
+    clock = [20_000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    state_path = tmp_path / "coordinator.json"
+    first_service = CoordinatorService(state_path)
+    await first_service.arm_resilient(
+        "immutable",
+        channel_id="route-restart-freeze",
+        delay_seconds=0,
+        retry_delays_seconds=(0, 0),
+    )
+    first = await first_service.claim("route-restart-freeze", delivery_mode="direct")
+    await first_service.finalize_transport(
+        "route-restart-freeze",
+        first["claim_id"],
+        "test",
+        "not_submitted",
+    )
+
+    clock[0] += first_service.LEASE_SECONDS + 1
+    restored = CoordinatorService(state_path)
+    retry = await restored.claim("route-restart-freeze", delivery_mode="direct")
+    assert retry["claimed"] is True
+    assert retry["message"] == first["message"]
+    assert retry["message_sha256"] == first["message_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_corrupted_frozen_wake_fails_closed(tmp_path, monkeypatch):
+    clock = [30_000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    state_path = tmp_path / "coordinator.json"
+    service = CoordinatorService(state_path)
+    await service.arm_resilient(
+        "immutable",
+        channel_id="route-corrupt-freeze",
+        delay_seconds=0,
+        retry_delays_seconds=(0, 0),
+    )
+    first = await service.claim("route-corrupt-freeze", delivery_mode="direct")
+    await service.finalize_transport(
+        "route-corrupt-freeze",
+        first["claim_id"],
+        "test",
+        "not_submitted",
+    )
+
+    pending = service._pending["route-corrupt-freeze"]
+    pending.frozen_message = "tampered"
+    clock[0] += service.LEASE_SECONDS + 1
+    blocked = await service.claim("route-corrupt-freeze", delivery_mode="direct")
+    assert blocked == {
+        "channel_id": "route-corrupt-freeze",
+        "claimed": False,
+        "state": "blocked",
+        "error_code": "WAKE_PAYLOAD_INTEGRITY_MISMATCH",
+    }
+    assert pending.owner_input_required is True
+    assert pending.last_transport_disposition == "uncertain"

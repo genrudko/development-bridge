@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
 import time
 from contextlib import suppress
+from hashlib import sha256
+from pathlib import Path
 from secrets import token_urlsafe
 from typing import TYPE_CHECKING
 
@@ -16,6 +20,9 @@ if TYPE_CHECKING:
 
 
 class RouteControlService:
+    CONTROL_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
+    CONTROL_TOKEN_REFRESH_WINDOW_SECONDS = 24 * 60 * 60
+
     def __init__(
         self,
         route_registry: RouteRegistry,
@@ -25,6 +32,7 @@ class RouteControlService:
         jobs: JobService | None = None,
         public_base_url: str | None = None,
         endpoint_prefix: str = "/x/route-control",
+        control_state_path: Path | None = None,
     ) -> None:
         self.route_registry = route_registry
         self.trace_store = trace_store
@@ -32,7 +40,57 @@ class RouteControlService:
         self.jobs = jobs
         self.public_base_url = public_base_url.rstrip("/") if public_base_url else None
         self.endpoint_prefix = endpoint_prefix.rstrip("/")
+        self._control_state_path = (
+            control_state_path.expanduser()
+            if control_state_path is not None
+            else self.route_registry.path.parent / "route-control-tokens.json"
+        )
         self._control_tokens: dict[str, dict] = {}
+        self._load_control_tokens()
+
+    @staticmethod
+    def _control_token_digest(token: str) -> str:
+        return sha256(b"development-bridge/route-control/v1\0" + token.encode("utf-8")).hexdigest()
+
+    def _load_control_tokens(self) -> None:
+        try:
+            data = json.loads(self._control_state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        if data.get("version") != 1 or not isinstance(data.get("tokens"), dict):
+            return
+        now = time.time()
+        loaded: dict[str, dict] = {}
+        for digest, item in data["tokens"].items():
+            if (
+                isinstance(digest, str)
+                and len(digest) == 64
+                and isinstance(item, dict)
+                and float(item.get("expires_at", 0.0)) > now
+            ):
+                loaded[digest] = dict(item)
+        self._control_tokens = loaded
+        if len(loaded) != len(data["tokens"]):
+            self._save_control_tokens()
+
+    def _save_control_tokens(self) -> None:
+        self._control_state_path.parent.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        self._control_tokens = {
+            digest: item
+            for digest, item in self._control_tokens.items()
+            if float(item.get("expires_at", 0.0)) > now
+        }
+        payload = {
+            "version": 1,
+            "tokens": self._control_tokens,
+        }
+        tmp = self._control_state_path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, self._control_state_path)
 
     def issue_control_token(self, route_id: str) -> dict:
         route_id = self.route_registry.validate_route_id(route_id)
@@ -54,20 +112,25 @@ class RouteControlService:
             "route_id": route_id,
             "generation": generation,
             "created_at": now,
-            "expires_at": now + 3600.0,
+            "expires_at": now + self.CONTROL_TOKEN_TTL_SECONDS,
         }
         if bootstrap_operation_id is not None:
             record["bootstrap_operation_id"] = bootstrap_operation_id
-        self._control_tokens[token] = record
+        self._control_tokens[self._control_token_digest(token)] = {
+            key: value for key, value in record.items() if key != "token"
+        }
+        self._save_control_tokens()
         return record
 
     def verify_control_token(self, token: str | None, route_id: str | None = None) -> dict:
         if not token or not isinstance(token, str):
             raise BridgeError(ErrorCode.PERMISSION_DENIED, "missing route control authorization")
-        record = self._control_tokens.get(token)
+        record = self._control_tokens.get(self._control_token_digest(token))
         if record is None:
             raise BridgeError(ErrorCode.PERMISSION_DENIED, "invalid or forged route control authorization")
         if time.time() > record["expires_at"]:
+            self._control_tokens.pop(self._control_token_digest(token), None)
+            self._save_control_tokens()
             raise BridgeError(ErrorCode.PERMISSION_DENIED, "expired route control authorization")
         target_route_id = route_id or record["route_id"]
         if target_route_id != record["route_id"]:
@@ -97,6 +160,11 @@ class RouteControlService:
             current_gen = int(route.get("generation", 0))
         if record["generation"] != current_gen:
             raise BridgeError(ErrorCode.POLICY_VIOLATION, "stale route control authorization for previous generation")
+        now = time.time()
+        if float(record["expires_at"]) - now <= self.CONTROL_TOKEN_REFRESH_WINDOW_SECONDS:
+            record["expires_at"] = now + self.CONTROL_TOKEN_TTL_SECONDS
+            self._control_tokens[self._control_token_digest(token)] = record
+            self._save_control_tokens()
         return record
 
     def pending_bind_descriptor(self, route_id: str, *, session_id: str | None) -> dict | None:
@@ -123,6 +191,7 @@ class RouteControlService:
             "generation": record["generation"],
             "endpoints": {
                 "status": f"{base}{ep}/status",
+                "enable_direct": f"{base}{ep}/enable-direct",
                 "unbind": f"{base}{ep}/unbind",
                 "cancel_wakes": f"{base}{ep}/cancel-wakes",
                 "unbind_and_cancel": f"{base}{ep}/unbind-and-cancel",
@@ -150,6 +219,7 @@ class RouteControlService:
         route_id: str,
         *,
         session_id: str | None = None,
+        host_session_fingerprint: str | None = None,
         allow_project_change: bool = False,
         bootstrap_if_missing: bool = False,
     ) -> dict:
@@ -161,6 +231,7 @@ class RouteControlService:
         pending = self.route_registry.prepare_current_bind(
             route_id,
             session_id=session_id,
+            host_session_fingerprint=host_session_fingerprint,
             allow_project_change=allow_project_change,
             bootstrap_if_missing=bootstrap_if_missing,
         )
@@ -439,10 +510,18 @@ class RouteControlService:
             ]
             pending_waiters = len(waiters)
 
+        binding_mode = "unbound"
+        direct_wake_available = False
+        if route is not None and self.route_registry.is_bound(route):
+            direct_wake_available = self.route_registry.has_direct_target(route)
+            binding_mode = "direct" if direct_wake_available else "x_only"
+
         return {
             "route_id": route_id,
             "title": title,
             "state": state,
+            "binding_mode": binding_mode,
+            "direct_wake_available": direct_wake_available,
             "generation": generation,
             "channel_id": channel_id,
             "pending_coordinator_wakes": pending_coord,
@@ -453,6 +532,50 @@ class RouteControlService:
 
     def resolve_return_target(self, diagnostic_id: str) -> str | None:
         return self.trace_store.get_return_target(diagnostic_id)
+
+    def prepare_direct_target(
+        self,
+        route_id: str,
+        *,
+        expected_generation: int,
+    ) -> dict:
+        route_id = self.route_registry.validate_route_id(route_id)
+        route = self.route_registry.resolve(route_id)
+        if route is None:
+            raise BridgeError(ErrorCode.INVALID_ARGUMENT, f"unknown route: {route_id}")
+        generation = int(route.get("generation", 0))
+        if generation != int(expected_generation):
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "route generation changed before direct-target preparation",
+            )
+        if self.route_registry.has_direct_target(route):
+            return {
+                "route_id": route_id,
+                "state": "already_direct",
+                "generation": generation,
+                "channel_id": route.get("channel_id"),
+            }
+        if route.get("binding_state") != "x_bound":
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "route must be X-bound before direct-target preparation",
+                details={"route_id": route_id, "error_code": "X_BIND_REQUIRED"},
+            )
+        fingerprint = route.get("host_session_fingerprint")
+        if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            raise BridgeError(
+                ErrorCode.POLICY_VIOLATION,
+                "X-bound route has no trusted ChatGPT host-session identity",
+                details={"route_id": route_id, "error_code": "HOST_SESSION_REQUIRED"},
+            )
+        return self.prepare_bind(
+            route_id,
+            session_id=None,
+            host_session_fingerprint=fingerprint,
+            allow_project_change=False,
+            bootstrap_if_missing=False,
+        )
 
     async def cancel_wakes(
         self,

@@ -836,6 +836,42 @@ def create_streamable_http_app(
                 headers=route_control_headers,
             )
 
+    async def route_control_enable_direct(request: Request):
+        service = container.route_control
+        if service is None:
+            return JSONResponse({"ok": False, "error": "Route control is not configured"}, status_code=500, headers=route_control_headers)
+
+        body_data = await _parse_json_safely(request)
+        route_id = request.query_params.get("route_id") or body_data.get("route_id")
+        authorized_route_id = None
+
+        try:
+            token = _extract_route_control_auth(request, body_data)
+            token_rec = service.verify_control_token(token, route_id=route_id)
+            authorized_route_id = token_rec["route_id"]
+            target_route = route_id or token_rec["route_id"]
+            prepared = service.prepare_direct_target(
+                target_route,
+                expected_generation=int(token_rec["generation"]),
+            )
+            safe_st = service.safe_status(target_route)
+            return JSONResponse(
+                {"ok": True, "action": "enable_direct", **prepared, "safe_status": safe_st},
+                status_code=200,
+                headers=route_control_headers,
+            )
+        except BridgeError as error:
+            status_code = 401 if error.code is ErrorCode.PERMISSION_DENIED else (409 if error.code is ErrorCode.POLICY_VIOLATION else 400)
+            safe_st = None
+            if authorized_route_id:
+                with suppress(BridgeError):
+                    safe_st = service.safe_status(authorized_route_id)
+            return JSONResponse(
+                _safe_route_control_error_payload(error, safe_status=safe_st),
+                status_code=status_code,
+                headers=route_control_headers,
+            )
+
     async def route_control_cancel_wakes(request: Request):
         service = container.route_control
         if service is None:
@@ -1132,6 +1168,14 @@ def create_streamable_http_app(
             endpoint=_route_control_cors(route_control_unbind, ["POST"], route_control_sandbox_origins),
             methods=["POST", "OPTIONS"],
             name="route_control_unbind",
+        )
+    )
+    custom_routes.append(
+        Route(
+            route_control_base_path + "/enable-direct",
+            endpoint=_route_control_cors(route_control_enable_direct, ["POST"], route_control_sandbox_origins),
+            methods=["POST", "OPTIONS"],
+            name="route_control_enable_direct",
         )
     )
     custom_routes.append(

@@ -1495,3 +1495,255 @@ async def test_route_control_status_is_widgetless_safe_data(tmp_path):
     assert result.structured_content == data
     assert not (result.meta or {}).get("openai/outputTemplate")
     assert "route_control" not in (result.meta or {})
+
+
+@pytest.mark.asyncio
+async def test_bind_current_receives_openai_session_meta_through_real_mcp_transport(tmp_path):
+    from app.chatgpt_host import chatgpt_session_fingerprint
+
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    app = create_streamable_http_app(create_server(container), settings, container)
+    raw_session = "transport-level-host-session"
+    expected_fingerprint = chatgpt_session_fingerprint(
+        SimpleNamespace(meta={"openai/session": raw_session})
+    )
+    assert expected_fingerprint is not None
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client,
+        streamable_http_client(
+            "http://127.0.0.1/mcp", http_client=client
+        ) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        result = await session.call_tool(
+            "coordinator_route_bind_current",
+            {"route_id": "bridge"},
+            meta={"openai/session": raw_session},
+        )
+
+    assert result.is_error is not True
+    pending = container.route_registry.pending_current_bind("bridge")
+    assert pending is not None
+    assert pending["host_session_fingerprint"] == expected_fingerprint
+
+    # Host identity stays server-side even when it entered through real MCP metadata.
+    assert raw_session not in result.content[0].text
+    assert expected_fingerprint not in result.content[0].text
+    assert raw_session not in json.dumps(result.structured_content)
+    assert expected_fingerprint not in json.dumps(result.structured_content)
+    assert raw_session not in json.dumps(result.meta)
+    assert expected_fingerprint not in json.dumps(result.meta)
+
+
+@pytest.mark.asyncio
+async def test_host_session_meta_restores_route_after_server_restart_over_real_mcp_transport(tmp_path):
+    routes_path = tmp_path / "routes.json"
+    raw_session = "stable-host-session-across-restart"
+
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": routes_path},
+    })
+    first = build_container(settings)
+    first.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    first_app = create_streamable_http_app(create_server(first), settings, first)
+
+    # First physical MCP connection prepares and then completes the normal OOB bind.
+    async with (
+        first_app.router.lifespan_context(first_app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=first_app),
+            base_url="http://127.0.0.1",
+        ) as client,
+        streamable_http_client(
+            "http://127.0.0.1/mcp", http_client=client
+        ) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        prepared = await session.call_tool(
+            "coordinator_route_bind_current",
+            {"route_id": "bridge"},
+            meta={"openai/session": raw_session},
+        )
+        assert prepared.is_error is not True
+
+    pending = first.route_registry.pending_current_bind("bridge")
+    assert pending is not None
+    first.route_registry.record_current_bind_candidate(
+        "bridge",
+        pending["token"],
+        "https://chatgpt.com/c/conv-new",
+    )
+    committed = first.route_registry.complete_current_bind(
+        "bridge", pending["token"]
+    )
+    assert committed["changed"] is True
+    committed_fingerprint = committed["host_session_fingerprint"]
+
+    # New container models a Bridge process restart: RAM MCP-session bindings are empty.
+    second = build_container(settings)
+    assert second.coordinator._session_bindings == {}
+    second_app = create_streamable_http_app(create_server(second), settings, second)
+
+    async with (
+        second_app.router.lifespan_context(second_app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=second_app),
+            base_url="http://127.0.0.1",
+        ) as client,
+        streamable_http_client(
+            "http://127.0.0.1/mcp", http_client=client
+        ) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        resumed = await session.call_tool(
+            "coordinator_continue",
+            {"message": "resume-after-restart", "delay_seconds": 0},
+            meta={"openai/session": raw_session},
+        )
+
+    assert resumed.is_error is not True
+    payload = json.loads(resumed.content[0].text)["data"]
+    assert payload["channel_id"] == "telegram-bridge-g1"
+
+    route = second.route_registry.resolve("bridge")
+    assert route is not None
+    assert route["host_session_fingerprint"] == committed_fingerprint
+    # The fresh MCP session was rebound internally, but no physical host identity leaked.
+    assert second.coordinator._session_bindings
+    assert raw_session not in resumed.content[0].text
+    assert committed_fingerprint not in resumed.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_x_only_mount_auto_binds_unbound_route_and_delivers_x_continuation(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    container.route_registry.unbind("bridge", expected_generation=0)
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client,
+        streamable_http_client(
+            "http://127.0.0.1/mcp", http_client=client
+        ) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        mounted = await session.call_tool(
+            "coordinator_x_mount",
+            {"route_id": "bridge"},
+            meta={"openai/session": "x-owner-session"},
+        )
+        assert mounted.is_error is not True
+        assert mounted.structured_content["route_id"] == "bridge"
+        assert mounted.structured_content["generation"] == 1
+        assert mounted.structured_content["channel_id"] == "telegram-bridge-g1"
+        lease = mounted.structured_content["delivery_lease"]
+
+        route = container.route_registry.resolve("bridge")
+        assert route["binding_state"] == "x_bound"
+        assert container.route_registry.has_direct_target(route) is False
+
+        armed = await session.call_tool(
+            "coordinator_continue",
+            {"message": "x-only-wake", "delay_seconds": 0},
+            meta={"openai/session": "x-owner-session"},
+        )
+        assert armed.is_error is not True
+
+        status = await client.get(
+            f"/mcp/x/coordinator/status?channel_id=telegram-bridge-g1&delivery_lease={lease}"
+        )
+        assert status.json()["state"] in {"ready", "pending"}
+
+        claim = await client.post(
+            f"/mcp/x/coordinator/claim?channel_id=telegram-bridge-g1&delivery_lease={lease}"
+        )
+        claimed = claim.json()
+        assert claimed["claimed"] is True
+        assert claimed["message"] == "x-only-wake"
+
+
+@pytest.mark.asyncio
+async def test_x_only_route_rejects_mount_from_different_host_session(tmp_path):
+    settings = BridgeSettings.model_validate({
+        "coordinator": {"route_registry_path": tmp_path / "routes.json"},
+    })
+    container = build_container(settings)
+    container.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-old",
+        "telegram-bridge-g0",
+    )
+    container.route_registry.unbind("bridge", expected_generation=0)
+    app = create_streamable_http_app(create_server(container), settings, container)
+
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+        ) as client,
+    ):
+        async with (
+            streamable_http_client(
+                "http://127.0.0.1/mcp", http_client=client
+            ) as streams1,
+            ClientSession(*streams1) as session1,
+        ):
+            await session1.initialize()
+            first = await session1.call_tool(
+                "coordinator_x_mount",
+                {"route_id": "bridge"},
+                meta={"openai/session": "x-owner-one"},
+            )
+            assert first.is_error is not True
+
+        async with (
+            streamable_http_client(
+                "http://127.0.0.1/mcp", http_client=client
+            ) as streams2,
+            ClientSession(*streams2) as session2,
+        ):
+            await session2.initialize()
+            second = await session2.call_tool(
+                "coordinator_x_mount",
+                {"route_id": "bridge"},
+                meta={"openai/session": "x-owner-two"},
+            )
+            assert second.is_error is True
+            assert "another physical ChatGPT session" in second.content[0].text
