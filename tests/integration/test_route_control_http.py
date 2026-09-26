@@ -1289,3 +1289,7 @@ def test_coordinator_widget_exposes_x_only_and_direct_wake_states():
     assert "direct wake: выкл" in html
     assert "Включить direct wake" in html
     assert "enable_direct" in html
+    assert "isNativeMobileClient" in html
+    assert "window.openai?.userAgent" in html
+    assert "X wake: активен · direct: desktop/web" in html
+    assert "Direct wake сейчас доступен только в desktop/web ChatGPT" in html

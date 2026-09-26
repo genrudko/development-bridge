@@ -123,6 +123,14 @@ async function confirmDestructiveAction(promptText, button, confirmLabel) {
   return false;
 }
 
+function isNativeMobileClient() {
+  const hostUa = String(window.openai?.userAgent || "");
+  const browserUa = String(navigator.userAgent || "");
+  const platform = String(navigator.platform || "");
+  const uaDataMobile = Boolean(navigator.userAgentData?.mobile);
+  return uaDataMobile || /Android|iPhone|iPad|iPod/i.test(`${hostUa} ${browserUa} ${platform}`);
+}
+
 function setRouteControlButtonsDisabled(disabled) {
   if (btnStatus) btnStatus.disabled = disabled;
   if (btnCancelWake) btnCancelWake.disabled = disabled;
@@ -144,7 +152,9 @@ function applySafeStatus(st, errorMessage = "") {
   const totalPending = pendingCoord + pendingWaiters;
   let detail = (st.route_id || "Маршрут") + " (" + genLabel + ")";
   if (isBound) {
-    detail += directWake ? " · direct wake: вкл" : " · direct wake: выкл";
+    detail += directWake
+      ? " · direct wake: вкл"
+      : (isNativeMobileClient() ? " · X wake: активен · direct: desktop/web" : " · direct wake: выкл");
   }
   if (totalPending > 0) {
     detail += ` · wakes: ${totalPending}`;
@@ -159,10 +169,15 @@ function applySafeStatus(st, errorMessage = "") {
     render(isBound ? "ready" : "working", stateLabel, detail);
   }
   if (isBound && bindingMode === "x_only" && currentRouteControl?.endpoints?.enable_direct) {
-    actionBtn.hidden = false;
-    actionBtn.disabled = false;
-    actionBtn.textContent = "Включить direct wake";
-    actionBtn.onclick = enableDirectWake;
+    if (isNativeMobileClient()) {
+      actionBtn.hidden = true;
+      actionBtn.onclick = null;
+    } else {
+      actionBtn.hidden = false;
+      actionBtn.disabled = false;
+      actionBtn.textContent = "Включить direct wake";
+      actionBtn.onclick = enableDirectWake;
+    }
   } else if (isBound && directWake && currentRouteControl?.action !== "bind") {
     actionBtn.hidden = true;
     actionBtn.onclick = null;
@@ -170,6 +185,12 @@ function applySafeStatus(st, errorMessage = "") {
 }
 
 async function enableDirectWake() {
+  if (isNativeMobileClient()) {
+    render("ready", "X wake активен", "Direct wake сейчас доступен только в desktop/web ChatGPT");
+    actionBtn.hidden = true;
+    actionBtn.onclick = null;
+    return;
+  }
   if (!currentRouteControl?.control_token || !currentRouteControl?.endpoints?.enable_direct) {
     render("error", "Нет авторизации", "Direct wake endpoint недоступен");
     return;
@@ -308,11 +329,16 @@ function handleRouteControl(control) {
   const action = String(control.action || "");
   const operationUrl = String(control.operation_url || "");
   if (action === "bind" && operationUrl) {
-    actionBtn.hidden = false;
-    actionBtn.disabled = false;
-    actionBtn.textContent = "Привязать этот чат";
-    render("working", "Привязка", "Нажмите для привязки текущего чата");
-    actionBtn.onclick = async () => {
+    if (isNativeMobileClient()) {
+      actionBtn.hidden = true;
+      actionBtn.onclick = null;
+      render("working", "X wake", "Новая physical binding на mobile сейчас недоступна; используйте desktop/web ChatGPT");
+    } else {
+      actionBtn.hidden = false;
+      actionBtn.disabled = false;
+      actionBtn.textContent = "Привязать этот чат";
+      render("working", "Привязка", "Нажмите для привязки текущего чата");
+      actionBtn.onclick = async () => {
       if (typeof window.openai?.openExternal !== "function") {
         render("error", "Не поддерживается", "openExternal недоступен в этом клиенте ChatGPT");
         return;
@@ -327,7 +353,8 @@ function handleRouteControl(control) {
         actionBtn.disabled = false;
         render("error", "Ошибка открытия", "Не удалось открыть страницу привязки");
       }
-    };
+      };
+    }
   }
 
   if (control.endpoints && control.control_token) {
