@@ -68,9 +68,10 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                     assert "__developmentBridgeControlV1" in resource.contents[0].text
                     assert "observerOnly" in resource.contents[0].text
                     assert "control_version: 2" in resource.contents[0].text
-                    legacy = await session.read_resource(COORDINATOR_UI_URIS[1])
-                    assert str(legacy.contents[0].uri) == COORDINATOR_UI_URIS[1]
-                    assert legacy.contents[0].text == resource.contents[0].text
+                    for legacy_uri in COORDINATOR_UI_URIS[1:]:
+                        legacy = await session.read_resource(legacy_uri)
+                        assert str(legacy.contents[0].uri) == legacy_uri
+                        assert legacy.contents[0].text == resource.contents[0].text
                     mounted = await session.call_tool(
                         "coordinator_x_mount", {"channel_id": "chat-42"}
                     )

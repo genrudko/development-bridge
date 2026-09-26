@@ -21,8 +21,13 @@ from app.tools.jobs import JOB_ID_SCHEMA
 COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v5.html"
 
 COORDINATOR_UI_ALIASES = (
+    # Keep all historical coordinator resource URIs readable. ChatGPT may cache
+    # an installed app action/outputTemplate snapshot across server upgrades.
+    "ui://development-bridge/coordinator-x-v6.html",
     "ui://development-bridge/coordinator-x-v4.html",
     "ui://development-bridge/coordinator-x-v3.html",
+    "ui://development-bridge/coordinator-x-v2.html",
+    "ui://development-bridge/coordinator-x-v1.html",
 )
 COORDINATOR_UI_URIS = (COORDINATOR_UI_URI, *COORDINATOR_UI_ALIASES)
 COORDINATOR_UI_META = {
