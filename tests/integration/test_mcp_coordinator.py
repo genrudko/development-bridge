@@ -1748,3 +1748,109 @@ async def test_x_only_route_rejects_mount_from_different_host_session(tmp_path):
             )
             assert second.is_error is True
             assert "another physical ChatGPT session" in second.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_same_physical_chat_can_remount_after_restart_without_losing_direct_target(tmp_path):
+    routes_path = tmp_path / "routes.json"
+    raw_session = "stable-owner-restart-remount"
+
+    settings = BridgeSettings.model_validate({
+        "server": {"public_base_url": "https://bridge.example"},
+        "coordinator": {"route_registry_path": routes_path},
+    })
+    first = build_container(settings)
+    first.route_registry.bootstrap(
+        "bridge",
+        "https://chatgpt.com/c/conv-bootstrap",
+        "telegram-bridge-g0",
+    )
+    first.route_registry.unbind("bridge", expected_generation=0)
+    first_app = create_streamable_http_app(create_server(first), settings, first)
+
+    async with (
+        first_app.router.lifespan_context(first_app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=first_app),
+            base_url="http://127.0.0.1",
+        ) as client,
+        streamable_http_client(
+            "http://127.0.0.1/mcp", http_client=client
+        ) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        mounted = await session.call_tool(
+            "coordinator_x_mount",
+            {"route_id": "bridge"},
+            meta={"openai/session": raw_session},
+        )
+        assert mounted.is_error is not True
+        old_lease = mounted.structured_content["delivery_lease"]
+
+    # Simulate the one-time direct-wake enable flow. The direct target and stable
+    # host fingerprint are durable route state and must survive the Bridge restart.
+    route = first.route_registry.resolve("bridge")
+    assert route is not None
+    fingerprint = route["host_session_fingerprint"]
+    pending = first.route_registry.prepare_current_bind(
+        "bridge",
+        session_id="mcp-before-restart",
+        host_session_fingerprint=fingerprint,
+    )
+    first.route_registry.record_current_bind_candidate(
+        "bridge",
+        pending["token"],
+        "https://chatgpt.com/c/conv-direct",
+    )
+    direct = first.route_registry.complete_current_bind("bridge", pending["token"])
+    assert first.route_registry.has_direct_target(direct) is True
+    assert direct["generation"] == 1
+
+    # A new container models a process restart. Its MCP transport session is new,
+    # but trusted OpenAI host-session metadata identifies the same physical chat.
+    restarted = build_container(settings)
+    assert restarted.coordinator._session_bindings == {}
+    persisted = restarted.route_registry.resolve("bridge")
+    assert persisted is not None
+    assert restarted.route_registry.has_direct_target(persisted) is True
+    assert persisted["host_session_fingerprint"] == fingerprint
+
+    restarted_app = create_streamable_http_app(create_server(restarted), settings, restarted)
+    async with (
+        restarted_app.router.lifespan_context(restarted_app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=restarted_app),
+            base_url="http://127.0.0.1",
+        ) as client,
+        streamable_http_client(
+            "http://127.0.0.1/mcp", http_client=client
+        ) as streams,
+        ClientSession(*streams) as session,
+    ):
+        await session.initialize()
+        remounted = await session.call_tool(
+            "coordinator_x_mount",
+            {"route_id": "bridge"},
+            meta={"openai/session": raw_session},
+        )
+        assert remounted.is_error is not True
+        new_lease = remounted.structured_content["delivery_lease"]
+        assert new_lease != old_lease
+
+        rebound = restarted.route_registry.resolve("bridge")
+        assert rebound is not None
+        assert rebound["generation"] == 1
+        assert rebound["conversation_id"] == "conv-direct"
+        assert restarted.route_registry.has_direct_target(rebound) is True
+
+        # A different physical ChatGPT host session still cannot take the route.
+        different = await session.call_tool(
+            "coordinator_x_mount",
+            {"route_id": "bridge"},
+            meta={"openai/session": "different-physical-owner"},
+        )
+        assert different.is_error is True
+        error_payload = json.loads(different.content[0].text)
+        assert error_payload["error"]["code"] == "POLICY_VIOLATION"
+        assert error_payload["error"]["details"]["error_code"] == "HOST_SESSION_MISMATCH"

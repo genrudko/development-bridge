@@ -410,3 +410,59 @@ async def test_x_ack_revalidates_explicit_lease_after_waiting_for_coordinator_lo
     wake_after = service._pending.get("route-g9")
     assert wake_after is not None
     assert wake_after.transport_delivered is True
+
+
+@pytest.mark.asyncio
+async def test_verified_physical_owner_reconnect_rotates_active_lease_after_restart(
+    tmp_path, monkeypatch
+):
+    clock = [7000.0]
+    monkeypatch.setattr("app.coordinator.service.time.time", lambda: clock[0])
+    state = tmp_path / "wakes-owner-reconnect.json"
+
+    first = CoordinatorService(state)
+    first.X_LISTENER_HEARTBEAT_TTL_SECONDS = 15.0
+    old = first.issue_delivery_lease(
+        "route-g1", session_id="mcp-before-restart", route_id="route", generation=1
+    )
+
+    # A process restart restores the durable lease but not the ephemeral MCP
+    # transport session. Restart grace deliberately considers the old X listener
+    # active, so an unverified new transport must still fail closed.
+    clock[0] = 7001.0
+    restarted = CoordinatorService(state)
+    restarted.X_LISTENER_HEARTBEAT_TTL_SECONDS = 15.0
+    with pytest.raises(BridgeError) as exc_info:
+        restarted.issue_delivery_lease(
+            "route-g1",
+            session_id="mcp-unverified",
+            route_id="route",
+            generation=1,
+        )
+    assert exc_info.value.code == ErrorCode.POLICY_VIOLATION
+    assert exc_info.value.details["error_code"] == "EXCLUSIVE_ENDPOINT_ACTIVE"
+
+    # The mount layer may assert verified_owner_reconnect only after matching the
+    # trusted OpenAI host-session fingerprint against the persisted logical route.
+    reclaimed = restarted.issue_delivery_lease(
+        "route-g1",
+        session_id="mcp-after-restart",
+        route_id="route",
+        generation=1,
+        verified_owner_reconnect=True,
+    )
+    assert reclaimed["lease_id"] != old["lease_id"]
+    assert reclaimed["session_id"] == "mcp-after-restart"
+    assert reclaimed["route_id"] == "route"
+    assert reclaimed["generation"] == 1
+
+    # Rotation invalidates the stale widget lease immediately.
+    await restarted.arm("wake", channel_id="route-g1", delay_seconds=0)
+    stale = await restarted.status(
+        "route-g1", delivery_lease=old["lease_id"], delivery_mode="x"
+    )
+    assert stale["state"] == "standby"
+    current = await restarted.status(
+        "route-g1", delivery_lease=reclaimed["lease_id"], delivery_mode="x"
+    )
+    assert current["state"] in {"ready", "pending"}

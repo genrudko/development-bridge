@@ -251,11 +251,21 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
             container, ctx, arguments, request_context=request_context, bind=False
         )
         channel_id = str(destination["channel_id"])
+        verified_owner_reconnect = False
+        if destination.get("route_id") is not None:
+            route = container.route_registry.resolve(str(destination["route_id"]))
+            fingerprint = chatgpt_session_fingerprint(request_context, ctx)
+            verified_owner_reconnect = bool(
+                route is not None
+                and fingerprint is not None
+                and route.get("host_session_fingerprint") == fingerprint
+            )
         delivery = container.coordinator.issue_delivery_lease(
             channel_id,
             session_id=_session_id(ctx),
             route_id=(str(destination["route_id"]) if destination.get("route_id") is not None else None),
             generation=(int(destination["generation"]) if destination.get("generation") is not None else None),
+            verified_owner_reconnect=verified_owner_reconnect,
         )
         binding = _bind_session(container, ctx, destination)
         if destination.get("route_id") is not None and destination.get("route_state") == "active":
