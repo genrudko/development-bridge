@@ -210,6 +210,13 @@ class CoordinatorService:
         item = self._session_bindings.get(session)
         return dict(item) if item is not None else None
 
+    def unbind_session(self, session_id: str | None) -> bool:
+        if session_id is None:
+            return False
+        session = self.validate_session_id(session_id)
+        self._prune_session_bindings()
+        return self._session_bindings.pop(session, None) is not None
+
     def issue_delivery_lease(
         self,
         channel_id: str,

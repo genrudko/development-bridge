@@ -70,6 +70,34 @@ function render(kind, state, detail = "") {
   resizeWidget();
 }
 
+async function handleRouteDiscovery(discovery) {
+  const routeId = String(discovery?.route_id || "");
+  const token = String(discovery?.token || "");
+  const marker = String(discovery?.marker || "");
+  if (!/^[a-z][a-z0-9-]{0,30}$/.test(routeId) || !/^bind_[A-Za-z0-9_-]{20,120}$/.test(token) || !/^DBRIDGE_ROUTE_BIND_[A-Za-z0-9_-]{20,120}$/.test(marker)) {
+    throw new Error("Invalid route_discovery payload");
+  }
+  const markerOperation = `route-discovery-marker:${token}`;
+  const completeOperation = `route-discovery-complete:${token}`;
+  if (handledControlOperations.has(completeOperation)) return;
+  render("working", "Привязываю", "Определяю этот ChatGPT-чат без ручной ссылки");
+  if (!handledControlOperations.has(markerOperation)) {
+    await app.sendMessage({ role: "user", content: [{ type: "text", text: marker }] });
+    rememberControlOperation(markerOperation);
+  }
+  const discovered = await request("discover", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ route_id: routeId, token }),
+  });
+  if (typeof discovered?.channel_id === "string" && discovered.channel_id.length) {
+    channelId = discovered.channel_id;
+    deliveryLease = null;
+  }
+  rememberControlOperation(completeOperation);
+  render("ready", "Готово", "Текущий чат привязан к маршруту");
+}
+
 app.ontoolresult = (result) => {
   const routed = result?.structuredContent?.channel_id;
   if (typeof routed === "string" && routed.length) channelId = routed;
@@ -78,6 +106,13 @@ app.ontoolresult = (result) => {
   const triggerUrl = result?.structuredContent?.trigger_url;
   if (typeof triggerUrl === "string" && triggerUrl.length) {
     endpoint = new URL(triggerUrl, window.location.href);
+  }
+  const routeDiscovery = result?.structuredContent?.route_discovery;
+  if (routeDiscovery) {
+    void handleRouteDiscovery(routeDiscovery).catch((error) => {
+      console.error("Current-chat route discovery failed", error);
+      render("error", "Не привязано", "Не удалось однозначно определить текущий чат");
+    });
   }
 };
 

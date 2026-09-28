@@ -22,7 +22,7 @@ from mcp.server.auth.settings import (
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Route, request_response
 
 from app.api.context import new_request_context
@@ -295,6 +295,8 @@ def create_streamable_http_app(
     coordinator_ui_headers = {
         "Cache-Control": "no-store",
         "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     }
 
     async def coordinator_status(request: Request):
@@ -364,6 +366,37 @@ def create_streamable_http_app(
             )
         except BridgeError as error:
             return JSONResponse({"error": error.message}, status_code=400, headers=coordinator_ui_headers)
+
+    async def coordinator_discover_current_chat(request: Request):
+        if request.method == "OPTIONS":
+            return Response(status_code=204, headers=coordinator_ui_headers)
+        try:
+            if int(request.headers.get("content-length", "0") or 0) > 8192:
+                raise ValueError
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise TypeError
+            route_id = body["route_id"]
+            token = body["token"]
+            service = container.coordinator_wake_delivery
+            if service is None:
+                raise BridgeError(
+                    ErrorCode.POLICY_VIOLATION,
+                    "Current-chat discovery requires configured wake delivery",
+                )
+            result = await service.discover_and_bind_current_route(route_id, token)
+            return JSONResponse(result, headers=coordinator_ui_headers)
+        except BridgeError as error:
+            status = 409 if error.code is ErrorCode.POLICY_VIOLATION else 400
+            return JSONResponse(
+                {"error": error.message}, status_code=status, headers=coordinator_ui_headers
+            )
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse(
+                {"error": "Invalid current-chat discovery request"},
+                status_code=400,
+                headers=coordinator_ui_headers,
+            )
 
     async def coordinator_rollover_control(request: Request):
         try:
@@ -540,6 +573,14 @@ def create_streamable_http_app(
             coordinator_browser_preflight,
             methods=["POST"],
             name="coordinator_x_browser_preflight",
+        )
+    )
+    custom_routes.append(
+        Route(
+            coordinator_base_path + "/discover",
+            coordinator_discover_current_chat,
+            methods=["POST", "OPTIONS"],
+            name="coordinator_x_discover_current_chat",
         )
     )
     custom_routes.append(
