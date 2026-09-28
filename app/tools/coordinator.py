@@ -18,7 +18,7 @@ from app.coordinator.context import (
 from app.settings import ArtifactSettings
 from app.tools.jobs import JOB_ID_SCHEMA
 
-COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v5.html"
+COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v7.html"
 WAKE_RECEIPT_UI_URI = "ui://development-bridge/wake-receipt-v1.html"
 WAKE_RECEIPT_UI_META = {
     "ui": {"resourceUri": WAKE_RECEIPT_UI_URI},
@@ -30,6 +30,7 @@ COORDINATOR_UI_ALIASES = (
     # Keep all historical coordinator resource URIs readable. ChatGPT may cache
     # an installed app action/outputTemplate snapshot across server upgrades.
     "ui://development-bridge/coordinator-x-v6.html",
+    "ui://development-bridge/coordinator-x-v5.html",
     "ui://development-bridge/coordinator-x-v4.html",
     "ui://development-bridge/coordinator-x-v3.html",
     "ui://development-bridge/coordinator-x-v2.html",

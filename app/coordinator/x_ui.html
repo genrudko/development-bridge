@@ -475,7 +475,7 @@ window.addEventListener("message", (event) => {
 });
 
 function acquirePollLease() {
-  const key = `development-bridge/poll-leader-v1/${channelId}`;
+  const key = `development-bridge/poll-leader-v2/${channelId}`;
   const now = Date.now();
   try {
     const current = JSON.parse(localStorage.getItem(key) || "null");
