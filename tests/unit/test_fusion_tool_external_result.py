@@ -1,3 +1,4 @@
+import base64
 from types import SimpleNamespace
 
 import pytest
@@ -41,3 +42,44 @@ async def test_external_screenshot_uses_resource_links_without_inline_base64():
     assert isinstance(result.content[2], types.ResourceLink)
     assert result.content[2].mime_type == "application/json"
     assert encoded not in str(result.content)
+
+
+@pytest.mark.asyncio
+async def test_fusion_result_view_returns_retained_desktop_image_as_mcp_image_content():
+    png = b"\x89PNG\r\n\x1a\nviewer-tool-image"
+    uri = "https://bridge.example/mcp/desktop-results/exports/r1.result.capability"
+
+    class Desktop:
+        def external_image_resource(self, resource_uri):
+            assert resource_uri == uri
+            return png, {
+                "uri": uri,
+                "file_name": "content.png",
+                "mime_type": "image/png",
+                "size_bytes": len(png),
+                "sha256": "a" * 64,
+            }
+
+    tool = next(
+        item for item in fusion_tools(SimpleNamespace(desktop_nodes=Desktop()))
+        if item.definition.name == "fusion_result_view"
+    )
+    assert tool.definition.input_schema == {
+        "type": "object",
+        "properties": {"resource_uri": {"type": "string", "minLength": 1, "maxLength": 2048}},
+        "required": ["resource_uri"],
+        "additionalProperties": False,
+    }
+
+    result = await tool.handler(
+        None,
+        SimpleNamespace(arguments={"resource_uri": uri}),
+        SimpleNamespace(request_id="request-view-1"),
+    )
+
+    images = [block for block in result.content if isinstance(block, types.ImageContent)]
+    assert len(images) == 1
+    assert images[0].mime_type == "image/png"
+    assert base64.b64decode(images[0].data) == png
+    assert not any(isinstance(block, types.ResourceLink) for block in result.content)
+    assert "content.png" in result.content[0].text
