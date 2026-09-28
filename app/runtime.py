@@ -20,7 +20,7 @@ from app.tools.compact import (
     dashboard_snapshot,
     exposed_tool_definitions,
 )
-from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
+from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS, WAKE_RECEIPT_UI_URI
 from app.tools.registry import build_tool_registry
 
 
@@ -105,6 +105,9 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
     ui_html = (Path(__file__).parent / "coordinator" / "x_ui.html").read_text(
         encoding="utf-8"
     )
+    wake_receipt_html = (
+        Path(__file__).parent / "coordinator" / "wake_receipt_ui.html"
+    ).read_text(encoding="utf-8")
     dashboard_html = (Path(__file__).parent / "dashboard" / "status_ui.html").read_text(encoding="utf-8")
     coordinator_path = application.settings.server.endpoint.rstrip("/") + "/x/coordinator/"
     public_base = application.settings.server.public_base_url
@@ -137,6 +140,15 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
             )
             for uri in COORDINATOR_UI_URIS
         ]
+        resources.append(
+            types.Resource(
+                name="Development Bridge Wake Receipt",
+                uri=WAKE_RECEIPT_UI_URI,
+                description="Static receipt rendered next to an automatic wake turn after model ACK",
+                mimeType="text/html;profile=mcp-app",
+                _meta=coordinator_meta,
+            )
+        )
         if application.settings.server.tool_surface == "compact":
             resources.extend((
                 types.Resource(
@@ -171,6 +183,10 @@ def create_server(container: ApplicationContainer | None = None) -> Server:
             )
             mime_type = "application/json"
             meta = None
+        elif requested_uri == WAKE_RECEIPT_UI_URI:
+            text = wake_receipt_html
+            mime_type = "text/html;profile=mcp-app"
+            meta = coordinator_meta
         elif requested_uri in COORDINATOR_UI_URIS:
             text = ui_html
             mime_type = "text/html;profile=mcp-app"

@@ -13,7 +13,7 @@ from mcp.client.streamable_http import streamable_http_client
 from app.container import build_container
 from app.runtime import create_server
 from app.settings import BridgeSettings, load_settings
-from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS
+from app.tools.coordinator import COORDINATOR_UI_URI, COORDINATOR_UI_URIS, WAKE_RECEIPT_UI_URI
 from app.tools.registry import build_tool_registry
 from app.transport import create_streamable_http_app
 
@@ -38,7 +38,13 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                 async with ClientSession(*streams) as session:
                     await session.initialize()
                     resources = await session.list_resources()
-                    assert [str(item.uri) for item in resources.resources] == list(COORDINATOR_UI_URIS)
+                    assert [str(item.uri) for item in resources.resources] == [
+                        *COORDINATOR_UI_URIS,
+                        WAKE_RECEIPT_UI_URI,
+                    ]
+                    receipt_resource = await session.read_resource(WAKE_RECEIPT_UI_URI)
+                    assert "Wake доставлен" in receipt_resource.contents[0].text
+                    assert "Bridge разбудил ChatGPT" in receipt_resource.contents[0].text
                     resource = await session.read_resource(COORDINATOR_UI_URI)
                     assert "app.sendMessage" in resource.contents[0].text
                     assert "route_control" in resource.contents[0].text
@@ -103,6 +109,21 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                         tool for tool in listed.tools if tool.name == "coordinator_continue"
                     )
                     assert continue_tool.input_schema["required"] == ["message"]
+                    ack_tool = next(
+                        tool for tool in listed.tools if tool.name == "coordinator_ack"
+                    )
+                    assert ack_tool.meta["ui"]["resourceUri"] == WAKE_RECEIPT_UI_URI
+                    assert ack_tool.meta["openai/outputTemplate"] == WAKE_RECEIPT_UI_URI
+                    receipt_wake = await container.coordinator.arm_resilient(
+                        "receipt", channel_id="receipt-42", delay_seconds=0
+                    )
+                    receipt_ack = await session.call_tool(
+                        "coordinator_ack",
+                        {"continuation_id": receipt_wake["continuation_id"]},
+                    )
+                    assert receipt_ack.meta["ui"]["resourceUri"] == WAKE_RECEIPT_UI_URI
+                    assert receipt_ack.meta["openai/outputTemplate"] == WAKE_RECEIPT_UI_URI
+                    assert receipt_ack.structured_content["acknowledged"] is True
             status = await client.get(f"/mcp/x/coordinator/status?channel_id=chat-42&delivery_lease={delivery_lease}")
             assert status.headers["access-control-allow-origin"] == "*"
             claim = await client.post(f"/mcp/x/coordinator/claim?channel_id=chat-42&delivery_lease={delivery_lease}")

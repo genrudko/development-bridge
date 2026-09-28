@@ -19,6 +19,12 @@ from app.settings import ArtifactSettings
 from app.tools.jobs import JOB_ID_SCHEMA
 
 COORDINATOR_UI_URI = "ui://development-bridge/coordinator-x-v5.html"
+WAKE_RECEIPT_UI_URI = "ui://development-bridge/wake-receipt-v1.html"
+WAKE_RECEIPT_UI_META = {
+    "ui": {"resourceUri": WAKE_RECEIPT_UI_URI},
+    "ui/resourceUri": WAKE_RECEIPT_UI_URI,
+    "openai/outputTemplate": WAKE_RECEIPT_UI_URI,
+}
 
 COORDINATOR_UI_ALIASES = (
     # Keep all historical coordinator resource URIs readable. ChatGPT may cache
@@ -522,7 +528,10 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         data = await container.coordinator.model_ack(
             (params.arguments or {})["continuation_id"]
         )
-        return to_mcp_result(success(request_context.request_id, data))
+        result = to_mcp_result(success(request_context.request_id, data))
+        result.structured_content = dict(data)
+        result.meta = dict(WAKE_RECEIPT_UI_META)
+        return result
 
     async def wake_on_jobs(ctx, params, request_context):
         arguments = params.arguments or {}
@@ -839,6 +848,7 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["continuation_id"],
                     "additionalProperties": False,
                 },
+                _meta=WAKE_RECEIPT_UI_META,
             ),
             ack_continuation,
             "coordinator-x",
