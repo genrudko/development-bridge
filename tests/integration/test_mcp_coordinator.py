@@ -1869,7 +1869,7 @@ async def test_same_physical_chat_can_remount_after_restart_without_losing_direc
         )
         assert remounted.is_error is not True
         new_lease = remounted.structured_content["delivery_lease"]
-        assert new_lease != old_lease
+        assert new_lease == old_lease
 
         rebound = restarted.route_registry.resolve("bridge")
         assert rebound is not None

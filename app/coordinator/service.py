@@ -288,10 +288,14 @@ class CoordinatorService:
                 elif verified_owner_reconnect:
                     # The caller has already verified the stable ChatGPT host-session
                     # fingerprint against the logical route. That host identity is the
-                    # durable owner proof; MCP transport session IDs are ephemeral and
-                    # may legitimately be absent or rotate across reconnects/restarts.
-                    # Rotate the delivery lease so any stale widget loses authority.
-                    item = {"lease_id": token_urlsafe(24), "issued_at": now}
+                    # durable owner proof, so a reconnect/remount by the same physical
+                    # chat must keep the existing delivery lease. Rotating it would
+                    # strand the already-mounted browser widget on a stale lease.
+                    item = dict(current)
+                    # Do not retain an obsolete transport-session identifier across
+                    # a verified physical-owner reconnect. A new one, when present,
+                    # is written below.
+                    item.pop("session_id", None)
                 elif self._x_listener_active(channel, now):
                     raise BridgeError(
                         ErrorCode.POLICY_VIOLATION,

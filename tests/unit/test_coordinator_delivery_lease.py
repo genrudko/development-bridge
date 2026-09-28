@@ -413,7 +413,7 @@ async def test_x_ack_revalidates_explicit_lease_after_waiting_for_coordinator_lo
 
 
 @pytest.mark.asyncio
-async def test_verified_physical_owner_reconnect_rotates_active_lease_after_restart(
+async def test_verified_physical_owner_reconnect_preserves_active_lease_after_restart(
     tmp_path, monkeypatch
 ):
     clock = [7000.0]
@@ -451,18 +451,15 @@ async def test_verified_physical_owner_reconnect_rotates_active_lease_after_rest
         generation=1,
         verified_owner_reconnect=True,
     )
-    assert reclaimed["lease_id"] != old["lease_id"]
+    assert reclaimed["lease_id"] == old["lease_id"]
     assert "session_id" not in reclaimed
     assert reclaimed["route_id"] == "route"
     assert reclaimed["generation"] == 1
 
-    # Rotation invalidates the stale widget lease immediately.
+    # The existing browser widget remains authoritative for the same verified
+    # physical ChatGPT owner after restart/remount.
     await restarted.arm("wake", channel_id="route-g1", delay_seconds=0)
-    stale = await restarted.status(
-        "route-g1", delivery_lease=old["lease_id"], delivery_mode="x"
-    )
-    assert stale["state"] == "standby"
     current = await restarted.status(
-        "route-g1", delivery_lease=reclaimed["lease_id"], delivery_mode="x"
+        "route-g1", delivery_lease=old["lease_id"], delivery_mode="x"
     )
     assert current["state"] in {"ready", "pending"}
