@@ -34,6 +34,7 @@ from app.auth import (
 from app.audit import AuditEvent, AuditOutcome
 from app.container import ApplicationContainer
 from app.settings import BridgeSettings
+from app.x_event import x_event_routes
 
 
 def create_streamable_http_app(
@@ -210,6 +211,7 @@ def create_streamable_http_app(
     token_verifier = None
     auth_provider = None
     custom_routes = []
+    custom_routes.extend(x_event_routes(settings.server.endpoint))
     if container.oauth is not None:
         assert settings.oauth.issuer_url is not None
         assert settings.oauth.resource_url is not None

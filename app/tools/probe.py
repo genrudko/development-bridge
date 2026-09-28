@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from mcp import types
+from mcp.server.subscriptions import InMemorySubscriptionBus, ToolsListChanged
 
 from app.api.registry import RegisteredTool
 from app.api.results import success, to_mcp_result
@@ -12,6 +13,32 @@ from app.container import ApplicationContainer
 
 _RESULTS: dict[str, dict[str, Any]] = {}
 _TASKS: set[asyncio.Task[None]] = set()
+_TOOLS_LIST_COUNT = 0
+_RESOURCES_LIST_COUNT = 0
+_RESOURCES_READ_COUNT = 0
+_UI_CONNECTED_COUNT = 0
+_UI_SEND_ATTEMPT_COUNT = 0
+_UI_SEND_SUCCESS_COUNT = 0
+_UI_SEND_ERROR_COUNT = 0
+_SUBSCRIPTION_BUS = InMemorySubscriptionBus()
+
+def subscription_bus():
+    return _SUBSCRIPTION_BUS
+
+def subscription_listener_count() -> int:
+    return len(_SUBSCRIPTION_BUS._listeners)
+
+def note_tools_list() -> None:
+    global _TOOLS_LIST_COUNT
+    _TOOLS_LIST_COUNT += 1
+
+def note_resources_list() -> None:
+    global _RESOURCES_LIST_COUNT
+    _RESOURCES_LIST_COUNT += 1
+
+def note_resources_read() -> None:
+    global _RESOURCES_READ_COUNT
+    _RESOURCES_READ_COUNT += 1
 
 
 def _capabilities(ctx) -> dict[str, Any]:
@@ -26,6 +53,15 @@ def _capabilities(ctx) -> dict[str, Any]:
         "protocol_version": ctx.protocol_version,
         "can_send_request": bool(ctx.session.can_send_request),
         "client_capabilities": dumped,
+        "tools_list_count": _TOOLS_LIST_COUNT,
+        "resources_list_count": _RESOURCES_LIST_COUNT,
+        "resources_read_count": _RESOURCES_READ_COUNT,
+        "ui_connected_count": _UI_CONNECTED_COUNT,
+        "ui_send_attempt_count": _UI_SEND_ATTEMPT_COUNT,
+        "ui_send_success_count": _UI_SEND_SUCCESS_COUNT,
+        "ui_send_error_count": _UI_SEND_ERROR_COUNT,
+        "subscription_listeners": subscription_listener_count(),
+        "has_standalone_channel": ctx.session._connection.has_standalone_channel,
     }
 
 
@@ -51,16 +87,17 @@ async def _delayed_probe(session, probe_id: str, delay_seconds: float) -> None:
     await asyncio.sleep(delay_seconds)
     record = _RESULTS[probe_id]
     record["can_send_request_at_fire"] = bool(session.can_send_request)
+    record["tools_list_count_before"] = _TOOLS_LIST_COUNT
+    record["subscription_listeners_before"] = subscription_listener_count()
     try:
-        result = await session.create_message(messages=_message(), max_tokens=32)
+        await _SUBSCRIPTION_BUS.publish(ToolsListChanged())
     except Exception as exc:
-        record.update(
-            status="failed",
-            error_type=type(exc).__name__,
-            error=str(exc),
-        )
+        record.update(status="failed", error_type=type(exc).__name__, error=str(exc))
     else:
-        record.update(status="succeeded", result=_dump_result(result))
+        record.update(status="notification_sent")
+    await asyncio.sleep(1.0)
+    record["tools_list_count_after"] = _TOOLS_LIST_COUNT
+    record["subscription_listeners_after"] = subscription_listener_count()
 
 
 def probe_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
@@ -72,20 +109,17 @@ def probe_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         data["mode"] = mode
 
         if mode == "during_call":
+            data["tools_list_count_before"] = _TOOLS_LIST_COUNT
+            data["subscription_listeners_before"] = subscription_listener_count()
             try:
-                result = await ctx.session.create_message(
-                    messages=_message(),
-                    max_tokens=32,
-                    related_request_id=ctx.request_id,
-                )
+                await _SUBSCRIPTION_BUS.publish(ToolsListChanged())
             except Exception as exc:
-                data.update(
-                    status="failed",
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                )
+                data.update(status="failed", error_type=type(exc).__name__, error=str(exc))
             else:
-                data.update(status="succeeded", result=_dump_result(result))
+                data.update(status="notification_sent")
+            await asyncio.sleep(1.0)
+            data["tools_list_count_after"] = _TOOLS_LIST_COUNT
+            data["subscription_listeners_after"] = subscription_listener_count()
         elif mode == "after_return":
             probe_id = f"probe_{uuid4().hex}"
             _RESULTS[probe_id] = {
@@ -104,19 +138,38 @@ def probe_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         else:
             data["status"] = "observed"
 
-        return to_mcp_result(success(request_context.request_id, data))
+        result = to_mcp_result(success(request_context.request_id, data))
+        return result.model_copy(update={"structured_content": {"probe": data}, "meta": {"ui": {"resourceUri": "ui://x-test/external-trigger-v1.html"}, "ui/resourceUri": "ui://x-test/external-trigger-v1.html", "openai/outputTemplate": "ui://x-test/external-trigger-v1.html"}})
 
     async def sampling_probe_status(ctx, params, request_context):
+        global _UI_CONNECTED_COUNT, _UI_SEND_ATTEMPT_COUNT, _UI_SEND_SUCCESS_COUNT, _UI_SEND_ERROR_COUNT
         probe_id = (params.arguments or {}).get("probe_id", "")
-        record = _RESULTS.get(probe_id)
-        data = record or {"probe_id": probe_id, "status": "not_found"}
+        if probe_id == "ui-telemetry:connected": _UI_CONNECTED_COUNT += 1
+        elif probe_id == "ui-telemetry:send-attempt": _UI_SEND_ATTEMPT_COUNT += 1
+        elif probe_id == "ui-telemetry:send-success": _UI_SEND_SUCCESS_COUNT += 1
+        elif probe_id == "ui-telemetry:send-error": _UI_SEND_ERROR_COUNT += 1
+        if probe_id.startswith("ui-telemetry:"):
+            data = {"probe_id": probe_id, "status": "telemetry_recorded"}
+        else:
+            record = _RESULTS.get(probe_id); data = record or {"probe_id": probe_id, "status": "not_found"}
         return to_mcp_result(success(request_context.request_id, data))
 
     return (
         RegisteredTool(
             definition=types.Tool(
+                name="external_trigger_probe",
+                description="Mount the one-shot externally triggered MCP App probe",
+                _meta={"ui": {"resourceUri": "ui://x-test/external-trigger-v1.html"}, "ui/resourceUri": "ui://x-test/external-trigger-v1.html", "openai/outputTemplate": "ui://x-test/external-trigger-v1.html"},
+                inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+            ),
+            handler=sampling_probe,
+            source="probe",
+        ),
+        RegisteredTool(
+            definition=types.Tool(
                 name="sampling_probe",
                 description="Probe MCP client sampling and server-to-client back-channel behavior",
+                _meta={"ui": {"resourceUri": "ui://x-test/external-trigger-v1.html"}, "ui/resourceUri": "ui://x-test/external-trigger-v1.html", "openai/outputTemplate": "ui://x-test/external-trigger-v1.html"},
                 inputSchema={
                     "type": "object",
                     "properties": {
