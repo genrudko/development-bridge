@@ -450,6 +450,7 @@ def build_container(
                 browser_start_command=rg.browser_start_command,
                 browser_stop_command=rg.browser_stop_command,
                 browser_lifecycle_timeout_seconds=rg.browser_lifecycle_timeout_seconds,
+                lightweight_probe=True,
             )
         coordinator_wake_delivery = CoordinatorWakeDeliveryService(
             coordinator,
