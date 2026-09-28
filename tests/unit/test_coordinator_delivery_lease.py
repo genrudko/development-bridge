@@ -446,13 +446,13 @@ async def test_verified_physical_owner_reconnect_rotates_active_lease_after_rest
     # trusted OpenAI host-session fingerprint against the persisted logical route.
     reclaimed = restarted.issue_delivery_lease(
         "route-g1",
-        session_id="mcp-after-restart",
+        session_id=None,
         route_id="route",
         generation=1,
         verified_owner_reconnect=True,
     )
     assert reclaimed["lease_id"] != old["lease_id"]
-    assert reclaimed["session_id"] == "mcp-after-restart"
+    assert "session_id" not in reclaimed
     assert reclaimed["route_id"] == "route"
     assert reclaimed["generation"] == 1
 
