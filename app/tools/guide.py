@@ -43,10 +43,12 @@ def guide_tools(registry: ToolRegistry, *, tool_surface: str = "full") -> tuple[
             },
             "route_binding": {
                 "summary": (
-                    "Current-chat binding uses direct coordinator_route_bind_current plus the "
-                    "OOB bind-card/openExternal flow. Physical ChatGPT URLs, IDs, sessions, and "
-                    "control tokens stay outside model-visible chat; marker/search fallback is "
-                    "retired. Native mobile new-bind is currently unsupported; use desktop/Web."
+                    "Canonical current-chat binding uses coordinator_route_bind_rendezvous_prepare "
+                    "through RDC -> GPTAdmin -> development-bridge and a VPS-only ReviewGPT search "
+                    "rendezvous. The returned marker is model-visible only for its one-time chat emission; "
+                    "physical ChatGPT URLs, IDs, sessions, and control tokens remain outside model-visible "
+                    "results. Browser Binder is fallback-only; coordinator_route_bind_current is "
+                    "compatibility-only for a live direct MCP App session."
                 ),
             },
             "economy_mode": {

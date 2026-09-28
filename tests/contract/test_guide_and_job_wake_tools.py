@@ -52,10 +52,14 @@ def test_bridge_guide_is_short_structured_runtime_summary():
     assert "widgetless" in coordinator["summary"].lower()
 
     route_binding = data["route_binding"]["summary"]
+    assert "coordinator_route_bind_rendezvous_prepare" in route_binding
+    assert "RDC -> GPTAdmin -> development-bridge" in route_binding
+    assert "VPS-only" in route_binding
+    assert "Browser Binder" in route_binding
+    assert "fallback" in route_binding.lower()
     assert "coordinator_route_bind_current" in route_binding
-    assert "openExternal" in route_binding
+    assert "compatibility" in route_binding.lower()
     assert "model-visible" in route_binding
-    assert "marker/search fallback" in route_binding
 
     economy = data["economy_mode"]
     assert economy["enabled"] is True
@@ -454,24 +458,24 @@ def test_coordinator_wake_on_jobs_pins_route_id_generation_and_channel(tmp_path)
     assert payload["channel_id"] == "telegram-bridge-g0"
 
 
-def test_route_binding_guidance_forbids_model_visible_physical_identity_and_legacy_discovery():
+def test_route_binding_guidance_preserves_physical_identity_boundary_with_marker_exception():
     root = Path(__file__).parents[2]
     agent_rules = (root / "AGENTS.md").read_text(encoding="utf-8")
-    contract = (root / "docs/operations/executor-operating-contract.md").read_text(encoding="utf-8")
     wake_runbook = (root / "docs/operations/review-gpt-coordinator-wake.md").read_text(encoding="utf-8")
-    combined = f"{agent_rules}\n{contract}\n{wake_runbook}"
+    combined = f"{agent_rules}\n{wake_runbook}"
 
     assert "Never ask the owner to paste or copy a physical ChatGPT conversation URL" in combined
     assert "conversation_id" in combined
     assert "project_id" in combined
     assert "bind/rollover/control token" in combined
     assert "model-visible" in combined
-    assert "marker/search fallback" in combined
-    assert "openExternal" in combined
-    assert "native mobile" in combined.lower()
+    assert "rendezvous marker" in combined.lower()
+    assert "exactly once" in combined.lower()
+    assert "not an authorization credential" in combined.lower()
+    assert "status" in combined.lower()
 
 
-def test_canonical_browser_binder_and_wake_reentry_guidance():
+def test_canonical_nonce_rendezvous_and_wake_reentry_guidance():
     root = Path(__file__).parents[2]
     agent_rules = (root / "AGENTS.md").read_text(encoding="utf-8")
     wake_runbook = (root / "docs/operations/review-gpt-coordinator-wake.md").read_text(encoding="utf-8")
@@ -479,13 +483,19 @@ def test_canonical_browser_binder_and_wake_reentry_guidance():
     combined = f"{agent_rules}\n{wake_runbook}\n{hub_runbook}"
 
     assert "RDC -> GPTAdmin -> development-bridge" in combined
-    assert "coordinator_route_bind_prepare" in combined
+    assert "coordinator_route_bind_rendezvous_prepare" in combined
+    assert "DBRIDGE_BIND" in combined
+    assert "VPS-only" in combined
     assert "Browser Binder" in combined
+    assert "fallback" in combined.lower()
     assert "coordinator_route_bind_current" in combined
     assert "compatibility" in combined.lower()
     assert "Dev_Bridge" in combined
     assert "does not prove" in combined
     assert "coordinator_ack" in wake_runbook
+    assert "RDC -> GPTAdmin -> development-bridge -> coordinator_ack" in combined
+    assert "There is no marker/search fallback" not in combined
+    assert "must not use Global Search" not in combined
 
 
 def test_only_explicit_mount_and_bind_advertise_coordinator_app():

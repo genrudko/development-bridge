@@ -15,23 +15,21 @@ Every direct wake must use both:
 
 Do not replace the Project URL with a guessed canonical `/c/<conversation-id>` route. Preflight must navigate the authoritative route and verify the exact conversation identity. ReviewGPT accepts both plain and Project conversation URL forms for same-thread identity, but Bridge production targeting remains authoritative-Project-URL first.
 
-### Current-chat binding is out of band
+### Current-chat binding uses VPS-only nonce rendezvous
 
-ReviewGPT is a wake delivery/probe transport only. It does not identify the currently invoking ChatGPT conversation and it must not use Global Search or marker turns for route binding.
+ReviewGPT now serves both wake delivery/probe and the VPS-resident current-chat rendezvous resolver. It reuses the same authenticated Chromium profile, CDP endpoint, browser lifecycle, and operation lock; there is no second browser profile.
 
-When an existing logical route must be rebound to the exact physical ChatGPT conversation, the canonical flow is `RDC -> GPTAdmin -> development-bridge`:
+For a new physical chat or intentional rebind, the canonical flow is `RDC -> GPTAdmin -> development-bridge`:
 
-1. call hidden `coordinator_route_bind_prepare(route_id=...)` through GPTAdmin; only `route_id`, pending `state`, and pre-bind `generation` are model-visible;
-2. on the intended ChatGPT desktop/Web tab, the owner explicitly clicks **Bind** in the Browser Binder WebExtension; if more than one route is pending, the owner selects the route first;
-3. Browser Binder sends the active `chatgpt.com` tab URL out of band to the dedicated binder API using its dedicated bearer, while the pending operation is identified only by `route_id + generation`;
-4. Bridge resolves the hidden legacy bind token internally and reuses the existing candidate/commit guards for project policy, expiry, generation races, and replay;
-5. a same-conversation result is idempotent and all rejected cases leave the active binding unchanged.
+1. call compact-visible `coordinator_route_bind_rendezvous_prepare(route_id=...)`; the model-visible result is exactly `route_id`, pending `state`, pre-bind `generation`, one-time `marker`, and `expires_at`;
+2. emit the returned `DBRIDGE_BIND bnd_<nonce>` rendezvous marker exactly once in visible chat text in the same turn;
+3. the authenticated ReviewGPT browser on the VPS searches that exact marker with native CDP input, waits for indexing, deduplicates canonical conversation identities, opens a sole candidate, and verifies exactly one matching rendered message turn;
+4. Bridge holds the candidate physical target only in process memory, rechecks expiry/generation under the route lock, and commits through the existing current-bind token, canonical-target, project-policy, generation, and replay guards;
+5. zero results retry durably until the 30-minute TTL, ambiguity fails closed, and login/Cloudflare intervention remains resumable as `owner_input_required`.
 
-`coordinator_route_bind_current` remains compatibility-only for a live direct MCP App session with the legacy bind-card. It is not the canonical hub path and must not be required merely because the direct ChatGPT `Dev_Bridge` namespace is absent.
+The rendezvous marker is intentionally model-visible and is not an authorization credential. After preparation, `coordinator_route_control_status` exposes only safe rendezvous diagnostics and never returns the marker/nonce. Never ask the owner to paste or copy a physical ChatGPT conversation URL. Physical conversation URLs, `conversation_id`, `project_id`, MCP/session identity, bind/rollover/control token, Browser Binder bearer, `redirectUrl`/return target, and equivalent physical binding material remain outside model-visible chat and prompts.
 
-**Model-visible identity boundary:** Never ask the owner to paste or copy a physical ChatGPT conversation URL. Physical conversation URLs, `conversation_id`, `project_id`, MCP/session identity, bind/rollover/control token, Browser Binder bearer, nonce, `redirectUrl`/return target, and equivalent physical binding material stay outside model-visible chat and prompts. Logical `route_id`, `generation`, and safe diagnostic IDs are the supported model-visible handles. There is no marker/search fallback.
-
-Native mobile new-bind remains unsuitable for this OOB browser-binding step because Browser Binder operates on the desktop/Web browser tab. Existing bound routes may still be controlled from mobile; establish a new physical binding from desktop/Web instead of adding marker/search discovery.
+Browser Binder remains installed and tested as a fallback-only/manual recovery path. Its flow uses `coordinator_route_bind_prepare(route_id=...)` plus the WebExtension to supply the active tab out of band. `coordinator_route_bind_current` remains compatibility-only for a live direct MCP App session with the legacy bind-card. Neither fallback is required for canonical VPS-only binding, so a new bind no longer depends on the owner's desktop/browser.
 
 ## On-demand browser lifecycle
 
@@ -48,7 +46,7 @@ Do not keep a persistent Chromium process merely to save startup time. Persisten
 
 ## Wake payload and ACK
 
-The user turn stays tiny and references the durable continuation ID. Canonical re-entry is `RDC -> GPTAdmin -> development-bridge`; a missing direct `Dev_Bridge` namespace does not prove a Bridge outage. On the fresh model turn, call `coordinator_ack(<continuation_id>)` exactly once before continuing other work, process any returned `batched_messages`, then inspect the durable job/result once.
+The user turn stays tiny and references the durable continuation ID. Canonical re-entry is `RDC -> GPTAdmin -> development-bridge -> coordinator_ack`; a missing direct `Dev_Bridge` namespace does not prove a Bridge outage. On the fresh model turn, call `coordinator_ack(<continuation_id>)` exactly once before continuing other work, process any returned `batched_messages`, then inspect the durable job/result once.
 
 Do not paste full job output into the wake prompt. The job database remains the source of execution evidence.
 

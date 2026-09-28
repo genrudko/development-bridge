@@ -25,16 +25,18 @@ The first is MCP transport routing. The second is coordinator conversation routi
 
 ## New-chat binding and wake re-entry
 
-Use the abbreviated operator path `RDC -> GPTAdmin -> development-bridge` for both new-chat binding preparation and wake re-entry. It is the same canonical ingress shown above; `RDC` supplies the ChatGPT-to-VPS control channel, GPTAdmin selects the MCP target, and Development Bridge keeps all coordinator state and guards.
+Use the abbreviated operator path `RDC -> GPTAdmin -> development-bridge` for both new-chat binding preparation and wake re-entry. `RDC` supplies the ChatGPT-to-VPS control channel, GPTAdmin selects `development-bridge`, and Bridge owns rendezvous durability and all binding guards.
 
-For a new physical chat or an intentional rebind:
+For a new physical chat or intentional rebind, the canonical path is VPS-only nonce rendezvous:
 
-1. call `coordinator_route_bind_prepare(route_id=...)` through GPTAdmin; the result contains only `route_id`, `state`, and the pre-bind `generation`;
-2. use the Browser Binder WebExtension on the intended active `chatgpt.com` tab and explicitly choose **Bind**; multiple pending routes require owner selection;
-3. Browser Binder completes the pending bind out of band using its dedicated bearer and `route_id + generation`; the physical tab URL and hidden legacy bind token never enter model-visible MCP content;
-4. `coordinator_route_bind_current` is compatibility-only for a live direct MCP App session and is not required for the canonical hub flow.
+1. call `coordinator_route_bind_rendezvous_prepare(route_id=...)` through GPTAdmin; the result is exactly safe state `route_id`, `state`, `generation`, `marker`, and `expires_at`;
+2. emit the returned `DBRIDGE_BIND bnd_<nonce>` marker exactly once in visible chat text in the same turn; this rendezvous marker is model-visible by design and is not an authorization credential;
+3. the existing authenticated ReviewGPT Chromium on the VPS searches the exact marker, verifies a sole candidate, and Bridge commits it through guarded route binding without persisting an intermediate candidate target;
+4. inspect `coordinator_route_control_status(route_id=...)` for safe retry/expiry diagnostics if needed; status never re-exposes the marker/nonce or physical target.
 
-For a delivered coordinator wake, re-enter through the same `RDC -> GPTAdmin -> development-bridge` path, call `coordinator_ack` once for the exact continuation ID, process batched messages, and continue from durable Bridge job/result state. Do not create a second wake queue or resend an uncertain delivery through another transport.
+Browser Binder is fallback-only/manual recovery: `coordinator_route_bind_prepare` plus its WebExtension remains available when explicitly needed. `coordinator_route_bind_current` is compatibility-only for a live direct MCP App session. Neither is part of the canonical nonce-rendezvous path.
+
+For a delivered coordinator wake, canonical re-entry is `RDC -> GPTAdmin -> development-bridge -> coordinator_ack`: call `coordinator_ack` once for the exact continuation ID, process batched messages, and continue from durable Bridge job/result state. Do not create a second wake queue or resend an uncertain delivery through another transport.
 
 ## What is not canonical
 
