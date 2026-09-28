@@ -112,7 +112,7 @@ class JobStore:
 
     def save_terminal_waiter(self, *, waiter_id: str, project_id: str, repository_id: str, job_ids: tuple[str, ...], policy: str, handler_name: str, payload: dict[str, object]) -> None:
         with self._connect() as connection:
-            connection.execute("INSERT INTO job_terminal_waiters (waiter_id, project_id, repository_id, job_ids_json, policy, handler_name, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (waiter_id, project_id, repository_id, json.dumps(list(job_ids), separators=(",", ":")), policy, handler_name, json.dumps(payload, sort_keys=True, separators=(",", ":")), _now()))
+            connection.execute("INSERT OR REPLACE INTO job_terminal_waiters (waiter_id, project_id, repository_id, job_ids_json, policy, handler_name, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (waiter_id, project_id, repository_id, json.dumps(list(job_ids), separators=(",", ":")), policy, handler_name, json.dumps(payload, sort_keys=True, separators=(",", ":")), _now()))
 
     def delete_terminal_waiter(self, waiter_id: str) -> None:
         with self._connect() as connection:

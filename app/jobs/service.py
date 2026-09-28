@@ -146,6 +146,44 @@ class JobService:
             durable_payload=payload_copy,
         )
 
+    def _find_matching_durable_waiter_ids_locked(
+        self,
+        job_ids: tuple[str, ...],
+        handler_name: str,
+        payload: dict[str, object] | None,
+    ) -> list[str]:
+        target_jobs = set(job_ids)
+        target_route = payload.get("route_id") if isinstance(payload, dict) else None
+        matching_ids: list[str] = []
+
+        for wid, w in self._terminal_waiters.items():
+            if not w.durable or w.handler_name != handler_name:
+                continue
+            if set(w.job_ids) != target_jobs:
+                continue
+            if target_route is not None:
+                if not isinstance(w.payload, dict) or w.payload.get("route_id") != target_route:
+                    continue
+            matching_ids.append(wid)
+
+        if self._store is not None:
+            for item in self._store.terminal_waiters():
+                wid = str(item["waiter_id"])
+                if wid in matching_ids:
+                    continue
+                if item.get("handler_name") != handler_name:
+                    continue
+                item_jobs = set(item.get("job_ids") or ())
+                if item_jobs != target_jobs:
+                    continue
+                item_payload = item.get("payload")
+                if target_route is not None:
+                    if not isinstance(item_payload, dict) or item_payload.get("route_id") != target_route:
+                        continue
+                matching_ids.append(wid)
+
+        return matching_ids
+
     async def _register_terminal_waiter(
         self,
         repository: Repository,
@@ -168,22 +206,35 @@ class JobService:
         waiter_id = token_urlsafe(18)
         fire: tuple[tuple[JobRecord, ...], str] | None = None
         durable = durable_handler is not None
+        matching_ids: list[str] = []
         async with self._terminal_lock:
             jobs = tuple(
                 store.get(repository.project_id, repository.id, job_id)
                 for job_id in job_ids
             )
             reason = self._waiter_reason(jobs, policy)
+            if durable:
+                assert durable_handler is not None
+                assert durable_payload is not None
+                matching_ids = self._find_matching_durable_waiter_ids_locked(
+                    job_ids, durable_handler, durable_payload
+                )
             if reason is None:
-                if (
-                    len(self._terminal_waiters) + len(self._firing_terminal_waiters)
-                    >= self.MAX_TERMINAL_WAITERS
-                ):
-                    raise BridgeError(
-                        ErrorCode.POLICY_VIOLATION,
-                        "Job wake waiter capacity is full",
-                        retryable=True,
-                    )
+                if matching_ids:
+                    waiter_id = matching_ids[0]
+                    for dup_id in matching_ids[1:]:
+                        self._terminal_waiters.pop(dup_id, None)
+                        store.delete_terminal_waiter(dup_id)
+                else:
+                    if (
+                        len(self._terminal_waiters) + len(self._firing_terminal_waiters)
+                        >= self.MAX_TERMINAL_WAITERS
+                    ):
+                        raise BridgeError(
+                            ErrorCode.POLICY_VIOLATION,
+                            "Job wake waiter capacity is full",
+                            retryable=True,
+                        )
                 waiter = TerminalWaiter(
                     waiter_id,
                     job_ids,
@@ -209,6 +260,9 @@ class JobService:
             else:
                 fire = (jobs, reason)
                 if durable:
+                    for mid in matching_ids:
+                        self._terminal_waiters.pop(mid, None)
+                        store.delete_terminal_waiter(mid)
                     waiter = TerminalWaiter(
                         waiter_id,
                         job_ids,
@@ -222,7 +276,24 @@ class JobService:
         if fire is not None:
             try:
                 await callback(*fire)
-            finally:
+            except Exception:
+                if durable:
+                    async with self._terminal_lock:
+                        self._firing_terminal_waiters.pop(waiter_id, None)
+                        self._terminal_waiters[waiter_id] = waiter
+                        assert durable_handler is not None
+                        assert durable_payload is not None
+                        store.save_terminal_waiter(
+                            waiter_id=waiter_id,
+                            project_id=repository.project_id,
+                            repository_id=repository.id,
+                            job_ids=job_ids,
+                            policy=policy,
+                            handler_name=durable_handler,
+                            payload=durable_payload,
+                        )
+                raise
+            else:
                 if durable:
                     async with self._terminal_lock:
                         self._firing_terminal_waiters.pop(waiter_id, None)
@@ -233,7 +304,6 @@ class JobService:
             "state": "fired" if fire is not None else "waiting",
             "durable": durable,
         }
-
 
     async def _finish_job(
         self,
@@ -266,9 +336,42 @@ class JobService:
             ready = self._collect_terminal_callbacks(store)
         await self._invoke_terminal_callbacks(ready)
 
+    def _ensure_durable_waiters_loaded_locked(self, store: JobStore) -> None:
+        for item in store.terminal_waiters():
+            waiter_id = str(item["waiter_id"])
+            if waiter_id in self._terminal_waiters or waiter_id in self._firing_terminal_waiters:
+                continue
+            handler_name = str(item["handler_name"])
+            handler = self._durable_terminal_handlers.get(handler_name)
+            if handler is None:
+                continue
+            payload = dict(item["payload"])
+            job_ids = tuple(str(value) for value in item["job_ids"])
+            policy = str(item["policy"])
+
+            async def callback(
+                records: tuple[JobRecord, ...],
+                reason: str,
+                *,
+                _handler: DurableTerminalHandler = handler,
+                _payload: dict[str, object] = payload,
+            ) -> None:
+                await _handler(_payload, records, reason)
+
+            self._terminal_waiters[waiter_id] = TerminalWaiter(
+                waiter_id,
+                job_ids,
+                policy,
+                callback,
+                durable=True,
+                handler_name=handler_name,
+                payload=payload,
+            )
+
     def _collect_terminal_callbacks(
         self, store: JobStore
     ) -> list[tuple[TerminalWaiter, tuple[JobRecord, ...], str]]:
+        self._ensure_durable_waiters_loaded_locked(store)
         ready: list[tuple[TerminalWaiter, tuple[JobRecord, ...], str]] = []
         for waiter_id, waiter in tuple(self._terminal_waiters.items()):
             jobs = tuple(store.get_by_id(job_id) for job_id in waiter.job_ids)
@@ -285,61 +388,37 @@ class JobService:
     async def _invoke_terminal_callbacks(
         self,
         ready: list[tuple[TerminalWaiter, tuple[JobRecord, ...], str]],
-    ) -> None:
-        first_exc: Exception | None = None
+    ) -> int:
+        succeeded = 0
         for waiter, jobs, reason in ready:
             try:
                 await waiter.callback(jobs, reason)
-            except Exception as exc:  # noqa: BLE001 -- callback boundary must restore waiter on arbitrary failure
+            except Exception:  # noqa: BLE001 -- callback boundary must restore waiter on arbitrary failure
                 async with self._terminal_lock:
                     self._firing_terminal_waiters.pop(waiter.waiter_id, None)
                     if waiter.durable:
                         self._terminal_waiters.setdefault(waiter.waiter_id, waiter)
-                if first_exc is None:
-                    first_exc = exc
             else:
                 async with self._terminal_lock:
                     self._firing_terminal_waiters.pop(waiter.waiter_id, None)
                     if waiter.durable:
                         self._require_store().delete_terminal_waiter(waiter.waiter_id)
-        if first_exc is not None:
-            raise first_exc
+                succeeded += 1
+        return succeeded
+
+    async def reconcile_durable_terminal_waiters(self) -> int:
+        """Reconcile and invoke any durable waiters whose jobs have reached terminal state."""
+        store = self._store
+        if store is None:
+            return 0
+        async with self._terminal_lock:
+            ready = self._collect_terminal_callbacks(store)
+        if not ready:
+            return 0
+        return await self._invoke_terminal_callbacks(ready)
 
     async def _restore_durable_terminal_waiters(self) -> None:
-        store = self._require_store()
-        async with self._terminal_lock:
-            for item in store.terminal_waiters():
-                waiter_id = str(item["waiter_id"])
-                if waiter_id in self._terminal_waiters or waiter_id in self._firing_terminal_waiters:
-                    continue
-                handler_name = str(item["handler_name"])
-                handler = self._durable_terminal_handlers.get(handler_name)
-                if handler is None:
-                    continue
-                payload = dict(item["payload"])
-                job_ids = tuple(str(value) for value in item["job_ids"])
-                policy = str(item["policy"])
-
-                async def callback(
-                    records: tuple[JobRecord, ...],
-                    reason: str,
-                    *,
-                    _handler: DurableTerminalHandler = handler,
-                    _payload: dict[str, object] = payload,
-                ) -> None:
-                    await _handler(_payload, records, reason)
-
-                self._terminal_waiters[waiter_id] = TerminalWaiter(
-                    waiter_id,
-                    job_ids,
-                    policy,
-                    callback,
-                    durable=True,
-                    handler_name=handler_name,
-                    payload=payload,
-                )
-            ready = self._collect_terminal_callbacks(store)
-        await self._invoke_terminal_callbacks(ready)
+        await self.reconcile_durable_terminal_waiters()
 
     async def has_durable_waiters(
         self,
@@ -781,6 +860,8 @@ class JobService:
     async def _run_worker(self) -> None:
         while True:
             self._dispatch_event.clear()
+            with suppress(Exception):
+                await self.reconcile_durable_terminal_waiters()
             while not self._stopping and len(self._active_tasks) < self._max_concurrency:
                 selected = self._next_eligible_job()
                 if selected is None:
@@ -801,16 +882,20 @@ class JobService:
                 await self._execute(job_id)
             except Exception:  # noqa: BLE001 - contain worker/task failures
                 store = self._require_store()
-                await self._fail_active(job_id, "internal_worker_error")
-                failed = store.get_by_id(job_id)
-                if failed is not None:
-                    await self._emit(
-                        failed, "fail", AuditOutcome.ERROR, "internal_worker_error"
-                    )
+                current = store.get_by_id(job_id)
+                if current is not None and current.status is JobStatus.RUNNING:
+                    await self._fail_active(job_id, "internal_worker_error")
+                    failed = store.get_by_id(job_id)
+                    if failed is not None:
+                        await self._emit(
+                            failed, "fail", AuditOutcome.ERROR, "internal_worker_error"
+                        )
         finally:
             self._active_tasks.pop(job_id, None)
             self._active_repositories.discard(repository_key)
             self._dispatch_event.set()
+            with suppress(Exception):
+                await self.reconcile_durable_terminal_waiters()
 
     async def _execute(self, job_id: str) -> None:
         store = self._require_store()
