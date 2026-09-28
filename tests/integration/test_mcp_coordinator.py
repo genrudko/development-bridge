@@ -64,6 +64,7 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                     assert "payload_json=" in resource.contents[0].text
                     assert "batched_messages" in resource.contents[0].text
                     assert "call coordinator_ack" in resource.contents[0].text
+                    assert "coordinator_wake_receipt" in resource.contents[0].text
                     assert "Bridge ref:" in resource.contents[0].text
                     assert "const fallback = contextInjected" not in resource.contents[0].text
                     assert "development-bridge/control-v1" in resource.contents[0].text
@@ -109,11 +110,11 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                         tool for tool in listed.tools if tool.name == "coordinator_continue"
                     )
                     assert continue_tool.input_schema["required"] == ["message"]
-                    ack_tool = next(
-                        tool for tool in listed.tools if tool.name == "coordinator_ack"
+                    receipt_tool = next(
+                        tool for tool in listed.tools if tool.name == "coordinator_wake_receipt"
                     )
-                    assert ack_tool.meta["ui"]["resourceUri"] == WAKE_RECEIPT_UI_URI
-                    assert ack_tool.meta["openai/outputTemplate"] == WAKE_RECEIPT_UI_URI
+                    assert receipt_tool.meta["ui"]["resourceUri"] == WAKE_RECEIPT_UI_URI
+                    assert receipt_tool.meta["openai/outputTemplate"] == WAKE_RECEIPT_UI_URI
                     receipt_wake = await container.coordinator.arm_resilient(
                         "receipt", channel_id="receipt-42", delay_seconds=0
                     )
@@ -121,9 +122,19 @@ async def test_resource_mount_routing_and_internal_continue(tmp_path):
                         "coordinator_ack",
                         {"continuation_id": receipt_wake["continuation_id"]},
                     )
-                    assert receipt_ack.meta["ui"]["resourceUri"] == WAKE_RECEIPT_UI_URI
-                    assert receipt_ack.meta["openai/outputTemplate"] == WAKE_RECEIPT_UI_URI
                     assert receipt_ack.structured_content["acknowledged"] is True
+                    receipt = await session.call_tool(
+                        "coordinator_wake_receipt",
+                        {
+                            "continuation_id": receipt_ack.structured_content["continuation_id"],
+                            "acknowledged": receipt_ack.structured_content["acknowledged"],
+                            "delivery_attempts": receipt_ack.structured_content["delivery_attempts"],
+                            "batched_count": receipt_ack.structured_content["batched_count"],
+                        },
+                    )
+                    assert receipt.meta["ui"]["resourceUri"] == WAKE_RECEIPT_UI_URI
+                    assert receipt.meta["openai/outputTemplate"] == WAKE_RECEIPT_UI_URI
+                    assert receipt.structured_content["acknowledged"] is True
             status = await client.get(f"/mcp/x/coordinator/status?channel_id=chat-42&delivery_lease={delivery_lease}")
             assert status.headers["access-control-allow-origin"] == "*"
             claim = await client.post(f"/mcp/x/coordinator/claim?channel_id=chat-42&delivery_lease={delivery_lease}")
@@ -388,7 +399,8 @@ async def test_compact_dashboard_live_state_resource(tmp_path):
 
                     listed = await session.list_tools()
                     names = {tool.name for tool in listed.tools}
-                    assert len(names) == 13
+                    assert len(names) == 14
+                    assert "coordinator_wake_receipt" in names
                     assert "work_progress_update" not in names
                     assert "coordinator_exec_and_wake" not in names
                     assert "coordinator_wake_on_jobs" not in names

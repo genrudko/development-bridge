@@ -40,10 +40,14 @@ COMPACT_VISIBLE_TOOLS = (
     "coordinator_x_mount",
     "coordinator_route_bind_current",
     "coordinator_ack",
+    "coordinator_wake_receipt",
 )
 
 _COMPACT_META_TOOLS = {"bridge_dashboard", "bridge_search", "bridge_schema", "bridge_call"}
-_DIRECT_ONLY_TOOLS = {"coordinator_route_bind_current"}
+_DIRECT_ONLY_TOOLS = {
+    "coordinator_route_bind_current",
+    "coordinator_wake_receipt",
+}
 
 
 def _category(name: str) -> str:

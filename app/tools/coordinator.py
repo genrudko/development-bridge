@@ -530,6 +530,26 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
         )
         result = to_mcp_result(success(request_context.request_id, data))
         result.structured_content = dict(data)
+        return result
+
+    async def wake_receipt(ctx, params, request_context):
+        arguments = params.arguments or {}
+        continuation_id = container.coordinator.validate_continuation_id(
+            arguments["continuation_id"]
+        )
+        if arguments.get("acknowledged") is not True:
+            raise BridgeError(
+                ErrorCode.INVALID_ARGUMENT,
+                "wake receipt requires acknowledged=true from coordinator_ack",
+            )
+        data = {
+            "continuation_id": continuation_id,
+            "acknowledged": True,
+            "delivery_attempts": int(arguments.get("delivery_attempts", 0)),
+            "batched_count": int(arguments.get("batched_count", 0)),
+        }
+        result = to_mcp_result(success(request_context.request_id, data))
+        result.structured_content = dict(data)
         result.meta = dict(WAKE_RECEIPT_UI_META)
         return result
 
@@ -848,9 +868,48 @@ def coordinator_tools(container: ApplicationContainer) -> tuple[RegisteredTool, 
                     "required": ["continuation_id"],
                     "additionalProperties": False,
                 },
-                _meta=WAKE_RECEIPT_UI_META,
             ),
             ack_continuation,
+            "coordinator-x",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="coordinator_wake_receipt",
+                description=(
+                    "Render one static visual wake receipt immediately after a successful "
+                    "coordinator_ack. This tool does not change route, lease, wake, or job state "
+                    "and must be invoked directly so ChatGPT can render its dedicated receipt UI."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "continuation_id": {
+                            "type": "string",
+                            "pattern": "^cont_[A-Za-z0-9_-]{5,75}$",
+                        },
+                        "acknowledged": {"type": "boolean"},
+                        "delivery_attempts": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                        "batched_count": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 1000,
+                        },
+                    },
+                    "required": [
+                        "continuation_id",
+                        "acknowledged",
+                        "delivery_attempts",
+                        "batched_count",
+                    ],
+                    "additionalProperties": False,
+                },
+                _meta=WAKE_RECEIPT_UI_META,
+            ),
+            wake_receipt,
             "coordinator-x",
         ),
         RegisteredTool(

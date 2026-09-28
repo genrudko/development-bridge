@@ -540,7 +540,9 @@ async function poll() {
         `continuation_id=${claim.continuation_id}\n` +
         `payload_json=${payloadJson}\n` +
         `Before other work, call coordinator_ack with continuation_id=${claim.continuation_id}. ` +
-        `If its response contains batched_messages, process those terminal groups in this same turn.`;
+        `If its response contains batched_messages, process those terminal groups in this same turn. ` +
+        `After a successful ACK, call coordinator_wake_receipt directly with continuation_id, acknowledged, ` +
+        `delivery_attempts, and batched_count from the ACK response so the user gets a fresh visual wake receipt.`;
       const contextInjected = await setProtocolContext(protocolContext);
       if (contextInjected) modelContextContinuation = claim.continuation_id;
       const fallback = `\n\n> Bridge ref: \`${claim.continuation_id}\` — acknowledge with coordinator_ack before other work.`;
