@@ -13,6 +13,7 @@ from .commands import command_tools
 from .compact import compact_tools
 from .coordinator import coordinator_tools
 from .eod_browser import eod_browser_tools
+from .eod_overlay import eod_overlay_tools
 from .executors import executor_tools
 from .files import file_tools
 from .fusion import fusion_tools
@@ -54,6 +55,7 @@ def build_tool_registry(
         + coordinator_tools(container)
         + telegram_supervisor_tools(container)
         + command_tools(container)
+        + eod_overlay_tools(container)
     )
     registry.register_many(guide_tools(registry, tool_surface=container.settings.server.tool_surface))
     if container.settings.server.tool_surface == "compact":

@@ -100,6 +100,8 @@ SUPPORTED_TOOLS = {
     "fusion_call",
     "executor_status",
     "executor_start",
+    "eod_development_overlay_apply",
+    "eod_development_overlay_rollback",
 }
 
 
@@ -107,7 +109,7 @@ def test_registered_tool_surface_is_exact():
     registry = build_tool_registry(build_container(BridgeSettings()))
 
     assert {tool.name for tool in registry.definitions} == SUPPORTED_TOOLS
-    assert len(registry.definitions) == 97
+    assert len(registry.definitions) == 99
     assert {registry.get(name).source for name in SUPPORTED_TOOLS} == {
         "v1",
         "community-knowledge",

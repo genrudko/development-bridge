@@ -535,6 +535,7 @@ async def test_runtime_lifespan_starts_and_stops_wake_delivery(
         bridge_restart=container.bridge_restart,
         desktop_nodes=container.desktop_nodes,
         coordinator_wake_delivery=wake_service,
+        eod_overlay=container.eod_overlay,
     )
 
     server = create_server(container)

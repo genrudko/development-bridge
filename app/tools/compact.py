@@ -70,6 +70,8 @@ def _category(name: str) -> str:
         return "projects"
     if name.startswith("eod_browser_"):
         return "browser"
+    if name.startswith("eod_development_overlay_"):
+        return "overlay"
     if name.startswith("fusion_"):
         return "fusion"
     if name == "chatgpt_share_read":

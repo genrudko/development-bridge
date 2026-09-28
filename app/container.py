@@ -23,6 +23,7 @@ from app.coordinator import (
     WakeTransport,
 )
 from app.desktop_nodes import DesktopNodeService
+from app.eod_overlay import EodDevelopmentOverlayService
 from app.files import FileService
 from app.executors import AntigravityExecutor, AsyncioProcessRunner, ExecutorSelector, ExecutorService
 from app.git import GitRunner, GitService, GitWorkspaceService, GitWriteService
@@ -93,7 +94,8 @@ class ApplicationContainer:
     commands: RepositoryCommandService
     bridge_restart: BridgeRestartService
     desktop_nodes: DesktopNodeService
-    coordinator_wake_delivery: CoordinatorWakeDeliveryService | None
+    coordinator_wake_delivery: CoordinatorWakeDeliveryService | None = None
+    eod_overlay: EodDevelopmentOverlayService | None = None
 
 
 def build_container(
@@ -437,4 +439,5 @@ def build_container(
             configured.server.endpoint,
         ),
         coordinator_wake_delivery=coordinator_wake_delivery,
+        eod_overlay=EodDevelopmentOverlayService(jobs, runner),
     )
