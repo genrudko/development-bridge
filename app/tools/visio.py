@@ -11,6 +11,43 @@ from app.api.results import failure, success, to_mcp_result
 from app.container import ApplicationContainer
 
 
+VISIO_READ_ONLY_TOOLS = frozenset({
+    "list_open_documents",
+    "list_pages",
+    "list_shapes",
+    "get_shape_info",
+    "get_connections",
+    "get_page_summary",
+    "read_shape_data",
+    "list_stencils",
+    "list_masters",
+    "list_diagram_types",
+    "get_diagram_standard",
+    "open_document",
+    "open_stencil",
+})
+VISIO_BLOCKED_TOOLS = frozenset({"save_document"})
+
+
+def _validate_visio_invocation(arguments: dict[str, Any]) -> None:
+    tool_name = str(arguments["tool_name"])
+    if tool_name in VISIO_BLOCKED_TOOLS:
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            "In-place Visio save is disabled; use save_document_as inside the approved workspace",
+            details={"tool_name": tool_name},
+        )
+    if tool_name in VISIO_READ_ONLY_TOOLS:
+        return
+    journal = arguments.get("journal")
+    if not isinstance(journal, dict) or journal.get("mutation") is not True:
+        raise BridgeError(
+            ErrorCode.POLICY_VIOLATION,
+            "Visio mutation requires journal.mutation=true",
+            details={"tool_name": tool_name},
+        )
+
+
 def _payload_error(value: Any) -> str | None:
     """Recognize Visio MCP errors even when the upstream tool returned isError=false."""
     if not isinstance(value, dict):
@@ -58,6 +95,7 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
 
     async def call(ctx, params, request_context):
         args = params.arguments
+        _validate_visio_invocation(args)
         data = await container.desktop_nodes.call(
             args["node_id"],
             args["tool_name"],
@@ -104,6 +142,7 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
 
     async def submit(ctx, params, request_context):
         args = params.arguments
+        _validate_visio_invocation(args)
         data = await container.desktop_nodes.submit(
             args["node_id"],
             args["tool_name"],
