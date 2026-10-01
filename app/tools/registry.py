@@ -25,6 +25,7 @@ from .jobs import job_tools
 from .knowledge import knowledge_tools
 from .projects import project_tools
 from .telegram_supervisor import telegram_supervisor_tools
+from .visio import visio_tools
 
 
 def build_tool_registry(
@@ -33,6 +34,10 @@ def build_tool_registry(
     v1_tools: Iterable[RegisteredTool] | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
+    if v1_tools is None and container.settings.server.tool_surface == "visio":
+        registry.register_many(visio_tools(container))
+        return registry
+
     registry.register_many(
         tuple(v1_tools)
         if v1_tools is not None
