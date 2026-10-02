@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.2"
+MANAGED_EXTENSION_VERSION = "2026.10.02.3"
 
 
 def install(namespace: dict) -> None:
@@ -14,6 +14,8 @@ def install(namespace: dict) -> None:
     mcp = namespace["mcp"]
     visio = namespace["visio"]
     parse_page = namespace["_parse_page"]
+    ok = namespace["_ok"]
+    err = namespace["_err"]
     workspace = Path(namespace["WORKSPACE"]).resolve()
 
     @mcp.tool()
@@ -43,3 +45,82 @@ def install(namespace: dict) -> None:
                 output.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    @mcp.tool()
+    def read_connection_points(
+        shape_id: int,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Read existing connection points from one Visio shape."""
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            shape = page_obj.Shapes.ItemFromID(int(shape_id))
+            section = 7  # visSectionConnectionPts
+            points = []
+            try:
+                count = int(shape.RowCount(section))
+            except Exception:
+                count = 0
+            for row_index in range(count):
+                try:
+                    row = shape.Section(section).Row(row_index)
+                    points.append({
+                        "row": row_index,
+                        "x_formula_u": str(row.Cell(0).FormulaU),
+                        "y_formula_u": str(row.Cell(1).FormulaU),
+                        "x_result_iu": float(row.Cell(0).ResultIU),
+                        "y_result_iu": float(row.Cell(1).ResultIU),
+                    })
+                except Exception:
+                    continue
+            return ok({
+                "shape_id": int(shape.ID),
+                "shape_name": str(shape.Name),
+                "points": points,
+            })
+        except Exception as exc:
+            return err(exc)
+
+
+    @mcp.tool()
+    def set_1d_shape_endpoints(
+        shape_id: int,
+        begin_x_mm: float,
+        begin_y_mm: float,
+        end_x_mm: float,
+        end_y_mm: float,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Set endpoints of one existing 1-D shape using bounded page coordinates in mm."""
+        try:
+            values = [float(begin_x_mm), float(begin_y_mm), float(end_x_mm), float(end_y_mm)]
+            if any(v < -1000.0 or v > 6000.0 for v in values):
+                raise ValueError("1-D endpoint coordinates must be between -1000 and 6000 mm")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            shape = page_obj.Shapes.ItemFromID(int(shape_id))
+            before = {
+                "BeginX": str(shape.CellsU("BeginX").FormulaU),
+                "BeginY": str(shape.CellsU("BeginY").FormulaU),
+                "EndX": str(shape.CellsU("EndX").FormulaU),
+                "EndY": str(shape.CellsU("EndY").FormulaU),
+            }
+            shape.CellsU("BeginX").FormulaU = f"{values[0]} mm"
+            shape.CellsU("BeginY").FormulaU = f"{values[1]} mm"
+            shape.CellsU("EndX").FormulaU = f"{values[2]} mm"
+            shape.CellsU("EndY").FormulaU = f"{values[3]} mm"
+            after = {
+                "BeginX": str(shape.CellsU("BeginX").FormulaU),
+                "BeginY": str(shape.CellsU("BeginY").FormulaU),
+                "EndX": str(shape.CellsU("EndX").FormulaU),
+                "EndY": str(shape.CellsU("EndY").FormulaU),
+            }
+            return ok({
+                "shape_id": int(shape.ID),
+                "shape_name": str(shape.Name),
+                "before": before,
+                "after": after,
+            })
+        except Exception as exc:
+            return err(exc)
