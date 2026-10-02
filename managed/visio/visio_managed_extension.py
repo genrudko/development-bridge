@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.7"
+MANAGED_EXTENSION_VERSION = "2026.10.02.8"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -405,23 +405,13 @@ def install(namespace: dict) -> None:
             import base64 as _base64
             import hashlib
             import os
-            import subprocess
+            import tkinter as _tkinter
             import win32com.client
 
-            # Fail early if the user's Python lacks tkinter rather than creating a broken shortcut.
-            python_exe = root / "venv312" / "Scripts" / "python.exe"
             pythonw_exe = root / "venv312" / "Scripts" / "pythonw.exe"
-            if not python_exe.exists() or not pythonw_exe.exists():
-                raise FileNotFoundError("Visio Python venv python/pythonw not found")
-            check = subprocess.run(
-                [str(python_exe), "-c", "import tkinter; print(tkinter.TkVersion)"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                creationflags=0x08000000,
-            )
-            if check.returncode != 0:
-                raise RuntimeError("tkinter is unavailable in the Visio Python environment")
+            if not pythonw_exe.exists():
+                raise FileNotFoundError("Visio Python venv pythonw not found")
+            tkinter_version = str(_tkinter.TkVersion)
 
             raw = _base64.b64decode(CONSOLE_SOURCE_B64.encode("ascii"), validate=True)
             source = raw.decode("utf-8")
@@ -452,7 +442,7 @@ def install(namespace: dict) -> None:
                 "console_path": str(target),
                 "shortcut_path": str(shortcut_path),
                 "sha256": hashlib.sha256(raw).hexdigest(),
-                "tkinter": check.stdout.strip(),
+                "tkinter": tkinter_version,
             })
         except Exception as exc:
             return err(exc)
