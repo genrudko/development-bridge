@@ -10,6 +10,11 @@ from app.tools.visio import _payload_error, _validate_visio_invocation
 VISIO_SURFACE = {
     "visio_node_status",
     "visio_tools",
+    "visio_list_open_documents",
+    "visio_list_diagram_types",
+    "visio_snapshot",
+    "visio_result_view",
+    "visio_managed_update",
     "visio_call",
     "visio_submit",
     "visio_operation_status",
@@ -100,3 +105,19 @@ def test_visio_mutation_with_explicit_journal_is_allowed():
         "tool_name": "save_document_as",
         "journal": {"mutation": True},
     })
+
+
+def test_visio_render_page_png_is_read_only():
+    _validate_visio_invocation({"tool_name": "render_page_png"})
+
+
+def test_visio_internal_managed_update_is_blocked_from_generic_call():
+    try:
+        _validate_visio_invocation({
+            "tool_name": "__openai_visio_managed_update",
+            "journal": {"mutation": True},
+        })
+    except BridgeError as exc:
+        assert exc.code is ErrorCode.POLICY_VIOLATION
+    else:
+        raise AssertionError("internal managed update must not be callable via generic visio_call")

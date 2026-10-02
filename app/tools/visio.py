@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 from mcp import types
+from mcp.server.mcpserver.utilities.types import Image
 
 from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool
 from app.api.results import failure, success, to_mcp_result
 from app.container import ApplicationContainer
 
+
+VISIO_MANAGED_UPDATE_TOOL = "__openai_visio_managed_update"
+VISIO_MANAGED_EXTENSION_VERSION = "2026.10.02.1"
+VISIO_MANAGED_EXTENSION_PATH = (
+    Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py"
+)
 
 VISIO_READ_ONLY_TOOLS = frozenset({
     "list_open_documents",
@@ -23,10 +33,16 @@ VISIO_READ_ONLY_TOOLS = frozenset({
     "list_masters",
     "list_diagram_types",
     "get_diagram_standard",
+    "inspect_shape_state_model",
+    "read_shape_cells",
+    "inspect_master_state_model",
+    "get_page_setup",
+    "get_vtd_state",
+    "render_page_png",
     "open_document",
     "open_stencil",
 })
-VISIO_BLOCKED_TOOLS = frozenset({"save_document"})
+VISIO_BLOCKED_TOOLS = frozenset({"save_document", VISIO_MANAGED_UPDATE_TOOL})
 
 
 def _validate_visio_invocation(arguments: dict[str, Any]) -> None:
@@ -77,6 +93,41 @@ def _payload_error(value: Any) -> str | None:
 
 
 def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
+    def external_result_response(full, metadata, request_id):
+        upstream_error = _payload_error(full)
+        is_error = upstream_error is not None
+        if is_error:
+            summary = failure(
+                request_id,
+                BridgeError(ErrorCode.INTERNAL_ERROR, upstream_error or "Visio snapshot failed"),
+            )
+        else:
+            summary = success(request_id, {"external_result": metadata})
+        blocks: list[types.ContentBlock] = [
+            types.TextContent(
+                type="text",
+                text=json.dumps(
+                    summary.model_dump(mode="json", exclude_none=True),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
+        ]
+        for resource in metadata.get("resources", []):
+            if not isinstance(resource, dict) or not resource.get("uri"):
+                continue
+            blocks.append(
+                types.ResourceLink(
+                    uri=resource["uri"],
+                    name=resource["file_name"],
+                    title=resource["file_name"],
+                    mimeType=resource["mime_type"],
+                    size=resource["size_bytes"],
+                    description="Visio rendered page image",
+                )
+            )
+        return types.CallToolResult(content=blocks, isError=is_error)
+
     async def status(ctx, params, request_context):
         return to_mcp_result(
             success(
@@ -93,14 +144,28 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             )
         )
 
-    async def call(ctx, params, request_context):
-        args = params.arguments
-        _validate_visio_invocation(args)
+    async def invoke(
+        request_context,
+        *,
+        node_id: str,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+        journal_data: dict[str, Any] | None = None,
+    ):
+        invocation = {
+            "node_id": node_id,
+            "tool_name": tool_name,
+            "arguments": arguments or {},
+        }
+        if journal_data is not None:
+            invocation["journal"] = journal_data
+        _validate_visio_invocation(invocation)
+
         data = await container.desktop_nodes.call(
-            args["node_id"],
-            args["tool_name"],
-            args.get("arguments", {}),
-            args.get("journal"),
+            node_id,
+            tool_name,
+            arguments or {},
+            journal_data,
         )
 
         upstream_error = _payload_error(data)
@@ -111,7 +176,7 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                     BridgeError(
                         ErrorCode.INTERNAL_ERROR,
                         upstream_error,
-                        details={"tool_name": args["tool_name"]},
+                        details={"tool_name": tool_name},
                     ),
                 )
             )
@@ -127,7 +192,7 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                         BridgeError(
                             ErrorCode.INTERNAL_ERROR,
                             upstream_error,
-                            details={"tool_name": args["tool_name"]},
+                            details={"tool_name": tool_name},
                         ),
                     )
                 )
@@ -139,6 +204,135 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             )
 
         return to_mcp_result(success(request_context.request_id, data))
+
+    async def call(ctx, params, request_context):
+        args = params.arguments
+        return await invoke(
+            request_context,
+            node_id=args["node_id"],
+            tool_name=args["tool_name"],
+            arguments=args.get("arguments", {}),
+            journal_data=args.get("journal"),
+        )
+
+    async def list_open_documents_explicit(ctx, params, request_context):
+        return await invoke(
+            request_context,
+            node_id=params.arguments["node_id"],
+            tool_name="list_open_documents",
+        )
+
+    async def list_diagram_types_explicit(ctx, params, request_context):
+        return await invoke(
+            request_context,
+            node_id=params.arguments["node_id"],
+            tool_name="list_diagram_types",
+        )
+
+    async def snapshot_explicit(ctx, params, request_context):
+        args = params.arguments
+        invocation = {
+            "node_id": args["node_id"],
+            "tool_name": "render_page_png",
+            "arguments": {
+                "doc_name": args.get("doc_name", ""),
+                "page": args.get("page", ""),
+            },
+        }
+        _validate_visio_invocation(invocation)
+        data = await container.desktop_nodes.call(
+            args["node_id"],
+            "render_page_png",
+            invocation["arguments"],
+            None,
+        )
+        upstream_error = _payload_error(data)
+        if upstream_error is not None:
+            return to_mcp_result(
+                failure(
+                    request_context.request_id,
+                    BridgeError(
+                        ErrorCode.INTERNAL_ERROR,
+                        upstream_error,
+                        details={"tool_name": "render_page_png"},
+                    ),
+                )
+            )
+        reference = data.get("external_result") if isinstance(data, dict) else None
+        if not isinstance(reference, dict):
+            return to_mcp_result(
+                failure(
+                    request_context.request_id,
+                    BridgeError(
+                        ErrorCode.INTERNAL_ERROR,
+                        "Visio snapshot was not externalized as an image resource",
+                        details={"tool_name": "render_page_png"},
+                    ),
+                )
+            )
+        full, metadata = container.desktop_nodes.external_result(reference)
+        return external_result_response(full, metadata, request_context.request_id)
+
+    async def result_view_explicit(ctx, params, request_context):
+        image_bytes, metadata = container.desktop_nodes.external_image_resource(
+            params.arguments["resource_uri"]
+        )
+        result = to_mcp_result(
+            success(request_context.request_id, {"resource": metadata})
+        )
+        image_format = {
+            "image/png": "png",
+            "image/jpeg": "jpeg",
+            "image/webp": "webp",
+        }[metadata["mime_type"]]
+        result.content.append(
+            Image(data=image_bytes, format=image_format).to_image_content()
+        )
+        return result
+
+    async def managed_update_explicit(ctx, params, request_context):
+        node_id = params.arguments["node_id"]
+        raw = VISIO_MANAGED_EXTENSION_PATH.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        data = await container.desktop_nodes.call(
+            node_id,
+            VISIO_MANAGED_UPDATE_TOOL,
+            {
+                "version": VISIO_MANAGED_EXTENSION_VERSION,
+                "file_name": "visio_managed_extension.py",
+                "content_b64": base64.b64encode(raw).decode("ascii"),
+                "sha256": digest,
+            },
+            {
+                "mutation": True,
+                "summary": (
+                    "Apply server-pinned managed Visio extension "
+                    + VISIO_MANAGED_EXTENSION_VERSION
+                ),
+            },
+        )
+        upstream_error = _payload_error(data)
+        if upstream_error is not None:
+            return to_mcp_result(
+                failure(
+                    request_context.request_id,
+                    BridgeError(
+                        ErrorCode.INTERNAL_ERROR,
+                        upstream_error,
+                        details={"tool_name": VISIO_MANAGED_UPDATE_TOOL},
+                    ),
+                )
+            )
+        return to_mcp_result(
+            success(
+                request_context.request_id,
+                {
+                    "version": VISIO_MANAGED_EXTENSION_VERSION,
+                    "sha256": digest,
+                    "result": data,
+                },
+            )
+        )
 
     async def submit(ctx, params, request_context):
         args = params.arguments
@@ -232,6 +426,25 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         "additionalProperties": False,
     }
 
+    snapshot_schema = {
+        "type": "object",
+        "properties": {
+            "node_id": node,
+            "doc_name": {"type": "string", "maxLength": 260, "default": ""},
+            "page": {"type": "string", "maxLength": 200, "default": ""},
+        },
+        "required": ["node_id"],
+        "additionalProperties": False,
+    }
+    resource_view_schema = {
+        "type": "object",
+        "properties": {
+            "resource_uri": {"type": "string", "minLength": 1, "maxLength": 2048},
+        },
+        "required": ["resource_uri"],
+        "additionalProperties": False,
+    }
+
     return (
         RegisteredTool(
             types.Tool(
@@ -249,6 +462,51 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 inputSchema=common,
             ),
             tools,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_list_open_documents",
+                description="List open documents in the live attached Microsoft Visio instance.",
+                inputSchema=common,
+            ),
+            list_open_documents_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_list_diagram_types",
+                description="List diagram types supported by the local Microsoft Visio MCP.",
+                inputSchema=common,
+            ),
+            list_diagram_types_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_snapshot",
+                description="Render the current or selected Visio page and expose it as an image resource for visual inspection.",
+                inputSchema=snapshot_schema,
+            ),
+            snapshot_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_result_view",
+                description="Resolve a Visio snapshot image resource URI and return the actual image content.",
+                inputSchema=resource_view_schema,
+            ),
+            result_view_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_managed_update",
+                description="Apply the server-pinned managed Visio extension bundle to the Windows node. No arbitrary code or path input is accepted.",
+                inputSchema=common,
+            ),
+            managed_update_explicit,
             "visio-desktop",
         ),
         RegisteredTool(
