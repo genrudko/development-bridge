@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.4"
+MANAGED_EXTENSION_VERSION = "2026.10.02.5"
 
 
 def install(namespace: dict) -> None:
@@ -165,6 +165,94 @@ def install(namespace: dict) -> None:
                 "before": before,
                 "after": after,
             })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def batch_set_1d_shape_endpoints(
+        items_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Batch-set endpoints of existing 1-D shapes using bounded mm coordinates."""
+        try:
+            import json
+            items = json.loads(items_json)
+            if not isinstance(items, list) or not items or len(items) > 300:
+                raise ValueError("items_json must be a JSON array with 1..300 items")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            results = []
+            for item in items:
+                sid = int(item["shape_id"])
+                vals = [float(item[k]) for k in ("begin_x_mm","begin_y_mm","end_x_mm","end_y_mm")]
+                if any(v < -1000.0 or v > 6000.0 for v in vals):
+                    raise ValueError(f"1-D endpoint coordinate out of bounds for shape {sid}")
+                shape = page_obj.Shapes.ItemFromID(sid)
+                shape.CellsU("BeginX").FormulaU = f"{vals[0]} mm"
+                shape.CellsU("BeginY").FormulaU = f"{vals[1]} mm"
+                shape.CellsU("EndX").FormulaU = f"{vals[2]} mm"
+                shape.CellsU("EndY").FormulaU = f"{vals[3]} mm"
+                results.append({"shape_id": sid, "shape_name": str(shape.Name)})
+            return ok({"count": len(results), "results": results})
+        except Exception as exc:
+            return err(exc)
+
+
+    @mcp.tool()
+    def batch_set_shape_text(
+        items_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Batch-set text on existing shapes."""
+        try:
+            import json
+            items = json.loads(items_json)
+            if not isinstance(items, list) or not items or len(items) > 300:
+                raise ValueError("items_json must be a JSON array with 1..300 items")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            results = []
+            for item in items:
+                sid = int(item["shape_id"])
+                text_value = str(item.get("text", ""))
+                if len(text_value) > 2000:
+                    raise ValueError(f"Text too long for shape {sid}")
+                shape = page_obj.Shapes.ItemFromID(sid)
+                shape.Text = text_value
+                results.append({"shape_id": sid, "shape_name": str(shape.Name), "text": text_value})
+            return ok({"count": len(results), "results": results})
+        except Exception as exc:
+            return err(exc)
+
+
+    @mcp.tool()
+    def batch_set_text_control_positions(
+        items_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Batch-move native Controls.Row_2 text anchors in local mm."""
+        try:
+            import json
+            items = json.loads(items_json)
+            if not isinstance(items, list) or not items or len(items) > 300:
+                raise ValueError("items_json must be a JSON array with 1..300 items")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            results = []
+            for item in items:
+                sid = int(item["shape_id"])
+                x = float(item["x_mm"]); y = float(item["y_mm"])
+                if not (-500.0 <= x <= 500.0 and -500.0 <= y <= 500.0):
+                    raise ValueError(f"Text control coordinate out of bounds for shape {sid}")
+                shape = page_obj.Shapes.ItemFromID(sid)
+                section = 9
+                if int(shape.RowCount(section)) < 2:
+                    raise KeyError(f"Shape {sid} has no Controls.Row_2 text control")
+                row = shape.Section(section).Row(1)
+                row.Cell(0).FormulaU = f"{x} mm"
+                row.Cell(1).FormulaU = f"{y} mm"
+                results.append({"shape_id": sid, "shape_name": str(shape.Name)})
+            return ok({"count": len(results), "results": results})
         except Exception as exc:
             return err(exc)
 
