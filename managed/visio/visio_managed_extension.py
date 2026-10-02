@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.12"
+MANAGED_EXTENSION_VERSION = "2026.10.02.13"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -322,6 +322,7 @@ def install(namespace: dict) -> None:
         page: str = "",
         doc_name: str = "",
         stencil_name: str = "Трансформаторы.vss",
+        selection_shape_id: int = 0,
     ) -> str:
         """Start or stop the native VTD connection-control VBA from an open VTD stencil.
 
@@ -364,6 +365,13 @@ def install(namespace: dict) -> None:
                 except Exception:
                     pass
 
+            selected_shape = None
+            if int(selection_shape_id) > 0:
+                selected_shape = page_obj.Shapes.ItemFromID(int(selection_shape_id))
+                window = app.ActiveWindow
+                # visDeselectAll | visSelect = 256 | 2 = 258
+                window.Select(selected_shape, 258)
+
             stencil = None
             for index in range(1, int(app.Documents.Count) + 1):
                 candidate = app.Documents.Item(index)
@@ -381,6 +389,8 @@ def install(namespace: dict) -> None:
                 "stencil_name": str(stencil.Name),
                 "active_document": str(app.ActiveDocument.Name) if app.ActiveDocument else None,
                 "active_page": str(app.ActivePage.Name) if app.ActivePage else None,
+                "selected_shape_id": int(selected_shape.ID) if selected_shape is not None else None,
+                "selected_shape_name": str(selected_shape.Name) if selected_shape is not None else None,
             })
         except Exception as exc:
             return err(exc)
