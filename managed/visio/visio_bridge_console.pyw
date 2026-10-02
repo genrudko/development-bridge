@@ -13,7 +13,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
-CONSOLE_VERSION = "2026.10.02.1"
+CONSOLE_VERSION = "2026.10.02.2"
 ROOT = Path(os.environ.get("VISIO_MCP_ROOT", Path(os.environ["LOCALAPPDATA"]) / "OpenAI" / "VisioMCP")).resolve()
 START_SCRIPT = ROOT / "START_VISIO_AGENT.ps1"
 TEST_SCRIPT = ROOT / "TEST_VISIO_LIVE_BRIDGE.ps1"
@@ -58,7 +58,9 @@ def load_json(path: Path) -> dict | None:
 def existing_agent_pids() -> list[int]:
     script = (
         "$p = Get-CimInstance Win32_Process | Where-Object { "
-        "$_.CommandLine -and $_.CommandLine -like '*windows_visio_agent.py*' }; "
+        "$_.CommandLine -and "
+        "$_.Name -match '^pythonw?\\.exe$' -and "
+        "$_.CommandLine -like '*windows_visio_agent.py*' }; "
         "$p | ForEach-Object { $_.ProcessId }"
     )
     try:

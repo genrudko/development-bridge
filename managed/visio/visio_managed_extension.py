@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.8"
+MANAGED_EXTENSION_VERSION = "2026.10.02.9"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -438,7 +438,7 @@ def install(namespace: dict) -> None:
             shortcut.Save()
 
             return ok({
-                "console_version": "2026.10.02.1",
+                "console_version": "2026.10.02.2",
                 "console_path": str(target),
                 "shortcut_path": str(shortcut_path),
                 "sha256": hashlib.sha256(raw).hexdigest(),
