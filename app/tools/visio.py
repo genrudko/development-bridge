@@ -16,9 +16,12 @@ from app.container import ApplicationContainer
 
 
 VISIO_MANAGED_UPDATE_TOOL = "__openai_visio_managed_update"
-VISIO_MANAGED_EXTENSION_VERSION = "2026.10.02.6"
+VISIO_MANAGED_EXTENSION_VERSION = "2026.10.02.7"
 VISIO_MANAGED_EXTENSION_PATH = (
     Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py"
+)
+VISIO_CONSOLE_SOURCE_PATH = (
+    Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_bridge_console.pyw"
 )
 
 VISIO_READ_ONLY_TOOLS = frozenset({
@@ -41,6 +44,7 @@ VISIO_READ_ONLY_TOOLS = frozenset({
     "get_vtd_state",
     "render_page_png",
     "read_connection_points",
+    "operator_notes_peek",
     "open_document",
     "open_stencil",
 })
@@ -292,9 +296,60 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         )
         return result
 
+    async def operator_notes_explicit(ctx, params, request_context):
+        args = params.arguments
+        return await invoke(
+            request_context,
+            node_id=args["node_id"],
+            tool_name="operator_notes_peek",
+            arguments={"limit": args.get("limit", 20)},
+        )
+
+    async def operator_ack_explicit(ctx, params, request_context):
+        args = params.arguments
+        return await invoke(
+            request_context,
+            node_id=args["node_id"],
+            tool_name="operator_notes_ack",
+            arguments={"note_ids_json": json.dumps(args["note_ids"], ensure_ascii=False)},
+            journal_data={
+                "mutation": True,
+                "summary": "Acknowledge operator notes delivered through Visio Bridge Console",
+            },
+        )
+
+    async def operator_reply_explicit(ctx, params, request_context):
+        args = params.arguments
+        return await invoke(
+            request_context,
+            node_id=args["node_id"],
+            tool_name="operator_reply_send",
+            arguments={
+                "text": args["text"],
+                "note_ids_json": json.dumps(args.get("note_ids", []), ensure_ascii=False),
+            },
+            journal_data={
+                "mutation": True,
+                "summary": "Send a reply to Visio Bridge Console operator chat",
+            },
+        )
+
+    async def console_install_explicit(ctx, params, request_context):
+        return await invoke(
+            request_context,
+            node_id=params.arguments["node_id"],
+            tool_name="install_bridge_console",
+            journal_data={
+                "mutation": True,
+                "summary": "Install or update the server-pinned Visio Bridge Console",
+            },
+        )
+
     async def managed_update_explicit(ctx, params, request_context):
         node_id = params.arguments["node_id"]
         raw = VISIO_MANAGED_EXTENSION_PATH.read_bytes()
+        console_b64 = base64.b64encode(VISIO_CONSOLE_SOURCE_PATH.read_bytes())
+        raw = raw.replace(b"__CONSOLE_SOURCE_B64__", console_b64)
         digest = hashlib.sha256(raw).hexdigest()
         data = await container.desktop_nodes.call(
             node_id,
@@ -447,6 +502,39 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         "additionalProperties": False,
     }
 
+    operator_notes_schema = {
+        "type": "object",
+        "properties": {
+            "node_id": node,
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+        },
+        "required": ["node_id"],
+        "additionalProperties": False,
+    }
+    note_id_schema = {
+        "type": "string",
+        "pattern": "^note-[0-9a-f]{32}$",
+    }
+    operator_ack_schema = {
+        "type": "object",
+        "properties": {
+            "node_id": node,
+            "note_ids": {"type": "array", "items": note_id_schema, "maxItems": 100},
+        },
+        "required": ["node_id", "note_ids"],
+        "additionalProperties": False,
+    }
+    operator_reply_schema = {
+        "type": "object",
+        "properties": {
+            "node_id": node,
+            "text": {"type": "string", "minLength": 1, "maxLength": 8000},
+            "note_ids": {"type": "array", "items": note_id_schema, "maxItems": 100, "default": []},
+        },
+        "required": ["node_id", "text"],
+        "additionalProperties": False,
+    }
+
     return (
         RegisteredTool(
             types.Tool(
@@ -500,6 +588,42 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 inputSchema=resource_view_schema,
             ),
             result_view_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_operator_notes",
+                description="Read pending operator messages from the local Visio Bridge Console side-channel without acknowledging them.",
+                inputSchema=operator_notes_schema,
+            ),
+            operator_notes_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_operator_ack",
+                description="Acknowledge operator messages after they have been read or acted upon.",
+                inputSchema=operator_ack_schema,
+            ),
+            operator_ack_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_operator_reply",
+                description="Send a short reply back to the Visio Bridge Console operator chat.",
+                inputSchema=operator_reply_schema,
+            ),
+            operator_reply_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_console_install",
+                description="Install or update the server-pinned Visio Bridge Console desktop utility on the Windows node.",
+                inputSchema=common,
+            ),
+            console_install_explicit,
             "visio-desktop",
         ),
         RegisteredTool(

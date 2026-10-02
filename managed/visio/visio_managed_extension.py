@@ -6,7 +6,8 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.6"
+MANAGED_EXTENSION_VERSION = "2026.10.02.7"
+CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
 def install(namespace: dict) -> None:
@@ -17,6 +18,13 @@ def install(namespace: dict) -> None:
     ok = namespace["_ok"]
     err = namespace["_err"]
     workspace = Path(namespace["WORKSPACE"]).resolve()
+    root = Path(namespace["ROOT"]).resolve()
+    chat_root = root / "operator-chat"
+    pending_dir = chat_root / "pending"
+    acked_dir = chat_root / "acked"
+    replies_dir = chat_root / "replies"
+    for _directory in (pending_dir, acked_dir, replies_dir):
+        _directory.mkdir(parents=True, exist_ok=True)
 
     @mcp.tool()
     def render_page_png(page: str = "", doc_name: str = "") -> types.ImageContent:
@@ -301,6 +309,151 @@ def install(namespace: dict) -> None:
                     "missing": missing,
                 })
             return ok({"count": len(results), "results": results})
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def operator_notes_peek(limit: int = 20) -> str:
+        """Read pending operator notes written by Visio Bridge Console without acknowledging them."""
+        try:
+            import json
+            bounded = max(1, min(int(limit), 100))
+            rows = []
+            for path in sorted(pending_dir.glob("note-*.json"), key=lambda item: item.stat().st_mtime)[:bounded]:
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                note_id = str(payload.get("id", ""))
+                text_value = str(payload.get("text", ""))
+                if not note_id.startswith("note-") or not text_value:
+                    continue
+                rows.append({
+                    "id": note_id,
+                    "created_at": str(payload.get("created_at", "")),
+                    "text": text_value,
+                    "source": str(payload.get("source", "")),
+                })
+            return ok({"count": len(rows), "notes": rows})
+        except Exception as exc:
+            return err(exc)
+
+
+    @mcp.tool()
+    def operator_notes_ack(note_ids_json: str) -> str:
+        """Acknowledge pending operator notes after they have been read/acted upon."""
+        try:
+            import json
+            import os
+            import re
+            note_ids = json.loads(note_ids_json)
+            if not isinstance(note_ids, list) or len(note_ids) > 100:
+                raise ValueError("note_ids_json must be a JSON array with at most 100 IDs")
+            moved = []
+            for raw in note_ids:
+                note_id = str(raw)
+                if re.fullmatch(r"note-[0-9a-f]{32}", note_id) is None:
+                    raise ValueError(f"Invalid note ID: {note_id}")
+                source = pending_dir / f"{note_id}.json"
+                target = acked_dir / f"{note_id}.json"
+                if source.exists():
+                    os.replace(source, target)
+                    moved.append(note_id)
+                elif target.exists():
+                    moved.append(note_id)
+            return ok({"acknowledged": moved, "count": len(moved)})
+        except Exception as exc:
+            return err(exc)
+
+
+    @mcp.tool()
+    def operator_reply_send(text: str, note_ids_json: str = "[]") -> str:
+        """Write one ChatGPT/bridge reply into the Console side-channel."""
+        try:
+            import json
+            import os
+            from datetime import datetime, timezone
+            value = str(text).strip()
+            if not value or len(value) > 8000:
+                raise ValueError("Reply text must contain 1..8000 characters")
+            note_ids = json.loads(note_ids_json)
+            if not isinstance(note_ids, list) or len(note_ids) > 100:
+                raise ValueError("note_ids_json must be a JSON array with at most 100 IDs")
+            reply_id = "reply-" + uuid.uuid4().hex
+            payload = {
+                "id": reply_id,
+                "created_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                "text": value,
+                "note_ids": [str(item) for item in note_ids],
+                "source": "chatgpt-visio-bridge",
+            }
+            target = replies_dir / f"{reply_id}.json"
+            temp = replies_dir / f".{reply_id}.tmp"
+            temp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            os.replace(temp, target)
+            return ok({"reply_id": reply_id, "created_at": payload["created_at"]})
+        except Exception as exc:
+            return err(exc)
+
+
+    @mcp.tool()
+    def install_bridge_console() -> str:
+        """Install/update the server-pinned Visio Bridge Console and a Desktop shortcut."""
+        try:
+            import base64 as _base64
+            import hashlib
+            import os
+            import subprocess
+            import win32com.client
+
+            # Fail early if the user's Python lacks tkinter rather than creating a broken shortcut.
+            python_exe = root / "venv312" / "Scripts" / "python.exe"
+            pythonw_exe = root / "venv312" / "Scripts" / "pythonw.exe"
+            if not python_exe.exists() or not pythonw_exe.exists():
+                raise FileNotFoundError("Visio Python venv python/pythonw not found")
+            check = subprocess.run(
+                [str(python_exe), "-c", "import tkinter; print(tkinter.TkVersion)"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                creationflags=0x08000000,
+            )
+            if check.returncode != 0:
+                raise RuntimeError("tkinter is unavailable in the Visio Python environment")
+
+            raw = _base64.b64decode(CONSOLE_SOURCE_B64.encode("ascii"), validate=True)
+            source = raw.decode("utf-8")
+            compile(source, "visio_bridge_console.pyw", "exec")
+
+            console_dir = root / "console"
+            console_dir.mkdir(parents=True, exist_ok=True)
+            target = console_dir / "visio_bridge_console.pyw"
+            temp = console_dir / ".visio_bridge_console.pyw.update"
+            temp.write_bytes(raw)
+            os.replace(temp, target)
+
+            shell = win32com.client.Dispatch("WScript.Shell")
+            desktop = Path(str(shell.SpecialFolders("Desktop")))
+            shortcut_path = desktop / "Visio Bridge Console.lnk"
+            shortcut = shell.CreateShortcut(str(shortcut_path))
+            shortcut.TargetPath = str(pythonw_exe)
+            shortcut.Arguments = f'"{target}"'
+            shortcut.WorkingDirectory = str(console_dir)
+            shortcut.Description = "OpenAI Visio live bridge console"
+            visio_icon = Path(os.environ.get("ProgramFiles", r"C:\\Program Files")) / "Microsoft Office" / "root" / "Office16" / "VISIO.EXE"
+            if visio_icon.exists():
+                shortcut.IconLocation = str(visio_icon) + ",0"
+            shortcut.Save()
+
+            return ok({
+                "console_version": "2026.10.02.1",
+                "console_path": str(target),
+                "shortcut_path": str(shortcut_path),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "tkinter": check.stdout.strip(),
+            })
         except Exception as exc:
             return err(exc)
 

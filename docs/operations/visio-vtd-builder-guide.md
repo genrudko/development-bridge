@@ -226,3 +226,40 @@ When a generally reusable capability is missing, extend this managed API. Do not
 - When rendering differs from the manual reference, compare the two native shapes before applying cosmetic fixes.
 - Prefer native master state and stencil behavior over forced formatting.
 - Treat the current KRU-35 `MCP-v2` result as a qualified working baseline, not proof that every unrelated VTD master has the same post-drop behavior.
+
+## Visio Bridge Console and operator side-channel
+
+The normal owner workflow should use **Visio Bridge Console**, not a manually opened `START_VISIO_AGENT.ps1` PowerShell window.
+
+The Console is a server-pinned managed utility installed through `visio_console_install`. It provides:
+
+- start/stop of the existing `START_VISIO_AGENT.ps1` agent;
+- a hard warning and blocked Start when the Console itself is elevated, because Visio and the bridge must run in the same normal non-admin integrity context for ROT/live attach;
+- captured agent stdout with timestamped local log files;
+- live tail of `live-bridge-v4.log` for COM add-in / ROT diagnostics;
+- one-click `TEST_VISIO_LIVE_BRIDGE.ps1` execution;
+- shortcuts to the workspace and log directories;
+- an operator-message side-channel for feedback during a long ChatGPT tool turn.
+
+### Operator-message semantics
+
+The side-channel is intentionally local and bounded. It does **not** impersonate the ChatGPT web UI and it does not claim to interrupt an already-running model generation instantly.
+
+The owner writes a message in Visio Bridge Console. The Console atomically stores it in the node-local `operator-chat/pending` queue. The Visio MCP managed extension exposes that queue through the explicit production tools:
+
+- `visio_operator_notes` — read pending notes without acknowledging them;
+- `visio_operator_ack` — acknowledge notes only after they have been read or acted upon;
+- `visio_operator_reply` — write a ChatGPT/bridge reply back to the Console UI.
+
+During any multi-step Visio operation, the coordinator must poll `visio_operator_notes`:
+
+1. before a substantial mutation batch;
+2. after every visual `visio_snapshot` / `visio_result_view` gate;
+3. before final save/acceptance;
+4. at any natural checkpoint in a long-running turn.
+
+If pending notes exist, stop expanding the current plan, read them, adapt the next action, acknowledge them, and use `visio_operator_reply` when a short acknowledgement or clarification in the Console is useful.
+
+Do not acknowledge a note merely because it was fetched if the note still requires an action that has not been incorporated.
+
+This side-channel is specifically intended to let the owner say things such as “stop”, “wrong master”, “look at the reference”, or “do not touch this page” while the coordinator is still inside a tool-heavy turn.

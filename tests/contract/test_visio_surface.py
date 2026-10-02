@@ -15,6 +15,10 @@ VISIO_SURFACE = {
     "visio_snapshot",
     "visio_result_view",
     "visio_managed_update",
+    "visio_console_install",
+    "visio_operator_reply",
+    "visio_operator_ack",
+    "visio_operator_notes",
     "visio_call",
     "visio_submit",
     "visio_operation_status",
@@ -121,3 +125,7 @@ def test_visio_internal_managed_update_is_blocked_from_generic_call():
         assert exc.code is ErrorCode.POLICY_VIOLATION
     else:
         raise AssertionError("internal managed update must not be callable via generic visio_call")
+
+
+def test_visio_operator_notes_peek_is_read_only():
+    _validate_visio_invocation({"tool_name": "operator_notes_peek"})

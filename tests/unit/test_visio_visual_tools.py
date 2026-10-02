@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.02.6"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.02.7"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.02.6"
+    assert arguments["version"] == "2026.10.02.7"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -147,3 +147,32 @@ def test_managed_visio_extension_uses_public_mcp_types():
     assert "from mcp import types" in source
     assert "mcp.server.mcpserver" not in source
     assert "types.ImageContent" in source
+
+
+@pytest.mark.asyncio
+async def test_visio_managed_update_embeds_console_source():
+    calls = []
+
+    class Desktop:
+        async def call(self, node_id, tool_name, arguments, journal):
+            calls.append((node_id, tool_name, arguments, journal))
+            return {
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.02.7"}'}],
+                "isError": False,
+            }
+
+    tool = next(
+        item for item in visio_tools(SimpleNamespace(desktop_nodes=Desktop()))
+        if item.definition.name == "visio_managed_update"
+    )
+    await tool.handler(
+        None,
+        SimpleNamespace(arguments={"node_id": "visio-workstation"}),
+        SimpleNamespace(request_id="request-update-console"),
+    )
+    payload = base64.b64decode(calls[0][2]["content_b64"])
+    assert b"__CONSOLE_SOURCE_B64__" not in payload
+    assert b"CONSOLE_SOURCE_B64" in payload
+    assert b"Visio Bridge Console" in base64.b64decode(
+        payload.split(b'CONSOLE_SOURCE_B64 = "',1)[1].split(b'"',1)[0]
+    )
