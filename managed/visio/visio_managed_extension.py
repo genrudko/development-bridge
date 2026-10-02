@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.10"
+MANAGED_EXTENSION_VERSION = "2026.10.02.11"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -307,6 +307,70 @@ def install(namespace: dict) -> None:
                     "shape_name": str(shape.Name),
                     "cells": cells,
                     "missing": missing,
+                })
+            return ok({"count": len(results), "results": results})
+        except Exception as exc:
+            return err(exc)
+
+
+
+    @mcp.tool()
+    def batch_glue_endpoints(
+        items_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Glue existing 1-D BeginX/EndX endpoints to native connection-point rows."""
+        try:
+            import json
+            items = json.loads(items_json)
+            if not isinstance(items, list) or not items or len(items) > 300:
+                raise ValueError("items_json must be a JSON array with 1..300 items")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            results = []
+            for item in items:
+                sid = int(item["shape_id"])
+                target_sid = int(item["target_shape_id"])
+                endpoint = str(item["endpoint"]).strip().lower()
+                row_number = int(item["target_connection_row"])
+                if endpoint not in {"begin", "end"}:
+                    raise ValueError(f"endpoint must be begin/end for shape {sid}")
+                if row_number < 1 or row_number > 256:
+                    raise ValueError(f"target_connection_row out of range for shape {sid}")
+
+                shape = page_obj.Shapes.ItemFromID(sid)
+                target = page_obj.Shapes.ItemFromID(target_sid)
+                source_cell_name = "BeginX" if endpoint == "begin" else "EndX"
+                source_cell = shape.CellsU(source_cell_name)
+
+                # Connection point rows are exposed as Connections.X1, X2, ... in
+                # universal ShapeSheet names. GlueTo on the X cell binds the whole
+                # 1-D endpoint (X/Y) to the native connection point.
+                target_cell_name = f"Connections.X{row_number}"
+                if not bool(target.CellExistsU(target_cell_name, 0)):
+                    raise KeyError(
+                        f"Target shape {target_sid} has no {target_cell_name}"
+                    )
+                target_cell = target.CellsU(target_cell_name)
+
+                before = {
+                    "x_formula_u": str(shape.CellsU(source_cell_name).FormulaU),
+                    "y_formula_u": str(shape.CellsU("BeginY" if endpoint == "begin" else "EndY").FormulaU),
+                }
+                source_cell.GlueTo(target_cell)
+                after = {
+                    "x_formula_u": str(shape.CellsU(source_cell_name).FormulaU),
+                    "y_formula_u": str(shape.CellsU("BeginY" if endpoint == "begin" else "EndY").FormulaU),
+                }
+                results.append({
+                    "shape_id": sid,
+                    "shape_name": str(shape.Name),
+                    "endpoint": endpoint,
+                    "target_shape_id": target_sid,
+                    "target_shape_name": str(target.Name),
+                    "target_connection_row": row_number,
+                    "before": before,
+                    "after": after,
                 })
             return ok({"count": len(results), "results": results})
         except Exception as exc:
