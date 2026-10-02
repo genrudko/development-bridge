@@ -13,7 +13,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
-CONSOLE_VERSION = "2026.10.02.2"
+CONSOLE_VERSION = "2026.10.02.3"
 ROOT = Path(os.environ.get("VISIO_MCP_ROOT", Path(os.environ["LOCALAPPDATA"]) / "OpenAI" / "VisioMCP")).resolve()
 START_SCRIPT = ROOT / "START_VISIO_AGENT.ps1"
 TEST_SCRIPT = ROOT / "TEST_VISIO_LIVE_BRIDGE.ps1"
@@ -31,6 +31,29 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def log_stamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def stamp_lines(text: str) -> str:
+    if not text:
+        return text
+    parts = text.splitlines(keepends=True)
+    rendered = []
+    for part in parts:
+        if part.endswith("\r\n"):
+            body, ending = part[:-2], "\r\n"
+        elif part.endswith("\n"):
+            body, ending = part[:-1], "\n"
+        else:
+            body, ending = part, ""
+        if body:
+            rendered.append(f"[{log_stamp()}] {body}{ending}")
+        else:
+            rendered.append(ending)
+    return "".join(rendered)
 
 
 def is_admin() -> bool:
@@ -253,9 +276,10 @@ class VisioBridgeConsole(tk.Tk):
             return
         try:
             for line in proc.stdout:
+                stamped = stamp_lines(line)
                 if self.agent_log_handle:
-                    self.agent_log_handle.write(line)
-                self.agent_queue.put(line)
+                    self.agent_log_handle.write(stamped)
+                self.agent_queue.put(stamped)
         finally:
             code = proc.wait()
             self.agent_queue.put(f"\n=== AGENT EXIT code={code} {now_iso()} ===\n")
@@ -346,7 +370,7 @@ class VisioBridgeConsole(tk.Tk):
                     chunk = f.read()
                     self.com_log_offset = f.tell()
                 if chunk:
-                    self._append_com(chunk)
+                    self._append_com(stamp_lines(chunk))
         except Exception:
             pass
         self.after(900, self._poll_com_log)
