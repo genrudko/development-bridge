@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.5"
+MANAGED_EXTENSION_VERSION = "2026.10.02.6"
 
 
 def install(namespace: dict) -> None:
@@ -252,6 +252,54 @@ def install(namespace: dict) -> None:
                 row.Cell(0).FormulaU = f"{x} mm"
                 row.Cell(1).FormulaU = f"{y} mm"
                 results.append({"shape_id": sid, "shape_name": str(shape.Name)})
+            return ok({"count": len(results), "results": results})
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def batch_read_shape_cells(
+        items_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Batch-read existing ShapeSheet cells from up to 300 shapes."""
+        try:
+            import json
+            items = json.loads(items_json)
+            if not isinstance(items, list) or not items or len(items) > 300:
+                raise ValueError("items_json must be a JSON array with 1..300 items")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            results = []
+            for item in items:
+                sid = int(item["shape_id"])
+                names = item.get("cell_names")
+                if not isinstance(names, list) or not names or len(names) > 100:
+                    raise ValueError(f"cell_names invalid for shape {sid}")
+                shape = page_obj.Shapes.ItemFromID(sid)
+                cells = {}
+                missing = []
+                for raw_name in names:
+                    name = str(raw_name)
+                    try:
+                        exists = bool(shape.CellExistsU(name, 0))
+                    except Exception:
+                        exists = False
+                    if not exists:
+                        missing.append(name)
+                        continue
+                    cell = shape.CellsU(name)
+                    value = {"formula_u": str(cell.FormulaU)}
+                    try: value["result_str_u"] = str(cell.ResultStrU(0))
+                    except Exception: value["result_str_u"] = None
+                    try: value["result_iu"] = float(cell.ResultIU)
+                    except Exception: value["result_iu"] = None
+                    cells[name] = value
+                results.append({
+                    "shape_id": sid,
+                    "shape_name": str(shape.Name),
+                    "cells": cells,
+                    "missing": missing,
+                })
             return ok({"count": len(results), "results": results})
         except Exception as exc:
             return err(exc)
