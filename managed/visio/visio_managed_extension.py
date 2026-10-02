@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import base64
 import uuid
 from pathlib import Path
 
-from mcp.server.mcpserver.utilities.types import Image
+from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.1"
+MANAGED_EXTENSION_VERSION = "2026.10.02.2"
 
 
 def install(namespace: dict) -> None:
@@ -16,7 +17,7 @@ def install(namespace: dict) -> None:
     workspace = Path(namespace["WORKSPACE"]).resolve()
 
     @mcp.tool()
-    def render_page_png(page: str = "", doc_name: str = "") -> Image:
+    def render_page_png(page: str = "", doc_name: str = "") -> types.ImageContent:
         """Render an existing Visio page to PNG and return the actual image bytes.
 
         This is read-only with respect to the Visio document. A short-lived PNG is
@@ -32,7 +33,11 @@ def install(namespace: dict) -> None:
                 raise RuntimeError("Visio page export did not produce a PNG")
             if len(raw) > 32 * 1024 * 1024:
                 raise RuntimeError("Visio page PNG exceeds the 32 MiB visual limit")
-            return Image(data=raw, format="png")
+            return types.ImageContent(
+                type="image",
+                data=base64.b64encode(raw).decode("ascii"),
+                mimeType="image/png",
+            )
         finally:
             try:
                 output.unlink(missing_ok=True)
