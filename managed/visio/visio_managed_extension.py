@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.11"
+MANAGED_EXTENSION_VERSION = "2026.10.02.12"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -313,6 +313,77 @@ def install(namespace: dict) -> None:
             return err(exc)
 
 
+
+
+
+    @mcp.tool()
+    def vtd_connection_control(
+        mode: str,
+        page: str = "",
+        doc_name: str = "",
+        stencil_name: str = "Трансформаторы.vss",
+    ) -> str:
+        """Start or stop the native VTD connection-control VBA from an open VTD stencil.
+
+        This is deliberately narrow: it can invoke only ThisDocument.StartCode or
+        ThisDocument.StopCode, and only from a known VTD/GOST stencil already open
+        in the live Visio instance. No arbitrary VBA text is accepted.
+        """
+        try:
+            action = str(mode).strip().lower()
+            macro = {
+                "start": "ThisDocument.StartCode",
+                "stop": "ThisDocument.StopCode",
+            }.get(action)
+            if macro is None:
+                raise ValueError("mode must be 'start' or 'stop'")
+
+            allowed = {
+                "Генераторы, двигатели.vss",
+                "Дополнительные элементы (Энергосбыт).vss",
+                "Коммутационные аппараты.vss",
+                "Линии, заземление.vss",
+                "Предохранители.vss",
+                "Разрядники, ОПН.vss",
+                "Трансформаторы.vss",
+                "Устройства компенсации, фильтры.vss",
+                "Шины.vss",
+                "Штамп, рамки, текст (ГОСТ).vss",
+            }
+            requested = str(stencil_name).strip()
+            if requested not in allowed:
+                raise ValueError("stencil_name is not an approved VTD stencil")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                page_obj.Application.ActiveWindow.Page = page_obj
+            except Exception:
+                try:
+                    page_obj.Activate()
+                except Exception:
+                    pass
+
+            stencil = None
+            for index in range(1, int(app.Documents.Count) + 1):
+                candidate = app.Documents.Item(index)
+                names = {str(getattr(candidate, "Name", "")), str(getattr(candidate, "NameU", ""))}
+                if requested in names:
+                    stencil = candidate
+                    break
+            if stencil is None:
+                raise KeyError(f"Open VTD stencil not found: {requested}")
+
+            stencil.ExecuteLine(macro)
+            return ok({
+                "mode": action,
+                "macro": macro,
+                "stencil_name": str(stencil.Name),
+                "active_document": str(app.ActiveDocument.Name) if app.ActiveDocument else None,
+                "active_page": str(app.ActivePage.Name) if app.ActivePage else None,
+            })
+        except Exception as exc:
+            return err(exc)
 
     @mcp.tool()
     def batch_glue_endpoints(
