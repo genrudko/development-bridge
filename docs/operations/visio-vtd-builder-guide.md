@@ -263,3 +263,27 @@ If pending notes exist, stop expanding the current plan, read them, adapt the ne
 Do not acknowledge a note merely because it was fetched if the note still requires an action that has not been incorporated.
 
 This side-channel is specifically intended to let the owner say things such as “stop”, “wrong master”, “look at the reference”, or “do not touch this page” while the coordinator is still inside a tool-heavy turn.
+
+## Multi-winding transformer masters
+
+Do not treat a transformer master as fully configured merely because its primary-side voltage class is correct.
+
+For multi-winding VTD masters such as `ТСН2` / voltage transformers / service transformers, verify and explicitly set all electrically meaningful native Shape Data that affects topology and rendered state, including at least:
+
+- primary voltage class (`Prop.u` / U1);
+- secondary voltage class (`Prop.u2` / U2);
+- primary winding connection (`Prop.s1`);
+- secondary winding connection (`Prop.s2`);
+- secondary connection direction (`Prop.p2`) where the master exposes it;
+- winding-color mode (`Prop.c`) where relevant.
+
+Qualified KRU-35 TSN reference example:
+
+```text
+U1 = 35 kV                 -> INDEX(10,...)
+U2 = below 3 kV            -> INDEX(16,...)
+U1 winding = delta         -> INDEX(1,...)
+U2 winding = star          -> INDEX(4,...)
+```
+
+A COM-dropped `ТСН2` can look superficially plausible while retaining default `U2 = undefined` and undefined winding connections. Visual QA alone is not sufficient for this class of error because the symbol can still resemble the intended transformer. For multi-winding apparatus, acceptance must include both rendered-image inspection and Shape Data verification of all voltage/winding fields.
