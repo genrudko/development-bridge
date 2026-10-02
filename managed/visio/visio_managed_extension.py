@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.3"
+MANAGED_EXTENSION_VERSION = "2026.10.02.4"
 
 
 def install(namespace: dict) -> None:
@@ -124,3 +124,47 @@ def install(namespace: dict) -> None:
             })
         except Exception as exc:
             return err(exc)
+
+    @mcp.tool()
+    def set_text_control_position(
+        shape_id: int,
+        x_mm: float,
+        y_mm: float,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Move an existing shape's native text control point (Controls.Row_2) in local mm."""
+        try:
+            x = float(x_mm)
+            y = float(y_mm)
+            if not (-500.0 <= x <= 500.0 and -500.0 <= y <= 500.0):
+                raise ValueError("Text control coordinates must be between -500 and 500 mm")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            shape = page_obj.Shapes.ItemFromID(int(shape_id))
+            section = 9  # visSectionControls
+            if int(shape.RowCount(section)) < 2:
+                raise KeyError("Shape has no Controls.Row_2 text control")
+            row = shape.Section(section).Row(1)
+            before = {
+                "x_formula_u": str(row.Cell(0).FormulaU),
+                "y_formula_u": str(row.Cell(1).FormulaU),
+                "x_result_iu": float(row.Cell(0).ResultIU),
+                "y_result_iu": float(row.Cell(1).ResultIU),
+            }
+            row.Cell(0).FormulaU = f"{x} mm"
+            row.Cell(1).FormulaU = f"{y} mm"
+            after = {
+                "x_formula_u": str(row.Cell(0).FormulaU),
+                "y_formula_u": str(row.Cell(1).FormulaU),
+                "x_result_iu": float(row.Cell(0).ResultIU),
+                "y_result_iu": float(row.Cell(1).ResultIU),
+            }
+            return ok({
+                "shape_id": int(shape.ID),
+                "shape_name": str(shape.Name),
+                "before": before,
+                "after": after,
+            })
+        except Exception as exc:
+            return err(exc)
+
