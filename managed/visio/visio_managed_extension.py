@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.13"
+MANAGED_EXTENSION_VERSION = "2026.10.02.14"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -315,6 +315,35 @@ def install(namespace: dict) -> None:
 
 
 
+
+
+
+    @mcp.tool()
+    def duplicate_page(
+        page: str,
+        new_page_name: str,
+        doc_name: str = "",
+    ) -> str:
+        """Duplicate one existing Visio page natively and assign a bounded new name."""
+        try:
+            name = str(new_page_name).strip()
+            if not name or len(name) > 80:
+                raise ValueError("new_page_name must contain 1..80 characters")
+            source = visio._resolve_page(doc_name, parse_page(page))
+            document = source.Document
+            for index in range(1, int(document.Pages.Count) + 1):
+                if str(document.Pages.Item(index).Name) == name:
+                    raise ValueError(f"Page already exists: {name}")
+            duplicated = source.Duplicate()
+            duplicated.Name = name
+            return ok({
+                "source_page": str(source.Name),
+                "new_page": str(duplicated.Name),
+                "index": int(duplicated.Index),
+                "shape_count": int(duplicated.Shapes.Count),
+            })
+        except Exception as exc:
+            return err(exc)
 
     @mcp.tool()
     def vtd_connection_control(
