@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.25"
+MANAGED_EXTENSION_VERSION = "2026.10.03.26"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -354,6 +354,7 @@ def install(namespace: dict) -> None:
         doc_name: str = "",
         select_result: bool = True,
         glue_items_json: str = "[]",
+        new_cell_id: str = "",
     ) -> str:
         """Duplicate explicit top-level shapes and move the copy by an exact mm offset.
 
@@ -382,6 +383,15 @@ def install(namespace: dict) -> None:
                 raise ValueError("dx_mm and dy_mm must be within +/-2000 mm")
             if abs(dx) < 1e-12 and abs(dy) < 1e-12:
                 raise ValueError("duplicate offset must not be zero")
+
+            cell_id = str(new_cell_id).strip()
+            if cell_id:
+                import re
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", cell_id) is None:
+                    raise ValueError(
+                        "new_cell_id must use 1..128 ASCII letters, digits, dot, "
+                        "underscore, colon or hyphen"
+                    )
 
             page_obj = visio._resolve_page(doc_name, parse_page(page))
             document = page_obj.Document
@@ -565,6 +575,32 @@ def install(namespace: dict) -> None:
                         f"got ({final_dx:.6f}, {final_dy:.6f}) mm"
                     )
 
+                identity_results = []
+                if cell_id:
+                    # visSectionUser = 242, visTagDefault = 0. The row is added
+                    # only to duplicated shape INSTANCES; VTD masters are untouched.
+                    for duplicate_sid in new_ids:
+                        shape = page_obj.Shapes.ItemFromID(duplicate_sid)
+                        if not bool(shape.SectionExists(242, 0)):
+                            shape.AddSection(242)
+                        if not bool(shape.CellExistsU("User.EnergoLogicCellId", 0)):
+                            shape.AddNamedRow(242, "EnergoLogicCellId", 0)
+                        identity_cell = shape.CellsU("User.EnergoLogicCellId")
+                        identity_cell.FormulaU = f'"{cell_id}"'
+                        formula_u = str(identity_cell.FormulaU)
+                        if formula_u.strip().strip('"') != cell_id:
+                            raise RuntimeError(
+                                f"EnergoLogicCellId verification failed for duplicate "
+                                f"shape {duplicate_sid}: {formula_u!r}"
+                            )
+                        identity_results.append({
+                            "shape_id": duplicate_sid,
+                            "user_cell": "User.EnergoLogicCellId",
+                            "cell_id": cell_id,
+                            "formula_u": formula_u,
+                            "verified": True,
+                        })
+
                 glue_results = []
                 for item in glue_items:
                     duplicate_sid = source_to_new[item["source_shape_id"]]
@@ -674,6 +710,8 @@ def install(namespace: dict) -> None:
                 "verified_final_offset_mm": {"x": final_dx, "y": final_dy},
                 "verification_tolerance_mm": tolerance_mm,
                 "source_to_new_shape_ids": {str(key): value for key, value in source_to_new.items()},
+                "new_cell_id": cell_id or None,
+                "identity_results": identity_results,
                 "glue_results": glue_results,
                 "undo_scope": "EnergoLogic: Duplicate Shapes Exact",
                 "undo_scope_owner": "document",
