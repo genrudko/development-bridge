@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.72"
+MANAGED_EXTENSION_VERSION = "2026.10.03.73"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2448,6 +2448,175 @@ namespace EnergoLogicVisioQolCommandBar
                 "launch_path": "physical mouse click on Office CommandBarButton",
                 "physical_ui_event": True,
                 "load_behavior": 0,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def schedule_energologic_commandbar_physical_click_probe(
+        shape_ids_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        # Schedule the fixed physical button click after this COM call has returned.
+        try:
+            import ctypes
+            import ctypes.wintypes
+            import json
+            import os
+            import subprocess
+            import sys
+
+            if os.name != "nt":
+                raise RuntimeError("asynchronous CommandBar click probe is Windows-only")
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids) or any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be unique positive integers")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            for sid in shape_ids:
+                window.Select(page_obj.Shapes.ItemFromID(sid), 2)
+            if int(window.Selection.Count) != len(shape_ids):
+                raise RuntimeError("Could not create the exact source selection")
+
+            addins = app.COMAddIns
+            addins.Update()
+            addin = addins.Item("EnergoLogic.VisioQolCommandBarAddin")
+            if not bool(addin.Connect):
+                raise RuntimeError("EnergoLogic command-bar add-in is not connected")
+
+            bar = app.CommandBars.Item("EnergoLogic QoL Probe")
+            if not bool(bar.Visible):
+                bar.Visible = True
+            button = None
+            for index in range(1, int(bar.Controls.Count) + 1):
+                control = bar.Controls.Item(index)
+                if str(control.Tag) == "EnergoLogic.Duplicate40.UndoProbe":
+                    button = control
+                    break
+            if button is None:
+                raise RuntimeError("EnergoLogic command-bar probe button was not found")
+            if not bool(button.Visible):
+                button.Visible = True
+
+            left = int(button.Left)
+            top = int(button.Top)
+            width = int(button.Width)
+            height = int(button.Height)
+            if width <= 0 or height <= 0:
+                raise RuntimeError(
+                    f"CommandBar button returned invalid bounds: left={left} top={top} "
+                    f"width={width} height={height}"
+                )
+            x = left + width // 2
+            y = top + height // 2
+
+            user32 = ctypes.windll.user32
+            hwnd = int(window.WindowHandle32)
+            if hwnd <= 0:
+                raise RuntimeError("Visio active window returned an invalid HWND")
+            GA_ROOT = 2
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+            cursor = ctypes.wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(cursor))
+            old_x = int(cursor.x)
+            old_y = int(cursor.y)
+            before_count = int(page_obj.Shapes.Count)
+
+            helper = f'''import ctypes,time\ntime.sleep(1.0)\nu=ctypes.windll.user32\nu.ShowWindow({root_hwnd},9)\nu.BringWindowToTop({root_hwnd})\nu.SetForegroundWindow({root_hwnd})\nu.SetActiveWindow({root_hwnd})\ntime.sleep(0.20)\nu.SetCursorPos({x},{y})\ntime.sleep(0.10)\nu.mouse_event(0x0002,0,0,0,0)\nu.mouse_event(0x0004,0,0,0,0)\ntime.sleep(0.15)\nu.SetCursorPos({old_x},{old_y})\n'''
+            creationflags = 0x08000000 | 0x00000008 | 0x00000200
+            proc = subprocess.Popen(
+                [sys.executable, "-c", helper],
+                cwd=str(workspace),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+            return ok({
+                "document": str(page_obj.Document.Name),
+                "page": str(page_obj.Name),
+                "source_shape_ids": shape_ids,
+                "shape_count_before": before_count,
+                "expected_shape_count_after": before_count + len(shape_ids),
+                "button_bounds": {
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                    "click_x": x,
+                    "click_y": y,
+                },
+                "root_window_handle32": root_hwnd,
+                "helper_pid": int(proc.pid),
+                "delay_seconds": 1.0,
+                "scheduled": True,
+                "returns_before_physical_click": True,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def schedule_energologic_physical_undo_probe(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        # Schedule one physical Ctrl+Z after this COM call has returned.
+        try:
+            import ctypes
+            import os
+            import subprocess
+            import sys
+
+            if os.name != "nt":
+                raise RuntimeError("asynchronous physical Undo probe is Windows-only")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            hwnd = int(window.WindowHandle32)
+            if hwnd <= 0:
+                raise RuntimeError("Visio active window returned an invalid HWND")
+            user32 = ctypes.windll.user32
+            GA_ROOT = 2
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+            before_count = int(page_obj.Shapes.Count)
+
+            helper = f'''import ctypes,time\ntime.sleep(1.0)\nu=ctypes.windll.user32\nu.ShowWindow({root_hwnd},9)\nu.BringWindowToTop({root_hwnd})\nu.SetForegroundWindow({root_hwnd})\nu.SetActiveWindow({root_hwnd})\ntime.sleep(0.20)\nu.keybd_event(0x11,0,0,0)\nu.keybd_event(0x5A,0,0,0)\nu.keybd_event(0x5A,0,0x0002,0)\nu.keybd_event(0x11,0,0x0002,0)\n'''
+            creationflags = 0x08000000 | 0x00000008 | 0x00000200
+            proc = subprocess.Popen(
+                [sys.executable, "-c", helper],
+                cwd=str(workspace),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+            return ok({
+                "document": str(page_obj.Document.Name),
+                "page": str(page_obj.Name),
+                "shape_count_before": before_count,
+                "root_window_handle32": root_hwnd,
+                "helper_pid": int(proc.pid),
+                "delay_seconds": 1.0,
+                "keyboard_chord": "Ctrl+Z",
+                "scheduled": True,
+                "returns_before_physical_undo": True,
             })
         except Exception as exc:
             return err(exc)

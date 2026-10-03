@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.72"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.73"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.72"
+    assert arguments["version"] == "2026.10.03.73"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.72"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.73"}'}],
                 "isError": False,
             }
 
@@ -574,3 +574,20 @@ def test_managed_visio_extension_can_physically_click_commandbar_probe():
     assert "MOUSEEVENTF_LEFTDOWN" in source
     assert "MOUSEEVENTF_LEFTUP" in source
     assert '"physical_ui_event": True' in source
+
+
+def test_managed_visio_extension_has_async_physical_commandbar_and_undo_probes():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def schedule_energologic_commandbar_physical_click_probe(" in source
+    assert "def schedule_energologic_physical_undo_probe(" in source
+    assert 'time.sleep(1.0)' in source
+    assert 'subprocess.Popen(' in source
+    assert 'creationflags = 0x08000000 | 0x00000008 | 0x00000200' in source
+    assert '"returns_before_physical_click": True' in source
+    assert '"returns_before_physical_undo": True' in source
+    assert 'u.mouse_event(0x0002' in source
+    assert 'u.keybd_event(0x11' in source
