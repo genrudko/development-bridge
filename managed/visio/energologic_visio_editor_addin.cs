@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.2.4.0")]
+[assembly: AssemblyVersion("0.2.5.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("31E49DF3-9BE0-4FF6-AC9A-D7268E7829AA")]
-    [ProgId("EnergoLogic.VisioEditorAddinV24")]
+    [Guid("1A2F95D4-3B13-499E-B87C-503D2B32F3E6")]
+    [ProgId("EnergoLogic.VisioEditorAddinV25")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -180,7 +180,7 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.2.4"; }
+        public string ApiVersion() { return "0.2.5"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -870,7 +870,8 @@ namespace EnergoLogicVisioEditor
         private void SetCellIdentity(dynamic shape, string cellId)
         {
             const short visSectionUser = 242;
-            if (!(bool)shape.SectionExists(visSectionUser, 0)) shape.AddSection(visSectionUser);
+            object sectionExistsRaw = shape.SectionExists(visSectionUser, 0);
+            if (Convert.ToInt32(sectionExistsRaw, CultureInfo.InvariantCulture) == 0) shape.AddSection(visSectionUser);
             if (!CellExists(shape, "User.EnergoLogicCellId")) shape.AddNamedRow(visSectionUser, "EnergoLogicCellId", 0);
             shape.CellsU("User.EnergoLogicCellId").FormulaU = "\"" + cellId + "\"";
         }
