@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.17"
+MANAGED_EXTENSION_VERSION = "2026.10.03.18"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -353,6 +353,7 @@ def install(namespace: dict) -> None:
         page: str = "",
         doc_name: str = "",
         select_result: bool = True,
+        glue_items_json: str = "[]",
     ) -> str:
         """Duplicate explicit top-level shapes and move the copy by an exact mm offset.
 
@@ -420,6 +421,36 @@ def install(namespace: dict) -> None:
 
             source_shapes = [page_obj.Shapes.ItemFromID(sid) for sid in shape_ids]
             source_snapshot = [shape_snapshot(shape) for shape in source_shapes]
+
+            raw_glue_items = json.loads(glue_items_json)
+            if not isinstance(raw_glue_items, list) or len(raw_glue_items) > 32:
+                raise ValueError("glue_items_json must be a JSON array with at most 32 items")
+            glue_items = []
+            for raw in raw_glue_items:
+                if not isinstance(raw, dict):
+                    raise ValueError("each glue item must be an object")
+                source_sid = int(raw["source_shape_id"])
+                if source_sid not in shape_ids:
+                    raise ValueError(
+                        f"glue source_shape_id {source_sid} is not in duplicated shape IDs"
+                    )
+                endpoint = str(raw["endpoint"]).strip().lower()
+                if endpoint not in {"begin", "end"}:
+                    raise ValueError("glue endpoint must be begin/end")
+                target_sid = int(raw["target_shape_id"])
+                row_number = int(raw["target_connection_row"])
+                if target_sid <= 0:
+                    raise ValueError("glue target_shape_id must be positive")
+                if row_number < 1 or row_number > 256:
+                    raise ValueError("glue target_connection_row must be within 1..256")
+                # Resolve targets before entering the Undo scope so bad IDs fail without mutation.
+                page_obj.Shapes.ItemFromID(target_sid)
+                glue_items.append({
+                    "source_shape_id": source_sid,
+                    "endpoint": endpoint,
+                    "target_shape_id": target_sid,
+                    "target_connection_row": row_number,
+                })
 
             previous_ids = []
             try:
@@ -502,16 +533,83 @@ def install(namespace: dict) -> None:
                 new_snapshot = [
                     shape_snapshot(page_obj.Shapes.ItemFromID(sid)) for sid in new_ids
                 ]
+                source_to_new = dict(zip(shape_ids, new_ids))
+                tolerance_mm = 0.01
+                for source_row, new_row in zip(source_snapshot, new_snapshot):
+                    if source_row["master_name"] != new_row["master_name"]:
+                        raise RuntimeError(
+                            "Visio duplicate selection order changed master correspondence"
+                        )
+                    if source_row["text"] != new_row["text"]:
+                        raise RuntimeError(
+                            "Visio duplicate selection order changed text correspondence"
+                        )
+                    pair_dx = new_row["pin_x_mm"] - source_row["pin_x_mm"]
+                    pair_dy = new_row["pin_y_mm"] - source_row["pin_y_mm"]
+                    if abs(pair_dx - dx) > tolerance_mm or abs(pair_dy - dy) > tolerance_mm:
+                        raise RuntimeError(
+                            "Visio duplicate correspondence verification failed for "
+                            f"source shape {source_row['shape_id']}: "
+                            f"requested ({dx:.6f}, {dy:.6f}) mm, "
+                            f"got ({pair_dx:.6f}, {pair_dy:.6f}) mm"
+                        )
+
                 final_centroid = centroid(new_snapshot)
                 final_dx = final_centroid[0] - source_centroid[0]
                 final_dy = final_centroid[1] - source_centroid[1]
-                tolerance_mm = 0.01
                 if abs(final_dx - dx) > tolerance_mm or abs(final_dy - dy) > tolerance_mm:
                     raise RuntimeError(
                         "Visio exact duplicate verification failed: "
                         f"requested ({dx:.6f}, {dy:.6f}) mm, "
                         f"got ({final_dx:.6f}, {final_dy:.6f}) mm"
                     )
+
+                glue_results = []
+                for item in glue_items:
+                    duplicate_sid = source_to_new[item["source_shape_id"]]
+                    shape = page_obj.Shapes.ItemFromID(duplicate_sid)
+                    target = page_obj.Shapes.ItemFromID(item["target_shape_id"])
+                    endpoint = item["endpoint"]
+                    source_cell_name = "BeginX" if endpoint == "begin" else "EndX"
+                    target_cell_name = f"Connections.X{item['target_connection_row']}"
+                    if not bool(target.CellExistsU(target_cell_name, 0)):
+                        raise KeyError(
+                            f"Target shape {item['target_shape_id']} has no {target_cell_name}"
+                        )
+                    source_cell = shape.CellsU(source_cell_name)
+                    target_cell = target.CellsU(target_cell_name)
+                    source_cell.GlueTo(target_cell)
+
+                    verified = False
+                    connects = shape.Connects
+                    for connect_index in range(1, int(connects.Count) + 1):
+                        connect = connects.Item(connect_index)
+                        try:
+                            to_id = int(connect.ToSheet.ID)
+                            from_name = str(connect.FromCell.NameU)
+                            to_name = str(connect.ToCell.NameU)
+                        except Exception:
+                            continue
+                        if (
+                            to_id == item["target_shape_id"]
+                            and from_name.casefold() == source_cell_name.casefold()
+                            and to_name.casefold() == target_cell_name.casefold()
+                        ):
+                            verified = True
+                            break
+                    if not verified:
+                        raise RuntimeError(
+                            f"Glue verification failed for duplicate shape {duplicate_sid} "
+                            f"to target {item['target_shape_id']} {target_cell_name}"
+                        )
+                    glue_results.append({
+                        "source_shape_id": item["source_shape_id"],
+                        "duplicate_shape_id": duplicate_sid,
+                        "endpoint": endpoint,
+                        "target_shape_id": item["target_shape_id"],
+                        "target_connection_row": item["target_connection_row"],
+                        "verified": True,
+                    })
 
                 app.EndUndoScope(scope_id, True)
                 committed = True
@@ -545,6 +643,8 @@ def install(namespace: dict) -> None:
                 "applied_move_mm": {"x": correction_dx, "y": correction_dy},
                 "verified_final_offset_mm": {"x": final_dx, "y": final_dy},
                 "verification_tolerance_mm": tolerance_mm,
+                "source_to_new_shape_ids": {str(key): value for key, value in source_to_new.items()},
+                "glue_results": glue_results,
                 "undo_scope": "EnergoLogic: Duplicate Shapes Exact",
                 "undo_committed": committed,
                 "result_selected": bool(select_result),
