@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.23"
+MANAGED_EXTENSION_VERSION = "2026.10.03.24"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -736,7 +736,9 @@ def install(namespace: dict) -> None:
                 current_scope_before = int(app.CurrentScope)
             except Exception:
                 current_scope_before = None
-            app.Undo()
+            # Execute the same built-in Visio UI command as Ctrl+Z.
+            # visCmdEditUndo = 1017 and is documented as Automation-safe.
+            app.DoCmd(1017)
             after_count = int(page_obj.Shapes.Count)
             try:
                 current_scope_after = int(app.CurrentScope)
@@ -750,6 +752,8 @@ def install(namespace: dict) -> None:
                 "undo_enabled_after": bool(app.UndoEnabled),
                 "current_scope_before": current_scope_before,
                 "current_scope_after": current_scope_after,
+                "undo_command": "visCmdEditUndo",
+                "undo_command_id": 1017,
                 "undone_once": True,
             })
         except Exception as exc:
