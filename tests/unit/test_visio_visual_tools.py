@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.62"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.63"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.62"
+    assert arguments["version"] == "2026.10.03.63"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.62"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.63"}'}],
                 "isError": False,
             }
 
@@ -386,12 +386,16 @@ def test_managed_visio_extension_has_bounded_classic_com_addin_probe():
     assert 'label=\'EnergoLogic\'' in source
     assert 'keytip=\'Z\'' in source
     assert 'keytip=\'D\'' in source
+    assert "using Extensibility;" in source
+    assert "using Microsoft.Office.Core;" in source
+    assert "public sealed class VisioQolAddin : IDTExtensibility2, IRibbonExtensibility" in source
+    assert "public void OnUndoProbeDuplicate40(IRibbonControl control)" in source
     assert 'app.BeginUndoScope("EnergoLogic: Duplicate Cell Probe")' in source
     assert 'app.DoCmd(1024)' in source
     assert 'duplicate.Move(40.0, 0.0, "mm")' in source
     assert 'visio_addin_key = "Software\\\\Microsoft\\\\Visio\\\\Addins\\\\" + progid' in source
     assert 'stale_office_key = "Software\\\\Microsoft\\\\Office\\\\Visio\\\\Addins\\\\" + progid' in source
-    assert '"LoadBehavior", 3' in source
+    assert '"LoadBehavior", 0' in source
     assert "{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}" in source
     assert "Implemented Categories" in source
     assert "winreg.HKEY_CURRENT_USER" in source
@@ -472,3 +476,22 @@ def test_vsto_probe_searches_visual_studio_interop_and_has_bounded_visio_recover
     assert 'KRU-35_normal_scheme_v2_energologic_qol_host_v1.vsdm' in source
     assert 'Get-Process VISIO' in source
     assert 'VISIO.EXE' in source
+
+
+def test_classic_com_addin_uses_real_microsoft_interop_and_separate_connect():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "Microsoft.VisualStudio.Interop.dll" in source
+    assert "PowerPivot Excel Add-in" in source
+    assert "OFFICE.dll" in source
+    assert 'f"/reference:{extensibility_ref}"' in source
+    assert 'f"/reference:{office_ref}"' in source
+    assert "def connect_energologic_classic_com_addin_probe(" in source
+    assert '"connect_attempted": False' in source
+    assert '"load_behavior_remains": 0' in source
+    assert "public enum ext_ConnectMode" not in source
+    assert "public interface IDTExtensibility2" not in source
+    assert "public interface IRibbonExtensibility" not in source

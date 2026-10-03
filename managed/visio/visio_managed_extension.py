@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.62"
+MANAGED_EXTENSION_VERSION = "2026.10.03.63"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1120,6 +1120,7 @@ def install(namespace: dict) -> None:
         try:
             import json
             import os
+            import shutil
             import subprocess
             import winreg
 
@@ -1134,53 +1135,15 @@ def install(namespace: dict) -> None:
             source = r"""using System;
 using System.Runtime.InteropServices;
 using System.Reflection;
+using Extensibility;
+using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio QoL Add-in")]
-[assembly: AssemblyVersion("0.1.0.0")]
+[assembly: AssemblyVersion("0.2.0.0")]
 
 namespace EnergoLogicVisioQol
 {
-    public enum ext_ConnectMode
-    {
-        ext_cm_AfterStartup = 0,
-        ext_cm_Startup = 1,
-        ext_cm_External = 2,
-        ext_cm_CommandLine = 3,
-        ext_cm_Solution = 4,
-        ext_cm_UISetup = 5
-    }
-
-    public enum ext_DisconnectMode
-    {
-        ext_dm_HostShutdown = 0,
-        ext_dm_UserClosed = 1
-    }
-
-    [ComImport]
-    [Guid("B65AD801-ABAF-11D0-BB8B-00A0C90F2744")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
-    public interface IDTExtensibility2
-    {
-        void OnConnection([MarshalAs(UnmanagedType.IDispatch)] object Application,
-            ext_ConnectMode ConnectMode,
-            [MarshalAs(UnmanagedType.IDispatch)] object AddInInst,
-            ref Array custom);
-        void OnDisconnection(ext_DisconnectMode RemoveMode, ref Array custom);
-        void OnAddInsUpdate(ref Array custom);
-        void OnStartupComplete(ref Array custom);
-        void OnBeginShutdown(ref Array custom);
-    }
-
-    [ComImport]
-    [Guid("000C0396-0000-0000-C000-000000000046")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
-    public interface IRibbonExtensibility
-    {
-        [return: MarshalAs(UnmanagedType.BStr)]
-        string GetCustomUI([MarshalAs(UnmanagedType.BStr)] string RibbonID);
-    }
-
     [ComVisible(true)]
     [Guid("7D679776-1D6B-4D0D-9123-E3E4FB21F806")]
     [ProgId("EnergoLogic.VisioQolAddin")]
@@ -1217,7 +1180,7 @@ namespace EnergoLogicVisioQol
 </customUI>";
         }
 
-        public void OnUndoProbeDuplicate40(object control)
+        public void OnUndoProbeDuplicate40(IRibbonControl control)
         {
             if (_application == null)
                 throw new InvalidOperationException("Visio application is not connected");
@@ -1233,8 +1196,6 @@ namespace EnergoLogicVisioQol
             bool commit = false;
             try
             {
-                // visCmdObjectDuplicate = 1024. Using the native command from the
-                // in-process Ribbon callback gives Visio normal user-command context.
                 app.DoCmd(1024);
                 dynamic duplicate = window.Selection;
                 if ((int)duplicate.Count != sourceCount)
@@ -1252,6 +1213,17 @@ namespace EnergoLogicVisioQol
 """
             source_path.write_text(source, encoding="utf-8")
 
+            extensibility_ref = Path(
+                r"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\PublicAssemblies\Microsoft.VisualStudio.Interop.dll"
+            )
+            office_ref = Path(
+                r"C:\Program Files\Microsoft Office\root\Office16\ADDINS\PowerPivot Excel Add-in\OFFICE.dll"
+            )
+            for reference in (extensibility_ref, office_ref):
+                if not reference.is_file():
+                    raise FileNotFoundError(f"required Microsoft interop assembly not found: {reference}")
+                shutil.copy2(reference, build_dir / reference.name)
+
             csc = Path(r"C:\WINDOWS\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
             if not csc.is_file():
                 raise FileNotFoundError(f"C# compiler not found: {csc}")
@@ -1262,6 +1234,8 @@ namespace EnergoLogicVisioQol
                     "/target:library",
                     "/platform:x64",
                     "/optimize+",
+                    f"/reference:{extensibility_ref}",
+                    f"/reference:{office_ref}",
                     f"/out:{dll_path}",
                     str(source_path),
                 ],
@@ -1279,7 +1253,7 @@ namespace EnergoLogicVisioQol
             clsid = "{7D679776-1D6B-4D0D-9123-E3E4FB21F806}"
             progid = "EnergoLogic.VisioQolAddin"
             class_name = "EnergoLogicVisioQol.VisioQolAddin"
-            assembly_name = "EnergoLogic.VisioQolAddin, Version=0.1.0.0, Culture=neutral, PublicKeyToken=null"
+            assembly_name = "EnergoLogic.VisioQolAddin, Version=0.2.0.0, Culture=neutral, PublicKeyToken=null"
             runtime_version = "v4.0.30319"
             codebase = dll_path.resolve().as_uri()
 
@@ -1318,7 +1292,7 @@ namespace EnergoLogicVisioQol
             visio_addin_key = "Software\\Microsoft\\Visio\\Addins\\" + progid
             set_string(winreg.HKEY_CURRENT_USER, visio_addin_key, "FriendlyName", "EnergoLogic Visio QoL")
             set_string(winreg.HKEY_CURRENT_USER, visio_addin_key, "Description", "EnergoLogic engineering QoL commands for Visio")
-            set_dword(winreg.HKEY_CURRENT_USER, visio_addin_key, "LoadBehavior", 3)
+            set_dword(winreg.HKEY_CURRENT_USER, visio_addin_key, "LoadBehavior", 0)
 
             # Clean the stale qualification key written by <= 2026.10.03.59.
             stale_office_key = "Software\\Microsoft\\Office\\Visio\\Addins\\" + progid
@@ -1332,18 +1306,20 @@ namespace EnergoLogicVisioQol
             except FileNotFoundError:
                 pass
 
-            connected = False
-            connect_error = None
+            listed_in_com_addins = False
+            discovery_error = None
             try:
                 page_obj = visio._resolve_page(doc_name, parse_page(page))
                 app = page_obj.Application
                 addins = app.COMAddIns
                 addins.Update()
-                addin = addins.Item(progid)
-                addin.Connect = True
-                connected = bool(addin.Connect)
+                for index in range(1, int(addins.Count) + 1):
+                    item = addins.Item(index)
+                    if str(item.ProgId).casefold() == progid.casefold():
+                        listed_in_com_addins = True
+                        break
             except Exception as exc:
-                connect_error = f"{type(exc).__name__}: {exc}"[:1000]
+                discovery_error = f"{type(exc).__name__}: {exc}"[:1000]
 
             return ok({
                 "progid": progid,
@@ -1354,14 +1330,42 @@ namespace EnergoLogicVisioQol
                 "compile_stdout": compile_result.stdout[-1000:],
                 "compile_stderr": compile_result.stderr[-1000:],
                 "hkcu_only": True,
-                "load_behavior": 3,
+                "load_behavior": 0,
                 "visio_addin_registry_key": visio_addin_key,
                 "office_addin_category": office_addin_category,
-                "connected": connected,
-                "connect_error": connect_error,
+                "extensibility_reference": str(extensibility_ref),
+                "office_reference": str(office_ref),
+                "listed_in_com_addins": listed_in_com_addins,
+                "connect_attempted": False,
+                "discovery_error": discovery_error,
                 "ribbon_tab": "EnergoLogic",
                 "tab_keytip": "Z",
                 "button_keytip": "D",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def connect_energologic_classic_com_addin_probe(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Connect only the fixed registered probe; registration stays non-autoloading."""
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            addins = app.COMAddIns
+            addins.Update()
+            addin = addins.Item("EnergoLogic.VisioQolAddin")
+            before = bool(addin.Connect)
+            if not before:
+                addin.Connect = True
+            after = bool(addin.Connect)
+            return ok({
+                "progid": "EnergoLogic.VisioQolAddin",
+                "connected_before": before,
+                "connected_after": after,
+                "load_behavior_remains": 0,
             })
         except Exception as exc:
             return err(exc)
