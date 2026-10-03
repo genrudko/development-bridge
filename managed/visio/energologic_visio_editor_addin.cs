@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.12.0")]
+[assembly: AssemblyVersion("0.3.13.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -90,12 +90,13 @@ namespace EnergoLogicVisioEditor
         string ApiNudgeDown();
         string ApiRenumberCell(string newDesignation);
         string ApiOperationStatus();
+        string ApiCompletePendingTopology();
         string ApiVersion();
     }
 
     [ComVisible(true)]
-    [Guid("2F8B22F0-0A1B-4E30-B850-09B1F7197D3D")]
-    [ProgId("EnergoLogic.VisioEditorAddinV312")]
+    [Guid("1A6AF8E1-2576-4EF3-96EC-676904B6DA57")]
+    [ProgId("EnergoLogic.VisioEditorAddinV313")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -110,6 +111,11 @@ namespace EnergoLogicVisioEditor
         private string _asyncToken = "";
         private string _asyncState = "idle";
         private string _asyncMessage = "EnergoLogic готов.";
+        private string _pendingDocumentName = "";
+        private string _pendingPageNameU = "";
+        private List<CellMoveState> _pendingStates = null;
+        private List<int> _pendingFinalSelection = null;
+        private string _pendingSuccessPrefix = "";
         private readonly Regex _glueRegex = new Regex(
             @"(?<target>[^!(),]+)!Connections(?:\.X(?<rowx>\d+)|\.(?<row>\d+)\.X)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -231,7 +237,8 @@ namespace EnergoLogicVisioEditor
             lock (_asyncSync)
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
-        public string ApiVersion() { return "0.3.12"; }
+        public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
+        public string ApiVersion() { return "0.3.13"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1153,54 +1160,81 @@ namespace EnergoLogicVisioEditor
                 _asyncPending = true;
                 _asyncToken = token;
                 _asyncState = "pending";
-                _asyncMessage = "Завершается восстановление электрических связей…";
+                _asyncMessage = "Геометрия готова. Ожидается завершение электрических связей…";
+                _pendingDocumentName = documentName;
+                _pendingPageNameU = pageNameU;
+                _pendingStates = new List<CellMoveState>(states);
+                _pendingFinalSelection = new List<int>(finalSelection);
+                _pendingSuccessPrefix = successPrefix;
+            }
+            return "⏳ Геометрия выполнена. EnergoLogic завершит электрические связи следующим шагом… token=" + token;
+        }
+
+        internal string CompletePendingTopology()
+        {
+            string documentName;
+            string pageNameU;
+            List<CellMoveState> states;
+            List<int> finalSelection;
+            string successPrefix;
+            string token;
+            lock (_asyncSync)
+            {
+                if (!_asyncPending || _pendingStates == null)
+                    return "✓ Нет незавершённых операций EnergoLogic.";
+                _asyncState = "completing";
+                _asyncMessage = "Восстанавливаются и проверяются электрические связи…";
+                documentName = _pendingDocumentName;
+                pageNameU = _pendingPageNameU;
+                states = new List<CellMoveState>(_pendingStates);
+                finalSelection = new List<int>(_pendingFinalSelection ?? new List<int>());
+                successPrefix = _pendingSuccessPrefix;
+                token = _asyncToken;
             }
 
-            if (_form == null || _form.IsDisposed) ShowPanel();
-            _form.BeginInvoke((MethodInvoker)delegate
+            string finalMessage;
+            string finalState;
+            try
             {
-                string finalMessage;
-                string finalState;
+                dynamic livePage = ResolveLivePage(documentName, pageNameU);
+                SettleVisioAfterGeometryChange();
+                int restoredInternal = 0;
+                foreach (CellMoveState state in states)
+                    restoredInternal += RestoreCellTopologyAfterMove(livePage, state);
+                VerifyMovedCellsComplete(livePage, states);
+                SelectIds(livePage, finalSelection);
+                finalState = "success";
+                finalMessage = successPrefix + "; внутренних Glue восстановлено: " + restoredInternal + ".";
+            }
+            catch (Exception topologyError)
+            {
+                string compensation;
                 try
                 {
-                    // Never carry a Visio COM Page object across the deferred UI boundary.
-                    // Resolve a fresh RCW after the originating API call has returned.
                     dynamic livePage = ResolveLivePage(documentName, pageNameU);
-                    SettleVisioAfterGeometryChange();
-                    int restoredInternal = 0;
-                    foreach (CellMoveState state in states)
-                        restoredInternal += RestoreCellTopologyAfterMove(livePage, state);
-                    VerifyMovedCellsComplete(livePage, states);
-                    SelectIds(livePage, finalSelection);
-                    finalState = "success";
-                    finalMessage = successPrefix + "; внутренних Glue восстановлено: " + restoredInternal + ".";
+                    compensation = CompensateCellMoves(livePage, states);
                 }
-                catch (Exception topologyError)
+                catch (Exception compensationError)
                 {
-                    string compensation;
-                    try
-                    {
-                        dynamic livePage = ResolveLivePage(documentName, pageNameU);
-                        compensation = CompensateCellMoves(livePage, states);
-                    }
-                    catch (Exception compensationError)
-                    {
-                        compensation = "ВНИМАНИЕ: компенсация не выполнена: " + compensationError.Message + ".";
-                    }
-                    finalState = compensation.StartsWith("Исходная", StringComparison.Ordinal) ? "failed_rolled_back" : "failed_needs_attention";
-                    finalMessage = "⚠ Не удалось завершить электрические связи. " + compensation + " Причина: " + topologyError.Message;
+                    compensation = "ВНИМАНИЕ: компенсация не выполнена: " + compensationError.Message + ".";
                 }
+                finalState = compensation.StartsWith("Исходная", StringComparison.Ordinal) ? "failed_rolled_back" : "failed_needs_attention";
+                finalMessage = "⚠ Не удалось завершить электрические связи. " + compensation + " Причина: " + topologyError.Message;
+            }
 
-                lock (_asyncSync)
-                {
-                    _asyncPending = false;
-                    _asyncState = finalState;
-                    _asyncMessage = finalMessage;
-                }
-                try { if (_form != null && !_form.IsDisposed) _form.SetStatus(finalMessage); } catch { }
-            });
-
-            return "⏳ Геометрия выполнена. EnergoLogic завершает и проверяет электрические связи… token=" + token;
+            lock (_asyncSync)
+            {
+                _asyncPending = false;
+                _asyncState = finalState;
+                _asyncMessage = finalMessage;
+                _pendingDocumentName = "";
+                _pendingPageNameU = "";
+                _pendingStates = null;
+                _pendingFinalSelection = null;
+                _pendingSuccessPrefix = "";
+            }
+            try { if (_form != null && !_form.IsDisposed) _form.SetStatus(finalMessage); } catch { }
+            return "state=" + finalState + "; token=" + token + "; message=" + finalMessage;
         }
 
         private dynamic ResolveLivePage(string documentName, string pageNameU)
@@ -1211,8 +1245,7 @@ namespace EnergoLogicVisioEditor
             {
                 dynamic candidate = app.Documents.Item(documentIndex);
                 string candidateName = "";
-                try { candidateName = Convert.ToString(candidate.Name, CultureInfo.InvariantCulture) ?? ""; }
-                catch { }
+                try { candidateName = Convert.ToString(candidate.Name, CultureInfo.InvariantCulture) ?? ""; } catch { }
                 if (String.Equals(candidateName, documentName, StringComparison.OrdinalIgnoreCase))
                 {
                     foundDocument = candidate;
@@ -1228,10 +1261,8 @@ namespace EnergoLogicVisioEditor
                 dynamic candidatePage = pages.Item(pageIndex);
                 string candidateNameU = "";
                 string candidateName = "";
-                try { candidateNameU = Convert.ToString(candidatePage.NameU, CultureInfo.InvariantCulture) ?? ""; }
-                catch { }
-                try { candidateName = Convert.ToString(candidatePage.Name, CultureInfo.InvariantCulture) ?? ""; }
-                catch { }
+                try { candidateNameU = Convert.ToString(candidatePage.NameU, CultureInfo.InvariantCulture) ?? ""; } catch { }
+                try { candidateName = Convert.ToString(candidatePage.Name, CultureInfo.InvariantCulture) ?? ""; } catch { }
                 if (String.Equals(candidateNameU, pageNameU, StringComparison.OrdinalIgnoreCase) ||
                     String.Equals(candidateName, pageNameU, StringComparison.OrdinalIgnoreCase))
                     return candidatePage;
@@ -1549,6 +1580,7 @@ namespace EnergoLogicVisioEditor
         private readonly NumericUpDown _ty;
         private readonly NumericUpDown _pitch;
         private readonly TextBox _renumber;
+        private Timer _topologyTimer;
 
         public EditorForm(Connect addin)
         {
@@ -1604,7 +1636,7 @@ namespace EnergoLogicVisioEditor
             geo.Controls.Add(bc,0,5); geo.SetColumnSpan(bc,2); geo.Controls.Add(bm,2,5); geo.SetColumnSpan(bm,2);
 
             _pitch=Num(1,500,40); geo.Controls.Add(new Label{Text="Шаг ячеек, мм",AutoSize=true},0,6); geo.Controls.Add(_pitch,1,6);
-            Button measure=Button("Измерить шаг",(s,e)=>RunPitchMeasure()); Button dist=Button("Распределить",(s,e)=>Run(()=>_addin.DistributePitch((double)_pitch.Value)));
+            Button measure=Button("Измерить шаг",(s,e)=>RunPitchMeasure()); Button dist=Button("Распределить",(s,e)=>RunDistributePitch());
             geo.Controls.Add(measure,2,6); geo.Controls.Add(dist,3,6);
             Button nx=Button("← 1 мм",(s,e)=>Run(()=>_addin.ExactOffset(-1,0)));
             Button px=Button("1 мм →",(s,e)=>Run(()=>_addin.ExactOffset(1,0)));
@@ -1630,6 +1662,17 @@ namespace EnergoLogicVisioEditor
             Controls.Add(tabs);
         }
 
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _topologyTimer != null)
+            {
+                _topologyTimer.Stop();
+                _topologyTimer.Dispose();
+                _topologyTimer = null;
+            }
+            base.Dispose(disposing);
+        }
+
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (e.CloseReason == CloseReason.UserClosing) { e.Cancel=true; Hide(); return; }
@@ -1650,6 +1693,37 @@ namespace EnergoLogicVisioEditor
         {
             try { _status.Text = action(); }
             catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
+        }
+
+        private void RunDistributePitch()
+        {
+            try
+            {
+                string result = _addin.DistributePitch((double)_pitch.Value);
+                _status.Text = result;
+                if (result.StartsWith("⏳", StringComparison.Ordinal))
+                    StartTopologyCompletionTimer();
+            }
+            catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
+        }
+
+        private void StartTopologyCompletionTimer()
+        {
+            if (_topologyTimer != null)
+            {
+                _topologyTimer.Stop();
+                _topologyTimer.Dispose();
+            }
+            _topologyTimer = new Timer { Interval = 350 };
+            _topologyTimer.Tick += delegate
+            {
+                Timer timer = _topologyTimer;
+                _topologyTimer = null;
+                if (timer != null) { timer.Stop(); timer.Dispose(); }
+                try { _status.Text = _addin.CompletePendingTopology(); }
+                catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
+            };
+            _topologyTimer.Start();
         }
 
         private void RunPitchMeasure()
