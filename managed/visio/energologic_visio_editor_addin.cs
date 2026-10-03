@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.1.0.0")]
+[assembly: AssemblyVersion("0.2.0.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -44,13 +44,39 @@ namespace EnergoLogicVisioEditor
         public double DistanceMm;
     }
 
+
     [ComVisible(true)]
-    [Guid("E31D0F45-8A5A-47D7-A4A3-CFB7F0C8B731")]
-    [ProgId("EnergoLogic.VisioEditorAddin")]
+    [Guid("B53E829D-123A-4A17-8F8D-4D124DA0D731")]
+    [InterfaceType(ComInterfaceType.InterfaceIsDual)]
+    public interface IEnergoLogicEditorApi
+    {
+        string ApiDuplicateLeft();
+        string ApiDuplicateRight();
+        string ApiMoveLeft();
+        string ApiMoveRight();
+        string ApiSelectCell();
+        string ApiRepairGluePreview();
+        string ApiRepairGlueApply();
+        string ApiDoctor();
+        string ApiShowPanel();
+        string ApiExactOffset(double dxMm, double dyMm);
+        string ApiAlignX();
+        string ApiAlignY();
+        string ApiBaseCopy(double bx, double by, double tx, double ty);
+        string ApiBaseMove(double bx, double by, double tx, double ty);
+        string ApiMeasurePitch();
+        string ApiDistributePitch(double pitchMm);
+        string ApiVersion();
+    }
+
+    [ComVisible(true)]
+    [Guid("9C760F65-31D1-49B5-A53A-A13580D67E92")]
+    [ProgId("EnergoLogic.VisioEditorAddinV2")]
     [ClassInterface(ClassInterfaceType.None)]
-    public sealed class Connect : IDTExtensibility2
+    public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
         private object _application;
+        private object _addInInstance;
         private EditorForm _form;
         private CommandBar _bar;
         private CommandBarButton _toggleButton;
@@ -62,6 +88,8 @@ namespace EnergoLogicVisioEditor
         public void OnConnection(object Application, ext_ConnectMode ConnectMode, object AddInInst, ref Array custom)
         {
             _application = Application;
+            _addInInstance = AddInInst;
+            try { dynamic host = AddInInst; host.Object = this; } catch { }
             InstallToggleButton();
             ShowPanel();
         }
@@ -72,6 +100,8 @@ namespace EnergoLogicVisioEditor
             _form = null;
             _toggleButton = null;
             _bar = null;
+            try { if (_addInInstance != null) { dynamic host = _addInInstance; host.Object = null; } } catch { }
+            _addInInstance = null;
             _application = null;
         }
 
@@ -133,6 +163,24 @@ namespace EnergoLogicVisioEditor
             _form.BringToFront();
             _form.Activate();
         }
+
+        public string ApiDuplicateLeft() { return DuplicateCell(-1); }
+        public string ApiDuplicateRight() { return DuplicateCell(1); }
+        public string ApiMoveLeft() { return MoveCell(-1); }
+        public string ApiMoveRight() { return MoveCell(1); }
+        public string ApiSelectCell() { return SelectCell(); }
+        public string ApiRepairGluePreview() { return RepairGlue(true); }
+        public string ApiRepairGlueApply() { return RepairGlue(false); }
+        public string ApiDoctor() { return Doctor(); }
+        public string ApiShowPanel() { ShowPanel(); return "✓ Панель EnergoLogic показана."; }
+        public string ApiExactOffset(double dxMm, double dyMm) { return ExactOffset(dxMm, dyMm); }
+        public string ApiAlignX() { return Align("x"); }
+        public string ApiAlignY() { return Align("y"); }
+        public string ApiBaseCopy(double bx, double by, double tx, double ty) { return BasePointTransform(true, bx, by, tx, ty); }
+        public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
+        public string ApiMeasurePitch() { return MeasurePitch(); }
+        public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
+        public string ApiVersion() { return "0.2.0"; }
 
         internal string DuplicateCell(int direction)
         {

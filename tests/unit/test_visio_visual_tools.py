@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.82"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.83"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.82"
+    assert arguments["version"] == "2026.10.03.83"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.82"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.83"}'}],
                 "isError": False,
             }
 
@@ -272,3 +272,21 @@ def test_managed_visio_extension_has_full_energologic_editor_ui_installer():
     assert "EnergoLogic.VisioEditorAddin" in source
     assert "modeless WinForms panel + Visio CommandBar toggle" in source
     assert '"LoadBehavior", 0' in source
+
+
+def test_energologic_editor_v2_exposes_bounded_com_api():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV2")' in cs
+    assert 'AssemblyVersion("0.2.0.0")' in cs
+    assert "public interface IEnergoLogicEditorApi" in cs
+    assert "ApiDuplicateRight" in cs
+    assert "ApiRepairGlueApply" in cs
+    assert "ApiShowPanel" in cs
+    assert "host.Object = this" in cs
+    assert "def invoke_energologic_editor_api(" in ext
+    assert 'addins.Item("EnergoLogic.VisioEditorAddinV2")' in ext
+    assert '"duplicate_right": "ApiDuplicateRight"' in ext
+    assert '"repair_glue_apply": "ApiRepairGlueApply"' in ext
