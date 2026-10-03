@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.27"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.28"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.27"
+    assert arguments["version"] == "2026.10.03.28"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.27"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.28"}'}],
                 "isError": False,
             }
 
@@ -189,8 +189,7 @@ def test_managed_visio_extension_has_transactional_exact_duplicate_tool():
     ).read_text()
 
     assert "def duplicate_shapes_exact(" in source
-    assert "selected.Duplicate()" in source
-    assert "if duplicated is None:" in source
+    assert "app.DoCmd(1024)" in source
     assert "duplicated = window.Selection" in source
     assert 'duplicated.Move(correction_dx, correction_dy, "mm")' in source
     assert "native_duplicate_offset_mm" in source
@@ -211,10 +210,11 @@ def test_managed_visio_extension_has_transactional_exact_duplicate_tool():
     assert "post_commit_connects_verification_required" in source
     assert "acceptable_target_names" in source
     assert "Connections.{expected_row}.X" in source
-    assert 'app.BeginUndoScope("EnergoLogic: Duplicate Shapes Exact")' in source
-    assert "app.EndUndoScope(scope_id, True)" in source
-    assert "app.EndUndoScope(scope_id, False)" in source
-    assert '"undo_scope_owner": "application"' in source
+    assert "app.DoCmd(1024)" in source
+    assert "app.DoCmd(1017)" in source
+    assert "preexisting_shape_ids" in source
+    assert '"undo_strategy": "visCmdUFEditDuplicate"' in source
+    assert '"single_user_undo_expected": True' in source
     assert "1..100 items" in source
     assert "+/-2000 mm" in source
 

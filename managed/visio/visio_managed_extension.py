@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.27"
+MANAGED_EXTENSION_VERSION = "2026.10.03.28"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -817,18 +817,23 @@ def install(namespace: dict) -> None:
                     f"Visio selected {int(selected.Count)} shapes, expected {len(shape_ids)}"
                 )
 
-            scope_id = int(app.BeginUndoScope("EnergoLogic: Duplicate Shapes Exact"))
+            shape_count_before = int(page_obj.Shapes.Count)
+            preexisting_shape_ids = {
+                int(page_obj.Shapes.Item(index).ID)
+                for index in range(1, shape_count_before + 1)
+            }
+            ui_duplicate_created = False
             committed = False
             try:
-                duplicated = selected.Duplicate()
-                # Some real Visio/pywin32 combinations perform the duplicate but
-                # return None despite the documented Selection return value. In
-                # that case Visio selects the newly-created duplicate set, so use
-                # the active window selection as the authoritative result.
+                # Use the actual Visio UI Duplicate command (visCmdUFEditDuplicate=1024).
+                # Direct COM mutations on this workstation do not create user-facing
+                # undo units, while the built-in UI command does. Post-processing the
+                # selected duplicate therefore keeps Ctrl+Z pointed at the duplicate.
+                app.DoCmd(1024)
+                ui_duplicate_created = True
+                duplicated = window.Selection
                 if duplicated is None:
-                    duplicated = window.Selection
-                if duplicated is None:
-                    raise RuntimeError("Visio Duplicate produced no result selection")
+                    raise RuntimeError("Visio UI Duplicate produced no result selection")
                 if int(duplicated.Count) != len(shape_ids):
                     raise RuntimeError(
                         f"Visio duplicated {int(duplicated.Count)} shapes, expected {len(shape_ids)}"
@@ -1011,20 +1016,40 @@ def install(namespace: dict) -> None:
                         "post_commit_connects_verification_required": True,
                     })
 
-                app.EndUndoScope(scope_id, True)
                 committed = True
             except Exception:
-                try:
-                    app.EndUndoScope(scope_id, False)
-                except Exception:
-                    pass
+                rollback_verified = False
+                if ui_duplicate_created:
+                    try:
+                        app.DoCmd(1017)  # visCmdEditUndo
+                        rollback_verified = int(page_obj.Shapes.Count) == shape_count_before
+                    except Exception:
+                        rollback_verified = False
+                    if not rollback_verified:
+                        # Last-resort bounded cleanup. Only shapes created during this
+                        # synchronous call are eligible; source/existing shapes are never deleted.
+                        current_ids = [
+                            int(page_obj.Shapes.Item(index).ID)
+                            for index in range(1, int(page_obj.Shapes.Count) + 1)
+                        ]
+                        for sid in reversed(current_ids):
+                            if sid not in preexisting_shape_ids:
+                                try:
+                                    page_obj.Shapes.ItemFromID(sid).Delete()
+                                except Exception:
+                                    pass
+                        rollback_verified = int(page_obj.Shapes.Count) == shape_count_before
+                    if not rollback_verified:
+                        raise RuntimeError(
+                            "Duplicate failed and automatic rollback could not restore shape count"
+                        )
                 try:
                     select_ids(previous_ids)
                 except Exception:
                     pass
                 raise
 
-            # Selection.Duplicate already leaves the duplicate selected. Avoid a
+            # The UI Duplicate command already leaves the duplicate selected. Avoid a
             # post-scope Select/Deselect operation so the operator's next Ctrl+Z
             # targets the engineering transaction itself.
             if not bool(select_result):
@@ -1048,8 +1073,9 @@ def install(namespace: dict) -> None:
                 "new_cell_id": cell_id or None,
                 "identity_results": identity_results,
                 "glue_results": glue_results,
-                "undo_scope": "EnergoLogic: Duplicate Shapes Exact",
-                "undo_scope_owner": "application",
+                "undo_strategy": "visCmdUFEditDuplicate",
+                "undo_command_id": 1024,
+                "single_user_undo_expected": True,
                 "undo_committed": committed,
                 "result_selected": bool(select_result),
                 "mapping_basis": "selection-order; qualify before identity-sensitive use",
