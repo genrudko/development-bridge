@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.6.0")]
+[assembly: AssemblyVersion("0.3.7.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -29,6 +29,15 @@ namespace EnergoLogicVisioEditor
         public string Endpoint;
         public int TargetId;
         public int Row;
+    }
+
+    internal sealed class CellMoveState
+    {
+        public CellInfo Cell;
+        public int TargetTerminalId;
+        public double Dx;
+        public double Dy;
+        public List<GlueEdgeInfo> InternalGlue = new List<GlueEdgeInfo>();
     }
 
     internal sealed class CellInfo
@@ -84,8 +93,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("81705A73-9C25-4E72-84A8-F58E4C818AAF")]
-    [ProgId("EnergoLogic.VisioEditorAddinV36")]
+    [Guid("3D58EA6C-A51F-41B9-A46D-BF0FB3BA7C5A")]
+    [ProgId("EnergoLogic.VisioEditorAddinV37")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -203,7 +212,7 @@ namespace EnergoLogicVisioEditor
         public string ApiNudgeUp() { return ExactOffset(0.0, 1.0); }
         public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
         public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
-        public string ApiVersion() { return "0.3.6"; }
+        public string ApiVersion() { return "0.3.7"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -289,27 +298,50 @@ namespace EnergoLogicVisioEditor
             EnsureTerminalFree(page, (int)targetTerminal.ID, own);
             double dx = GetMm(targetTerminal, "PinX") - GetMm(sourceTerminal, "PinX");
             double dy = GetMm(targetTerminal, "PinY") - GetMm(sourceTerminal, "PinY");
-            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
+            CellMoveState state = new CellMoveState {
+                Cell = cell,
+                TargetTerminalId = (int)targetTerminal.ID,
+                Dx = dx,
+                Dy = dy,
+                InternalGlue = CaptureInternalGlue(page, cell.MemberIds)
+            };
 
             int scope = (int)app.BeginUndoScope(direction > 0 ? "EnergoLogic: Переместить ячейку вправо" : "EnergoLogic: Переместить ячейку влево");
-            bool commit = false;
+            bool geometryCommit = false;
             try
             {
                 dynamic anchor = page.Shapes.ItemFromID(cell.AnchorId);
                 DetachEndpoint(anchor, cell.Endpoint);
                 SelectIds(page, cell.MemberIds);
                 app.ActiveWindow.Selection.Move(dx, dy, "mm");
-                SettleVisioAfterGeometryChange();
-                int restoredInternal = RestoreInternalGlue(page, internalGlue);
-                GlueEndpoint(anchor, cell.Endpoint, targetTerminal, cell.ConnectionRow);
-                VerifyGlue(anchor, cell.Endpoint, (int)targetTerminal.ID, cell.ConnectionRow);
-                VerifyInternalGlue(page, internalGlue);
-                commit = true;
+                geometryCommit = true;
+            }
+            finally
+            {
+                app.EndUndoScope(scope, geometryCommit);
+            }
+
+            if (!geometryCommit)
+                throw new InvalidOperationException("Перемещение ячейки не было завершено");
+
+            SettleVisioAfterGeometryChange();
+            try
+            {
+                int restoredInternal = RestoreCellTopologyAfterMove(page, state);
+                SelectIds(page, cell.MemberIds);
                 return String.Format(CultureInfo.CurrentCulture,
                     "✓ Ячейка перемещена {0}. Место {1} → {2}; сдвиг {3:0.00} мм; внутренние Glue проверены, восстановлено: {4}.",
                     direction > 0 ? "вправо" : "влево", cell.Slot, GetSlot(targetTerminal), dx, restoredInternal);
             }
-            finally { app.EndUndoScope(scope, commit); }
+            catch (Exception topologyError)
+            {
+                string compensation = CompensateCellMoves(page, new List<CellMoveState> { state });
+                throw new InvalidOperationException(
+                    "Перемещение отменено: не удалось восстановить электрические связи после геометрического сдвига. " +
+                    compensation + " Причина: " + topologyError.Message,
+                    topologyError
+                );
+            }
         }
 
         internal string SelectCell()
@@ -557,13 +589,11 @@ namespace EnergoLogicVisioEditor
             int busId = cells[0].BusId;
             if (cells.Any(c => c.BusId != busId)) throw new InvalidOperationException("Все выбранные ячейки должны быть на одной шине");
             int startSlot = cells.Min(c => c.Slot);
-            List<Tuple<CellInfo, object>> plan = new List<Tuple<CellInfo, object>>();
-            Dictionary<int, List<GlueEdgeInfo>> internalGlueByAnchor = new Dictionary<int, List<GlueEdgeInfo>>();
-            foreach (CellInfo cell in cells)
-                internalGlueByAnchor[cell.AnchorId] = CaptureInternalGlue(page, cell.MemberIds);
+            List<CellMoveState> plan = new List<CellMoveState>();
             HashSet<int> selectedMembers = new HashSet<int>(cells.SelectMany(c => c.MemberIds));
             for (int i = 0; i < cells.Count; i++)
             {
+                CellInfo cell = cells[i];
                 dynamic target = GetBusTerminalBySlot(page, busId, startSlot + i);
                 if (i > 0)
                 {
@@ -573,36 +603,64 @@ namespace EnergoLogicVisioEditor
                         throw new InvalidOperationException(String.Format(CultureInfo.CurrentCulture, "Шина имеет шаг {0:0.###} мм, а задан {1:0.###} мм", actual, pitch));
                 }
                 EnsureTerminalFree(page, (int)target.ID, selectedMembers);
-                plan.Add(new Tuple<CellInfo, object>(cells[i], (object)target));
+                if ((int)target.ID == cell.BusTerminalId) continue;
+                dynamic sourceTerminal = page.Shapes.ItemFromID(cell.BusTerminalId);
+                plan.Add(new CellMoveState {
+                    Cell = cell,
+                    TargetTerminalId = (int)target.ID,
+                    Dx = GetMm(target, "PinX") - GetMm(sourceTerminal, "PinX"),
+                    Dy = GetMm(target, "PinY") - GetMm(sourceTerminal, "PinY"),
+                    InternalGlue = CaptureInternalGlue(page, cell.MemberIds)
+                });
             }
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Распределить ячейки");
-            bool commit = false;
+            if (plan.Count == 0)
+            {
+                SelectIds(page, cells.SelectMany(c => c.MemberIds).Distinct().ToList());
+                return "✓ Ячейки уже распределены по реальным точкам шины. Шаг: " + pitch.ToString("0.###", CultureInfo.CurrentCulture) + " мм.";
+            }
+
+            int scope = (int)app.BeginUndoScope("EnergoLogic: Геометрия распределения ячеек");
+            bool geometryCommit = false;
             try
             {
-                foreach (Tuple<CellInfo, object> row in plan)
+                foreach (CellMoveState state in plan)
                 {
-                    CellInfo cell = row.Item1;
-                    dynamic target = row.Item2;
-                    if ((int)target.ID == cell.BusTerminalId) continue;
-                    dynamic sourceTerminal = page.Shapes.ItemFromID(cell.BusTerminalId);
-                    double dx = GetMm(target, "PinX") - GetMm(sourceTerminal, "PinX");
-                    double dy = GetMm(target, "PinY") - GetMm(sourceTerminal, "PinY");
-                    dynamic anchor = page.Shapes.ItemFromID(cell.AnchorId);
-                    DetachEndpoint(anchor, cell.Endpoint);
-                    SelectIds(page, cell.MemberIds);
-                    app.ActiveWindow.Selection.Move(dx, dy, "mm");
-                    SettleVisioAfterGeometryChange();
-                    RestoreInternalGlue(page, internalGlueByAnchor[cell.AnchorId]);
-                    GlueEndpoint(anchor, cell.Endpoint, target, cell.ConnectionRow);
-                    VerifyGlue(anchor, cell.Endpoint, (int)target.ID, cell.ConnectionRow);
-                    VerifyInternalGlue(page, internalGlueByAnchor[cell.AnchorId]);
+                    dynamic anchor = page.Shapes.ItemFromID(state.Cell.AnchorId);
+                    DetachEndpoint(anchor, state.Cell.Endpoint);
+                    SelectIds(page, state.Cell.MemberIds);
+                    app.ActiveWindow.Selection.Move(state.Dx, state.Dy, "mm");
                 }
-                SelectIds(page, cells.SelectMany(c => c.MemberIds).Distinct().ToList());
-                commit = true;
-                return "✓ Ячейки распределены по реальным точкам шины. Шаг: " + pitch.ToString("0.###", CultureInfo.CurrentCulture) + " мм.";
+                geometryCommit = true;
             }
-            finally { app.EndUndoScope(scope, commit); }
+            finally
+            {
+                app.EndUndoScope(scope, geometryCommit);
+            }
+
+            if (!geometryCommit)
+                throw new InvalidOperationException("Геометрия распределения ячеек не была завершена");
+
+            SettleVisioAfterGeometryChange();
+            try
+            {
+                int restoredInternal = 0;
+                foreach (CellMoveState state in plan)
+                    restoredInternal += RestoreCellTopologyAfterMove(page, state);
+                SelectIds(page, cells.SelectMany(c => c.MemberIds).Distinct().ToList());
+                return String.Format(CultureInfo.CurrentCulture,
+                    "✓ Ячейки распределены по реальным точкам шины. Шаг: {0:0.###} мм. Перемещено: {1}; внутренних Glue восстановлено: {2}.",
+                    pitch, plan.Count, restoredInternal);
+            }
+            catch (Exception topologyError)
+            {
+                string compensation = CompensateCellMoves(page, plan);
+                throw new InvalidOperationException(
+                    "Распределение отменено: не удалось восстановить электрические связи после перемещения. " +
+                    compensation + " Причина: " + topologyError.Message,
+                    topologyError
+                );
+            }
         }
 
         internal string RepairGlue(bool previewOnly, bool requireConfirmation)
@@ -1040,6 +1098,45 @@ namespace EnergoLogicVisioEditor
         private bool HasEndpoint(dynamic shape, string endpoint)
         {
             return CellExists(shape, endpoint == "begin" ? "BeginX" : "EndX");
+        }
+
+        private int RestoreCellTopologyAfterMove(dynamic page, CellMoveState state)
+        {
+            int restored = RestoreInternalGlue(page, state.InternalGlue);
+            dynamic anchor = page.Shapes.ItemFromID(state.Cell.AnchorId);
+            dynamic target = page.Shapes.ItemFromID(state.TargetTerminalId);
+            GlueEndpoint(anchor, state.Cell.Endpoint, target, state.Cell.ConnectionRow);
+            VerifyGlue(anchor, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow);
+            VerifyInternalGlue(page, state.InternalGlue);
+            return restored;
+        }
+
+        private string CompensateCellMoves(dynamic page, IList<CellMoveState> states)
+        {
+            List<string> failures = new List<string>();
+            for (int index = states.Count - 1; index >= 0; index--)
+            {
+                CellMoveState state = states[index];
+                try
+                {
+                    dynamic anchor = page.Shapes.ItemFromID(state.Cell.AnchorId);
+                    try { DetachEndpoint(anchor, state.Cell.Endpoint); } catch { }
+                    SelectIds(page, state.Cell.MemberIds);
+                    App.ActiveWindow.Selection.Move(-state.Dx, -state.Dy, "mm");
+                    SettleVisioAfterGeometryChange();
+                    RestoreInternalGlue(page, state.InternalGlue);
+                    dynamic originalTerminal = page.Shapes.ItemFromID(state.Cell.BusTerminalId);
+                    GlueEndpoint(anchor, state.Cell.Endpoint, originalTerminal, state.Cell.ConnectionRow);
+                    VerifyGlue(anchor, state.Cell.Endpoint, state.Cell.BusTerminalId, state.Cell.ConnectionRow);
+                    VerifyInternalGlue(page, state.InternalGlue);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add("ячейка " + state.Cell.AnchorId + ": " + ex.Message);
+                }
+            }
+            if (failures.Count == 0) return "Исходная геометрия и Glue восстановлены.";
+            return "ВНИМАНИЕ: автоматическое восстановление исходной схемы неполное: " + String.Join(" | ", failures.ToArray()) + ".";
         }
 
         private void SettleVisioAfterGeometryChange()
