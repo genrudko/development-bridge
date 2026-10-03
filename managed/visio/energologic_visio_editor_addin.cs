@@ -834,7 +834,7 @@ namespace EnergoLogicVisioEditor
                 foreach (string ep in new[] { "begin", "end" })
                 {
                     GlueTarget target = TryGetGlueTarget(shape, ep);
-                    int parentId;
+                    int parentId = 0;
                     if (target != null && childParent.TryGetValue(target.TargetId, out parentId) &&
                         IsNumberedBusTerminal(page, target.TargetId))
                         anchors.Add(Tuple.Create(id, target, parentId));
