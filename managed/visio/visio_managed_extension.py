@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.61"
+MANAGED_EXTENSION_VERSION = "2026.10.03.62"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1696,6 +1696,58 @@ $events = Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$sinc
             return err(exc)
 
     @mcp.tool()
+    def launch_energologic_visio_qualification_copy() -> str:
+        """Launch only the fixed EnergoLogic qualification copy when Visio is not running."""
+        try:
+            import os
+            import subprocess
+
+            if os.name != "nt":
+                raise RuntimeError("Visio qualification launch is Windows-only")
+            target = workspace / "KRU-35_normal_scheme_v2_energologic_qol_host_v1.vsdm"
+            exe = Path(r"C:\Program Files\Microsoft Office\root\Office16\VISIO.EXE")
+            if not target.is_file():
+                raise FileNotFoundError(f"qualification document not found: {target}")
+            if not exe.is_file():
+                raise FileNotFoundError(f"Visio executable not found: {exe}")
+
+            ps = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "@(Get-Process VISIO -ErrorAction SilentlyContinue).Count",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            running = int((ps.stdout or "0").strip() or "0")
+            if running:
+                return ok({
+                    "launched": False,
+                    "reason": "VISIO.EXE is already running",
+                    "document": str(target),
+                    "process_count": running,
+                })
+            proc = subprocess.Popen(
+                [str(exe), str(target)],
+                cwd=str(workspace),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return ok({
+                "launched": True,
+                "pid": int(proc.pid),
+                "document": str(target),
+                "visio_executable": str(exe),
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
     def get_vsto_build_capabilities() -> str:
         """Read bounded Windows/.NET/VSTO build capabilities without mutation."""
         try:
@@ -1826,6 +1878,7 @@ $events = Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$sinc
                 "microsoft.office.core.dll",
                 "microsoft.office.interop.visio.dll",
                 "microsoft.visualstudio.tools.applications.runtime.dll",
+                "microsoft.visualstudio.interop.dll",
             }
             for search_root in search_roots:
                 if not search_root.exists():
