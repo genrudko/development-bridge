@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.30"
+MANAGED_EXTENSION_VERSION = "2026.10.03.31"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1148,18 +1148,43 @@ def install(namespace: dict) -> None:
 
             before_count = int(page_obj.Shapes.Count)
             user32.ShowWindow(hwnd, SW_RESTORE)
-            if not bool(user32.SetForegroundWindow(hwnd)):
-                # Windows may return 0 even when the requested window is already
-                # foreground; verify actual foreground ownership before failing.
-                if int(user32.GetForegroundWindow()) != hwnd:
-                    raise RuntimeError("Could not focus the Visio window for Ctrl+Z")
-            time.sleep(0.15)
 
-            user32.keybd_event(VK_CONTROL, 0, 0, 0)
-            user32.keybd_event(VK_Z, 0, 0, 0)
-            user32.keybd_event(VK_Z, 0, KEYEVENTF_KEYUP, 0)
-            user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-            time.sleep(0.25)
+            kernel32 = ctypes.windll.kernel32
+            foreground_hwnd = int(user32.GetForegroundWindow())
+            current_thread = int(kernel32.GetCurrentThreadId())
+            target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
+            foreground_thread = (
+                int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
+                if foreground_hwnd else 0
+            )
+            attached = []
+            try:
+                for other_thread in (foreground_thread, target_thread):
+                    if other_thread and other_thread != current_thread:
+                        if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
+                            attached.append(other_thread)
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                user32.SetActiveWindow(hwnd)
+                time.sleep(0.15)
+                focused_hwnd = int(user32.GetForegroundWindow())
+                if focused_hwnd != hwnd:
+                    raise RuntimeError(
+                        f"Could not focus the Visio window for Ctrl+Z: "
+                        f"requested HWND {hwnd}, foreground HWND {focused_hwnd}"
+                    )
+
+                user32.keybd_event(VK_CONTROL, 0, 0, 0)
+                user32.keybd_event(VK_Z, 0, 0, 0)
+                user32.keybd_event(VK_Z, 0, KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+                time.sleep(0.25)
+            finally:
+                for other_thread in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(current_thread, other_thread, False)
+                    except Exception:
+                        pass
 
             after_count = int(page_obj.Shapes.Count)
             return ok({
