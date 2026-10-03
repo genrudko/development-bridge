@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.31"
+MANAGED_EXTENSION_VERSION = "2026.10.03.32"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -73,12 +73,35 @@ def install(namespace: dict) -> None:
             for row_index in range(count):
                 try:
                     row = shape.Section(section).Row(row_index)
+                    x_iu = float(row.Cell(0).ResultIU)
+                    y_iu = float(row.Cell(1).ResultIU)
+                    page_x_iu = None
+                    page_y_iu = None
+                    transform_error = None
+                    try:
+                        transformed = shape.XYToPage(x_iu, y_iu)
+                        if isinstance(transformed, (tuple, list)) and len(transformed) >= 2:
+                            page_x_iu = float(transformed[0])
+                            page_y_iu = float(transformed[1])
+                        else:
+                            transform_error = (
+                                "XYToPage returned unsupported result "
+                                f"{transformed!r}"
+                            )
+                    except Exception as transform_exc:
+                        transform_error = str(transform_exc)
                     points.append({
                         "row": row_index,
+                        "connection_row": row_index + 1,
                         "x_formula_u": str(row.Cell(0).FormulaU),
                         "y_formula_u": str(row.Cell(1).FormulaU),
-                        "x_result_iu": float(row.Cell(0).ResultIU),
-                        "y_result_iu": float(row.Cell(1).ResultIU),
+                        "x_result_iu": x_iu,
+                        "y_result_iu": y_iu,
+                        "page_x_iu": page_x_iu,
+                        "page_y_iu": page_y_iu,
+                        "page_x_mm": None if page_x_iu is None else page_x_iu * 25.4,
+                        "page_y_mm": None if page_y_iu is None else page_y_iu * 25.4,
+                        "page_transform_error": transform_error,
                     })
                 except Exception:
                     continue

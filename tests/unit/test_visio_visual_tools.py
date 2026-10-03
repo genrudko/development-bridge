@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.31"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.32"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.31"
+    assert arguments["version"] == "2026.10.03.32"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.31"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.32"}'}],
                 "isError": False,
             }
 
@@ -296,3 +296,20 @@ def test_managed_visio_extension_has_bounded_keyboard_undo_tool():
     assert "VK_CONTROL = 0x11" in source
     assert "VK_Z = 0x5A" in source
     assert '"keyboard_chord": "Ctrl+Z"' in source
+
+
+def test_connection_point_reader_reports_page_coordinate_projection():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed"
+        / "visio"
+        / "visio_managed_extension.py"
+    ).read_text()
+
+    assert "shape.XYToPage(x_iu, y_iu)" in source
+    assert '"connection_row": row_index + 1' in source
+    assert '"page_x_mm"' in source
+    assert '"page_y_mm"' in source
+    assert '"page_transform_error"' in source
