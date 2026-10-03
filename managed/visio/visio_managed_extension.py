@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.46"
+MANAGED_EXTENSION_VERSION = "2026.10.03.47"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1525,6 +1525,46 @@ End Property
                 "action_formula": str(
                     trigger.CellsU("Actions.EnergoLogicUndoProbe.Action").FormulaU
                 ),
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def trigger_energologic_qol_action_probe(
+        trigger_shape_id: int,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Trigger only the fixed EnergoLogic ShapeSheet Action cell."""
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("QoL action probe requires a .vsdm document")
+            trigger = page_obj.Shapes.ItemFromID(int(trigger_shape_id))
+            cell_name = "Actions.EnergoLogicUndoProbe.Action"
+            if not bool(trigger.CellExistsU(cell_name, 0)):
+                raise ValueError("trigger shape does not contain EnergoLogic probe action")
+            action_cell = trigger.CellsU(cell_name)
+            formula_before = str(action_cell.FormulaU)
+            before_count = int(page_obj.Shapes.Count)
+            action_cell.Trigger()
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + 8:
+                raise RuntimeError(
+                    f"ShapeSheet Cell.Trigger probe expected {before_count + 8} shapes, "
+                    f"got {after_count}; formula={formula_before!r}"
+                )
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "trigger_shape_id": int(trigger_shape_id),
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "action_cell": cell_name,
+                "action_formula": formula_before,
+                "launch_path": "ShapeSheet Cell.Trigger",
+                "action_triggered": True,
             })
         except Exception as exc:
             return err(exc)
