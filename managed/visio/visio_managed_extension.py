@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.28"
+MANAGED_EXTENSION_VERSION = "2026.10.03.29"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1108,6 +1108,7 @@ def install(namespace: dict) -> None:
                 "active_page": active_page,
                 "undo_enabled": bool(app.UndoEnabled),
                 "document_undo_enabled": bool(page_obj.Document.UndoEnabled),
+                "undo_levels": int(app.Settings.UndoLevels),
                 "current_scope": current_scope,
             })
         except Exception as exc:
