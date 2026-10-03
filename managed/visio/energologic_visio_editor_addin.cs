@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.2.7.0")]
+[assembly: AssemblyVersion("0.2.8.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -46,7 +46,7 @@ namespace EnergoLogicVisioEditor
 
 
     [ComVisible(true)]
-    [Guid("B53E829D-123A-4A17-8F8D-4D124DA0D731")]
+    [Guid("6E70A71C-3A2B-41DD-9B79-58B31504B332")]
     [InterfaceType(ComInterfaceType.InterfaceIsDual)]
     public interface IEnergoLogicEditorApi
     {
@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("1DD57883-7CD6-4C5F-BAEA-8383F4D41CC2")]
-    [ProgId("EnergoLogic.VisioEditorAddinV27")]
+    [Guid("A57C645D-EC43-4DFB-89CD-4FF056A4C4C8")]
+    [ProgId("EnergoLogic.VisioEditorAddinV28")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -172,8 +172,8 @@ namespace EnergoLogicVisioEditor
         public string ApiMoveLeft() { return MoveCell(-1); }
         public string ApiMoveRight() { return MoveCell(1); }
         public string ApiSelectCell() { return SelectCell(); }
-        public string ApiRepairGluePreview() { return RepairGlue(true); }
-        public string ApiRepairGlueApply() { return RepairGlue(false); }
+        public string ApiRepairGluePreview() { return RepairGlue(true, false); }
+        public string ApiRepairGlueApply() { return RepairGlue(false, false); }
         public string ApiDoctor() { return Doctor(); }
         public string ApiShowPanel() { ShowPanel(); return "✓ Панель EnergoLogic показана."; }
         public string ApiExactOffset(double dxMm, double dyMm) { return ExactOffset(dxMm, dyMm); }
@@ -183,7 +183,7 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.2.7"; }
+        public string ApiVersion() { return "0.2.8"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -447,7 +447,7 @@ namespace EnergoLogicVisioEditor
             finally { app.EndUndoScope(scope, commit); }
         }
 
-        internal string RepairGlue(bool previewOnly)
+        internal string RepairGlue(bool previewOnly, bool requireConfirmation)
         {
             dynamic app = App;
             dynamic page = app.ActivePage;
@@ -459,7 +459,7 @@ namespace EnergoLogicVisioEditor
             foreach (string endpoint in new[] { "begin", "end" })
             {
                 if (!HasEndpoint(shape, endpoint)) continue;
-                if (TryGetGlueTarget(shape, endpoint) != null) continue;
+                if (EndpointHasAnyGlue(page, shape, endpoint)) continue;
                 endpoints.Add(Tuple.Create(endpoint, GetMm(shape, endpoint == "begin" ? "BeginX" : "EndX"), GetMm(shape, endpoint == "begin" ? "BeginY" : "EndY")));
             }
             if (endpoints.Count == 0) throw new InvalidOperationException("У выбранного элемента нет свободного endpoint для ремонта");
@@ -485,8 +485,11 @@ namespace EnergoLogicVisioEditor
             var best = candidates[0];
             string description = String.Format(CultureInfo.CurrentCulture, "{0}: shape {1}, Connections.{2}, расстояние {3:0.###} мм", best.Item1, best.Item2.ShapeId, best.Item2.Row, best.Item2.DistanceMm);
             if (previewOnly) return "Кандидат Repair Glue: " + description;
-            DialogResult answer = MessageBox.Show("Найден кандидат:\n\n" + description + "\n\nИсправить Glue?", "EnergoLogic — Repair Glue", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (answer != DialogResult.Yes) return "Repair Glue отменён пользователем.";
+            if (requireConfirmation)
+            {
+                DialogResult answer = MessageBox.Show("Найден кандидат:\n\n" + description + "\n\nИсправить Glue?", "EnergoLogic — Repair Glue", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes) return "Repair Glue отменён пользователем.";
+            }
             int scope = (int)app.BeginUndoScope("EnergoLogic: Repair Glue");
             bool commit = false;
             try
@@ -511,7 +514,7 @@ namespace EnergoLogicVisioEditor
                 int id = (int)shape.ID;
                 foreach (string ep in new[] { "begin", "end" })
                 {
-                    if (!HasEndpoint(shape, ep) || TryGetGlueTarget(shape, ep) != null) continue;
+                    if (!HasEndpoint(shape, ep) || EndpointHasAnyGlue(page, shape, ep)) continue;
                     double x = GetMm(shape, ep == "begin" ? "BeginX" : "EndX");
                     double y = GetMm(shape, ep == "begin" ? "BeginY" : "EndY");
                     var near = points.Where(p => p.ShapeId != id && Math.Sqrt(Math.Pow(p.Xmm - x, 2) + Math.Pow(p.Ymm - y, 2)) <= 0.8).ToList();
@@ -891,6 +894,74 @@ namespace EnergoLogicVisioEditor
                 throw new InvalidOperationException("Проверка Glue после операции не прошла");
         }
 
+        private bool EndpointHasAnyGlue(dynamic page, dynamic shape, string endpoint)
+        {
+            if (!HasEndpoint(shape, endpoint)) return false;
+            if (TryGetGlueTarget(shape, endpoint) != null) return true;
+
+            int targetId = (int)shape.ID;
+            string endpointXName = endpoint == "begin" ? "BeginX" : "EndX";
+            string endpointYName = endpoint == "begin" ? "BeginY" : "EndY";
+            double endpointX = GetMm(shape, endpointXName);
+            double endpointY = GetMm(shape, endpointYName);
+            bool found = false;
+
+            Action<dynamic> inspect = null;
+            inspect = source =>
+            {
+                if (found) return;
+                try
+                {
+                    dynamic connects = source.Connects;
+                    for (int index = 1; index <= (int)connects.Count; index++)
+                    {
+                        dynamic connect = connects.Item(index);
+                        int toId;
+                        string toCellName;
+                        try
+                        {
+                            toId = Convert.ToInt32(connect.ToSheet.ID, CultureInfo.InvariantCulture);
+                            toCellName = Convert.ToString(connect.ToCell.NameU, CultureInfo.InvariantCulture) ?? "";
+                        }
+                        catch { continue; }
+                        if (toId != targetId) continue;
+
+                        Match cellMatch = _connectionCellRegex.Match(toCellName);
+                        if (!cellMatch.Success) continue;
+                        int row = cellMatch.Groups[1].Success
+                            ? Int32.Parse(cellMatch.Groups[1].Value, CultureInfo.InvariantCulture)
+                            : Int32.Parse(cellMatch.Groups[2].Value, CultureInfo.InvariantCulture);
+                        string xName = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
+                        string yName = "Connections.Y" + row.ToString(CultureInfo.InvariantCulture);
+                        if (!CellExists(shape, xName) || !CellExists(shape, yName)) continue;
+
+                        double localX = (double)shape.CellsU(xName).ResultIU;
+                        double localY = (double)shape.CellsU(yName).ResultIU;
+                        double pageX = 0, pageY = 0;
+                        shape.XYToPage(localX, localY, out pageX, out pageY);
+                        double dx = pageX * 25.4 - endpointX;
+                        double dy = pageY * 25.4 - endpointY;
+                        if (Math.Sqrt(dx * dx + dy * dy) <= 0.02)
+                        {
+                            found = true;
+                            return;
+                        }
+                    }
+                }
+                catch { }
+                try
+                {
+                    for (int child = 1; child <= (int)source.Shapes.Count && !found; child++)
+                        inspect(source.Shapes.Item(child));
+                }
+                catch { }
+            };
+
+            for (int index = 1; index <= (int)page.Shapes.Count && !found; index++)
+                inspect(page.Shapes.Item(index));
+            return found;
+        }
+
         private List<ConnectionPointInfo> GetAllConnectionPoints(dynamic page)
         {
             List<ConnectionPointInfo> result = new List<ConnectionPointInfo>();
@@ -981,8 +1052,8 @@ namespace EnergoLogicVisioEditor
             cellTab.Controls.Add(cells);
 
             FlowLayoutPanel gluePanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 120, FlowDirection = FlowDirection.TopDown, Padding = new Padding(10) };
-            gluePanel.Controls.Add(ButtonWide("Найти проблему Glue", (s,e)=>Run(()=>_addin.RepairGlue(true))));
-            gluePanel.Controls.Add(ButtonWide("Repair Glue…", (s,e)=>Run(()=>_addin.RepairGlue(false))));
+            gluePanel.Controls.Add(ButtonWide("Найти проблему Glue", (s,e)=>Run(()=>_addin.RepairGlue(true, false))));
+            gluePanel.Controls.Add(ButtonWide("Repair Glue…", (s,e)=>Run(()=>_addin.RepairGlue(false, true))));
             cellTab.Controls.Add(gluePanel);
 
             TableLayoutPanel geo = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 9, Padding = new Padding(10) };
