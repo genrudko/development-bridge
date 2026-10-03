@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.87"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.88"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.87"
+    assert arguments["version"] == "2026.10.03.88"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.87"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.88"}'}],
                 "isError": False,
             }
 
@@ -309,3 +309,13 @@ def test_editor_acceptance_selection_and_api_evidence_are_bounded():
     assert '"shape_count_before": before_shape_count' in source
     assert '"shape_count_after": int(page_obj.Shapes.Count)' in source
     assert '"selected_shape_ids": selected' in source
+
+
+def test_editor_api_can_set_exact_selection_in_same_com_call():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text()
+    assert 'shape_ids_json: str = ""' in source
+    assert "window.DeselectAll()" in source
+    assert "window.Select(page_obj.Shapes.ItemFromID(shape_id), 2)" in source
+    assert "Visio selection mismatch before editor action" in source
+    assert '"requested_shape_ids": requested_selection' in source

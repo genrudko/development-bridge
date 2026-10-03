@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.87"
+MANAGED_EXTENSION_VERSION = "2026.10.03.88"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1453,6 +1453,7 @@ def install(namespace: dict) -> None:
     def invoke_energologic_editor_api(
         action: str,
         args_json: str = "{}",
+        shape_ids_json: str = "",
         page: str = "",
         doc_name: str = "",
     ) -> str:
@@ -1468,6 +1469,27 @@ def install(namespace: dict) -> None:
                 app.ActiveWindow.Page = page_obj
             except Exception:
                 page_obj.Activate()
+            window = app.ActiveWindow
+            requested_selection = []
+            if str(shape_ids_json).strip():
+                raw_selection = json.loads(shape_ids_json)
+                if not isinstance(raw_selection, list) or not raw_selection or len(raw_selection) > 100:
+                    raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+                requested_selection = [int(value) for value in raw_selection]
+                if len(set(requested_selection)) != len(requested_selection) or any(value <= 0 for value in requested_selection):
+                    raise ValueError("shape IDs must be unique positive integers")
+                window.DeselectAll()
+                for shape_id in requested_selection:
+                    window.Select(page_obj.Shapes.ItemFromID(shape_id), 2)
+                actual_selection = [
+                    int(window.Selection.Item(index).ID)
+                    for index in range(1, int(window.Selection.Count) + 1)
+                ]
+                if sorted(actual_selection) != sorted(requested_selection):
+                    raise RuntimeError(
+                        f"Visio selection mismatch before editor action: requested={requested_selection!r}, "
+                        f"selected={actual_selection!r}"
+                    )
             addins = app.COMAddIns
             addins.Update()
             addin = addins.Item("EnergoLogic.VisioEditorAddinV21")
@@ -1508,7 +1530,6 @@ def install(namespace: dict) -> None:
                 result = api.ApiDistributePitch(float(payload["pitch_mm"]))
             else:
                 raise ValueError(f"unsupported EnergoLogic editor action: {action!r}")
-            window = app.ActiveWindow
             selected = [
                 int(window.Selection.Item(index).ID)
                 for index in range(1, int(window.Selection.Count) + 1)
@@ -1523,6 +1544,7 @@ def install(namespace: dict) -> None:
                 "shape_count_before": before_shape_count,
                 "shape_count_after": int(page_obj.Shapes.Count),
                 "selected_shape_ids": selected,
+                "requested_shape_ids": requested_selection,
             })
         except Exception as exc:
             return err(exc)
