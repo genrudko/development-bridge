@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.36"
+MANAGED_EXTENSION_VERSION = "2026.10.03.37"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1427,17 +1427,21 @@ End Sub
                 user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
                 user32.keybd_event(modifier, 0, KEYEVENTF_KEYUP, 0)
 
-            def unicode_text(value):
+            def ascii_text(value):
+                VK_SHIFT = 0x10
                 for char in value:
-                    code = ord(char)
-                    down = INPUT(type=INPUT_KEYBOARD)
-                    down.ki = KEYBDINPUT(0, code, KEYEVENTF_UNICODE, 0, None)
-                    up = INPUT(type=INPUT_KEYBOARD)
-                    up.ki = KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, None)
-                    sent = int(user32.SendInput(1, ctypes.byref(down), ctypes.sizeof(INPUT)))
-                    sent += int(user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT)))
-                    if sent != 2:
-                        raise RuntimeError(f"SendInput failed while typing fixed macro name at {char!r}")
+                    code = int(user32.VkKeyScanW(ord(char)))
+                    if code == -1:
+                        raise RuntimeError(f"VkKeyScanW cannot type fixed macro name at {char!r}")
+                    vk = code & 0xFF
+                    shift_state = (code >> 8) & 0xFF
+                    if shift_state & 1:
+                        user32.keybd_event(VK_SHIFT, 0, 0, 0)
+                    user32.keybd_event(vk, 0, 0, 0)
+                    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                    if shift_state & 1:
+                        user32.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
+                    time.sleep(0.01)
 
             foreground_hwnd = int(user32.GetForegroundWindow())
             current_thread = int(kernel32.GetCurrentThreadId())
@@ -1460,10 +1464,13 @@ End Sub
                 user32.SetActiveWindow(root_hwnd)
                 time.sleep(0.2)
 
+                # Close a stale dialog left by a prior failed qualification, if any.
+                press(VK_ESCAPE)
+                time.sleep(0.15)
                 chord(VK_MENU, VK_F8)
                 time.sleep(0.6)
                 chord(VK_CONTROL, VK_A)
-                unicode_text(macro_name)
+                ascii_text(macro_name)
                 time.sleep(0.15)
                 press(VK_RETURN)
                 time.sleep(1.0)
