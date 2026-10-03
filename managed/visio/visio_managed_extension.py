@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.58"
+MANAGED_EXTENSION_VERSION = "2026.10.03.59"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2646,6 +2646,127 @@ namespace EnergoLogicVisioQol
                 "ribbon_tab": "EnergoLogic",
                 "tab_keytip": "Z",
                 "button_keytip": "D",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def get_energologic_classic_com_addin_probe_status(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Read registry, COM activation and Visio COMAddIns state for the fixed probe."""
+        try:
+            import pythoncom
+            import win32com.client
+            import winreg
+
+            progid = "EnergoLogic.VisioQolAddin"
+            clsid = "{7D679776-1D6B-4D0D-9123-E3E4FB21F806}"
+
+            def read_values(root, subkey):
+                result = {"exists": False, "values": {}, "subkeys": []}
+                try:
+                    with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                        result["exists"] = True
+                        index = 0
+                        while True:
+                            try:
+                                name, value, kind = winreg.EnumValue(key, index)
+                                result["values"][name or "(Default)"] = {"value": value, "kind": kind}
+                                index += 1
+                            except OSError:
+                                break
+                        index = 0
+                        while True:
+                            try:
+                                result["subkeys"].append(winreg.EnumKey(key, index))
+                                index += 1
+                            except OSError:
+                                break
+                except FileNotFoundError:
+                    pass
+                return result
+
+            registry = {
+                "office_addin": read_values(
+                    winreg.HKEY_CURRENT_USER,
+                    "Software\\Microsoft\\Office\\Visio\\Addins\\" + progid,
+                ),
+                "progid": read_values(
+                    winreg.HKEY_CURRENT_USER,
+                    "Software\\Classes\\" + progid,
+                ),
+                "progid_clsid": read_values(
+                    winreg.HKEY_CURRENT_USER,
+                    "Software\\Classes\\" + progid + r"\CLSID",
+                ),
+                "clsid": read_values(
+                    winreg.HKEY_CURRENT_USER,
+                    "Software\\Classes\\CLSID\\" + clsid,
+                ),
+                "inproc": read_values(
+                    winreg.HKEY_CURRENT_USER,
+                    "Software\\Classes\\CLSID\\" + clsid + r"\InprocServer32",
+                ),
+                "implemented_categories": read_values(
+                    winreg.HKEY_CURRENT_USER,
+                    "Software\\Classes\\CLSID\\" + clsid + r"\Implemented Categories",
+                ),
+            }
+
+            clsid_from_progid = None
+            clsid_error = None
+            try:
+                clsid_from_progid = str(pythoncom.CLSIDFromProgID(progid))
+            except Exception as exc:
+                clsid_error = f"{type(exc).__name__}: {exc}"[:1000]
+
+            dispatch_created = False
+            dispatch_error = None
+            try:
+                obj = win32com.client.Dispatch(progid)
+                dispatch_created = obj is not None
+                obj = None
+            except Exception as exc:
+                dispatch_error = f"{type(exc).__name__}: {exc}"[:1500]
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            addins = app.COMAddIns
+            update_error = None
+            try:
+                addins.Update()
+            except Exception as exc:
+                update_error = f"{type(exc).__name__}: {exc}"[:1000]
+
+            collection = []
+            for index in range(1, int(addins.Count) + 1):
+                item = addins.Item(index)
+                row = {"index": index}
+                for attr, key in (
+                    ("ProgId", "progid"),
+                    ("Guid", "guid"),
+                    ("Description", "description"),
+                    ("Connect", "connect"),
+                ):
+                    try:
+                        row[key] = getattr(item, attr)
+                    except Exception as exc:
+                        row[key + "_error"] = f"{type(exc).__name__}: {exc}"[:500]
+                collection.append(row)
+
+            return ok({
+                "progid": progid,
+                "expected_clsid": clsid,
+                "registry": registry,
+                "clsid_from_progid": clsid_from_progid,
+                "clsid_error": clsid_error,
+                "dispatch_created": dispatch_created,
+                "dispatch_error": dispatch_error,
+                "com_addins_update_error": update_error,
+                "com_addins_count": int(addins.Count),
+                "com_addins": collection,
             })
         except Exception as exc:
             return err(exc)
