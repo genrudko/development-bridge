@@ -69,8 +69,29 @@ def main() -> int:
         result["button_hwnd"] = button
         write_result(result_path, result)
 
-        user32.SendMessageW(button, bm_click, 0, 0)
+        rect = ctypes.wintypes.RECT()
+        if not bool(user32.GetWindowRect(button, ctypes.byref(rect))):
+            raise RuntimeError("Could not read EnergoLogic button bounds")
+        x = int((rect.left + rect.right) // 2)
+        y = int((rect.top + rect.bottom) // 2)
+        result["button_bounds"] = {
+            "left": int(rect.left), "top": int(rect.top),
+            "right": int(rect.right), "bottom": int(rect.bottom),
+            "x": x, "y": y,
+        }
+        old_cursor = ctypes.wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(old_cursor))
+        user32.ShowWindow(root, 9)
+        user32.BringWindowToTop(root)
+        user32.SetForegroundWindow(root)
+        time.sleep(0.2)
+        user32.SetCursorPos(x, y)
+        time.sleep(0.1)
+        user32.mouse_event(0x0002, 0, 0, 0, 0)
+        user32.mouse_event(0x0004, 0, 0, 0, 0)
         result["clicked"] = True
+        time.sleep(0.5)
+        user32.SetCursorPos(int(old_cursor.x), int(old_cursor.y))
     except Exception as exc:
         result["error"] = str(exc)
     finally:
