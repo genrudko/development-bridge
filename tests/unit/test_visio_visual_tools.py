@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.63"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.64"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.63"
+    assert arguments["version"] == "2026.10.03.64"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.63"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.64"}'}],
                 "isError": False,
             }
 
@@ -495,3 +495,16 @@ def test_classic_com_addin_uses_real_microsoft_interop_and_separate_connect():
     assert "public enum ext_ConnectMode" not in source
     assert "public interface IDTExtensibility2" not in source
     assert "public interface IRibbonExtensibility" not in source
+
+
+def test_managed_visio_extension_has_read_only_ribbon_accessibility_probe():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def get_energologic_ribbon_accessibility_probe(" in source
+    assert 'CreateObject("UIAutomationClient.CUIAutomation")' in source
+    assert "ElementFromHandle(root_hwnd)" in source
+    assert "FindAll(4, true_condition)" in source
+    assert '"energologic_found": bool(matches)' in source

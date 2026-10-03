@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.63"
+MANAGED_EXTENSION_VERSION = "2026.10.03.64"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1491,6 +1491,81 @@ namespace EnergoLogicVisioQol
                 "com_addins_update_error": update_error,
                 "com_addins_count": int(addins.Count),
                 "com_addins": collection,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def get_energologic_ribbon_accessibility_probe(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Read the live Visio UI Automation tree for EnergoLogic Ribbon elements."""
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            hwnd = int(window.WindowHandle32)
+            if hwnd <= 0:
+                raise RuntimeError("Visio active window returned an invalid HWND")
+
+            import ctypes
+            user32 = ctypes.windll.user32
+            GA_ROOT = 2
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+
+            import comtypes.client
+            uia = comtypes.client.CreateObject("UIAutomationClient.CUIAutomation")
+            root = uia.ElementFromHandle(root_hwnd)
+            true_condition = uia.CreateTrueCondition()
+            elements = root.FindAll(4, true_condition)  # TreeScope_Subtree
+
+            matches = []
+            sample = []
+            length = int(elements.Length)
+            for index in range(length):
+                element = elements.GetElement(index)
+                try:
+                    name = str(element.CurrentName or "")
+                except Exception:
+                    name = ""
+                try:
+                    automation_id = str(element.CurrentAutomationId or "")
+                except Exception:
+                    automation_id = ""
+                try:
+                    control_type = int(element.CurrentControlType)
+                except Exception:
+                    control_type = None
+                try:
+                    class_name = str(element.CurrentClassName or "")
+                except Exception:
+                    class_name = ""
+                row = {
+                    "index": index,
+                    "name": name,
+                    "automation_id": automation_id,
+                    "control_type": control_type,
+                    "class_name": class_name,
+                }
+                haystack = (name + " " + automation_id + " " + class_name).casefold()
+                if "energologic" in haystack or "duplicate 40" in haystack:
+                    matches.append(row)
+                if name and len(sample) < 120:
+                    sample.append(row)
+
+            return ok({
+                "document": str(page_obj.Document.Name),
+                "page": str(page_obj.Name),
+                "root_window_handle32": root_hwnd,
+                "element_count": length,
+                "matches": matches,
+                "named_sample": sample,
+                "energologic_found": bool(matches),
             })
         except Exception as exc:
             return err(exc)
