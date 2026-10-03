@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.86"
+MANAGED_EXTENSION_VERSION = "2026.10.03.87"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1408,6 +1408,48 @@ def install(namespace: dict) -> None:
             return err(exc)
 
     @mcp.tool()
+    def set_energologic_editor_acceptance_selection(
+        shape_ids_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        # Set only the active Visio selection for bounded editor acceptance.
+        try:
+            import json
+            raw = json.loads(shape_ids_json)
+            if not isinstance(raw, list) or not raw or len(raw) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw]
+            if len(set(shape_ids)) != len(shape_ids) or any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be unique positive integers")
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            for shape_id in shape_ids:
+                window.Select(page_obj.Shapes.ItemFromID(shape_id), 2)
+            selected = [
+                int(window.Selection.Item(index).ID)
+                for index in range(1, int(window.Selection.Count) + 1)
+            ]
+            if sorted(selected) != sorted(shape_ids):
+                raise RuntimeError(
+                    f"Visio selection mismatch: requested={shape_ids!r}, selected={selected!r}"
+                )
+            return ok({
+                "document": str(page_obj.Document.Name),
+                "page": str(page_obj.Name),
+                "selected_shape_ids": selected,
+                "selection_only": True,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
     def invoke_energologic_editor_api(
         action: str,
         args_json: str = "{}",
@@ -1434,6 +1476,7 @@ def install(namespace: dict) -> None:
             api = addin.Object
             if api is None:
                 raise RuntimeError("EnergoLogic editor v2 COM API object is not published")
+            before_shape_count = int(page_obj.Shapes.Count)
             key = str(action).strip().lower()
             zero = {
                 "duplicate_left": "ApiDuplicateLeft",
@@ -1465,6 +1508,11 @@ def install(namespace: dict) -> None:
                 result = api.ApiDistributePitch(float(payload["pitch_mm"]))
             else:
                 raise ValueError(f"unsupported EnergoLogic editor action: {action!r}")
+            window = app.ActiveWindow
+            selected = [
+                int(window.Selection.Item(index).ID)
+                for index in range(1, int(window.Selection.Count) + 1)
+            ]
             return ok({
                 "action": key,
                 "result": str(result),
@@ -1472,6 +1520,9 @@ def install(namespace: dict) -> None:
                 "progid": "EnergoLogic.VisioEditorAddinV21",
                 "page": str(page_obj.Name),
                 "document": str(page_obj.Document.Name),
+                "shape_count_before": before_shape_count,
+                "shape_count_after": int(page_obj.Shapes.Count),
+                "selected_shape_ids": selected,
             })
         except Exception as exc:
             return err(exc)
