@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.19"
+MANAGED_EXTENSION_VERSION = "2026.10.03.20"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -580,39 +580,64 @@ def install(namespace: dict) -> None:
                     target_cell = target.CellsU(target_cell_name)
                     source_cell.GlueTo(target_cell)
 
-                    verified = False
-                    connects = shape.Connects
-                    for connect_index in range(1, int(connects.Count) + 1):
-                        connect = connects.Item(connect_index)
-                        try:
-                            to_id = int(connect.ToSheet.ID)
-                            from_name = str(connect.FromCell.NameU)
-                            to_name = str(connect.ToCell.NameU)
-                        except Exception:
-                            continue
-                        acceptable_target_names = {
-                            target_cell_name.casefold(),
-                            f"Connections.{item['target_connection_row']}.X".casefold(),
-                        }
-                        if (
-                            to_id == item["target_shape_id"]
-                            and from_name.casefold() == source_cell_name.casefold()
-                            and to_name.casefold() in acceptable_target_names
-                        ):
-                            verified = True
-                            break
-                    if not verified:
-                        raise RuntimeError(
-                            f"Glue verification failed for duplicate shape {duplicate_sid} "
-                            f"to target {item['target_shape_id']} {target_cell_name}"
+                    endpoint_formula = str(source_cell.FormulaU)
+                    target_name = str(target.Name)
+                    expected_row = item["target_connection_row"]
+                    formula_verified = (
+                        target_name.casefold() in endpoint_formula.casefold()
+                        and (
+                            f"Connections.{expected_row}.X".casefold()
+                            in endpoint_formula.casefold()
+                            or f"Connections.X{expected_row}".casefold()
+                            in endpoint_formula.casefold()
                         )
+                    )
+                    if not formula_verified:
+                        raise RuntimeError(
+                            f"Glue formula verification failed for duplicate shape {duplicate_sid} "
+                            f"to target {item['target_shape_id']} {target_cell_name}: "
+                            f"{endpoint_formula}"
+                        )
+
+                    # Best-effort immediate Connects observation. Some live Visio COM
+                    # sessions lag this collection until the operation returns, so the
+                    # high-level caller performs the authoritative post-commit
+                    # get_connections verification as well.
+                    connects_verified = False
+                    try:
+                        connects = shape.Connects
+                        for connect_index in range(1, int(connects.Count) + 1):
+                            connect = connects.Item(connect_index)
+                            try:
+                                to_id = int(connect.ToSheet.ID)
+                                from_name = str(connect.FromCell.NameU)
+                                to_name = str(connect.ToCell.NameU)
+                            except Exception:
+                                continue
+                            acceptable_target_names = {
+                                target_cell_name.casefold(),
+                                f"Connections.{expected_row}.X".casefold(),
+                            }
+                            if (
+                                to_id == item["target_shape_id"]
+                                and from_name.casefold() == source_cell_name.casefold()
+                                and to_name.casefold() in acceptable_target_names
+                            ):
+                                connects_verified = True
+                                break
+                    except Exception:
+                        connects_verified = False
+
                     glue_results.append({
                         "source_shape_id": item["source_shape_id"],
                         "duplicate_shape_id": duplicate_sid,
                         "endpoint": endpoint,
                         "target_shape_id": item["target_shape_id"],
                         "target_connection_row": item["target_connection_row"],
-                        "verified": True,
+                        "endpoint_formula_u": endpoint_formula,
+                        "formula_verified": formula_verified,
+                        "connects_immediate_verified": connects_verified,
+                        "post_commit_connects_verification_required": True,
                     })
 
                 app.EndUndoScope(scope_id, True)
