@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.51"
+MANAGED_EXTENSION_VERSION = "2026.10.03.52"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1765,6 +1765,224 @@ End Property
                 "menu_item": target_text,
                 "menu_item_rect": clicked_rect,
                 "launch_path": "real Visio shortcut menu mouse click",
+                "ui_action_launched": True,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def msaa_run_energologic_qol_action_probe(
+        trigger_shape_id: int,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Invoke the fixed EnergoLogic ShapeSheet action via Office MSAA accessibility."""
+        try:
+            import ctypes
+            import time
+            import uuid as _uuid
+            import pythoncom
+            import win32com.client
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("QoL action probe requires a .vsdm document")
+            trigger = page_obj.Shapes.ItemFromID(int(trigger_shape_id))
+            if not bool(trigger.CellExistsU("Actions.EnergoLogicUndoProbe.Action", 0)):
+                raise ValueError("trigger shape does not contain EnergoLogic probe action")
+
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            window.Select(trigger, 2)
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            oleacc = ctypes.oledll.oleacc
+            hwnd = int(window.WindowHandle32)
+            GA_ROOT = 2
+            SW_RESTORE = 9
+            VK_SHIFT = 0x10
+            VK_F10 = 0x79
+            VK_ESCAPE = 0x1B
+            KEYEVENTF_KEYUP = 0x0002
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+
+            def chord(modifier, vk):
+                user32.keybd_event(modifier, 0, 0, 0)
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(modifier, 0, KEYEVENTF_KEYUP, 0)
+
+            def press(vk):
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", ctypes.c_ulong),
+                    ("Data2", ctypes.c_ushort),
+                    ("Data3", ctypes.c_ushort),
+                    ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+            def guid(value):
+                raw = _uuid.UUID(value).bytes_le
+                return GUID.from_buffer_copy(raw)
+
+            foreground_hwnd = int(user32.GetForegroundWindow())
+            current_thread = int(kernel32.GetCurrentThreadId())
+            target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
+            foreground_thread = (
+                int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
+                if foreground_hwnd else 0
+            )
+            attached = []
+            before_count = int(page_obj.Shapes.Count)
+            menu_hwnd = 0
+            diagnostics = []
+            target_diagnostic = None
+            target_acc = None
+            target_child_id = None
+            try:
+                for other_thread in (foreground_thread, target_thread):
+                    if other_thread and other_thread != current_thread:
+                        if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
+                            attached.append(other_thread)
+                user32.ShowWindow(root_hwnd, SW_RESTORE)
+                user32.BringWindowToTop(root_hwnd)
+                user32.SetForegroundWindow(root_hwnd)
+                user32.SetActiveWindow(root_hwnd)
+                user32.SetFocus(hwnd)
+                time.sleep(0.2)
+                chord(VK_SHIFT, VK_F10)
+                for _ in range(30):
+                    candidate = int(user32.GetForegroundWindow())
+                    class_buf = ctypes.create_unicode_buffer(128)
+                    user32.GetClassNameW(candidate, class_buf, len(class_buf))
+                    if class_buf.value == "Net UI Tool Window":
+                        menu_hwnd = candidate
+                        break
+                    time.sleep(0.05)
+                if not menu_hwnd:
+                    raise RuntimeError("Visio shortcut menu did not become a Net UI Tool Window")
+
+                iid_dispatch = guid("00020400-0000-0000-C000-000000000046")
+                raw_dispatch = ctypes.c_void_p()
+                OBJID_CLIENT = 0xFFFFFFFC
+                hr = int(
+                    oleacc.AccessibleObjectFromWindow(
+                        menu_hwnd,
+                        ctypes.c_uint32(OBJID_CLIENT),
+                        ctypes.byref(iid_dispatch),
+                        ctypes.byref(raw_dispatch),
+                    )
+                )
+                if hr != 0 or not raw_dispatch.value:
+                    raise RuntimeError(
+                        f"AccessibleObjectFromWindow failed hr=0x{hr & 0xFFFFFFFF:08X}"
+                    )
+                dispatch = pythoncom.ObjectFromAddress(
+                    int(raw_dispatch.value),
+                    pythoncom.IID_IDispatch,
+                )
+                root_acc = win32com.client.Dispatch(dispatch)
+
+                visited = set()
+
+                def safe_call(obj, name, child_id, default=None):
+                    try:
+                        return getattr(obj, name)(child_id)
+                    except Exception:
+                        return default
+
+                def walk(acc, depth=0):
+                    nonlocal target_acc, target_child_id, target_diagnostic
+                    if depth > 5 or target_acc is not None:
+                        return
+                    identity = id(acc)
+                    if identity in visited:
+                        return
+                    visited.add(identity)
+                    try:
+                        count = int(acc.accChildCount)
+                    except Exception:
+                        count = 0
+                    for child_id in range(1, count + 1):
+                        name = safe_call(acc, "accName", child_id, "")
+                        role = safe_call(acc, "accRole", child_id, None)
+                        state = safe_call(acc, "accState", child_id, None)
+                        default_action = safe_call(acc, "accDefaultAction", child_id, "")
+                        shortcut = safe_call(acc, "accKeyboardShortcut", child_id, "")
+                        row = {
+                            "depth": depth,
+                            "child_id": child_id,
+                            "name": "" if name is None else str(name),
+                            "role": role if isinstance(role, (int, str)) else str(role),
+                            "state": state if isinstance(state, (int, str)) else str(state),
+                            "default_action": "" if default_action is None else str(default_action),
+                            "keyboard_shortcut": "" if shortcut is None else str(shortcut),
+                        }
+                        diagnostics.append(row)
+                        if "EnergoLogic Undo Probe" in row["name"]:
+                            target_acc = acc
+                            target_child_id = child_id
+                            target_diagnostic = row
+                            return
+                        child_obj = safe_call(acc, "accChild", child_id, None)
+                        if child_obj is not None and not isinstance(
+                            child_obj, (int, float, str, bool)
+                        ):
+                            try:
+                                walk(win32com.client.Dispatch(child_obj), depth + 1)
+                            except Exception:
+                                pass
+                            if target_acc is not None:
+                                return
+
+                walk(root_acc)
+                if target_acc is None:
+                    raise RuntimeError(
+                        f"EnergoLogic MSAA menu item not found; nodes={diagnostics!r}"
+                    )
+                target_acc.accDoDefaultAction(target_child_id)
+
+                expected_count = before_count + 8
+                for _ in range(80):
+                    time.sleep(0.1)
+                    if int(page_obj.Shapes.Count) == expected_count:
+                        break
+            finally:
+                for other_thread in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(current_thread, other_thread, False)
+                    except Exception:
+                        pass
+
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + 8:
+                try:
+                    press(VK_ESCAPE)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"MSAA ShapeSheet Action probe expected {before_count + 8} shapes, got {after_count}; "
+                    f"target={target_diagnostic!r}; nodes={diagnostics!r}"
+                )
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "trigger_shape_id": int(trigger_shape_id),
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "menu_window_handle": menu_hwnd,
+                "target_accessible": target_diagnostic,
+                "launch_path": "Office Net UI / MSAA accDoDefaultAction",
                 "ui_action_launched": True,
             })
         except Exception as exc:

@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.51"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.52"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.51"
+    assert arguments["version"] == "2026.10.03.52"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.51"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.52"}'}],
                 "isError": False,
             }
 
@@ -510,3 +510,16 @@ def test_managed_visio_extension_has_uia_netui_action_probe():
     assert "ElementFromHandle(menu_hwnd)" in source
     assert '"EnergoLogic Undo Probe" in row["name"]' in source
     assert "CurrentBoundingRectangle" in source
+
+
+def test_managed_visio_extension_has_msaa_netui_action_probe():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def msaa_run_energologic_qol_action_probe(" in source
+    assert "AccessibleObjectFromWindow" in source
+    assert "pythoncom.ObjectFromAddress" in source
+    assert "accDoDefaultAction" in source
+    assert '"Office Net UI / MSAA accDoDefaultAction"' in source
