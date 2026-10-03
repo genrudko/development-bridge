@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.67"
+MANAGED_EXTENSION_VERSION = "2026.10.03.68"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1385,7 +1385,10 @@ namespace EnergoLogicVisioQol
             if not exe.is_file():
                 raise FileNotFoundError(f"Visio executable not found: {exe}")
 
-            page_obj = visio._resolve_page("", "")
+            page_obj = visio._resolve_page(
+                "KRU-35_normal_scheme_v2_energologic_qol_host_v1.vsdm",
+                "MCP-v2",
+            )
             app = page_obj.Application
             documents = app.Documents
             if int(documents.Count) != 1:
