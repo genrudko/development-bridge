@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.75"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.76"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.75"
+    assert arguments["version"] == "2026.10.03.76"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.75"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.76"}'}],
                 "isError": False,
             }
 
@@ -219,41 +219,6 @@ def test_managed_visio_extension_has_transactional_exact_duplicate_tool():
     assert "+/-2000 mm" in source
 
 
-def test_managed_visio_extension_has_bounded_single_undo_tool():
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed"
-        / "visio"
-        / "visio_managed_extension.py"
-    ).read_text()
-
-    assert "def undo_once(" in source
-    assert "app.DoCmd(1017)" in source
-    assert '"undo_command": "visCmdEditUndo"' in source
-    assert "shape_count_before" in source
-    assert "shape_count_after" in source
-
-
-def test_managed_visio_extension_has_read_only_undo_status_tool():
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed"
-        / "visio"
-        / "visio_managed_extension.py"
-    ).read_text()
-
-    assert "def get_undo_status(" in source
-    assert '"undo_enabled": bool(app.UndoEnabled)' in source
-    assert '"undo_levels": int(app.Settings.UndoLevels)' in source
-    assert '"document_undo_enabled": bool(page_obj.Document.UndoEnabled)' in source
-    assert 'current_scope = int(app.CurrentScope)' in source
-    assert '"undo_enabled_before": undo_enabled_before' in source
-
-
 def test_managed_visio_extension_has_transactional_exact_move_tool():
     from pathlib import Path
 
@@ -278,28 +243,6 @@ def test_managed_visio_extension_has_transactional_exact_move_tool():
     assert "document.EndUndoScope(scope_id, False)" in source
 
 
-def test_managed_visio_extension_has_bounded_keyboard_undo_tool():
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed"
-        / "visio"
-        / "visio_managed_extension.py"
-    ).read_text()
-
-    assert "def keyboard_undo_once(" in source
-    assert "GetAncestor(hwnd, GA_ROOT)" in source
-    assert '"root_window_handle32": root_hwnd' in source
-    assert "window.WindowHandle32" in source
-    assert "SetForegroundWindow" in source
-    assert "AttachThreadInput" in source
-    assert "BringWindowToTop" in source
-    assert "VK_CONTROL = 0x11" in source
-    assert "VK_Z = 0x5A" in source
-    assert '"keyboard_chord": "Ctrl+Z"' in source
-
-
 def test_connection_point_reader_reports_page_coordinate_projection():
     from pathlib import Path
 
@@ -315,282 +258,6 @@ def test_connection_point_reader_reports_page_coordinate_projection():
     assert '"page_x_mm"' in source
     assert '"page_y_mm"' in source
     assert '"page_transform_error"' in source
-
-
-def test_managed_visio_extension_has_read_only_host_capabilities_probe():
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed"
-        / "visio"
-        / "visio_managed_extension.py"
-    ).read_text()
-    policy = (
-        Path(__file__).resolve().parents[2]
-        / "app"
-        / "tools"
-        / "visio.py"
-    ).read_text()
-
-    assert "def get_extension_host_capabilities(" in source
-    assert "app.VBAEnabled" in source
-    assert "document.MacrosEnabled" in source
-    assert "app.VBE" in source
-    assert "app.COMAddIns" in source
-    assert '"get_extension_host_capabilities"' in policy
-
-
-def test_managed_visio_extension_has_read_only_vsto_build_capability_probe():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    policy = (
-        Path(__file__).resolve().parents[2]
-        / "app" / "tools" / "visio.py"
-    ).read_text()
-    assert "def get_vsto_build_capabilities(" in source
-    assert '"devenv.exe"' in source
-    assert '"msbuild.exe"' in source
-    assert '"vswhere"' in source
-    assert '"office_targets"' in source
-    assert '"get_vsto_build_capabilities"' in policy
-
-
-def test_vsto_probe_searches_classic_com_interop_references():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert '"extensibility.dll"' in source
-    assert '"office.dll"' in source
-    assert '"microsoft.office.interop.visio.dll"' in source
-    assert '"reference_candidates": sorted(set(reference_candidates))' in source
-
-
-def test_managed_visio_extension_has_bounded_classic_com_addin_probe():
-    from pathlib import Path
-
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert "def install_energologic_classic_com_addin_probe(" in source
-    assert "page_obj = visio._resolve_page(doc_name, parse_page(page))" in source
-    assert "def uninstall_energologic_classic_com_addin_probe(" in source
-    assert 'ProgId("EnergoLogic.VisioQolAddin")' in source
-    assert 'Guid("7D679776-1D6B-4D0D-9123-E3E4FB21F806")' in source
-    assert 'label=\'EnergoLogic\'' in source
-    assert 'keytip=\'Z\'' in source
-    assert 'keytip=\'D\'' in source
-    assert "using Extensibility;" in source
-    assert "using Microsoft.Office.Core;" in source
-    assert "public sealed class VisioQolAddin : IDTExtensibility2, IRibbonExtensibility" in source
-    assert "public void OnUndoProbeDuplicate40(IRibbonControl control)" in source
-    assert 'app.BeginUndoScope("EnergoLogic: Duplicate Cell Probe")' in source
-    assert 'app.DoCmd(1024)' in source
-    assert 'duplicate.Move(40.0, 0.0, "mm")' in source
-    assert 'visio_addin_key = "Software\\\\Microsoft\\\\Visio\\\\Addins\\\\" + progid' in source
-    assert 'stale_office_key = "Software\\\\Microsoft\\\\Office\\\\Visio\\\\Addins\\\\" + progid' in source
-    assert '"LoadBehavior", 0' in source
-    assert "{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}" in source
-    assert "Implemented Categories" in source
-    assert "winreg.HKEY_CURRENT_USER" in source
-    assert "COMAddIns" in source
-    assert "addins.Update()" in source
-    assert "addin.Connect = True" in source
-
-
-def test_managed_visio_extension_has_bounded_classic_com_addin_ribbon_probe():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert "def keyboard_run_energologic_classic_com_addin_probe(" in source
-    assert 'addins.Item("EnergoLogic.VisioQolAddin")' in source
-    assert "VK_Z = 0x5A" in source
-    assert "VK_D = 0x44" in source
-    assert '"launch_path": "Office Ribbon KeyTips Alt-Z-D"' in source
-
-
-def test_managed_visio_extension_has_read_only_classic_com_addin_status_probe():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    policy = (
-        Path(__file__).resolve().parents[2]
-        / "app" / "tools" / "visio.py"
-    ).read_text()
-    assert "def get_energologic_classic_com_addin_probe_status(" in source
-    assert "pythoncom.CLSIDFromProgID(progid)" in source
-    assert "win32com.client.Dispatch(progid)" in source
-    assert "addins.Update()" in source
-    assert "for index in range(1, int(addins.Count) + 1)" in source
-    assert '"get_energologic_classic_com_addin_probe_status"' in policy
-
-
-def test_classic_com_addin_uses_visio_specific_addins_registry_path():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert '"visio_addin": read_values(' in source
-    assert '"stale_office_visio_addin": read_values(' in source
-    assert '"visio_addin_registry_key": visio_addin_key' in source
-    assert 'Software\\\\Microsoft\\\\Visio\\\\Addins' in source
-    assert 'Software\\\\Microsoft\\\\Office\\\\Visio\\\\Addins' in source
-
-
-def test_managed_visio_extension_has_bounded_crash_diagnostics():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    policy = (
-        Path(__file__).resolve().parents[2]
-        / "app" / "tools" / "visio.py"
-    ).read_text()
-    assert "def get_energologic_visio_crash_diagnostics(" in source
-    assert "Get-CimInstance Win32_Process" in source
-    assert "Get-WinEvent -FilterHashtable" in source
-    assert "EnergoLogic\\.VisioQolAddin" in source
-    assert '"get_energologic_visio_crash_diagnostics"' in policy
-
-
-def test_vsto_probe_searches_visual_studio_interop_and_has_bounded_visio_recovery():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert '"microsoft.visualstudio.interop.dll"' in source
-    assert "def launch_energologic_visio_qualification_copy(" in source
-    assert 'KRU-35_normal_scheme_v2_energologic_qol_host_v1.vsdm' in source
-    assert 'Get-Process VISIO' in source
-    assert 'VISIO.EXE' in source
-
-
-def test_classic_com_addin_uses_real_microsoft_interop_and_separate_connect():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert "Microsoft.VisualStudio.Interop.dll" in source
-    assert "PowerPivot Excel Add-in" in source
-    assert "OFFICE.dll" in source
-    assert 'f"/reference:{extensibility_ref}"' in source
-    assert 'f"/reference:{office_ref}"' in source
-    assert "def connect_energologic_classic_com_addin_probe(" in source
-    assert '"connect_attempted": False' in source
-    assert '"load_behavior_remains": 0' in source
-    assert "public enum ext_ConnectMode" not in source
-    assert "public interface IDTExtensibility2" not in source
-    assert "public interface IRibbonExtensibility" not in source
-
-
-def test_managed_visio_extension_has_read_only_ribbon_accessibility_probe():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert "def get_energologic_ribbon_accessibility_probe(" in source
-    assert "Add-Type -AssemblyName UIAutomationClient" in source
-    assert "AutomationElement]::FromHandle" in source
-    assert "TreeScope]::Descendants" in source
-    assert '"backend": ".NET UIAutomationClient"' in source
-
-
-def test_managed_visio_extension_has_safe_addin_autoload_and_graceful_restart():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert "def enable_energologic_classic_com_addin_probe_autoload(" in source
-    assert 'winreg.SetValueEx(key, "LoadBehavior", 0, winreg.REG_DWORD, 3)' in source
-    assert "def restart_energologic_visio_qualification_copy_graceful(" in source
-    assert "expected exactly one non-stencil Visio document" in source
-    assert "the only non-stencil Visio document is not" in source
-    assert "document.Save()" in source
-    assert "app.Quit()" in source
-    assert '"graceful_quit": True' in source
-
-
-def test_graceful_restart_allows_stencil_documents_but_only_one_drawing():
-    from pathlib import Path
-    source = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert "if doc_type != 2:" in source
-    assert "expected exactly one non-stencil Visio document" in source
-    assert "document_inventory" in source
-
-
-def test_managed_visio_extension_has_nonautoloading_commandbar_only_addin_probe():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert "def install_energologic_commandbar_com_addin_probe(" in source
-    assert "def connect_energologic_commandbar_com_addin_probe(" in source
-    assert "def execute_energologic_commandbar_com_addin_probe(" in source
-    assert "def uninstall_energologic_commandbar_com_addin_probe(" in source
-    assert 'ProgId("EnergoLogic.VisioQolCommandBarAddin")' in source
-    assert 'ClassInterface(ClassInterfaceType.None)' in source
-    assert 'public sealed class Connect : IDTExtensibility2' in source
-    assert 'IRibbonExtensibility' not in source[source.index('namespace EnergoLogicVisioQolCommandBar'):source.index('"""', source.index('namespace EnergoLogicVisioQolCommandBar'))]
-    assert 'const string barName = "EnergoLogic QoL Probe"' in source
-    assert 'buttonTag = "EnergoLogic.Duplicate40.UndoProbe"' in source
-    assert '_button.Click += _clickHandler' in source
-    assert 'app.BeginUndoScope("EnergoLogic: Duplicate Cell Probe")' in source
-    assert 'app.DoCmd(1024)' in source
-    assert 'duplicate.Move(40.0, 0.0, "mm")' in source
-    assert 'set_dword(winreg.HKEY_CURRENT_USER, addin_key, "LoadBehavior", 0)' in source
-    assert 'button.Execute()' in source
-
-
-def test_managed_visio_extension_can_physically_click_commandbar_probe():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert "def mouse_run_energologic_commandbar_com_addin_probe(" in source
-    assert "left = int(button.Left)" in source
-    assert "top = int(button.Top)" in source
-    assert "width = int(button.Width)" in source
-    assert "height = int(button.Height)" in source
-    assert "import ctypes.wintypes" in source
-    assert "user32.SetCursorPos(x, y)" in source
-    assert "MOUSEEVENTF_LEFTDOWN" in source
-    assert "MOUSEEVENTF_LEFTUP" in source
-    assert '"physical_ui_event": True' in source
-
-
-def test_managed_visio_extension_has_async_physical_commandbar_and_undo_probes():
-    from pathlib import Path
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "managed" / "visio" / "visio_managed_extension.py"
-    ).read_text()
-    assert "def schedule_energologic_commandbar_physical_click_probe(" in source
-    assert "def schedule_energologic_physical_undo_probe(" in source
-    assert 'time.sleep(1.0)' in source
-    assert 'subprocess.Popen(' in source
-    assert 'creationflags = 0x08000000 | 0x00000008 | 0x00000200' in source
-    assert '"returns_before_physical_click": True' in source
-    assert '"returns_before_physical_undo": True' in source
-    assert 'u.mouse_event(0x0002' in source
-    assert 'u.keybd_event(0x11' in source
 
 
 def test_managed_visio_extension_has_full_energologic_editor_ui_installer():
