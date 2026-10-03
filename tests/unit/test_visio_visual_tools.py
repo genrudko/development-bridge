@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.70"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.71"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.70"
+    assert arguments["version"] == "2026.10.03.71"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.70"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.71"}'}],
                 "isError": False,
             }
 
@@ -556,3 +556,20 @@ def test_managed_visio_extension_has_nonautoloading_commandbar_only_addin_probe(
     assert 'duplicate.Move(40.0, 0.0, "mm")' in source
     assert 'set_dword(winreg.HKEY_CURRENT_USER, addin_key, "LoadBehavior", 0)' in source
     assert 'button.Execute()' in source
+
+
+def test_managed_visio_extension_can_physically_click_commandbar_probe():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def mouse_run_energologic_commandbar_com_addin_probe(" in source
+    assert "left = int(button.Left)" in source
+    assert "top = int(button.Top)" in source
+    assert "width = int(button.Width)" in source
+    assert "height = int(button.Height)" in source
+    assert "user32.SetCursorPos(x, y)" in source
+    assert "MOUSEEVENTF_LEFTDOWN" in source
+    assert "MOUSEEVENTF_LEFTUP" in source
+    assert '"physical_ui_event": True' in source

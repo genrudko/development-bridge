@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.70"
+MANAGED_EXTENSION_VERSION = "2026.10.03.71"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2305,6 +2305,147 @@ namespace EnergoLogicVisioQolCommandBar
                 "shape_count_after": after_count,
                 "launch_path": "Office CommandBarButton.Execute",
                 "in_process_callback_expected": True,
+                "load_behavior": 0,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def mouse_run_energologic_commandbar_com_addin_probe(
+        shape_ids_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        # Physically click the fixed visible CommandBar button after exact selection.
+        try:
+            import ctypes
+            import json
+            import time
+
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids) or any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be unique positive integers")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            for sid in shape_ids:
+                window.Select(page_obj.Shapes.ItemFromID(sid), 2)
+            if int(window.Selection.Count) != len(shape_ids):
+                raise RuntimeError("Could not create the exact source selection")
+
+            addins = app.COMAddIns
+            addins.Update()
+            addin = addins.Item("EnergoLogic.VisioQolCommandBarAddin")
+            if not bool(addin.Connect):
+                raise RuntimeError("EnergoLogic command-bar add-in is not connected")
+
+            bar = app.CommandBars.Item("EnergoLogic QoL Probe")
+            if not bool(bar.Visible):
+                bar.Visible = True
+            button = None
+            for index in range(1, int(bar.Controls.Count) + 1):
+                control = bar.Controls.Item(index)
+                if str(control.Tag) == "EnergoLogic.Duplicate40.UndoProbe":
+                    button = control
+                    break
+            if button is None:
+                raise RuntimeError("EnergoLogic command-bar probe button was not found")
+            if not bool(button.Visible):
+                button.Visible = True
+
+            left = int(button.Left)
+            top = int(button.Top)
+            width = int(button.Width)
+            height = int(button.Height)
+            if width <= 0 or height <= 0:
+                raise RuntimeError(
+                    f"CommandBar button returned invalid bounds: left={left} top={top} "
+                    f"width={width} height={height}"
+                )
+            x = left + width // 2
+            y = top + height // 2
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = int(window.WindowHandle32)
+            if hwnd <= 0:
+                raise RuntimeError("Visio active window returned an invalid HWND")
+            GA_ROOT = 2
+            SW_RESTORE = 9
+            MOUSEEVENTF_LEFTDOWN = 0x0002
+            MOUSEEVENTF_LEFTUP = 0x0004
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+
+            foreground_hwnd = int(user32.GetForegroundWindow())
+            current_thread = int(kernel32.GetCurrentThreadId())
+            target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
+            foreground_thread = (
+                int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
+                if foreground_hwnd else 0
+            )
+            attached = []
+            before_count = int(page_obj.Shapes.Count)
+            old_cursor = ctypes.wintypes.POINT()
+            user32.GetCursorPos(ctypes.byref(old_cursor))
+            try:
+                for other_thread in (foreground_thread, target_thread):
+                    if other_thread and other_thread != current_thread:
+                        if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
+                            attached.append(other_thread)
+                user32.ShowWindow(root_hwnd, SW_RESTORE)
+                user32.BringWindowToTop(root_hwnd)
+                user32.SetForegroundWindow(root_hwnd)
+                user32.SetActiveWindow(root_hwnd)
+                time.sleep(0.35)
+                user32.SetCursorPos(x, y)
+                time.sleep(0.15)
+                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                expected = before_count + len(shape_ids)
+                for _ in range(50):
+                    if int(page_obj.Shapes.Count) == expected:
+                        break
+                    time.sleep(0.1)
+            finally:
+                user32.SetCursorPos(int(old_cursor.x), int(old_cursor.y))
+                for other_thread in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(current_thread, other_thread, False)
+                    except Exception:
+                        pass
+
+            after_count = int(page_obj.Shapes.Count)
+            expected = before_count + len(shape_ids)
+            if after_count != expected:
+                raise RuntimeError(
+                    f"Physical CommandBar click expected {expected} shapes, got {after_count}; "
+                    f"button_bounds=({left},{top},{width},{height})"
+                )
+            return ok({
+                "document": str(page_obj.Document.Name),
+                "page": str(page_obj.Name),
+                "source_shape_ids": shape_ids,
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "button_bounds": {
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                    "click_x": x,
+                    "click_y": y,
+                },
+                "launch_path": "physical mouse click on Office CommandBarButton",
+                "physical_ui_event": True,
                 "load_behavior": 0,
             })
         except Exception as exc:
