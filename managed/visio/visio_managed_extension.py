@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.33"
+MANAGED_EXTENSION_VERSION = "2026.10.03.34"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1102,6 +1102,60 @@ def install(namespace: dict) -> None:
                 "undo_committed": committed,
                 "result_selected": bool(select_result),
                 "mapping_basis": "selection-order; qualify before identity-sensitive use",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def get_extension_host_capabilities(page: str = "", doc_name: str = "") -> str:
+        """Read bounded desktop Visio extension-host capabilities without mutation."""
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            document = page_obj.Document
+
+            try:
+                vba_enabled = bool(app.VBAEnabled)
+            except Exception:
+                vba_enabled = None
+            try:
+                document_macros_enabled = bool(document.MacrosEnabled)
+            except Exception:
+                document_macros_enabled = None
+
+            vbe_accessible = False
+            vbprojects_count = None
+            vbe_error = None
+            try:
+                vbe = app.VBE
+                vbprojects_count = int(vbe.VBProjects.Count)
+                vbe_accessible = True
+            except Exception as exc:
+                vbe_error = f"{type(exc).__name__}: {exc}"[:500]
+
+            com_addins_accessible = False
+            com_addins_count = None
+            com_addins_error = None
+            try:
+                com_addins = app.COMAddIns
+                com_addins_count = int(com_addins.Count)
+                com_addins_accessible = True
+            except Exception as exc:
+                com_addins_error = f"{type(exc).__name__}: {exc}"[:500]
+
+            return ok({
+                "application_name": str(app.Name),
+                "application_version": str(app.Version),
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "vba_enabled": vba_enabled,
+                "document_macros_enabled": document_macros_enabled,
+                "vbe_accessible": vbe_accessible,
+                "vbprojects_count": vbprojects_count,
+                "vbe_error": vbe_error,
+                "com_addins_accessible": com_addins_accessible,
+                "com_addins_count": com_addins_count,
+                "com_addins_error": com_addins_error,
             })
         except Exception as exc:
             return err(exc)
