@@ -148,9 +148,16 @@ namespace EnergoLogicVisioEditor
 
             List<int> sourceIds = cell.MemberIds.OrderBy(x => x).ToList();
             SelectIds(page, sourceIds);
-            List<double[]> sourcePoints = sourceIds.Select(id => new[] { GetMm(page.Shapes.ItemFromID(id), "PinX"), GetMm(page.Shapes.ItemFromID(id), "PinY") }).ToList();
-            List<string> sourceMasters = sourceIds.Select(id => MasterName(page.Shapes.ItemFromID(id))).ToList();
-            List<string> sourceTexts = sourceIds.Select(id => SafeText(page.Shapes.ItemFromID(id))).ToList();
+            List<double[]> sourcePoints = new List<double[]>();
+            List<string> sourceMasters = new List<string>();
+            List<string> sourceTexts = new List<string>();
+            foreach (int id in sourceIds)
+            {
+                dynamic sourceShape = page.Shapes.ItemFromID(id);
+                sourcePoints.Add(new double[] { GetMm(sourceShape, "PinX"), GetMm(sourceShape, "PinY") });
+                sourceMasters.Add(MasterName(sourceShape));
+                sourceTexts.Add(SafeText(sourceShape));
+            }
 
             int scope = (int)app.BeginUndoScope(direction > 0 ? "EnergoLogic: Копировать ячейку вправо" : "EnergoLogic: Копировать ячейку влево");
             bool commit = false;
@@ -160,7 +167,12 @@ namespace EnergoLogicVisioEditor
                 dynamic duplicated = app.ActiveWindow.Selection;
                 if ((int)duplicated.Count != sourceIds.Count) throw new InvalidOperationException("Visio вернул неполную копию выделения");
                 List<int> newIds = SelectionIds(duplicated);
-                List<double[]> newPoints = newIds.Select(id => new[] { GetMm(page.Shapes.ItemFromID(id), "PinX"), GetMm(page.Shapes.ItemFromID(id), "PinY") }).ToList();
+                List<double[]> newPoints = new List<double[]>();
+                foreach (int id in newIds)
+                {
+                    dynamic newShape = page.Shapes.ItemFromID(id);
+                    newPoints.Add(new double[] { GetMm(newShape, "PinX"), GetMm(newShape, "PinY") });
+                }
                 for (int i = 0; i < sourceIds.Count; i++)
                 {
                     if (MasterName(page.Shapes.ItemFromID(newIds[i])) != sourceMasters[i] || SafeText(page.Shapes.ItemFromID(newIds[i])) != sourceTexts[i])
@@ -261,12 +273,22 @@ namespace EnergoLogicVisioEditor
                 SelectIds(page, ids);
                 if (copy)
                 {
-                    List<double[]> src = ids.Select(id => new[] { GetMm(page.Shapes.ItemFromID(id), "PinX"), GetMm(page.Shapes.ItemFromID(id), "PinY") }).ToList();
+                    List<double[]> src = new List<double[]>();
+                    foreach (int id in ids)
+                    {
+                        dynamic sourceShape = page.Shapes.ItemFromID(id);
+                        src.Add(new double[] { GetMm(sourceShape, "PinX"), GetMm(sourceShape, "PinY") });
+                    }
                     app.DoCmd(1024);
                     dynamic dup = app.ActiveWindow.Selection;
                     if ((int)dup.Count != ids.Count) throw new InvalidOperationException("Неполная копия выделения");
                     List<int> newIds = SelectionIds(dup);
-                    List<double[]> now = newIds.Select(id => new[] { GetMm(page.Shapes.ItemFromID(id), "PinX"), GetMm(page.Shapes.ItemFromID(id), "PinY") }).ToList();
+                    List<double[]> now = new List<double[]>();
+                    foreach (int id in newIds)
+                    {
+                        dynamic duplicateShape = page.Shapes.ItemFromID(id);
+                        now.Add(new double[] { GetMm(duplicateShape, "PinX"), GetMm(duplicateShape, "PinY") });
+                    }
                     double ndx = now.Average(p => p[0]) - src.Average(p => p[0]);
                     double ndy = now.Average(p => p[1]) - src.Average(p => p[1]);
                     dup.Move(dx - ndx, dy - ndy, "mm");
@@ -322,7 +344,13 @@ namespace EnergoLogicVisioEditor
             if (pitch <= 0) throw new InvalidOperationException("Шаг должен быть больше нуля");
             dynamic app = App;
             dynamic page = app.ActivePage;
-            List<CellInfo> cells = SelectedCells(page).OrderBy(c => GetMm(page.Shapes.ItemFromID(c.BusTerminalId), "PinX")).ToList();
+            List<CellInfo> cells = SelectedCells(page);
+            cells.Sort(delegate(CellInfo left, CellInfo right)
+            {
+                dynamic leftTerminal = page.Shapes.ItemFromID(left.BusTerminalId);
+                dynamic rightTerminal = page.Shapes.ItemFromID(right.BusTerminalId);
+                return GetMm(leftTerminal, "PinX").CompareTo(GetMm(rightTerminal, "PinX"));
+            });
             if (cells.Count < 2) throw new InvalidOperationException("Для распределения выберите минимум две ячейки");
             int busId = cells[0].BusId;
             if (cells.Any(c => c.BusId != busId)) throw new InvalidOperationException("Все выбранные ячейки должны быть на одной шине");
@@ -518,8 +546,16 @@ namespace EnergoLogicVisioEditor
             dynamic terminal = page.Shapes.ItemFromID(anchor.Item2.TargetId);
             int slot = GetSlot(terminal);
             double anchorX = GetMm(page.Shapes.ItemFromID(anchor.Item1), "PinX");
-            double minY = core.Min(id => GetMm(page.Shapes.ItemFromID(id), "PinY")) - 10.0;
-            double maxY = core.Max(id => GetMm(page.Shapes.ItemFromID(id), "PinY")) + 10.0;
+            double minY = Double.PositiveInfinity;
+            double maxY = Double.NegativeInfinity;
+            foreach (int id in core)
+            {
+                double y = GetMm(page.Shapes.ItemFromID(id), "PinY");
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+            minY -= 10.0;
+            maxY += 10.0;
             double pitch = NearestBusPitch(page, anchor.Item3, anchor.Item2.TargetId);
             double half = pitch / 2.0;
             List<int> members = new List<int>(core);
