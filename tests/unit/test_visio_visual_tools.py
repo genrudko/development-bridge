@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.57"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.58"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.57"
+    assert arguments["version"] == "2026.10.03.58"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.57"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.58"}'}],
                 "isError": False,
             }
 
@@ -587,6 +587,8 @@ def test_managed_visio_extension_has_bounded_classic_com_addin_probe():
     assert 'duplicate.Move(40.0, 0.0, "mm")' in source
     assert 'office_key =' in source
     assert '"LoadBehavior", 3' in source
+    assert "{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}" in source
+    assert "Implemented Categories" in source
     assert "winreg.HKEY_CURRENT_USER" in source
     assert "COMAddIns" in source
     assert "addins.Update()" in source

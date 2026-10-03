@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.57"
+MANAGED_EXTENSION_VERSION = "2026.10.03.58"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2597,6 +2597,13 @@ namespace EnergoLogicVisioQol
             clsid_key = classes + "\\CLSID\\" + clsid
             set_string(winreg.HKEY_CURRENT_USER, clsid_key, "", "EnergoLogic Visio QoL Add-in")
             set_string(winreg.HKEY_CURRENT_USER, clsid_key + r"\ProgId", "", progid)
+            office_addin_category = "{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}"
+            set_string(
+                winreg.HKEY_CURRENT_USER,
+                clsid_key + "\\Implemented Categories\\" + office_addin_category,
+                "",
+                "",
+            )
             inproc = clsid_key + r"\InprocServer32"
             set_string(winreg.HKEY_CURRENT_USER, inproc, "", "mscoree.dll")
             set_string(winreg.HKEY_CURRENT_USER, inproc, "ThreadingModel", "Both")
@@ -2633,6 +2640,7 @@ namespace EnergoLogicVisioQol
                 "compile_stderr": compile_result.stderr[-1000:],
                 "hkcu_only": True,
                 "load_behavior": 3,
+                "office_addin_category": office_addin_category,
                 "connected": connected,
                 "connect_error": connect_error,
                 "ribbon_tab": "EnergoLogic",
