@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.2.3.0")]
+[assembly: AssemblyVersion("0.2.4.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("782E02AF-5D14-4A70-A92D-0E1675BD2901")]
-    [ProgId("EnergoLogic.VisioEditorAddinV23")]
+    [Guid("31E49DF3-9BE0-4FF6-AC9A-D7268E7829AA")]
+    [ProgId("EnergoLogic.VisioEditorAddinV24")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -180,7 +180,7 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.2.3"; }
+        public string ApiVersion() { return "0.2.4"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -666,11 +666,21 @@ namespace EnergoLogicVisioEditor
             return found[0];
         }
 
+        private bool CellExists(dynamic shape, string cellName)
+        {
+            try
+            {
+                object raw = shape.CellExistsU(cellName, 0);
+                return Convert.ToInt32(raw, CultureInfo.InvariantCulture) != 0;
+            }
+            catch { return false; }
+        }
+
         private int GetSlot(dynamic terminal)
         {
             try
             {
-                if ((bool)terminal.CellExistsU("User.slot", 0))
+                if (CellExists(terminal, "User.slot"))
                     return Convert.ToInt32(Math.Round((double)terminal.CellsU("User.slot").ResultIU));
             }
             catch { }
@@ -790,8 +800,7 @@ namespace EnergoLogicVisioEditor
 
         private bool HasEndpoint(dynamic shape, string endpoint)
         {
-            try { return (bool)shape.CellExistsU(endpoint == "begin" ? "BeginX" : "EndX", 0); }
-            catch { return false; }
+            return CellExists(shape, endpoint == "begin" ? "BeginX" : "EndX");
         }
 
         private void DetachEndpoint(dynamic shape, string endpoint)
@@ -808,7 +817,7 @@ namespace EnergoLogicVisioEditor
         {
             string sourceName = endpoint == "begin" ? "BeginX" : "EndX";
             string targetName = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
-            if (!(bool)target.CellExistsU(targetName, 0)) throw new InvalidOperationException("У target отсутствует " + targetName);
+            if (!CellExists(target, targetName)) throw new InvalidOperationException("У target отсутствует " + targetName);
             shape.CellsU(sourceName).GlueTo(target.CellsU(targetName));
         }
 
@@ -832,7 +841,7 @@ namespace EnergoLogicVisioEditor
                     string yName = "Connections.Y" + row.ToString(CultureInfo.InvariantCulture);
                     try
                     {
-                        if (!(bool)shape.CellExistsU(xName, 0)) continue;
+                        if (!CellExists(shape, xName)) continue;
                         double x = (double)shape.CellsU(xName).ResultIU;
                         double y = (double)shape.CellsU(yName).ResultIU;
                         double px = 0, py = 0;
@@ -855,15 +864,14 @@ namespace EnergoLogicVisioEditor
 
         private bool HasCellIdentity(dynamic shape)
         {
-            try { return (bool)shape.CellExistsU("User.EnergoLogicCellId", 0); }
-            catch { return false; }
+            return CellExists(shape, "User.EnergoLogicCellId");
         }
 
         private void SetCellIdentity(dynamic shape, string cellId)
         {
             const short visSectionUser = 242;
             if (!(bool)shape.SectionExists(visSectionUser, 0)) shape.AddSection(visSectionUser);
-            if (!(bool)shape.CellExistsU("User.EnergoLogicCellId", 0)) shape.AddNamedRow(visSectionUser, "EnergoLogicCellId", 0);
+            if (!CellExists(shape, "User.EnergoLogicCellId")) shape.AddNamedRow(visSectionUser, "EnergoLogicCellId", 0);
             shape.CellsU("User.EnergoLogicCellId").FormulaU = "\"" + cellId + "\"";
         }
     }

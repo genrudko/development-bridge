@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.89"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.90"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.89"
+    assert arguments["version"] == "2026.10.03.90"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.89"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.90"}'}],
                 "isError": False,
             }
 
@@ -279,8 +279,8 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV23")' in cs
-    assert 'AssemblyVersion("0.2.3.0")' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV24")' in cs
+    assert 'AssemblyVersion("0.2.4.0")' in cs
     assert "public interface IEnergoLogicEditorApi" in cs
     assert "ClassInterface(ClassInterfaceType.AutoDual)" in cs
     assert "ApiDuplicateRight" in cs
@@ -288,7 +288,7 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     assert "ApiShowPanel" in cs
     assert "host.Object = this" in cs
     assert "def invoke_energologic_editor_api(" in ext
-    assert 'addins.Item("EnergoLogic.VisioEditorAddinV23")' in ext
+    assert 'addins.Item("EnergoLogic.VisioEditorAddinV24")' in ext
     assert '"duplicate_right": "ApiDuplicateRight"' in ext
     assert '"repair_glue_apply": "ApiRepairGlueApply"' in ext
 
@@ -326,4 +326,15 @@ def test_editor_cell_discovery_surfaces_inner_reason():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "Причина: " in cs
     assert "last.Message" in cs
-    assert 'ApiVersion() { return "0.2.3"; }' in cs
+    assert 'ApiVersion() { return "0.2.4"; }' in cs
+
+
+def test_editor_uses_robust_com_cell_exists_conversion():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    assert "private bool CellExists(dynamic shape, string cellName)" in cs
+    assert "Convert.ToInt32(raw, CultureInfo.InvariantCulture) != 0" in cs
+    assert "(bool)shape.CellExistsU" not in cs
+    assert "(bool)target.CellExistsU" not in cs
+    assert "(bool)terminal.CellExistsU" not in cs
+    assert 'ApiVersion() { return "0.2.4"; }' in cs
