@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.85"
+MANAGED_EXTENSION_VERSION = "2026.10.03.86"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1450,8 +1450,12 @@ def install(namespace: dict) -> None:
                 "show_panel": "ApiShowPanel",
                 "version": "ApiVersion",
             }
+            def invoke_zero(name):
+                value = getattr(api, name)
+                return value() if callable(value) else value
+
             if key in zero:
-                result = getattr(api, zero[key])()
+                result = invoke_zero(zero[key])
             elif key == "exact_offset":
                 result = api.ApiExactOffset(float(payload["dx_mm"]), float(payload["dy_mm"]))
             elif key in {"base_copy", "base_move"}:
@@ -1464,7 +1468,7 @@ def install(namespace: dict) -> None:
             return ok({
                 "action": key,
                 "result": str(result),
-                "api_version": str(api.ApiVersion()),
+                "api_version": str(invoke_zero("ApiVersion")),
                 "progid": "EnergoLogic.VisioEditorAddinV21",
                 "page": str(page_obj.Name),
                 "document": str(page_obj.Document.Name),
