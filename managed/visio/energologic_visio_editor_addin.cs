@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("9C760F65-31D1-49B5-A53A-A13580D67E92")]
-    [ProgId("EnergoLogic.VisioEditorAddinV2")]
+    [Guid("4A78D159-46C8-4AF8-9CA4-5B8A5D25F421")]
+    [ProgId("EnergoLogic.VisioEditorAddinV21")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
