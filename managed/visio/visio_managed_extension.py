@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.39"
+MANAGED_EXTENSION_VERSION = "2026.10.03.40"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1189,6 +1189,23 @@ Failed:
     On Error GoTo 0
     Err.Raise vbObjectError + 703, "EnergoLogicQolHost", "Undo probe failed"
 End Sub
+
+Public Sub UndoProbeDuplicate40FromShape(ByVal triggerShape As Visio.Shape)
+    Dim pg As Visio.Page
+    Dim win As Visio.Window
+    Dim ids As Variant
+    Dim item As Variant
+
+    Set pg = triggerShape.ContainingPage
+    Set win = Application.ActiveWindow
+    win.DeselectAll
+    ids = Array(66, 69, 71, 73, 113, 117, 119, 247)
+    For Each item In ids
+        win.Select pg.Shapes.ItemFromID(CLng(item)), 2
+    Next item
+    UndoProbeDuplicate40
+End Sub
+
 """
             component.CodeModule.AddFromString(vba_source)
 
@@ -1255,6 +1272,138 @@ End Sub
                 "shape_count_after": after_count,
                 "macro": "EnergoLogicQolHost.UndoProbeDuplicate40",
                 "executed_inside_visio": True,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def install_energologic_qol_action_probe(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Create one bounded ShapeSheet Action trigger for the fixed VBA Undo probe."""
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("QoL action probe requires a .vsdm document")
+
+            # One small temporary trigger, isolated from the electrical drawing.
+            trigger = page_obj.DrawRectangle(0.25, 0.25, 1.65, 0.65)
+            trigger.Text = "EnergoLogic Undo Probe"
+            section = 240  # visSectionAction
+            if not bool(trigger.SectionExists(section, 0)):
+                trigger.AddSection(section)
+            trigger.AddNamedRow(section, "EnergoLogicUndoProbe", 0)
+            trigger.CellsU("Actions.EnergoLogicUndoProbe.Menu").FormulaU = '"&EnergoLogic Undo Probe"'
+            trigger.CellsU("Actions.EnergoLogicUndoProbe.Action").FormulaU = (
+                'CALLTHIS("EnergoLogicQolHost.UndoProbeDuplicate40FromShape",)'
+            )
+            trigger.CellsU("Actions.EnergoLogicUndoProbe.BeginGroup").FormulaU = "TRUE"
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "trigger_shape_id": int(trigger.ID),
+                "menu": "EnergoLogic Undo Probe",
+                "action_formula": str(
+                    trigger.CellsU("Actions.EnergoLogicUndoProbe.Action").FormulaU
+                ),
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def keyboard_run_energologic_qol_action_probe(
+        trigger_shape_id: int,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Invoke the fixed EnergoLogic ShapeSheet Action through the real shortcut menu."""
+        try:
+            import ctypes
+            import time
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("QoL action probe requires a .vsdm document")
+            trigger = page_obj.Shapes.ItemFromID(int(trigger_shape_id))
+            if not bool(trigger.CellExistsU("Actions.EnergoLogicUndoProbe.Action", 0)):
+                raise ValueError("trigger shape does not contain EnergoLogic probe action")
+
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            window.Select(trigger, 2)
+
+            hwnd = int(window.WindowHandle32)
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            GA_ROOT = 2
+            SW_RESTORE = 9
+            VK_SHIFT = 0x10
+            VK_F10 = 0x79
+            VK_E = 0x45
+            KEYEVENTF_KEYUP = 0x0002
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+
+            def chord(modifier, vk):
+                user32.keybd_event(modifier, 0, 0, 0)
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(modifier, 0, KEYEVENTF_KEYUP, 0)
+
+            def press(vk):
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+            foreground_hwnd = int(user32.GetForegroundWindow())
+            current_thread = int(kernel32.GetCurrentThreadId())
+            target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
+            foreground_thread = (
+                int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
+                if foreground_hwnd else 0
+            )
+            attached = []
+            before_count = int(page_obj.Shapes.Count)
+            try:
+                for other_thread in (foreground_thread, target_thread):
+                    if other_thread and other_thread != current_thread:
+                        if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
+                            attached.append(other_thread)
+                user32.ShowWindow(root_hwnd, SW_RESTORE)
+                user32.BringWindowToTop(root_hwnd)
+                user32.SetForegroundWindow(root_hwnd)
+                user32.SetActiveWindow(root_hwnd)
+                time.sleep(0.2)
+                chord(VK_SHIFT, VK_F10)
+                time.sleep(0.45)
+                press(VK_E)
+                time.sleep(1.0)
+            finally:
+                for other_thread in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(current_thread, other_thread, False)
+                    except Exception:
+                        pass
+
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + 8:
+                raise RuntimeError(
+                    f"ShapeSheet Action probe expected {before_count + 8} shapes, got {after_count}"
+                )
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "trigger_shape_id": int(trigger_shape_id),
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "launch_path": "Shape shortcut menu / Actions.EnergoLogicUndoProbe",
+                "ui_action_launched": True,
             })
         except Exception as exc:
             return err(exc)

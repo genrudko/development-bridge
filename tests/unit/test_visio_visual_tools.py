@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.39"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.40"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.39"
+    assert arguments["version"] == "2026.10.03.40"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.39"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.40"}'}],
                 "isError": False,
             }
 
@@ -383,3 +383,17 @@ def test_managed_visio_extension_has_bounded_macros_ui_probe():
     assert "EnumWindows" in source
     assert "EnumChildWindows" in source
     assert "GetDlgCtrlID" in source
+
+
+def test_managed_visio_extension_has_shapesheet_action_ui_probe():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def install_energologic_qol_action_probe(" in source
+    assert "def keyboard_run_energologic_qol_action_probe(" in source
+    assert "visSectionAction" in source or "section = 240" in source
+    assert 'Actions.EnergoLogicUndoProbe.Action' in source
+    assert 'CALLTHIS("EnergoLogicQolHost.UndoProbeDuplicate40FromShape",)' in source
+    assert "chord(VK_SHIFT, VK_F10)" in source
