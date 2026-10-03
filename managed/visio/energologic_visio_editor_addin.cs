@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.5.0")]
+[assembly: AssemblyVersion("0.3.6.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -84,8 +84,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("D93F00C2-1C95-4D0A-A0A9-609E25B9794C")]
-    [ProgId("EnergoLogic.VisioEditorAddinV35")]
+    [Guid("81705A73-9C25-4E72-84A8-F58E4C818AAF")]
+    [ProgId("EnergoLogic.VisioEditorAddinV36")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -203,7 +203,7 @@ namespace EnergoLogicVisioEditor
         public string ApiNudgeUp() { return ExactOffset(0.0, 1.0); }
         public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
         public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
-        public string ApiVersion() { return "0.3.5"; }
+        public string ApiVersion() { return "0.3.6"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -253,6 +253,7 @@ namespace EnergoLogicVisioEditor
                 double nativeDx = newPoints.Average(p => p[0]) - sourcePoints.Average(p => p[0]);
                 double nativeDy = newPoints.Average(p => p[1]) - sourcePoints.Average(p => p[1]);
                 duplicated.Move(dx - nativeDx, dy - nativeDy, "mm");
+                SettleVisioAfterGeometryChange();
 
                 int anchorIndex = sourceIds.IndexOf(cell.AnchorId);
                 if (anchorIndex < 0) throw new InvalidOperationException("Не найден anchor ячейки в копии");
@@ -298,6 +299,7 @@ namespace EnergoLogicVisioEditor
                 DetachEndpoint(anchor, cell.Endpoint);
                 SelectIds(page, cell.MemberIds);
                 app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                SettleVisioAfterGeometryChange();
                 int restoredInternal = RestoreInternalGlue(page, internalGlue);
                 GlueEndpoint(anchor, cell.Endpoint, targetTerminal, cell.ConnectionRow);
                 VerifyGlue(anchor, cell.Endpoint, (int)targetTerminal.ID, cell.ConnectionRow);
@@ -332,6 +334,7 @@ namespace EnergoLogicVisioEditor
             {
                 SelectIds(page, ids);
                 app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                SettleVisioAfterGeometryChange();
                 int restoredInternal = RestoreInternalGlue(page, internalGlue);
                 VerifyInternalGlue(page, internalGlue);
                 commit = true;
@@ -377,6 +380,7 @@ namespace EnergoLogicVisioEditor
                     double ndx = now.Average(p => p[0]) - src.Average(p => p[0]);
                     double ndy = now.Average(p => p[1]) - src.Average(p => p[1]);
                     dup.Move(dx - ndx, dy - ndy, "mm");
+                    SettleVisioAfterGeometryChange();
                     string cellId = "cell:" + Guid.NewGuid().ToString("N");
                     foreach (int id in newIds) if (HasCellIdentity(page.Shapes.ItemFromID(id))) SetCellIdentity(page.Shapes.ItemFromID(id), cellId);
                     List<GlueEdgeInfo> duplicateGlue = CaptureInternalGlue(page, newIds);
@@ -386,6 +390,7 @@ namespace EnergoLogicVisioEditor
                 else
                 {
                     app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                    SettleVisioAfterGeometryChange();
                     RestoreInternalGlue(page, internalGlue);
                     VerifyInternalGlue(page, internalGlue);
                 }
@@ -514,6 +519,7 @@ namespace EnergoLogicVisioEditor
                     dynamic shape = page.Shapes.ItemFromID(id);
                     SetMm(shape, axis == "x" ? "PinX" : "PinY", target);
                 }
+                SettleVisioAfterGeometryChange();
                 RestoreInternalGlue(page, internalGlue);
                 VerifyInternalGlue(page, internalGlue);
                 SelectIds(page, ids);
@@ -586,6 +592,7 @@ namespace EnergoLogicVisioEditor
                     DetachEndpoint(anchor, cell.Endpoint);
                     SelectIds(page, cell.MemberIds);
                     app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                    SettleVisioAfterGeometryChange();
                     RestoreInternalGlue(page, internalGlueByAnchor[cell.AnchorId]);
                     GlueEndpoint(anchor, cell.Endpoint, target, cell.ConnectionRow);
                     VerifyGlue(anchor, cell.Endpoint, (int)target.ID, cell.ConnectionRow);
@@ -1033,6 +1040,17 @@ namespace EnergoLogicVisioEditor
         private bool HasEndpoint(dynamic shape, string endpoint)
         {
             return CellExists(shape, endpoint == "begin" ? "BeginX" : "EndX");
+        }
+
+        private void SettleVisioAfterGeometryChange()
+        {
+            // VTD/Visio can update endpoint formulas asynchronously after Selection.Move.
+            // Pump the UI queue briefly before re-applying native Glue.
+            for (int i = 0; i < 4; i++)
+            {
+                System.Windows.Forms.Application.DoEvents();
+                System.Threading.Thread.Sleep(25);
+            }
         }
 
         private List<GlueEdgeInfo> CaptureInternalGlue(dynamic page, IEnumerable<int> ids)
