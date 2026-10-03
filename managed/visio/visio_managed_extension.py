@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.21"
+MANAGED_EXTENSION_VERSION = "2026.10.03.22"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -683,6 +683,35 @@ def install(namespace: dict) -> None:
             return err(exc)
 
     @mcp.tool()
+    def get_undo_status(page: str = "", doc_name: str = "") -> str:
+        """Read Visio undo-state diagnostics without mutating the document."""
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                active_document = str(app.ActiveDocument.Name) if app.ActiveDocument else None
+            except Exception:
+                active_document = None
+            try:
+                active_page = str(app.ActivePage.Name) if app.ActivePage else None
+            except Exception:
+                active_page = None
+            try:
+                current_scope = int(app.CurrentScope)
+            except Exception:
+                current_scope = None
+            return ok({
+                "page": str(page_obj.Name),
+                "document": str(page_obj.Document.Name),
+                "active_document": active_document,
+                "active_page": active_page,
+                "undo_enabled": bool(app.UndoEnabled),
+                "current_scope": current_scope,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
     def undo_once(page: str = "", doc_name: str = "") -> str:
         """Undo exactly one Visio user action on the resolved page.
 
@@ -700,12 +729,25 @@ def install(namespace: dict) -> None:
                 except Exception:
                     pass
             before_count = int(page_obj.Shapes.Count)
+            undo_enabled_before = bool(app.UndoEnabled)
+            try:
+                current_scope_before = int(app.CurrentScope)
+            except Exception:
+                current_scope_before = None
             app.Undo()
             after_count = int(page_obj.Shapes.Count)
+            try:
+                current_scope_after = int(app.CurrentScope)
+            except Exception:
+                current_scope_after = None
             return ok({
                 "page": str(page_obj.Name),
                 "shape_count_before": before_count,
                 "shape_count_after": after_count,
+                "undo_enabled_before": undo_enabled_before,
+                "undo_enabled_after": bool(app.UndoEnabled),
+                "current_scope_before": current_scope_before,
+                "current_scope_after": current_scope_after,
                 "undone_once": True,
             })
         except Exception as exc:

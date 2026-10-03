@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.21"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.22"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.21"
+    assert arguments["version"] == "2026.10.03.22"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.21"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.22"}'}],
                 "isError": False,
             }
 
@@ -226,3 +226,19 @@ def test_managed_visio_extension_has_bounded_single_undo_tool():
     assert "app.Undo()" in source
     assert "shape_count_before" in source
     assert "shape_count_after" in source
+
+
+def test_managed_visio_extension_has_read_only_undo_status_tool():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed"
+        / "visio"
+        / "visio_managed_extension.py"
+    ).read_text()
+
+    assert "def get_undo_status(" in source
+    assert '"undo_enabled": bool(app.UndoEnabled)' in source
+    assert 'current_scope = int(app.CurrentScope)' in source
+    assert '"undo_enabled_before": undo_enabled_before' in source
