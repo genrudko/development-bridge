@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.1.0")]
+[assembly: AssemblyVersion("0.3.2.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -46,7 +46,7 @@ namespace EnergoLogicVisioEditor
 
 
     [ComVisible(true)]
-    [Guid("3288CA38-4200-47CB-9BDA-665B51B90937")]
+    [Guid("C4AC16D4-DB4F-416B-BB13-1D84E22B781C")]
     [InterfaceType(ComInterfaceType.InterfaceIsDual)]
     public interface IEnergoLogicEditorApi
     {
@@ -66,12 +66,18 @@ namespace EnergoLogicVisioEditor
         string ApiBaseMove(double bx, double by, double tx, double ty);
         string ApiMeasurePitch();
         string ApiDistributePitch(double pitchMm);
+        string ApiCoordinates();
+        string ApiNudgeLeft();
+        string ApiNudgeRight();
+        string ApiNudgeUp();
+        string ApiNudgeDown();
+        string ApiRenumberCell(string newDesignation);
         string ApiVersion();
     }
 
     [ComVisible(true)]
-    [Guid("F2236480-88B8-42B3-AEC4-0707D59A14FC")]
-    [ProgId("EnergoLogic.VisioEditorAddinV31")]
+    [Guid("9B2D0D65-A68C-44D0-A523-612148808DBD")]
+    [ProgId("EnergoLogic.VisioEditorAddinV32")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -183,7 +189,13 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.3.1"; }
+        public string ApiCoordinates() { return Coordinates(); }
+        public string ApiNudgeLeft() { return ExactOffset(-1.0, 0.0); }
+        public string ApiNudgeRight() { return ExactOffset(1.0, 0.0); }
+        public string ApiNudgeUp() { return ExactOffset(0.0, 1.0); }
+        public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
+        public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
+        public string ApiVersion() { return "0.3.2"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -330,8 +342,9 @@ namespace EnergoLogicVisioEditor
                         dynamic sourceShape = page.Shapes.ItemFromID(id);
                         src.Add(new double[] { GetMm(sourceShape, "PinX"), GetMm(sourceShape, "PinY") });
                     }
-                    app.DoCmd(1024);
-                    dynamic dup = app.ActiveWindow.Selection;
+                    dynamic sourceSelection = app.ActiveWindow.Selection;
+                    dynamic dup = sourceSelection.Duplicate();
+                    if (dup == null) dup = app.ActiveWindow.Selection;
                     if ((int)dup.Count != ids.Count) throw new InvalidOperationException("Неполная копия выделения");
                     List<int> newIds = SelectionIds(dup);
                     List<double[]> now = new List<double[]>();
@@ -351,6 +364,106 @@ namespace EnergoLogicVisioEditor
                 return String.Format(CultureInfo.CurrentCulture, "✓ {0} по базовой точке: ΔX {1:0.###} мм, ΔY {2:0.###} мм.", copy ? "Копирование" : "Перемещение", dx, dy);
             }
             finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string Coordinates()
+        {
+            dynamic page = App.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            List<string> rows = new List<string>();
+            foreach (int id in ids)
+            {
+                dynamic shape = page.Shapes.ItemFromID(id);
+                string label = SafeText(shape).Trim();
+                if (String.IsNullOrWhiteSpace(label)) label = Convert.ToString(shape.Name, CultureInfo.CurrentCulture);
+                rows.Add(String.Format(CultureInfo.CurrentCulture,
+                    "#{0} {1}: X {2:0.###} мм; Y {3:0.###} мм",
+                    id, label, GetMm(shape, "PinX"), GetMm(shape, "PinY")));
+            }
+            return "Координаты выделения:\r\n" + String.Join("\r\n", rows.ToArray());
+        }
+
+        internal string RenumberCell(string newDesignation)
+        {
+            string value = (newDesignation ?? "").Trim();
+            if (value.Length == 0) throw new InvalidOperationException("Введите новое обозначение ячейки");
+            if (value.Length > 64) throw new InvalidOperationException("Обозначение ячейки не должно быть длиннее 64 символов");
+            if (!Regex.IsMatch(value, @"^[\p{L}\p{N}][\p{L}\p{N}\s._/()+\-]{0,63}$"))
+                throw new InvalidOperationException("В обозначении допустимы буквы, цифры, пробел, точка, дефис, /, + и скобки");
+
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            CellInfo cell = DiscoverCellFromSelection(page);
+            dynamic anchor = page.Shapes.ItemFromID(cell.AnchorId);
+            string oldDesignation = SafeText(anchor).Trim();
+            if (String.IsNullOrWhiteSpace(oldDesignation))
+                throw new InvalidOperationException("У anchor выбранной ячейки отсутствует текстовое обозначение");
+            if (String.Equals(oldDesignation, value, StringComparison.CurrentCulture))
+                throw new InvalidOperationException("Новое обозначение совпадает с текущим");
+
+            HashSet<int> memberIds = new HashSet<int>(cell.MemberIds);
+            for (int index = 1; index <= (int)page.Shapes.Count; index++)
+            {
+                dynamic candidate = page.Shapes.Item(index);
+                int candidateId = (int)candidate.ID;
+                if (memberIds.Contains(candidateId)) continue;
+                string text = SafeText(candidate).Trim();
+                if (String.Equals(text, value, StringComparison.CurrentCultureIgnoreCase))
+                    throw new InvalidOperationException("Обозначение \"" + value + "\" уже используется shape " + candidateId);
+            }
+
+            string oldShort = ShortDesignation(oldDesignation);
+            string newShort = ShortDesignation(value);
+            int scope = (int)app.BeginUndoScope("EnergoLogic: Перенумеровать ячейку");
+            bool commit = false;
+            int changed = 0;
+            try
+            {
+                foreach (int id in cell.MemberIds)
+                {
+                    dynamic shape = page.Shapes.ItemFromID(id);
+                    string text = SafeText(shape);
+                    if (String.IsNullOrEmpty(text)) continue;
+                    string updated = text;
+                    if (updated.IndexOf(oldDesignation, StringComparison.CurrentCulture) >= 0)
+                        updated = updated.Replace(oldDesignation, value);
+                    else if (!String.IsNullOrWhiteSpace(oldShort) &&
+                             String.Equals(updated.Trim(), oldShort, StringComparison.CurrentCulture))
+                        updated = PreserveOuterWhitespace(updated, newShort);
+                    if (!String.Equals(updated, text, StringComparison.Ordinal))
+                    {
+                        shape.Text = updated;
+                        changed++;
+                    }
+                }
+                if (changed == 0)
+                    throw new InvalidOperationException("В составе ячейки не найдено текстов для перенумерации");
+                if (!String.Equals(SafeText(anchor).Trim(), value, StringComparison.CurrentCulture))
+                    throw new InvalidOperationException("После перенумерации anchor не получил новое обозначение");
+                SelectIds(page, cell.MemberIds);
+                commit = true;
+                return String.Format(CultureInfo.CurrentCulture,
+                    "✓ Ячейка перенумерована: {0} → {1}. Обновлено подписей: {2}. Identity сохранена.",
+                    oldDesignation, value, changed);
+            }
+            finally { app.EndUndoScope(scope, commit); }
+        }
+
+        private string ShortDesignation(string designation)
+        {
+            Match match = Regex.Match(designation ?? "", @"^(?<base>.+)-(?<voltage>\d+(?:[.,]\d+)?)$");
+            return match.Success ? match.Groups["base"].Value : designation;
+        }
+
+        private string PreserveOuterWhitespace(string original, string replacement)
+        {
+            int start = 0;
+            while (start < original.Length && Char.IsWhiteSpace(original[start])) start++;
+            int end = original.Length - 1;
+            while (end >= start && Char.IsWhiteSpace(original[end])) end--;
+            string prefix = original.Substring(0, start);
+            string suffix = end + 1 < original.Length ? original.Substring(end + 1) : "";
+            return prefix + replacement + suffix;
         }
 
         internal string Align(string axis)
@@ -1025,6 +1138,7 @@ namespace EnergoLogicVisioEditor
         private readonly NumericUpDown _tx;
         private readonly NumericUpDown _ty;
         private readonly NumericUpDown _pitch;
+        private readonly TextBox _renumber;
 
         public EditorForm(Connect addin)
         {
@@ -1052,6 +1166,9 @@ namespace EnergoLogicVisioEditor
             cells.Controls.Add(Button("Переместить →", (s,e)=>Run(()=>_addin.MoveCell(1))),1,1);
             cells.Controls.Add(Button("Выделить всю ячейку", (s,e)=>Run(()=>_addin.SelectCell())),0,2);
             cells.SetColumnSpan(cells.GetControlFromPosition(0,2),2);
+            _renumber = new TextBox { Dock=DockStyle.Fill, Margin=new Padding(5), AccessibleName="Новое обозначение ячейки" };
+            cells.Controls.Add(_renumber,0,3);
+            cells.Controls.Add(Button("Перенумеровать", (s,e)=>Run(()=>_addin.RenumberCell(_renumber.Text))),1,3);
             cellTab.Controls.Add(cells);
 
             FlowLayoutPanel gluePanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 120, FlowDirection = FlowDirection.TopDown, Padding = new Padding(10) };
@@ -1079,6 +1196,13 @@ namespace EnergoLogicVisioEditor
             _pitch=Num(1,500,40); geo.Controls.Add(new Label{Text="Шаг ячеек, мм",AutoSize=true},0,6); geo.Controls.Add(_pitch,1,6);
             Button measure=Button("Измерить шаг",(s,e)=>RunPitchMeasure()); Button dist=Button("Распределить",(s,e)=>Run(()=>_addin.DistributePitch((double)_pitch.Value)));
             geo.Controls.Add(measure,2,6); geo.Controls.Add(dist,3,6);
+            Button nx=Button("← 1 мм",(s,e)=>Run(()=>_addin.ExactOffset(-1,0)));
+            Button px=Button("1 мм →",(s,e)=>Run(()=>_addin.ExactOffset(1,0)));
+            Button ny=Button("↓ 1 мм",(s,e)=>Run(()=>_addin.ExactOffset(0,-1)));
+            Button py=Button("↑ 1 мм",(s,e)=>Run(()=>_addin.ExactOffset(0,1)));
+            geo.Controls.Add(nx,0,7); geo.Controls.Add(px,1,7); geo.Controls.Add(ny,2,7); geo.Controls.Add(py,3,7);
+            Button coords=ButtonWide("Показать координаты выделения",(s,e)=>Run(()=>_addin.Coordinates()));
+            geo.Controls.Add(coords,0,8); geo.SetColumnSpan(coords,4);
             geoTab.Controls.Add(geo);
 
             FlowLayoutPanel checks = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, Padding = new Padding(14), WrapContents=false };
@@ -1128,7 +1252,7 @@ namespace EnergoLogicVisioEditor
 
         private TableLayoutPanel Panel2()
         {
-            TableLayoutPanel p=new TableLayoutPanel{Dock=DockStyle.Top,Height=180,ColumnCount=2,RowCount=3,Padding=new Padding(10)};
+            TableLayoutPanel p=new TableLayoutPanel{Dock=DockStyle.Top,Height=220,ColumnCount=2,RowCount=4,Padding=new Padding(10)};
             p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50)); p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50));
             return p;
         }
