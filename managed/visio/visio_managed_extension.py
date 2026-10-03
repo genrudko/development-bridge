@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.52"
+MANAGED_EXTENSION_VERSION = "2026.10.03.53"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1835,6 +1835,35 @@ End Property
                 raw = _uuid.UUID(value).bytes_le
                 return GUID.from_buffer_copy(raw)
 
+            class VARIANT_VALUE(ctypes.Union):
+                _fields_ = [
+                    ("llVal", ctypes.c_longlong),
+                    ("lVal", ctypes.c_long),
+                    ("pdispVal", ctypes.c_void_p),
+                    ("punkVal", ctypes.c_void_p),
+                ]
+
+            class VARIANT(ctypes.Structure):
+                _anonymous_ = ("value",)
+                _fields_ = [
+                    ("vt", ctypes.c_ushort),
+                    ("wReserved1", ctypes.c_ushort),
+                    ("wReserved2", ctypes.c_ushort),
+                    ("wReserved3", ctypes.c_ushort),
+                    ("value", VARIANT_VALUE),
+                ]
+
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
             foreground_hwnd = int(user32.GetForegroundWindow())
             current_thread = int(kernel32.GetCurrentThreadId())
             target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
@@ -1846,6 +1875,7 @@ End Property
             before_count = int(page_obj.Shapes.Count)
             menu_hwnd = 0
             diagnostics = []
+            point_diagnostics = []
             target_diagnostic = None
             target_acc = None
             target_child_id = None
@@ -1947,8 +1977,71 @@ End Property
 
                 walk(root_acc)
                 if target_acc is None:
+                    menu_rect = RECT()
+                    if not bool(user32.GetWindowRect(menu_hwnd, ctypes.byref(menu_rect))):
+                        raise RuntimeError(
+                            f"GetWindowRect failed for Net UI menu; nodes={diagnostics!r}"
+                        )
+                    width = max(1, int(menu_rect.right - menu_rect.left))
+                    x_positions = [
+                        int(menu_rect.left + width * fraction)
+                        for fraction in (0.25, 0.5, 0.75)
+                    ]
+                    seen_points = set()
+                    VT_I4 = 3
+                    for y in range(int(menu_rect.top) + 4, int(menu_rect.bottom) - 4, 6):
+                        if target_acc is not None:
+                            break
+                        for x in x_positions:
+                            raw_acc = ctypes.c_void_p()
+                            child_variant = VARIANT()
+                            try:
+                                hr_point = int(
+                                    oleacc.AccessibleObjectFromPoint(
+                                        POINT(x, y),
+                                        ctypes.byref(raw_acc),
+                                        ctypes.byref(child_variant),
+                                    )
+                                )
+                            except Exception:
+                                continue
+                            if hr_point != 0 or not raw_acc.value:
+                                continue
+                            try:
+                                point_dispatch = pythoncom.ObjectFromAddress(
+                                    int(raw_acc.value),
+                                    pythoncom.IID_IDispatch,
+                                )
+                                point_acc = win32com.client.Dispatch(point_dispatch)
+                                child_id = int(child_variant.lVal) if int(child_variant.vt) == VT_I4 else 0
+                                name = safe_call(point_acc, "accName", child_id, "")
+                                role = safe_call(point_acc, "accRole", child_id, None)
+                                default_action = safe_call(
+                                    point_acc, "accDefaultAction", child_id, ""
+                                )
+                                row = {
+                                    "x": x,
+                                    "y": y,
+                                    "child_id": child_id,
+                                    "name": "" if name is None else str(name),
+                                    "role": role if isinstance(role, (int, str)) else str(role),
+                                    "default_action": "" if default_action is None else str(default_action),
+                                }
+                                key = (row["name"], row["role"], row["child_id"])
+                                if key not in seen_points:
+                                    seen_points.add(key)
+                                    point_diagnostics.append(row)
+                                if "EnergoLogic Undo Probe" in row["name"]:
+                                    target_acc = point_acc
+                                    target_child_id = child_id
+                                    target_diagnostic = row
+                                    break
+                            except Exception:
+                                continue
+                if target_acc is None:
                     raise RuntimeError(
-                        f"EnergoLogic MSAA menu item not found; nodes={diagnostics!r}"
+                        f"EnergoLogic MSAA menu item not found; tree_nodes={diagnostics!r}; "
+                        f"point_nodes={point_diagnostics!r}"
                     )
                 target_acc.accDoDefaultAction(target_child_id)
 
@@ -1972,7 +2065,8 @@ End Property
                     pass
                 raise RuntimeError(
                     f"MSAA ShapeSheet Action probe expected {before_count + 8} shapes, got {after_count}; "
-                    f"target={target_diagnostic!r}; nodes={diagnostics!r}"
+                    f"target={target_diagnostic!r}; tree_nodes={diagnostics!r}; "
+                    f"point_nodes={point_diagnostics!r}"
                 )
             return ok({
                 "document": str(document.Name),
@@ -1982,7 +2076,8 @@ End Property
                 "shape_count_after": after_count,
                 "menu_window_handle": menu_hwnd,
                 "target_accessible": target_diagnostic,
-                "launch_path": "Office Net UI / MSAA accDoDefaultAction",
+                "point_nodes": point_diagnostics,
+                "launch_path": "Office Net UI / MSAA AccessibleObjectFromPoint + accDoDefaultAction",
                 "ui_action_launched": True,
             })
         except Exception as exc:
