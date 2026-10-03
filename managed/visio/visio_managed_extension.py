@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.59"
+MANAGED_EXTENSION_VERSION = "2026.10.03.60"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2612,10 +2612,25 @@ namespace EnergoLogicVisioQol
             set_string(winreg.HKEY_CURRENT_USER, inproc, "RuntimeVersion", runtime_version)
             set_string(winreg.HKEY_CURRENT_USER, inproc, "CodeBase", codebase)
 
-            office_key = "Software\\Microsoft\\Office\\Visio\\Addins\\" + progid
-            set_string(winreg.HKEY_CURRENT_USER, office_key, "FriendlyName", "EnergoLogic Visio QoL")
-            set_string(winreg.HKEY_CURRENT_USER, office_key, "Description", "EnergoLogic engineering QoL commands for Visio")
-            set_dword(winreg.HKEY_CURRENT_USER, office_key, "LoadBehavior", 3)
+            # Visio is the Office-family exception: its add-in discovery key is
+            # HKCU\Software\Microsoft\Visio\Addins\<ProgID>, not
+            # HKCU\Software\Microsoft\Office\Visio\Addins\<ProgID>.
+            visio_addin_key = "Software\\Microsoft\\Visio\\Addins\\" + progid
+            set_string(winreg.HKEY_CURRENT_USER, visio_addin_key, "FriendlyName", "EnergoLogic Visio QoL")
+            set_string(winreg.HKEY_CURRENT_USER, visio_addin_key, "Description", "EnergoLogic engineering QoL commands for Visio")
+            set_dword(winreg.HKEY_CURRENT_USER, visio_addin_key, "LoadBehavior", 3)
+
+            # Clean the stale qualification key written by <= 2026.10.03.59.
+            stale_office_key = "Software\\Microsoft\\Office\\Visio\\Addins\\" + progid
+            try:
+                winreg.DeleteKeyEx(
+                    winreg.HKEY_CURRENT_USER,
+                    stale_office_key,
+                    winreg.KEY_WOW64_64KEY,
+                    0,
+                )
+            except FileNotFoundError:
+                pass
 
             connected = False
             connect_error = None
@@ -2640,6 +2655,7 @@ namespace EnergoLogicVisioQol
                 "compile_stderr": compile_result.stderr[-1000:],
                 "hkcu_only": True,
                 "load_behavior": 3,
+                "visio_addin_registry_key": visio_addin_key,
                 "office_addin_category": office_addin_category,
                 "connected": connected,
                 "connect_error": connect_error,
@@ -2689,7 +2705,11 @@ namespace EnergoLogicVisioQol
                 return result
 
             registry = {
-                "office_addin": read_values(
+                "visio_addin": read_values(
+                    winreg.HKEY_CURRENT_USER,
+                    "Software\\Microsoft\\Visio\\Addins\\" + progid,
+                ),
+                "stale_office_visio_addin": read_values(
                     winreg.HKEY_CURRENT_USER,
                     "Software\\Microsoft\\Office\\Visio\\Addins\\" + progid,
                 ),
@@ -2894,6 +2914,8 @@ namespace EnergoLogicVisioQol
             clsid = "{7D679776-1D6B-4D0D-9123-E3E4FB21F806}"
             progid = "EnergoLogic.VisioQolAddin"
             targets = [
+                "Software\\Microsoft\\Visio\\Addins\\" + progid,
+                # Also remove the stale qualification key from versions <= .59.
                 "Software\\Microsoft\\Office\\Visio\\Addins\\" + progid,
                 "Software\\Classes\\" + progid,
                 "Software\\Classes\\CLSID\\" + clsid,
