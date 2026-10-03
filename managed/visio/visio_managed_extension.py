@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.15"
+MANAGED_EXTENSION_VERSION = "2026.10.03.16"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -445,6 +445,14 @@ def install(namespace: dict) -> None:
             committed = False
             try:
                 duplicated = selected.Duplicate()
+                # Some real Visio/pywin32 combinations perform the duplicate but
+                # return None despite the documented Selection return value. In
+                # that case Visio selects the newly-created duplicate set, so use
+                # the active window selection as the authoritative result.
+                if duplicated is None:
+                    duplicated = window.Selection
+                if duplicated is None:
+                    raise RuntimeError("Visio Duplicate produced no result selection")
                 if int(duplicated.Count) != len(shape_ids):
                     raise RuntimeError(
                         f"Visio duplicated {int(duplicated.Count)} shapes, expected {len(shape_ids)}"
