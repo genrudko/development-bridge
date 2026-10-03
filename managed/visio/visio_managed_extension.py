@@ -1217,6 +1217,47 @@ Public Sub UndoProbeDuplicate40FromShape(ByVal triggerShape As Visio.Shape)
     dup.Move 40#, 0#, "mm"
 End Sub
 
+Private Function EnergoLogicSelectionIds(ByVal sel As Visio.Selection) As String
+    Dim i As Long
+    Dim result As String
+    For i = 1 To sel.Count
+        If Len(result) > 0 Then result = result & ","
+        result = result & CStr(sel.Item(i).ID)
+    Next i
+    EnergoLogicSelectionIds = result
+End Function
+
+Public Sub CustomUndoProbeDuplicate40()
+    Dim win As Visio.Window
+    Dim sel As Visio.Selection
+    Dim dup As Visio.Selection
+    Dim sourceIds As String
+    Dim newIds As String
+    Dim unit As EnergoLogicUndoUnit
+    Dim sourceCount As Long
+
+    Set win = Application.ActiveWindow
+    Set sel = win.Selection
+    sourceCount = sel.Count
+    If sourceCount < 1 Then
+        Err.Raise vbObjectError + 705, "EnergoLogicQolHost", "No shapes selected"
+    End If
+    sourceIds = EnergoLogicSelectionIds(sel)
+
+    Application.DoCmd 1024
+    Set dup = win.Selection
+    If dup.Count <> sourceCount Then
+        Err.Raise vbObjectError + 706, "EnergoLogicQolHost", "Duplicate selection count mismatch"
+    End If
+    dup.Move 40#, 0#, "mm"
+    newIds = EnergoLogicSelectionIds(dup)
+
+    Set unit = New EnergoLogicUndoUnit
+    unit.Initialize win.Page, sourceIds, newIds, 40#, 0#
+    Application.AddUndoUnit unit
+End Sub
+
+
 """
             component.CodeModule.AddFromString(vba_source)
 
@@ -1390,6 +1431,64 @@ End Property
                 "shape_count_after": after_count,
                 "macro": "EnergoLogicQolHost.UndoProbeDuplicate40",
                 "executed_inside_visio": True,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def run_energologic_qol_custom_undo_probe(
+        shape_ids_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Run the fixed Duplicate + IVBUndoUnit probe on an explicit selection."""
+        try:
+            import json
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids) or any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be unique positive integers")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("custom Undo probe requires a .vsdm document")
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            for sid in shape_ids:
+                window.Select(page_obj.Shapes.ItemFromID(sid), 2)
+            if int(window.Selection.Count) != len(shape_ids):
+                raise RuntimeError("Could not create the exact source selection")
+
+            before_count = int(page_obj.Shapes.Count)
+            document.ExecuteLine("EnergoLogicQolHost.CustomUndoProbeDuplicate40")
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + len(shape_ids):
+                raise RuntimeError(
+                    f"Custom Undo probe expected {before_count + len(shape_ids)} shapes, got {after_count}"
+                )
+            new_ids = [
+                int(window.Selection.Item(index).ID)
+                for index in range(1, int(window.Selection.Count) + 1)
+            ]
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "source_shape_ids": shape_ids,
+                "new_shape_ids": new_ids,
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "macro": "EnergoLogicQolHost.CustomUndoProbeDuplicate40",
+                "undo_unit": "EnergoLogicUndoUnit",
+                "undo_description": "EnergoLogic: Duplicate Cell",
+                "custom_undo_added": True,
             })
         except Exception as exc:
             return err(exc)

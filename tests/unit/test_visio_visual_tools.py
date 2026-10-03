@@ -430,3 +430,19 @@ def test_managed_visio_extension_has_mouse_shapesheet_action_probe():
     assert "target_pid" in source
     assert "mouse_event(MOUSEEVENTF_LEFTDOWN" in source
     assert 'target_text = "J EnergoLogic Undo Probe"' in source
+
+
+def test_managed_visio_extension_has_custom_vba_undo_unit_probe():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert 'undo_class_name = "EnergoLogicUndoUnit"' in source
+    assert "Implements Visio.IVBUndoUnit" in source
+    assert "Private Sub IVBUndoUnit_Do(ByVal pMgr As Visio.IVBUndoManager)" in source
+    assert "pMgr.Add Me" in source
+    assert 'IVBUndoUnit_Description = "EnergoLogic: Duplicate Cell"' in source
+    assert "Application.AddUndoUnit unit" in source
+    assert "def run_energologic_qol_custom_undo_probe(" in source
+    assert 'document.ExecuteLine("EnergoLogicQolHost.CustomUndoProbeDuplicate40")' in source
