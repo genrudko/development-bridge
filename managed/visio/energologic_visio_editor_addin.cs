@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.2.6.0")]
+[assembly: AssemblyVersion("0.2.7.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("6F58CA11-8162-41B9-981E-2E671371D3C7")]
-    [ProgId("EnergoLogic.VisioEditorAddinV26")]
+    [Guid("1DD57883-7CD6-4C5F-BAEA-8383F4D41CC2")]
+    [ProgId("EnergoLogic.VisioEditorAddinV27")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -82,7 +82,7 @@ namespace EnergoLogicVisioEditor
         private CommandBarButton _toggleButton;
         private _CommandBarButtonEvents_ClickEventHandler _toggleHandler;
         private readonly Regex _glueRegex = new Regex(
-            @"Sheet\.(\d+)!Connections(?:\.X(\d+)|\.(\d+)\.X)",
+            @"(?<target>[^!(),]+)!Connections(?:\.X(?<rowx>\d+)|\.(?<row>\d+)\.X)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
         private readonly Regex _connectionCellRegex = new Regex(
             @"^Connections(?:\.X(\d+)|\.(\d+)\.X)$",
@@ -183,7 +183,7 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.2.6"; }
+        public string ApiVersion() { return "0.2.7"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -830,14 +830,35 @@ namespace EnergoLogicVisioEditor
             catch { return null; }
             Match m = _glueRegex.Match(formula);
             if (!m.Success) return null;
-            int fallbackRow = m.Groups[2].Success
-                ? Int32.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture)
-                : Int32.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture);
-            return new GlueTarget {
-                TargetId = Int32.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture),
-                Row = fallbackRow,
-                Endpoint = endpoint
-            };
+            int fallbackRow = m.Groups["rowx"].Success
+                ? Int32.Parse(m.Groups["rowx"].Value, CultureInfo.InvariantCulture)
+                : Int32.Parse(m.Groups["row"].Value, CultureInfo.InvariantCulture);
+            string targetRef = m.Groups["target"].Value.Trim();
+            int fallbackTargetId = 0;
+            Match sheetMatch = Regex.Match(targetRef, @"^Sheet\.(\d+)$", RegexOptions.IgnoreCase);
+            if (sheetMatch.Success)
+            {
+                fallbackTargetId = Int32.Parse(sheetMatch.Groups[1].Value, CultureInfo.InvariantCulture);
+            }
+            else
+            {
+                dynamic page = App.ActivePage;
+                List<int> matches = new List<int>();
+                for (int index = 1; index <= (int)page.Shapes.Count; index++)
+                {
+                    dynamic candidate = page.Shapes.Item(index);
+                    string name = "";
+                    string nameU = "";
+                    try { name = Convert.ToString(candidate.Name, CultureInfo.InvariantCulture) ?? ""; } catch { }
+                    try { nameU = Convert.ToString(candidate.NameU, CultureInfo.InvariantCulture) ?? ""; } catch { }
+                    if (String.Equals(name, targetRef, StringComparison.OrdinalIgnoreCase) ||
+                        String.Equals(nameU, targetRef, StringComparison.OrdinalIgnoreCase))
+                        matches.Add(Convert.ToInt32(candidate.ID, CultureInfo.InvariantCulture));
+                }
+                if (matches.Count != 1) return null;
+                fallbackTargetId = matches[0];
+            }
+            return new GlueTarget { TargetId = fallbackTargetId, Row = fallbackRow, Endpoint = endpoint };
         }
 
         private bool HasEndpoint(dynamic shape, string endpoint)
