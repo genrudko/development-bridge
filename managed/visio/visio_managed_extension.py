@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.50"
+MANAGED_EXTENSION_VERSION = "2026.10.03.51"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1765,6 +1765,208 @@ End Property
                 "menu_item": target_text,
                 "menu_item_rect": clicked_rect,
                 "launch_path": "real Visio shortcut menu mouse click",
+                "ui_action_launched": True,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def uia_run_energologic_qol_action_probe(
+        trigger_shape_id: int,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Invoke the fixed EnergoLogic ShapeSheet action through Office UI Automation."""
+        try:
+            import ctypes
+            import importlib.util
+            import time
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("QoL action probe requires a .vsdm document")
+            trigger = page_obj.Shapes.ItemFromID(int(trigger_shape_id))
+            if not bool(trigger.CellExistsU("Actions.EnergoLogicUndoProbe.Action", 0)):
+                raise ValueError("trigger shape does not contain EnergoLogic probe action")
+
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            window.Select(trigger, 2)
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = int(window.WindowHandle32)
+            GA_ROOT = 2
+            SW_RESTORE = 9
+            VK_SHIFT = 0x10
+            VK_F10 = 0x79
+            VK_ESCAPE = 0x1B
+            KEYEVENTF_KEYUP = 0x0002
+            MOUSEEVENTF_LEFTDOWN = 0x0002
+            MOUSEEVENTF_LEFTUP = 0x0004
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+
+            def chord(modifier, vk):
+                user32.keybd_event(modifier, 0, 0, 0)
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(modifier, 0, KEYEVENTF_KEYUP, 0)
+
+            def press(vk):
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+            foreground_hwnd = int(user32.GetForegroundWindow())
+            current_thread = int(kernel32.GetCurrentThreadId())
+            target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
+            foreground_thread = (
+                int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
+                if foreground_hwnd else 0
+            )
+            attached = []
+            before_count = int(page_obj.Shapes.Count)
+            menu_hwnd = 0
+            menu_class = ""
+            diagnostics = []
+            uia_error = None
+            target = None
+            clicked_point = None
+            try:
+                for other_thread in (foreground_thread, target_thread):
+                    if other_thread and other_thread != current_thread:
+                        if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
+                            attached.append(other_thread)
+                user32.ShowWindow(root_hwnd, SW_RESTORE)
+                user32.BringWindowToTop(root_hwnd)
+                user32.SetForegroundWindow(root_hwnd)
+                user32.SetActiveWindow(root_hwnd)
+                user32.SetFocus(hwnd)
+                time.sleep(0.2)
+                chord(VK_SHIFT, VK_F10)
+                for _ in range(30):
+                    candidate = int(user32.GetForegroundWindow())
+                    class_buf = ctypes.create_unicode_buffer(128)
+                    user32.GetClassNameW(candidate, class_buf, len(class_buf))
+                    menu_class = class_buf.value
+                    if menu_class == "Net UI Tool Window":
+                        menu_hwnd = candidate
+                        break
+                    time.sleep(0.05)
+                if not menu_hwnd:
+                    raise RuntimeError(
+                        f"Visio shortcut menu did not become a Net UI Tool Window; class={menu_class!r}"
+                    )
+
+                modules = {
+                    name: bool(importlib.util.find_spec(name))
+                    for name in ("comtypes", "pywinauto", "uiautomation", "PIL")
+                }
+                if not modules["comtypes"]:
+                    raise RuntimeError(f"comtypes is unavailable on the Windows agent; modules={modules!r}")
+
+                try:
+                    import comtypes.client
+                    uia_module = comtypes.client.GetModule("UIAutomationCore.dll")
+                    from comtypes.gen import UIAutomationClient
+                    uia = comtypes.client.CreateObject(
+                        "{ff48dba4-60ef-4201-aa87-54103eef594e}",
+                        interface=UIAutomationClient.IUIAutomation,
+                    )
+                    root_element = uia.ElementFromHandle(menu_hwnd)
+                    condition = uia.CreateTrueCondition()
+                    scope_descendants = int(getattr(UIAutomationClient, "TreeScope_Descendants", 4))
+                    collection = root_element.FindAll(scope_descendants, condition)
+                    length = int(collection.Length)
+                    for index in range(min(length, 200)):
+                        element = collection.GetElement(index)
+                        def prop(*names):
+                            for name in names:
+                                try:
+                                    return getattr(element, name)
+                                except Exception:
+                                    continue
+                            return None
+                        name = prop("CurrentName", "currentName")
+                        control_type = prop("CurrentControlType", "currentControlType")
+                        enabled = prop("CurrentIsEnabled", "currentIsEnabled")
+                        rect = prop("CurrentBoundingRectangle", "currentBoundingRectangle")
+                        rect_values = None
+                        if rect is not None:
+                            try:
+                                rect_values = [int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)]
+                            except Exception:
+                                try:
+                                    rect_values = [int(value) for value in rect]
+                                except Exception:
+                                    rect_values = None
+                        row = {
+                            "index": index,
+                            "name": None if name is None else str(name),
+                            "control_type": None if control_type is None else int(control_type),
+                            "enabled": None if enabled is None else bool(enabled),
+                            "rect": rect_values,
+                        }
+                        diagnostics.append(row)
+                        if row["name"] and "EnergoLogic Undo Probe" in row["name"]:
+                            target = row
+                            break
+                except Exception as exc:
+                    uia_error = f"{type(exc).__name__}: {exc}"
+
+                if target is None or not target.get("rect"):
+                    raise RuntimeError(
+                        f"EnergoLogic action UIA element not found; uia_error={uia_error!r}; "
+                        f"elements={diagnostics!r}"
+                    )
+                left, top, right, bottom = target["rect"]
+                x = int((left + right) / 2)
+                y = int((top + bottom) / 2)
+                clicked_point = [x, y]
+                user32.SetCursorPos(x, y)
+                time.sleep(0.1)
+                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+                expected_count = before_count + 8
+                for _ in range(80):
+                    time.sleep(0.1)
+                    if int(page_obj.Shapes.Count) == expected_count:
+                        break
+            finally:
+                for other_thread in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(current_thread, other_thread, False)
+                    except Exception:
+                        pass
+
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + 8:
+                try:
+                    press(VK_ESCAPE)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"UIA ShapeSheet Action probe expected {before_count + 8} shapes, got {after_count}; "
+                    f"target={target!r}; clicked_point={clicked_point!r}; uia_error={uia_error!r}; "
+                    f"elements={diagnostics!r}"
+                )
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "trigger_shape_id": int(trigger_shape_id),
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "menu_window_handle": menu_hwnd,
+                "menu_window_class": menu_class,
+                "target_element": target,
+                "clicked_point": clicked_point,
+                "launch_path": "Office Net UI / Windows UI Automation bounding rectangle click",
                 "ui_action_launched": True,
             })
         except Exception as exc:
