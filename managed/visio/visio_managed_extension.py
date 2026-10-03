@@ -1306,7 +1306,7 @@ End Sub
             if not bool(trigger.SectionExists(section, 0)):
                 trigger.AddSection(section)
             trigger.AddNamedRow(section, "EnergoLogicUndoProbe", 0)
-            trigger.CellsU("Actions.EnergoLogicUndoProbe.Menu").FormulaU = '"&EnergoLogic Undo Probe"'
+            trigger.CellsU("Actions.EnergoLogicUndoProbe.Menu").FormulaU = '"&J EnergoLogic Undo Probe"'
             trigger.CellsU("Actions.EnergoLogicUndoProbe.Action").FormulaU = (
                 'CALLTHIS("EnergoLogicQolHost.UndoProbeDuplicate40FromShape",)'
             )
