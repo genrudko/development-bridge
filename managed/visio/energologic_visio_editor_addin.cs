@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.2.5.0")]
+[assembly: AssemblyVersion("0.2.6.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("1A2F95D4-3B13-499E-B87C-503D2B32F3E6")]
-    [ProgId("EnergoLogic.VisioEditorAddinV25")]
+    [Guid("6F58CA11-8162-41B9-981E-2E671371D3C7")]
+    [ProgId("EnergoLogic.VisioEditorAddinV26")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -83,6 +83,9 @@ namespace EnergoLogicVisioEditor
         private _CommandBarButtonEvents_ClickEventHandler _toggleHandler;
         private readonly Regex _glueRegex = new Regex(
             @"Sheet\.(\d+)!Connections(?:\.X(\d+)|\.(\d+)\.X)",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private readonly Regex _connectionCellRegex = new Regex(
+            @"^Connections(?:\.X(\d+)|\.(\d+)\.X)$",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public void OnConnection(object Application, ext_ConnectMode ConnectMode, object AddInInst, ref Array custom)
@@ -180,7 +183,7 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.2.5"; }
+        public string ApiVersion() { return "0.2.6"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -788,14 +791,53 @@ namespace EnergoLogicVisioEditor
         private GlueTarget TryGetGlueTarget(dynamic shape, string endpoint)
         {
             if (!HasEndpoint(shape, endpoint)) return null;
-            string cellName = endpoint == "begin" ? "BeginX" : "EndX";
+            string sourceCellName = endpoint == "begin" ? "BeginX" : "EndX";
+
+            // Primary source of truth: Visio native Connects collection. VTD often
+            // serializes internal ShapeSheet references by shape Name rather than
+            // Sheet.ID, so parsing FormulaU alone is not topology-safe.
+            try
+            {
+                dynamic connects = shape.Connects;
+                for (int index = 1; index <= (int)connects.Count; index++)
+                {
+                    dynamic connect = connects.Item(index);
+                    string fromName;
+                    string toName;
+                    int targetId;
+                    try
+                    {
+                        fromName = Convert.ToString(connect.FromCell.NameU, CultureInfo.InvariantCulture) ?? "";
+                        toName = Convert.ToString(connect.ToCell.NameU, CultureInfo.InvariantCulture) ?? "";
+                        targetId = Convert.ToInt32(connect.ToSheet.ID, CultureInfo.InvariantCulture);
+                    }
+                    catch { continue; }
+                    if (!String.Equals(fromName, sourceCellName, StringComparison.OrdinalIgnoreCase)) continue;
+                    Match cellMatch = _connectionCellRegex.Match(toName);
+                    if (!cellMatch.Success) continue;
+                    int row = cellMatch.Groups[1].Success
+                        ? Int32.Parse(cellMatch.Groups[1].Value, CultureInfo.InvariantCulture)
+                        : Int32.Parse(cellMatch.Groups[2].Value, CultureInfo.InvariantCulture);
+                    return new GlueTarget { TargetId = targetId, Row = row, Endpoint = endpoint };
+                }
+            }
+            catch { }
+
+            // Fallback for environments where Connects observation lags immediately
+            // after GlueTo. This intentionally supports only explicit Sheet.ID formulas.
             string formula;
-            try { formula = (string)shape.CellsU(cellName).FormulaU; }
+            try { formula = Convert.ToString(shape.CellsU(sourceCellName).FormulaU, CultureInfo.InvariantCulture) ?? ""; }
             catch { return null; }
-            Match m = _glueRegex.Match(formula ?? "");
+            Match m = _glueRegex.Match(formula);
             if (!m.Success) return null;
-            int row = m.Groups[2].Success ? Int32.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) : Int32.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture);
-            return new GlueTarget { TargetId = Int32.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), Row = row, Endpoint = endpoint };
+            int fallbackRow = m.Groups[2].Success
+                ? Int32.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture)
+                : Int32.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture);
+            return new GlueTarget {
+                TargetId = Int32.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture),
+                Row = fallbackRow,
+                Endpoint = endpoint
+            };
         }
 
         private bool HasEndpoint(dynamic shape, string endpoint)
