@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.29"
+MANAGED_EXTENSION_VERSION = "2026.10.03.30"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1110,6 +1110,65 @@ def install(namespace: dict) -> None:
                 "document_undo_enabled": bool(page_obj.Document.UndoEnabled),
                 "undo_levels": int(app.Settings.UndoLevels),
                 "current_scope": current_scope,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def keyboard_undo_once(page: str = "", doc_name: str = "") -> str:
+        """Send one real Ctrl+Z keystroke to the active Visio window.
+
+        This bounded qualification tool accepts no arbitrary keys. It exists only
+        to verify the exact user-facing Undo behavior of QoL transactions.
+        """
+        try:
+            import ctypes
+            import time
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            window = app.ActiveWindow
+            try:
+                window.Page = page_obj
+            except Exception:
+                try:
+                    page_obj.Activate()
+                except Exception:
+                    pass
+
+            hwnd = int(window.WindowHandle32)
+            if hwnd <= 0:
+                raise RuntimeError("Visio active window returned an invalid HWND")
+
+            user32 = ctypes.windll.user32
+            SW_RESTORE = 9
+            VK_CONTROL = 0x11
+            VK_Z = 0x5A
+            KEYEVENTF_KEYUP = 0x0002
+
+            before_count = int(page_obj.Shapes.Count)
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            if not bool(user32.SetForegroundWindow(hwnd)):
+                # Windows may return 0 even when the requested window is already
+                # foreground; verify actual foreground ownership before failing.
+                if int(user32.GetForegroundWindow()) != hwnd:
+                    raise RuntimeError("Could not focus the Visio window for Ctrl+Z")
+            time.sleep(0.15)
+
+            user32.keybd_event(VK_CONTROL, 0, 0, 0)
+            user32.keybd_event(VK_Z, 0, 0, 0)
+            user32.keybd_event(VK_Z, 0, KEYEVENTF_KEYUP, 0)
+            user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+            time.sleep(0.25)
+
+            after_count = int(page_obj.Shapes.Count)
+            return ok({
+                "page": str(page_obj.Name),
+                "window_handle32": hwnd,
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "keyboard_chord": "Ctrl+Z",
+                "keyboard_undo_sent": True,
             })
         except Exception as exc:
             return err(exc)
