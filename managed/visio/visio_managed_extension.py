@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.34"
+MANAGED_EXTENSION_VERSION = "2026.10.03.35"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1102,6 +1102,159 @@ def install(namespace: dict) -> None:
                 "undo_committed": committed,
                 "result_selected": bool(select_result),
                 "mapping_basis": "selection-order; qualify before identity-sensitive use",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def install_energologic_qol_vba_host(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Install the fixed EnergoLogic QoL VBA host into a macro-enabled workspace copy.
+
+        This tool never accepts arbitrary VBA source and never modifies VTD stencil projects.
+        It is intentionally limited to *.vsdm documents inside the approved workspace.
+        """
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            full_name = Path(str(document.FullName)).resolve()
+            try:
+                full_name.relative_to(workspace)
+            except ValueError as exc:
+                raise ValueError("QoL VBA host can only be installed in the approved workspace") from exc
+            if full_name.suffix.lower() != ".vsdm":
+                raise ValueError("QoL VBA host requires a macro-enabled .vsdm document copy")
+            if not bool(app.VBAEnabled):
+                raise RuntimeError("Visio VBA is not enabled")
+            if not bool(document.MacrosEnabled):
+                raise RuntimeError("Macros are not enabled for the target document")
+
+            try:
+                project = document.VBProject
+            except Exception:
+                project = app.VBE.ActiveVBProject
+            if project is None:
+                raise RuntimeError("Could not resolve the target Visio VBA project")
+
+            module_name = "EnergoLogicQolHost"
+            components = project.VBComponents
+            existing = None
+            for index in range(1, int(components.Count) + 1):
+                candidate = components.Item(index)
+                if str(candidate.Name).casefold() == module_name.casefold():
+                    existing = candidate
+                    break
+            if existing is not None:
+                components.Remove(existing)
+
+            component = components.Add(1)  # vbext_ct_StdModule
+            component.Name = module_name
+            vba_source = """Option Explicit
+
+Public Const ENERGOLOGIC_QOL_HOST_VERSION As String = "0.1-probe"
+
+Public Sub UndoProbeDuplicate40()
+    Dim app As Visio.Application
+    Dim scopeId As Long
+    Dim sel As Visio.Selection
+    Dim dup As Visio.Selection
+    Dim sourceCount As Long
+
+    Set app = Application
+    Set sel = app.ActiveWindow.Selection
+    sourceCount = sel.Count
+    If sourceCount < 1 Then
+        Err.Raise vbObjectError + 701, "EnergoLogicQolHost", "No shapes selected"
+    End If
+
+    scopeId = app.BeginUndoScope("EnergoLogic: Undo Probe Duplicate")
+    On Error GoTo Failed
+
+    sel.Duplicate
+    Set dup = app.ActiveWindow.Selection
+    If dup.Count <> sourceCount Then
+        Err.Raise vbObjectError + 702, "EnergoLogicQolHost", "Duplicate selection count mismatch"
+    End If
+    dup.Move 40#, 0#, "mm"
+
+    app.EndUndoScope scopeId, True
+    Exit Sub
+
+Failed:
+    On Error Resume Next
+    app.EndUndoScope scopeId, False
+    On Error GoTo 0
+    Err.Raise vbObjectError + 703, "EnergoLogicQolHost", "Undo probe failed"
+End Sub
+"""
+            component.CodeModule.AddFromString(vba_source)
+
+            return ok({
+                "document": str(document.Name),
+                "project_name": str(project.Name),
+                "module_name": module_name,
+                "host_version": "0.1-probe",
+                "persisted": False,
+                "note": "Use SaveAs after qualification to persist this in-memory VBA project change.",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def run_energologic_qol_undo_probe(
+        shape_ids_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Run only the fixed in-Visio UndoProbeDuplicate40 macro on explicit shapes."""
+        try:
+            import json
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids) or any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be unique positive integers")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("QoL VBA host can only run in a .vsdm document")
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            for sid in shape_ids:
+                window.Select(page_obj.Shapes.ItemFromID(sid), 2)
+            if int(window.Selection.Count) != len(shape_ids):
+                raise RuntimeError("Could not create the exact source selection")
+
+            before_count = int(page_obj.Shapes.Count)
+            document.ExecuteLine("EnergoLogicQolHost.UndoProbeDuplicate40")
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + len(shape_ids):
+                raise RuntimeError(
+                    f"VBA probe expected {before_count + len(shape_ids)} shapes, got {after_count}"
+                )
+            new_ids = [
+                int(window.Selection.Item(index).ID)
+                for index in range(1, int(window.Selection.Count) + 1)
+            ]
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "source_shape_ids": shape_ids,
+                "new_shape_ids": new_ids,
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "macro": "EnergoLogicQolHost.UndoProbeDuplicate40",
+                "executed_inside_visio": True,
             })
         except Exception as exc:
             return err(exc)
