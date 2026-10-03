@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.38"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.39"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.38"
+    assert arguments["version"] == "2026.10.03.39"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.38"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.39"}'}],
                 "isError": False,
             }
 
@@ -380,3 +380,6 @@ def test_managed_visio_extension_has_bounded_macros_ui_probe():
     assert 'vk = ord(char.upper())' in source
     assert "VkKeyScanW" not in source
     assert '"launch_path": "Alt+F8 Macros dialog"' in source
+    assert "EnumWindows" in source
+    assert "EnumChildWindows" in source
+    assert "GetDlgCtrlID" in source

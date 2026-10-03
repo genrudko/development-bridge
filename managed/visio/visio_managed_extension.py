@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.38"
+MANAGED_EXTENSION_VERSION = "2026.10.03.39"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1493,13 +1493,69 @@ End Sub
 
             after_count = int(page_obj.Shapes.Count)
             if after_count != before_count + len(shape_ids):
+                diagnostics = []
+                try:
+                    process_id = ctypes.c_ulong(0)
+                    user32.GetWindowThreadProcessId(root_hwnd, ctypes.byref(process_id))
+                    target_pid = int(process_id.value)
+
+                    def window_text(target_hwnd):
+                        length = int(user32.GetWindowTextLengthW(target_hwnd))
+                        buf = ctypes.create_unicode_buffer(max(1, length + 1))
+                        user32.GetWindowTextW(target_hwnd, buf, len(buf))
+                        return buf.value
+
+                    def class_name(target_hwnd):
+                        buf = ctypes.create_unicode_buffer(256)
+                        user32.GetClassNameW(target_hwnd, buf, len(buf))
+                        return buf.value
+
+                    top_windows = []
+                    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+                    @EnumWindowsProc
+                    def enum_top(target_hwnd, lparam):
+                        pid = ctypes.c_ulong(0)
+                        user32.GetWindowThreadProcessId(target_hwnd, ctypes.byref(pid))
+                        if int(pid.value) == target_pid and bool(user32.IsWindowVisible(target_hwnd)):
+                            top_windows.append(int(target_hwnd))
+                        return True
+
+                    user32.EnumWindows(enum_top, 0)
+                    for top_hwnd in top_windows:
+                        children = []
+                        EnumChildProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+                        @EnumChildProc
+                        def enum_child(child_hwnd, lparam):
+                            children.append({
+                                "hwnd": int(child_hwnd),
+                                "class": class_name(child_hwnd),
+                                "text": window_text(child_hwnd)[:200],
+                                "control_id": int(user32.GetDlgCtrlID(child_hwnd)),
+                                "visible": bool(user32.IsWindowVisible(child_hwnd)),
+                                "enabled": bool(user32.IsWindowEnabled(child_hwnd)),
+                            })
+                            return True
+
+                        user32.EnumChildWindows(top_hwnd, enum_child, 0)
+                        diagnostics.append({
+                            "hwnd": top_hwnd,
+                            "class": class_name(top_hwnd),
+                            "text": window_text(top_hwnd)[:200],
+                            "is_foreground": int(user32.GetForegroundWindow()) == top_hwnd,
+                            "children": children[:80],
+                        })
+                except Exception as diag_exc:
+                    diagnostics = [{"diagnostic_error": f"{type(diag_exc).__name__}: {diag_exc}"}]
                 # Best-effort close any macro dialog left open by a failed qualification.
                 try:
                     press(VK_ESCAPE)
                 except Exception:
                     pass
                 raise RuntimeError(
-                    f"Visio Macros UI probe expected {before_count + len(shape_ids)} shapes, got {after_count}"
+                    f"Visio Macros UI probe expected {before_count + len(shape_ids)} shapes, "
+                    f"got {after_count}; windows={diagnostics!r}"
                 )
             return ok({
                 "document": str(document.Name),
