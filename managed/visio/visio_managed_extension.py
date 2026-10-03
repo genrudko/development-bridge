@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.22"
+MANAGED_EXTENSION_VERSION = "2026.10.03.23"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -384,6 +384,7 @@ def install(namespace: dict) -> None:
                 raise ValueError("duplicate offset must not be zero")
 
             page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
             app = page_obj.Application
             window = app.ActiveWindow
             try:
@@ -472,7 +473,7 @@ def install(namespace: dict) -> None:
                     f"Visio selected {int(selected.Count)} shapes, expected {len(shape_ids)}"
                 )
 
-            scope_id = int(app.BeginUndoScope("EnergoLogic: Duplicate Shapes Exact"))
+            scope_id = int(document.BeginUndoScope("EnergoLogic: Duplicate Shapes Exact"))
             committed = False
             try:
                 duplicated = selected.Duplicate()
@@ -640,11 +641,11 @@ def install(namespace: dict) -> None:
                         "post_commit_connects_verification_required": True,
                     })
 
-                app.EndUndoScope(scope_id, True)
+                document.EndUndoScope(scope_id, True)
                 committed = True
             except Exception:
                 try:
-                    app.EndUndoScope(scope_id, False)
+                    document.EndUndoScope(scope_id, False)
                 except Exception:
                     pass
                 try:
@@ -675,6 +676,7 @@ def install(namespace: dict) -> None:
                 "source_to_new_shape_ids": {str(key): value for key, value in source_to_new.items()},
                 "glue_results": glue_results,
                 "undo_scope": "EnergoLogic: Duplicate Shapes Exact",
+                "undo_scope_owner": "document",
                 "undo_committed": committed,
                 "result_selected": bool(select_result),
                 "mapping_basis": "selection-order; qualify before identity-sensitive use",
