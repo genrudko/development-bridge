@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.44"
+MANAGED_EXTENSION_VERSION = "2026.10.03.45"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1319,6 +1319,160 @@ End Sub
                 "action_formula": str(
                     trigger.CellsU("Actions.EnergoLogicUndoProbe.Action").FormulaU
                 ),
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def mouse_run_energologic_qol_action_probe(
+        trigger_shape_id: int,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Click the fixed EnergoLogic ShapeSheet Action from Visio's real shortcut menu."""
+        try:
+            import ctypes
+            import time
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("QoL action probe requires a .vsdm document")
+            trigger = page_obj.Shapes.ItemFromID(int(trigger_shape_id))
+            if not bool(trigger.CellExistsU("Actions.EnergoLogicUndoProbe.Action", 0)):
+                raise ValueError("trigger shape does not contain EnergoLogic probe action")
+
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            window.Select(trigger, 2)
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = int(window.WindowHandle32)
+            GA_ROOT = 2
+            SW_RESTORE = 9
+            VK_SHIFT = 0x10
+            VK_F10 = 0x79
+            KEYEVENTF_KEYUP = 0x0002
+            MN_GETHMENU = 0x01E1
+            MF_BYPOSITION = 0x00000400
+            MOUSEEVENTF_LEFTDOWN = 0x0002
+            MOUSEEVENTF_LEFTUP = 0x0004
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
+            def chord(modifier, vk):
+                user32.keybd_event(modifier, 0, 0, 0)
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(modifier, 0, KEYEVENTF_KEYUP, 0)
+
+            foreground_hwnd = int(user32.GetForegroundWindow())
+            current_thread = int(kernel32.GetCurrentThreadId())
+            target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
+            foreground_thread = (
+                int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
+                if foreground_hwnd else 0
+            )
+            attached = []
+            before_count = int(page_obj.Shapes.Count)
+            target_text = "J EnergoLogic Undo Probe"
+            menu_items = []
+            clicked_rect = None
+            try:
+                for other_thread in (foreground_thread, target_thread):
+                    if other_thread and other_thread != current_thread:
+                        if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
+                            attached.append(other_thread)
+                user32.ShowWindow(root_hwnd, SW_RESTORE)
+                user32.BringWindowToTop(root_hwnd)
+                user32.SetForegroundWindow(root_hwnd)
+                user32.SetActiveWindow(root_hwnd)
+                time.sleep(0.2)
+                chord(VK_SHIFT, VK_F10)
+                time.sleep(0.5)
+
+                menu_hwnd = 0
+                for _ in range(20):
+                    candidate = int(user32.GetForegroundWindow())
+                    class_buf = ctypes.create_unicode_buffer(128)
+                    user32.GetClassNameW(candidate, class_buf, len(class_buf))
+                    if class_buf.value == "#32768":
+                        menu_hwnd = candidate
+                        break
+                    time.sleep(0.05)
+                if not menu_hwnd:
+                    raise RuntimeError("Visio shortcut menu window (#32768) was not found")
+
+                hmenu = int(user32.SendMessageW(menu_hwnd, MN_GETHMENU, 0, 0))
+                if not hmenu:
+                    raise RuntimeError("Visio shortcut menu did not expose an HMENU")
+                count = int(user32.GetMenuItemCount(hmenu))
+                target_index = None
+                for index in range(count):
+                    buf = ctypes.create_unicode_buffer(512)
+                    user32.GetMenuStringW(hmenu, index, buf, len(buf), MF_BYPOSITION)
+                    label = buf.value.replace("&", "").strip()
+                    menu_items.append(label)
+                    if label == target_text:
+                        target_index = index
+                if target_index is None:
+                    raise RuntimeError(
+                        f"EnergoLogic action not found in Visio shortcut menu: {menu_items!r}"
+                    )
+
+                rect = RECT()
+                if not bool(user32.GetMenuItemRect(root_hwnd, hmenu, target_index, ctypes.byref(rect))):
+                    if not bool(user32.GetMenuItemRect(0, hmenu, target_index, ctypes.byref(rect))):
+                        raise RuntimeError("GetMenuItemRect failed for EnergoLogic action")
+                x = int((rect.left + rect.right) / 2)
+                y = int((rect.top + rect.bottom) / 2)
+                clicked_rect = [int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)]
+                user32.SetCursorPos(x, y)
+                time.sleep(0.1)
+                user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+                expected_count = before_count + 8
+                for _ in range(100):
+                    time.sleep(0.1)
+                    if int(page_obj.Shapes.Count) == expected_count:
+                        break
+            finally:
+                for other_thread in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(current_thread, other_thread, False)
+                    except Exception:
+                        pass
+
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + 8:
+                raise RuntimeError(
+                    f"Mouse ShapeSheet Action probe expected {before_count + 8} shapes, "
+                    f"got {after_count}; menu={menu_items!r}; rect={clicked_rect!r}"
+                )
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "trigger_shape_id": int(trigger_shape_id),
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "menu_item": target_text,
+                "menu_item_rect": clicked_rect,
+                "launch_path": "real Visio shortcut menu mouse click",
+                "ui_action_launched": True,
             })
         except Exception as exc:
             return err(exc)
