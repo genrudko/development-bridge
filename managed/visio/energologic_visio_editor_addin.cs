@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.0.0")]
+[assembly: AssemblyVersion("0.3.1.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -46,7 +46,7 @@ namespace EnergoLogicVisioEditor
 
 
     [ComVisible(true)]
-    [Guid("BF9EC1EA-74FA-4AE4-93DB-9EE9622EC41A")]
+    [Guid("3288CA38-4200-47CB-9BDA-665B51B90937")]
     [InterfaceType(ComInterfaceType.InterfaceIsDual)]
     public interface IEnergoLogicEditorApi
     {
@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("B66D6B8F-7388-4DFB-AD57-64E4D02856AE")]
-    [ProgId("EnergoLogic.VisioEditorAddinV30")]
+    [Guid("F2236480-88B8-42B3-AEC4-0707D59A14FC")]
+    [ProgId("EnergoLogic.VisioEditorAddinV31")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -183,7 +183,7 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.3.0"; }
+        public string ApiVersion() { return "0.3.1"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -913,39 +913,23 @@ namespace EnergoLogicVisioEditor
             Action<dynamic> inspect = null;
             inspect = source =>
             {
-                try
+                int sourceId;
+                try { sourceId = Convert.ToInt32(source.ID, CultureInfo.InvariantCulture); }
+                catch { return; }
+
+                foreach (string sourceEndpoint in new[] { "begin", "end" })
                 {
-                    dynamic connects = source.Connects;
-                    for (int index = 1; index <= (int)connects.Count; index++)
+                    GlueTarget glue = null;
+                    try { glue = TryGetGlueTarget(source, sourceEndpoint); }
+                    catch { glue = null; }
+                    if (glue == null) continue;
+
+                    connected.Add(EndpointKey(sourceId, sourceEndpoint));
+                    try
                     {
-                        dynamic connect = connects.Item(index);
-                        int fromId;
-                        int toId;
-                        string fromName;
-                        string toName;
-                        dynamic target;
-                        try
-                        {
-                            fromId = Convert.ToInt32(source.ID, CultureInfo.InvariantCulture);
-                            toId = Convert.ToInt32(connect.ToSheet.ID, CultureInfo.InvariantCulture);
-                            fromName = Convert.ToString(connect.FromCell.NameU, CultureInfo.InvariantCulture) ?? "";
-                            toName = Convert.ToString(connect.ToCell.NameU, CultureInfo.InvariantCulture) ?? "";
-                            target = connect.ToSheet;
-                        }
-                        catch { continue; }
-
-                        if (String.Equals(fromName, "BeginX", StringComparison.OrdinalIgnoreCase))
-                            connected.Add(EndpointKey(fromId, "begin"));
-                        else if (String.Equals(fromName, "EndX", StringComparison.OrdinalIgnoreCase))
-                            connected.Add(EndpointKey(fromId, "end"));
-
-                        Match cellMatch = _connectionCellRegex.Match(toName);
-                        if (!cellMatch.Success) continue;
-                        int row = cellMatch.Groups[1].Success
-                            ? Int32.Parse(cellMatch.Groups[1].Value, CultureInfo.InvariantCulture)
-                            : Int32.Parse(cellMatch.Groups[2].Value, CultureInfo.InvariantCulture);
-                        string xName = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
-                        string yName = "Connections.Y" + row.ToString(CultureInfo.InvariantCulture);
+                        dynamic target = page.Shapes.ItemFromID(glue.TargetId);
+                        string xName = "Connections.X" + glue.Row.ToString(CultureInfo.InvariantCulture);
+                        string yName = "Connections.Y" + glue.Row.ToString(CultureInfo.InvariantCulture);
                         if (!CellExists(target, xName) || !CellExists(target, yName)) continue;
 
                         double localX = (double)target.CellsU(xName).ResultIU;
@@ -954,19 +938,20 @@ namespace EnergoLogicVisioEditor
                         target.XYToPage(localX, localY, out pageX, out pageY);
                         double pointX = pageX * 25.4;
                         double pointY = pageY * 25.4;
-                        foreach (string endpoint in new[] { "begin", "end" })
+                        foreach (string targetEndpoint in new[] { "begin", "end" })
                         {
-                            if (!HasEndpoint(target, endpoint)) continue;
-                            double endpointX = GetMm(target, endpoint == "begin" ? "BeginX" : "EndX");
-                            double endpointY = GetMm(target, endpoint == "begin" ? "BeginY" : "EndY");
+                            if (!HasEndpoint(target, targetEndpoint)) continue;
+                            double endpointX = GetMm(target, targetEndpoint == "begin" ? "BeginX" : "EndX");
+                            double endpointY = GetMm(target, targetEndpoint == "begin" ? "BeginY" : "EndY");
                             double dx = pointX - endpointX;
                             double dy = pointY - endpointY;
                             if (Math.Sqrt(dx * dx + dy * dy) <= 0.02)
-                                connected.Add(EndpointKey(toId, endpoint));
+                                connected.Add(EndpointKey(glue.TargetId, targetEndpoint));
                         }
                     }
+                    catch { }
                 }
-                catch { }
+
                 try
                 {
                     for (int child = 1; child <= (int)source.Shapes.Count; child++)

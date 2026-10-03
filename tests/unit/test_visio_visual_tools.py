@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.96"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.97"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.96"
+    assert arguments["version"] == "2026.10.03.97"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.96"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.97"}'}],
                 "isError": False,
             }
 
@@ -279,8 +279,8 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV30")' in cs
-    assert 'AssemblyVersion("0.3.0.0")' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV31")' in cs
+    assert 'AssemblyVersion("0.3.1.0")' in cs
     assert "public interface IEnergoLogicEditorApi" in cs
     assert "ClassInterface(ClassInterfaceType.AutoDual)" in cs
     assert "ApiDuplicateRight" in cs
@@ -288,7 +288,7 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     assert "ApiShowPanel" in cs
     assert "host.Object = this" in cs
     assert "def invoke_energologic_editor_api(" in ext
-    assert 'addins.Item("EnergoLogic.VisioEditorAddinV30")' in ext
+    assert 'addins.Item("EnergoLogic.VisioEditorAddinV31")' in ext
     assert '"duplicate_right": "ApiDuplicateRight"' in ext
     assert '"repair_glue_apply": "ApiRepairGlueApply"' in ext
 
@@ -326,7 +326,7 @@ def test_editor_cell_discovery_surfaces_inner_reason():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "Причина: " in cs
     assert "last.Message" in cs
-    assert 'ApiVersion() { return "0.3.0"; }' in cs
+    assert 'ApiVersion() { return "0.3.1"; }' in cs
 
 
 def test_editor_uses_robust_com_cell_exists_conversion():
@@ -337,7 +337,7 @@ def test_editor_uses_robust_com_cell_exists_conversion():
     assert "(bool)shape.CellExistsU" not in cs
     assert "(bool)target.CellExistsU" not in cs
     assert "(bool)terminal.CellExistsU" not in cs
-    assert 'ApiVersion() { return "0.3.0"; }' in cs
+    assert 'ApiVersion() { return "0.3.1"; }' in cs
 
 
 def test_editor_has_no_unsafe_explicit_dynamic_bool_casts():
@@ -345,7 +345,7 @@ def test_editor_has_no_unsafe_explicit_dynamic_bool_casts():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "(bool)" not in cs
     assert "Convert.ToInt32(sectionExistsRaw, CultureInfo.InvariantCulture) == 0" in cs
-    assert 'ApiVersion() { return "0.3.0"; }' in cs
+    assert 'ApiVersion() { return "0.3.1"; }' in cs
 
 
 def test_editor_uses_native_visio_connects_as_topology_source():
@@ -356,7 +356,7 @@ def test_editor_uses_native_visio_connects_as_topology_source():
     assert "connect.ToCell.NameU" in cs
     assert "connect.ToSheet.ID" in cs
     assert 'private readonly Regex _connectionCellRegex' in cs
-    assert 'ApiVersion() { return "0.3.0"; }' in cs
+    assert 'ApiVersion() { return "0.3.1"; }' in cs
 
 
 def test_editor_formula_fallback_resolves_vtd_shape_names_not_only_sheet_ids():
@@ -366,7 +366,7 @@ def test_editor_formula_fallback_resolves_vtd_shape_names_not_only_sheet_ids():
     assert "candidate.NameU" in cs
     assert "candidate.Name" in cs
     assert 'Regex.Match(targetRef, @"^Sheet\\.(\\d+)$"' in cs
-    assert 'ApiVersion() { return "0.3.0"; }' in cs
+    assert 'ApiVersion() { return "0.3.1"; }' in cs
 
 
 def test_editor_v28_repair_glue_understands_incoming_native_connects():
@@ -394,9 +394,8 @@ def test_editor_v29_builds_native_glue_index_once_per_repair_or_doctor_command()
     ).read_text()
     assert cs.count("BuildConnectedEndpointIndex(page)") == 2
     assert "EndpointHasAnyGlue" not in cs
-    assert 'connected.Add(EndpointKey(fromId, "begin"))' in cs
-    assert 'connected.Add(EndpointKey(fromId, "end"))' in cs
-    assert "connected.Add(EndpointKey(toId, endpoint))" in cs
+    assert "connected.Add(EndpointKey(sourceId, sourceEndpoint))" in cs
+    assert "connected.Add(EndpointKey(glue.TargetId, targetEndpoint))" in cs
 
 
 def test_editor_v30_uses_current_source_shape_for_native_connect_index():
@@ -405,7 +404,19 @@ def test_editor_v30_uses_current_source_shape_for_native_connect_index():
         Path(__file__).resolve().parents[2]
         / "managed" / "visio" / "energologic_visio_editor_addin.cs"
     ).read_text()
-    assert "fromId = Convert.ToInt32(source.ID" in cs
-    assert "connect.FromSheet.ID" not in cs
+    assert "glue = TryGetGlueTarget(source, sourceEndpoint)" in cs
+    assert "connected.Add(EndpointKey(sourceId, sourceEndpoint))" in cs
     assert "ambiguity = String.Join" in cs
     assert "автоматический ремонт запрещён:" in cs
+
+
+def test_editor_v31_reuses_proven_glue_target_parser_for_connectivity_index():
+    from pathlib import Path
+    cs = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "energologic_visio_editor_addin.cs"
+    ).read_text()
+    assert "GlueTarget glue = null;" in cs
+    assert "glue = TryGetGlueTarget(source, sourceEndpoint)" in cs
+    assert "page.Shapes.ItemFromID(glue.TargetId)" in cs
+    assert "connected.Add(EndpointKey(glue.TargetId, targetEndpoint))" in cs
