@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.65"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.66"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.65"
+    assert arguments["version"] == "2026.10.03.66"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.65"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.66"}'}],
                 "isError": False,
             }
 
@@ -508,3 +508,19 @@ def test_managed_visio_extension_has_read_only_ribbon_accessibility_probe():
     assert "AutomationElement]::FromHandle" in source
     assert "TreeScope]::Descendants" in source
     assert '"backend": ".NET UIAutomationClient"' in source
+
+
+def test_managed_visio_extension_has_safe_addin_autoload_and_graceful_restart():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def enable_energologic_classic_com_addin_probe_autoload(" in source
+    assert 'winreg.SetValueEx(key, "LoadBehavior", 0, winreg.REG_DWORD, 3)' in source
+    assert "def restart_energologic_visio_qualification_copy_graceful(" in source
+    assert "expected one open Visio document" in source
+    assert "the only open Visio document is not the fixed qualification copy" in source
+    assert "document.Save()" in source
+    assert "app.Quit()" in source
+    assert '"graceful_quit": True' in source

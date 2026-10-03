@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.65"
+MANAGED_EXTENSION_VERSION = "2026.10.03.66"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1341,6 +1341,98 @@ namespace EnergoLogicVisioQol
                 "ribbon_tab": "EnergoLogic",
                 "tab_keytip": "Z",
                 "button_keytip": "D",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def enable_energologic_classic_com_addin_probe_autoload() -> str:
+        """Enable startup loading only for the fixed EnergoLogic qualification add-in."""
+        try:
+            import winreg
+            progid = "EnergoLogic.VisioQolAddin"
+            key_path = "Software\\Microsoft\\Visio\\Addins\\" + progid
+            with winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER,
+                key_path,
+                0,
+                winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY,
+            ) as key:
+                winreg.SetValueEx(key, "LoadBehavior", 0, winreg.REG_DWORD, 3)
+            return ok({
+                "progid": progid,
+                "load_behavior": 3,
+                "scope": "HKCU",
+                "qualification_only": True,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def restart_energologic_visio_qualification_copy_graceful() -> str:
+        """Save, quit and relaunch only the fixed single-document qualification copy."""
+        try:
+            import os
+            import subprocess
+            import time
+
+            if os.name != "nt":
+                raise RuntimeError("Visio qualification restart is Windows-only")
+            target = workspace / "KRU-35_normal_scheme_v2_energologic_qol_host_v1.vsdm"
+            exe = Path(r"C:\Program Files\Microsoft Office\root\Office16\VISIO.EXE")
+            if not target.is_file():
+                raise FileNotFoundError(f"qualification document not found: {target}")
+            if not exe.is_file():
+                raise FileNotFoundError(f"Visio executable not found: {exe}")
+
+            app = visio._resolve_application()
+            documents = app.Documents
+            if int(documents.Count) != 1:
+                raise RuntimeError(
+                    f"refusing graceful restart: expected one open Visio document, got {int(documents.Count)}"
+                )
+            document = documents.Item(1)
+            full_name = Path(str(document.FullName)).resolve()
+            if full_name != target.resolve():
+                raise RuntimeError(
+                    "refusing graceful restart: the only open Visio document is not the fixed qualification copy"
+                )
+
+            document.Save()
+            app.Quit()
+
+            for _ in range(40):
+                ps = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "@(Get-Process VISIO -ErrorAction SilentlyContinue).Count",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if int((ps.stdout or "0").strip() or "0") == 0:
+                    break
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("Visio did not exit after graceful Application.Quit()")
+
+            proc = subprocess.Popen(
+                [str(exe), str(target)],
+                cwd=str(workspace),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return ok({
+                "restarted": True,
+                "new_pid": int(proc.pid),
+                "document": str(target),
+                "graceful_quit": True,
+                "saved_before_quit": True,
             })
         except Exception as exc:
             return err(exc)
