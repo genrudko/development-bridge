@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.49"
+MANAGED_EXTENSION_VERSION = "2026.10.03.50"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1512,7 +1512,7 @@ End Property
             if not bool(trigger.SectionExists(section, 0)):
                 trigger.AddSection(section)
             trigger.AddNamedRow(section, "EnergoLogicUndoProbe", 0)
-            trigger.CellsU("Actions.EnergoLogicUndoProbe.Menu").FormulaU = '"&J EnergoLogic Undo Probe"'
+            trigger.CellsU("Actions.EnergoLogicUndoProbe.Menu").FormulaU = '"%&J EnergoLogic Undo Probe"'
             trigger.CellsU("Actions.EnergoLogicUndoProbe.Action").FormulaU = (
                 'CALLTHIS("EnergoLogicQolHost.UndoProbeDuplicate40FromShape",)'
             )
@@ -1521,7 +1521,7 @@ End Property
                 "document": str(document.Name),
                 "page": str(page_obj.Name),
                 "trigger_shape_id": int(trigger.ID),
-                "menu": "J EnergoLogic Undo Probe",
+                "menu": "J EnergoLogic Undo Probe (forced bottom)",
                 "action_formula": str(
                     trigger.CellsU("Actions.EnergoLogicUndoProbe.Action").FormulaU
                 ),
@@ -1805,7 +1805,8 @@ End Property
             SW_RESTORE = 9
             VK_SHIFT = 0x10
             VK_F10 = 0x79
-            VK_J = 0x4A
+            VK_END = 0x23
+            VK_RETURN = 0x0D
             KEYEVENTF_KEYUP = 0x0002
             root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
 
@@ -1856,7 +1857,9 @@ End Property
                         f"Visio shortcut menu did not become a Net UI Tool Window; "
                         f"foreground={int(user32.GetForegroundWindow())}, class={menu_class!r}"
                     )
-                press(VK_J)
+                press(VK_END)
+                time.sleep(0.15)
+                press(VK_RETURN)
                 expected_count = before_count + 8
                 for _ in range(60):
                     time.sleep(0.1)

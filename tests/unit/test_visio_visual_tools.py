@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.49"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.50"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.49"
+    assert arguments["version"] == "2026.10.03.50"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.49"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.50"}'}],
                 "isError": False,
             }
 
@@ -397,8 +397,9 @@ def test_managed_visio_extension_has_shapesheet_action_ui_probe():
     assert 'Actions.EnergoLogicUndoProbe.Action' in source
     assert 'CALLTHIS("EnergoLogicQolHost.UndoProbeDuplicate40FromShape",)' in source
     assert "chord(VK_SHIFT, VK_F10)" in source
-    assert '"&J EnergoLogic Undo Probe"' in source
-    assert "press(VK_J)" in source
+    assert '%&J EnergoLogic Undo Probe' in source
+    assert "press(VK_END)" in source
+    assert "press(VK_RETURN)" in source
     assert "expected_count = before_count + 8" in source
     assert "for _ in range(60):" in source
 
@@ -484,3 +485,15 @@ def test_keyboard_shapesheet_probe_targets_office_net_ui_menu():
     assert 'menu_class == "Net UI Tool Window"' in source
     assert '"menu_window_class": menu_class' in source
     assert "user32.SetFocus(hwnd)" in source
+
+
+def test_keyboard_shapesheet_probe_runs_forced_bottom_action_with_end_enter():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert '%&J EnergoLogic Undo Probe' in source
+    assert "VK_END = 0x23" in source
+    assert "press(VK_END)" in source
+    assert "press(VK_RETURN)" in source
