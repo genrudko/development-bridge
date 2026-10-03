@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.9.0")]
+[assembly: AssemblyVersion("0.3.10.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -94,8 +94,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("B42A3C6E-8C1F-44AB-A486-93C6AB3D8F39")]
-    [ProgId("EnergoLogic.VisioEditorAddinV39")]
+    [Guid("D1C940D2-5A7E-4B4B-A92A-2D443A0DBA85")]
+    [ProgId("EnergoLogic.VisioEditorAddinV310")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -231,7 +231,7 @@ namespace EnergoLogicVisioEditor
             lock (_asyncSync)
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
-        public string ApiVersion() { return "0.3.9"; }
+        public string ApiVersion() { return "0.3.10"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -989,14 +989,24 @@ namespace EnergoLogicVisioEditor
             for (int i = 1; i <= (int)page.Shapes.Count; i++)
             {
                 dynamic top = page.Shapes.Item(i);
-                try
-                {
-                    for (int j = 1; j <= (int)top.Shapes.Count; j++)
-                        map[(int)top.Shapes.Item(j).ID] = (int)top.ID;
-                }
-                catch { }
+                AddDescendantOwners(top, (int)top.ID, map);
             }
             return map;
+        }
+
+        private void AddDescendantOwners(dynamic container, int topLevelOwnerId, Dictionary<int, int> map)
+        {
+            try
+            {
+                for (int index = 1; index <= (int)container.Shapes.Count; index++)
+                {
+                    dynamic child = container.Shapes.Item(index);
+                    int childId = (int)child.ID;
+                    map[childId] = topLevelOwnerId;
+                    AddDescendantOwners(child, topLevelOwnerId, map);
+                }
+            }
+            catch { }
         }
 
         private HashSet<int> TopLevelIds(dynamic page)
