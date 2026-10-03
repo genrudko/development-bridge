@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.41"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.42"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.41"
+    assert arguments["version"] == "2026.10.03.42"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.41"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.42"}'}],
                 "isError": False,
             }
 
@@ -405,6 +405,6 @@ def test_shapesheet_ui_probe_macro_has_no_nested_undo_scope():
     start = source.index('Public Sub UndoProbeDuplicate40FromShape')
     end = source.index('End Sub', start)
     block = source[start:end]
-    assert 'sel.Duplicate' in block
+    assert 'Application.DoCmd 1024' in block
     assert 'dup.Move 40#, 0#, "mm"' in block
     assert 'BeginUndoScope' not in block
