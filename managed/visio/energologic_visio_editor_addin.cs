@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.2.0")]
+[assembly: AssemblyVersion("0.3.3.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -76,8 +76,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("9B2D0D65-A68C-44D0-A523-612148808DBD")]
-    [ProgId("EnergoLogic.VisioEditorAddinV32")]
+    [Guid("54D4E77E-73B0-4D45-94E2-B138DF35D1A3")]
+    [ProgId("EnergoLogic.VisioEditorAddinV33")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -195,7 +195,7 @@ namespace EnergoLogicVisioEditor
         public string ApiNudgeUp() { return ExactOffset(0.0, 1.0); }
         public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
         public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
-        public string ApiVersion() { return "0.3.2"; }
+        public string ApiVersion() { return "0.3.3"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -519,7 +519,7 @@ namespace EnergoLogicVisioEditor
             int busId = cells[0].BusId;
             if (cells.Any(c => c.BusId != busId)) throw new InvalidOperationException("Все выбранные ячейки должны быть на одной шине");
             int startSlot = cells.Min(c => c.Slot);
-            List<Tuple<CellInfo, dynamic>> plan = new List<Tuple<CellInfo, dynamic>>();
+            List<Tuple<CellInfo, object>> plan = new List<Tuple<CellInfo, object>>();
             HashSet<int> selectedMembers = new HashSet<int>(cells.SelectMany(c => c.MemberIds));
             for (int i = 0; i < cells.Count; i++)
             {
@@ -532,14 +532,14 @@ namespace EnergoLogicVisioEditor
                         throw new InvalidOperationException(String.Format(CultureInfo.CurrentCulture, "Шина имеет шаг {0:0.###} мм, а задан {1:0.###} мм", actual, pitch));
                 }
                 EnsureTerminalFree(page, (int)target.ID, selectedMembers);
-                plan.Add(Tuple.Create(cells[i], target));
+                plan.Add(new Tuple<CellInfo, object>(cells[i], (object)target));
             }
 
             int scope = (int)app.BeginUndoScope("EnergoLogic: Распределить ячейки");
             bool commit = false;
             try
             {
-                foreach (Tuple<CellInfo, dynamic> row in plan)
+                foreach (Tuple<CellInfo, object> row in plan)
                 {
                     CellInfo cell = row.Item1;
                     dynamic target = row.Item2;
