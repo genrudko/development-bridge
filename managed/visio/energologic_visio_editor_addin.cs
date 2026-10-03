@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.8.0")]
+[assembly: AssemblyVersion("0.3.9.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -94,8 +94,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("9974BD0D-D56E-45F5-BB8C-7A21485C6730")]
-    [ProgId("EnergoLogic.VisioEditorAddinV38")]
+    [Guid("B42A3C6E-8C1F-44AB-A486-93C6AB3D8F39")]
+    [ProgId("EnergoLogic.VisioEditorAddinV39")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -231,7 +231,7 @@ namespace EnergoLogicVisioEditor
             lock (_asyncSync)
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
-        public string ApiVersion() { return "0.3.8"; }
+        public string ApiVersion() { return "0.3.9"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -795,10 +795,24 @@ namespace EnergoLogicVisioEditor
                 foreach (string ep in new[] { "begin", "end" })
                 {
                     GlueTarget target = TryGetGlueTarget(shape, ep);
-                    if (target != null && top.Contains(target.TargetId))
+                    if (target == null) continue;
+                    int graphTargetId = target.TargetId;
+                    int parentId;
+                    if (childParent.TryGetValue(graphTargetId, out parentId))
                     {
-                        graph[id].Add(target.TargetId);
-                        graph[target.TargetId].Add(id);
+                        // A numbered child connection point belongs to a bus and is
+                        // an external cell boundary. Any other child connection point
+                        // belongs to an equipment group; normalize it to that top-level
+                        // owner so incoming Glue (for example RU SN -> transformer child)
+                        // participates in the same logical cell.
+                        if (IsNumberedBusTerminal(page, graphTargetId))
+                            continue;
+                        graphTargetId = parentId;
+                    }
+                    if (top.Contains(graphTargetId) && graphTargetId != id)
+                    {
+                        graph[id].Add(graphTargetId);
+                        graph[graphTargetId].Add(id);
                     }
                 }
             }
@@ -820,8 +834,10 @@ namespace EnergoLogicVisioEditor
                 foreach (string ep in new[] { "begin", "end" })
                 {
                     GlueTarget target = TryGetGlueTarget(shape, ep);
-                    if (target != null && childParent.ContainsKey(target.TargetId))
-                        anchors.Add(Tuple.Create(id, target, childParent[target.TargetId]));
+                    int parentId;
+                    if (target != null && childParent.TryGetValue(target.TargetId, out parentId) &&
+                        IsNumberedBusTerminal(page, target.TargetId))
+                        anchors.Add(Tuple.Create(id, target, parentId));
                 }
             }
             if (anchors.Count != 1) throw new InvalidOperationException("У ячейки должен быть ровно один внешний Glue к шине; найдено: " + anchors.Count);
@@ -864,6 +880,16 @@ namespace EnergoLogicVisioEditor
                 CoreIds = core.OrderBy(x => x).ToList(),
                 MemberIds = members
             };
+        }
+
+        private bool IsNumberedBusTerminal(dynamic page, int shapeId)
+        {
+            try
+            {
+                dynamic shape = page.Shapes.ItemFromID(shapeId);
+                return GetSlot(shape) > 0;
+            }
+            catch { return false; }
         }
 
         private double NearestBusPitch(dynamic page, int busId, int sourceTerminalId)
