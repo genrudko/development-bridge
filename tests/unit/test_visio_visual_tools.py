@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.20"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.21"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.20"
+    assert arguments["version"] == "2026.10.03.21"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.20"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.21"}'}],
                 "isError": False,
             }
 
@@ -210,3 +210,19 @@ def test_managed_visio_extension_has_transactional_exact_duplicate_tool():
     assert "EndUndoScope(scope_id, False)" in source
     assert "1..100 items" in source
     assert "+/-2000 mm" in source
+
+
+def test_managed_visio_extension_has_bounded_single_undo_tool():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed"
+        / "visio"
+        / "visio_managed_extension.py"
+    ).read_text()
+
+    assert "def undo_once(" in source
+    assert "app.Undo()" in source
+    assert "shape_count_before" in source
+    assert "shape_count_after" in source

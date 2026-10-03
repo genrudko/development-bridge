@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.20"
+MANAGED_EXTENSION_VERSION = "2026.10.03.21"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -678,6 +678,35 @@ def install(namespace: dict) -> None:
                 "undo_committed": committed,
                 "result_selected": bool(select_result),
                 "mapping_basis": "selection-order; qualify before identity-sensitive use",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def undo_once(page: str = "", doc_name: str = "") -> str:
+        """Undo exactly one Visio user action on the resolved page.
+
+        This is intentionally narrow and exists so compound QoL commands can prove
+        that their UndoScope is exposed to the operator as one Ctrl+Z step.
+        """
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                try:
+                    page_obj.Activate()
+                except Exception:
+                    pass
+            before_count = int(page_obj.Shapes.Count)
+            app.Undo()
+            after_count = int(page_obj.Shapes.Count)
+            return ok({
+                "page": str(page_obj.Name),
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "undone_once": True,
             })
         except Exception as exc:
             return err(exc)
