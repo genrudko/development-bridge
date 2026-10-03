@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.104"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.105"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.104"
+    assert arguments["version"] == "2026.10.03.105"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.104"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.105"}'}],
                 "isError": False,
             }
 
@@ -527,3 +527,16 @@ def test_editor_v38_schedules_post_return_topology_completion():
     assert "public void SetStatus(string value)" in cs
     assert '"operation_status": "ApiOperationStatus"' in ext
     assert 'ApiVersion() { return "0.3.8"; }' in cs
+
+
+def test_editor_v38_installer_migrates_legacy_versions_and_disconnect_cleans_ui():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    ext = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text()
+    assert "_toggleButton.Click -= _toggleHandler" in cs
+    assert "_form.Dispose()" in cs
+    assert "_bar.Delete()" in cs
+    for version in range(31, 38):
+        assert f"EnergoLogic.VisioEditorAddinV{version}" in ext
+    assert 'stale_bar = app.CommandBars.Item("EnergoLogic")' in ext
+    assert '"migration": "v3.1-v3.7 -> v3.8"' in ext

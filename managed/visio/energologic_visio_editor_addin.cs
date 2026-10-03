@@ -128,8 +128,16 @@ namespace EnergoLogicVisioEditor
 
         public void OnDisconnection(ext_DisconnectMode RemoveMode, ref Array custom)
         {
-            try { if (_form != null && !_form.IsDisposed) _form.Close(); } catch { }
+            try
+            {
+                if (_toggleButton != null && _toggleHandler != null)
+                    _toggleButton.Click -= _toggleHandler;
+            }
+            catch { }
+            try { if (_form != null && !_form.IsDisposed) _form.Dispose(); } catch { }
+            try { if (_bar != null) _bar.Delete(); } catch { }
             _form = null;
+            _toggleHandler = null;
             _toggleButton = null;
             _bar = null;
             try { if (_addInInstance != null) { dynamic host = _addInInstance; host.Object = null; } } catch { }
