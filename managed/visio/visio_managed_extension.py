@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.64"
+MANAGED_EXTENSION_VERSION = "2026.10.03.65"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1500,8 +1500,11 @@ namespace EnergoLogicVisioQol
         page: str = "",
         doc_name: str = "",
     ) -> str:
-        """Read the live Visio UI Automation tree for EnergoLogic Ribbon elements."""
+        # Read the live Visio UI Automation tree for EnergoLogic Ribbon elements.
         try:
+            import json
+            import subprocess
+
             page_obj = visio._resolve_page(doc_name, parse_page(page))
             app = page_obj.Application
             try:
@@ -1518,57 +1521,61 @@ namespace EnergoLogicVisioQol
             GA_ROOT = 2
             root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
 
-            import comtypes.client
-            uia = comtypes.client.CreateObject("UIAutomationClient.CUIAutomation")
-            root = uia.ElementFromHandle(root_hwnd)
-            true_condition = uia.CreateTrueCondition()
-            elements = root.FindAll(4, true_condition)  # TreeScope_Subtree
-
-            matches = []
-            sample = []
-            length = int(elements.Length)
-            for index in range(length):
-                element = elements.GetElement(index)
-                try:
-                    name = str(element.CurrentName or "")
-                except Exception:
-                    name = ""
-                try:
-                    automation_id = str(element.CurrentAutomationId or "")
-                except Exception:
-                    automation_id = ""
-                try:
-                    control_type = int(element.CurrentControlType)
-                except Exception:
-                    control_type = None
-                try:
-                    class_name = str(element.CurrentClassName or "")
-                except Exception:
-                    class_name = ""
-                row = {
-                    "index": index,
-                    "name": name,
-                    "automation_id": automation_id,
-                    "control_type": control_type,
-                    "class_name": class_name,
-                }
-                haystack = (name + " " + automation_id + " " + class_name).casefold()
-                if "energologic" in haystack or "duplicate 40" in haystack:
-                    matches.append(row)
-                if name and len(sample) < 120:
-                    sample.append(row)
-
+            ps = f"""$ErrorActionPreference='Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]{root_hwnd})
+if ($null -eq $root) {{ throw 'UIAutomation root element was not found' }}
+$all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+$matches = @()
+$sample = @()
+for ($i = 0; $i -lt $all.Count; $i++) {{
+  $el = $all.Item($i)
+  $name = [string]$el.Current.Name
+  $aid = [string]$el.Current.AutomationId
+  $cls = [string]$el.Current.ClassName
+  $type = [string]$el.Current.ControlType.ProgrammaticName
+  $row = [pscustomobject]@{{ index=$i; name=$name; automation_id=$aid; class_name=$cls; control_type=$type }}
+  $hay = ($name + ' ' + $aid + ' ' + $cls).ToLowerInvariant()
+  if ($hay.Contains('energologic') -or $hay.Contains('duplicate 40')) {{ $matches += $row }}
+  if ($name -and $sample.Count -lt 160) {{ $sample += $row }}
+}}
+[pscustomobject]@{{ element_count=$all.Count; matches=@($matches); named_sample=@($sample); energologic_found=($matches.Count -gt 0) }} | ConvertTo-Json -Depth 6 -Compress
+"""
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "PowerShell UI Automation probe failed: "
+                    + (result.stdout + "\n" + result.stderr)[-3000:]
+                )
+            payload = json.loads(result.stdout or "{}")
             return ok({
                 "document": str(page_obj.Document.Name),
                 "page": str(page_obj.Name),
                 "root_window_handle32": root_hwnd,
-                "element_count": length,
-                "matches": matches,
-                "named_sample": sample,
-                "energologic_found": bool(matches),
+                "element_count": payload.get("element_count", 0),
+                "matches": payload.get("matches", []),
+                "named_sample": payload.get("named_sample", []),
+                "energologic_found": bool(payload.get("energologic_found", False)),
+                "backend": ".NET UIAutomationClient",
             })
         except Exception as exc:
             return err(exc)
+
 
     @mcp.tool()
     def keyboard_run_energologic_classic_com_addin_probe(
