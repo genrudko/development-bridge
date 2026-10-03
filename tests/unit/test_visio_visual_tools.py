@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.35"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.36"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.35"
+    assert arguments["version"] == "2026.10.03.36"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.35"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.36"}'}],
                 "isError": False,
             }
 
@@ -360,3 +360,20 @@ def test_managed_visio_extension_has_bounded_qol_vba_host_probe():
     assert 'document.ExecuteLine("EnergoLogicQolHost.UndoProbeDuplicate40")' in source
     assert 'full_name.suffix.lower() != ".vsdm"' in source
     assert "AddFromString(vba_source)" in source
+
+
+def test_managed_visio_extension_has_bounded_macros_ui_probe():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed"
+        / "visio"
+        / "visio_managed_extension.py"
+    ).read_text()
+
+    assert "def keyboard_run_energologic_qol_undo_probe(" in source
+    assert 'macro_name = "UndoProbeDuplicate40"' in source
+    assert "chord(VK_MENU, VK_F8)" in source
+    assert "unicode_text(macro_name)" in source
+    assert '"launch_path": "Alt+F8 Macros dialog"' in source

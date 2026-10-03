@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.35"
+MANAGED_EXTENSION_VERSION = "2026.10.03.36"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1340,6 +1340,159 @@ End Sub
                 "document_undo_enabled": bool(page_obj.Document.UndoEnabled),
                 "undo_levels": int(app.Settings.UndoLevels),
                 "current_scope": current_scope,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def keyboard_run_energologic_qol_undo_probe(
+        shape_ids_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Launch the fixed EnergoLogic undo-probe macro through Visio's real Macros UI.
+
+        No arbitrary macro name or keystrokes are accepted. This is a bounded
+        qualification tool for proving true user-context invocation.
+        """
+        try:
+            import ctypes
+            import json
+            import time
+
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids) or any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be unique positive integers")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            if Path(str(document.FullName)).suffix.lower() != ".vsdm":
+                raise ValueError("QoL VBA UI probe requires a .vsdm document")
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            for sid in shape_ids:
+                window.Select(page_obj.Shapes.ItemFromID(sid), 2)
+            if int(window.Selection.Count) != len(shape_ids):
+                raise RuntimeError("Could not create the exact source selection")
+
+            hwnd = int(window.WindowHandle32)
+            if hwnd <= 0:
+                raise RuntimeError("Visio active window returned an invalid HWND")
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            GA_ROOT = 2
+            SW_RESTORE = 9
+            VK_MENU = 0x12
+            VK_F8 = 0x77
+            VK_CONTROL = 0x11
+            VK_A = 0x41
+            VK_RETURN = 0x0D
+            VK_ESCAPE = 0x1B
+            KEYEVENTF_KEYUP = 0x0002
+            KEYEVENTF_UNICODE = 0x0004
+            INPUT_KEYBOARD = 1
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+
+            class KEYBDINPUT(ctypes.Structure):
+                _fields_ = [
+                    ("wVk", ctypes.c_ushort),
+                    ("wScan", ctypes.c_ushort),
+                    ("dwFlags", ctypes.c_ulong),
+                    ("time", ctypes.c_ulong),
+                    ("dwExtraInfo", ctypes.c_void_p),
+                ]
+
+            class INPUT_UNION(ctypes.Union):
+                _fields_ = [("ki", KEYBDINPUT)]
+
+            class INPUT(ctypes.Structure):
+                _anonymous_ = ("u",)
+                _fields_ = [("type", ctypes.c_ulong), ("u", INPUT_UNION)]
+
+            def press(vk):
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+            def chord(modifier, vk):
+                user32.keybd_event(modifier, 0, 0, 0)
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                user32.keybd_event(modifier, 0, KEYEVENTF_KEYUP, 0)
+
+            def unicode_text(value):
+                for char in value:
+                    code = ord(char)
+                    down = INPUT(type=INPUT_KEYBOARD)
+                    down.ki = KEYBDINPUT(0, code, KEYEVENTF_UNICODE, 0, None)
+                    up = INPUT(type=INPUT_KEYBOARD)
+                    up.ki = KEYBDINPUT(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, None)
+                    sent = int(user32.SendInput(1, ctypes.byref(down), ctypes.sizeof(INPUT)))
+                    sent += int(user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT)))
+                    if sent != 2:
+                        raise RuntimeError(f"SendInput failed while typing fixed macro name at {char!r}")
+
+            foreground_hwnd = int(user32.GetForegroundWindow())
+            current_thread = int(kernel32.GetCurrentThreadId())
+            target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
+            foreground_thread = (
+                int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
+                if foreground_hwnd else 0
+            )
+            attached = []
+            before_count = int(page_obj.Shapes.Count)
+            macro_name = "UndoProbeDuplicate40"
+            try:
+                for other_thread in (foreground_thread, target_thread):
+                    if other_thread and other_thread != current_thread:
+                        if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
+                            attached.append(other_thread)
+                user32.ShowWindow(root_hwnd, SW_RESTORE)
+                user32.BringWindowToTop(root_hwnd)
+                user32.SetForegroundWindow(root_hwnd)
+                user32.SetActiveWindow(root_hwnd)
+                time.sleep(0.2)
+
+                chord(VK_MENU, VK_F8)
+                time.sleep(0.6)
+                chord(VK_CONTROL, VK_A)
+                unicode_text(macro_name)
+                time.sleep(0.15)
+                press(VK_RETURN)
+                time.sleep(1.0)
+            finally:
+                for other_thread in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(current_thread, other_thread, False)
+                    except Exception:
+                        pass
+
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + len(shape_ids):
+                # Best-effort close any macro dialog left open by a failed qualification.
+                try:
+                    press(VK_ESCAPE)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"Visio Macros UI probe expected {before_count + len(shape_ids)} shapes, got {after_count}"
+                )
+            return ok({
+                "document": str(document.Name),
+                "page": str(page_obj.Name),
+                "macro_name": macro_name,
+                "launch_path": "Alt+F8 Macros dialog",
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "source_shape_ids": shape_ids,
+                "ui_macro_launched": True,
             })
         except Exception as exc:
             return err(exc)
