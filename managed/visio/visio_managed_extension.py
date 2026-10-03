@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.32"
+MANAGED_EXTENSION_VERSION = "2026.10.03.33"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1164,6 +1164,8 @@ def install(namespace: dict) -> None:
                 raise RuntimeError("Visio active window returned an invalid HWND")
 
             user32 = ctypes.windll.user32
+            GA_ROOT = 2
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
             SW_RESTORE = 9
             VK_CONTROL = 0x11
             VK_Z = 0x5A
@@ -1175,7 +1177,7 @@ def install(namespace: dict) -> None:
             kernel32 = ctypes.windll.kernel32
             foreground_hwnd = int(user32.GetForegroundWindow())
             current_thread = int(kernel32.GetCurrentThreadId())
-            target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
+            target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
             foreground_thread = (
                 int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
                 if foreground_hwnd else 0
@@ -1186,16 +1188,23 @@ def install(namespace: dict) -> None:
                     if other_thread and other_thread != current_thread:
                         if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
                             attached.append(other_thread)
-                user32.BringWindowToTop(hwnd)
-                user32.SetForegroundWindow(hwnd)
-                user32.SetActiveWindow(hwnd)
+                user32.ShowWindow(root_hwnd, SW_RESTORE)
+                user32.BringWindowToTop(root_hwnd)
+                user32.SetForegroundWindow(root_hwnd)
+                user32.SetActiveWindow(root_hwnd)
                 time.sleep(0.15)
                 focused_hwnd = int(user32.GetForegroundWindow())
-                if focused_hwnd != hwnd:
-                    raise RuntimeError(
-                        f"Could not focus the Visio window for Ctrl+Z: "
-                        f"requested HWND {hwnd}, foreground HWND {focused_hwnd}"
-                    )
+                if focused_hwnd != root_hwnd:
+                    focused_pid = ctypes.c_ulong(0)
+                    root_pid = ctypes.c_ulong(0)
+                    user32.GetWindowThreadProcessId(focused_hwnd, ctypes.byref(focused_pid))
+                    user32.GetWindowThreadProcessId(root_hwnd, ctypes.byref(root_pid))
+                    if int(focused_pid.value) != int(root_pid.value):
+                        raise RuntimeError(
+                            f"Could not focus the Visio window for Ctrl+Z: "
+                            f"child HWND {hwnd}, root HWND {root_hwnd}, "
+                            f"foreground HWND {focused_hwnd}"
+                        )
 
                 user32.keybd_event(VK_CONTROL, 0, 0, 0)
                 user32.keybd_event(VK_Z, 0, 0, 0)
@@ -1213,6 +1222,7 @@ def install(namespace: dict) -> None:
             return ok({
                 "page": str(page_obj.Name),
                 "window_handle32": hwnd,
+                "root_window_handle32": root_hwnd,
                 "shape_count_before": before_count,
                 "shape_count_after": after_count,
                 "keyboard_chord": "Ctrl+Z",
