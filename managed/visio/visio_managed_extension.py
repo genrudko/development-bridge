@@ -2591,7 +2591,7 @@ namespace EnergoLogicVisioQol
             classes = r"Software\Classes"
             set_string(winreg.HKEY_CURRENT_USER, classes + "\\" + progid, "", "EnergoLogic Visio QoL Add-in")
             set_string(winreg.HKEY_CURRENT_USER, classes + "\\" + progid + r"\CLSID", "", clsid)
-            clsid_key = classes + r"\CLSID\" + clsid
+            clsid_key = classes + "\\CLSID\\" + clsid
             set_string(winreg.HKEY_CURRENT_USER, clsid_key, "", "EnergoLogic Visio QoL Add-in")
             set_string(winreg.HKEY_CURRENT_USER, clsid_key + r"\ProgId", "", progid)
             inproc = clsid_key + r"\InprocServer32"
@@ -2602,7 +2602,7 @@ namespace EnergoLogicVisioQol
             set_string(winreg.HKEY_CURRENT_USER, inproc, "RuntimeVersion", runtime_version)
             set_string(winreg.HKEY_CURRENT_USER, inproc, "CodeBase", codebase)
 
-            office_key = r"Software\Microsoft\Office\Visio\Addins\" + progid
+            office_key = "Software\\Microsoft\\Office\\Visio\\Addins\\" + progid
             set_string(winreg.HKEY_CURRENT_USER, office_key, "FriendlyName", "EnergoLogic Visio QoL")
             set_string(winreg.HKEY_CURRENT_USER, office_key, "Description", "EnergoLogic engineering QoL commands for Visio")
             set_dword(winreg.HKEY_CURRENT_USER, office_key, "LoadBehavior", 3)
@@ -2647,9 +2647,9 @@ namespace EnergoLogicVisioQol
             clsid = "{7D679776-1D6B-4D0D-9123-E3E4FB21F806}"
             progid = "EnergoLogic.VisioQolAddin"
             targets = [
-                r"Software\Microsoft\Office\Visio\Addins\" + progid,
-                r"Software\Classes\" + progid,
-                r"Software\Classes\CLSID\" + clsid,
+                "Software\\Microsoft\\Office\\Visio\\Addins\\" + progid,
+                "Software\\Classes\\" + progid,
+                "Software\\Classes\\CLSID\\" + clsid,
             ]
 
             def delete_tree(root, subkey):

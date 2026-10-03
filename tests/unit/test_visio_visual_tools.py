@@ -584,7 +584,8 @@ def test_managed_visio_extension_has_bounded_classic_com_addin_probe():
     assert 'app.BeginUndoScope("EnergoLogic: Duplicate Cell Probe")' in source
     assert 'app.DoCmd(1024)' in source
     assert 'duplicate.Move(40.0, 0.0, "mm")' in source
-    assert 'Software\\Microsoft\\Office\\Visio\\Addins' in source
+    assert 'office_key =' in source
+    assert '"LoadBehavior", 3' in source
     assert "winreg.HKEY_CURRENT_USER" in source
     assert "COMAddIns" in source
     assert "addins.Update()" in source
