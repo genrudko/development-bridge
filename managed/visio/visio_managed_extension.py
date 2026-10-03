@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.40"
+MANAGED_EXTENSION_VERSION = "2026.10.03.41"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1193,8 +1193,11 @@ End Sub
 Public Sub UndoProbeDuplicate40FromShape(ByVal triggerShape As Visio.Shape)
     Dim pg As Visio.Page
     Dim win As Visio.Window
+    Dim sel As Visio.Selection
+    Dim dup As Visio.Selection
     Dim ids As Variant
     Dim item As Variant
+    Dim sourceCount As Long
 
     Set pg = triggerShape.ContainingPage
     Set win = Application.ActiveWindow
@@ -1203,7 +1206,15 @@ Public Sub UndoProbeDuplicate40FromShape(ByVal triggerShape As Visio.Shape)
     For Each item In ids
         win.Select pg.Shapes.ItemFromID(CLng(item)), 2
     Next item
-    UndoProbeDuplicate40
+
+    Set sel = win.Selection
+    sourceCount = sel.Count
+    sel.Duplicate
+    Set dup = win.Selection
+    If dup.Count <> sourceCount Then
+        Err.Raise vbObjectError + 704, "EnergoLogicQolHost", "Duplicate selection count mismatch"
+    End If
+    dup.Move 40#, 0#, "mm"
 End Sub
 
 """
