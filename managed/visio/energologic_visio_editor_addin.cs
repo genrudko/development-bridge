@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.11.0")]
+[assembly: AssemblyVersion("0.3.12.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -94,8 +94,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("6D8D560D-1F9F-4CB8-BED7-5FCBB70B1F2C")]
-    [ProgId("EnergoLogic.VisioEditorAddinV311")]
+    [Guid("2F8B22F0-0A1B-4E30-B850-09B1F7197D3D")]
+    [ProgId("EnergoLogic.VisioEditorAddinV312")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -231,7 +231,7 @@ namespace EnergoLogicVisioEditor
             lock (_asyncSync)
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
-        public string ApiVersion() { return "0.3.11"; }
+        public string ApiVersion() { return "0.3.12"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1141,6 +1141,10 @@ namespace EnergoLogicVisioEditor
 
         private string ScheduleTopologyCompletion(dynamic page, List<CellMoveState> states, List<int> finalSelection, string successPrefix)
         {
+            string documentName = Convert.ToString(page.Document.Name, CultureInfo.InvariantCulture) ?? "";
+            string pageNameU = "";
+            try { pageNameU = Convert.ToString(page.NameU, CultureInfo.InvariantCulture) ?? ""; }
+            catch { pageNameU = Convert.ToString(page.Name, CultureInfo.InvariantCulture) ?? ""; }
             string token = "topology:" + Guid.NewGuid().ToString("N");
             lock (_asyncSync)
             {
@@ -1159,18 +1163,30 @@ namespace EnergoLogicVisioEditor
                 string finalState;
                 try
                 {
+                    // Never carry a Visio COM Page object across the deferred UI boundary.
+                    // Resolve a fresh RCW after the originating API call has returned.
+                    dynamic livePage = ResolveLivePage(documentName, pageNameU);
                     SettleVisioAfterGeometryChange();
                     int restoredInternal = 0;
                     foreach (CellMoveState state in states)
-                        restoredInternal += RestoreCellTopologyAfterMove(page, state);
-                    VerifyMovedCellsComplete(page, states);
-                    SelectIds(page, finalSelection);
+                        restoredInternal += RestoreCellTopologyAfterMove(livePage, state);
+                    VerifyMovedCellsComplete(livePage, states);
+                    SelectIds(livePage, finalSelection);
                     finalState = "success";
                     finalMessage = successPrefix + "; внутренних Glue восстановлено: " + restoredInternal + ".";
                 }
                 catch (Exception topologyError)
                 {
-                    string compensation = CompensateCellMoves(page, states);
+                    string compensation;
+                    try
+                    {
+                        dynamic livePage = ResolveLivePage(documentName, pageNameU);
+                        compensation = CompensateCellMoves(livePage, states);
+                    }
+                    catch (Exception compensationError)
+                    {
+                        compensation = "ВНИМАНИЕ: компенсация не выполнена: " + compensationError.Message + ".";
+                    }
                     finalState = compensation.StartsWith("Исходная", StringComparison.Ordinal) ? "failed_rolled_back" : "failed_needs_attention";
                     finalMessage = "⚠ Не удалось завершить электрические связи. " + compensation + " Причина: " + topologyError.Message;
                 }
@@ -1185,6 +1201,42 @@ namespace EnergoLogicVisioEditor
             });
 
             return "⏳ Геометрия выполнена. EnergoLogic завершает и проверяет электрические связи… token=" + token;
+        }
+
+        private dynamic ResolveLivePage(string documentName, string pageNameU)
+        {
+            dynamic app = App;
+            dynamic foundDocument = null;
+            for (int documentIndex = 1; documentIndex <= (int)app.Documents.Count; documentIndex++)
+            {
+                dynamic candidate = app.Documents.Item(documentIndex);
+                string candidateName = "";
+                try { candidateName = Convert.ToString(candidate.Name, CultureInfo.InvariantCulture) ?? ""; }
+                catch { }
+                if (String.Equals(candidateName, documentName, StringComparison.OrdinalIgnoreCase))
+                {
+                    foundDocument = candidate;
+                    break;
+                }
+            }
+            if (foundDocument == null)
+                throw new InvalidOperationException("Документ операции больше не открыт: " + documentName);
+
+            dynamic pages = foundDocument.Pages;
+            for (int pageIndex = 1; pageIndex <= (int)pages.Count; pageIndex++)
+            {
+                dynamic candidatePage = pages.Item(pageIndex);
+                string candidateNameU = "";
+                string candidateName = "";
+                try { candidateNameU = Convert.ToString(candidatePage.NameU, CultureInfo.InvariantCulture) ?? ""; }
+                catch { }
+                try { candidateName = Convert.ToString(candidatePage.Name, CultureInfo.InvariantCulture) ?? ""; }
+                catch { }
+                if (String.Equals(candidateNameU, pageNameU, StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(candidateName, pageNameU, StringComparison.OrdinalIgnoreCase))
+                    return candidatePage;
+            }
+            throw new InvalidOperationException("Страница операции больше не найдена: " + pageNameU);
         }
 
         private void VerifyMovedCellsComplete(dynamic page, IEnumerable<CellMoveState> states)
