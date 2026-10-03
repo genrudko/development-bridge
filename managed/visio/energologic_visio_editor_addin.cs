@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.3.0")]
+[assembly: AssemblyVersion("0.3.4.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -21,6 +21,14 @@ namespace EnergoLogicVisioEditor
         public int TargetId;
         public int Row;
         public string Endpoint;
+    }
+
+    internal sealed class GlueEdgeInfo
+    {
+        public int SourceId;
+        public string Endpoint;
+        public int TargetId;
+        public int Row;
     }
 
     internal sealed class CellInfo
@@ -76,8 +84,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("54D4E77E-73B0-4D45-94E2-B138DF35D1A3")]
-    [ProgId("EnergoLogic.VisioEditorAddinV33")]
+    [Guid("A6E63A2D-0DA5-4E84-9B2B-5B3E6944B5F4")]
+    [ProgId("EnergoLogic.VisioEditorAddinV34")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -195,7 +203,7 @@ namespace EnergoLogicVisioEditor
         public string ApiNudgeUp() { return ExactOffset(0.0, 1.0); }
         public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
         public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
-        public string ApiVersion() { return "0.3.3"; }
+        public string ApiVersion() { return "0.3.4"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -210,6 +218,7 @@ namespace EnergoLogicVisioEditor
             double dy = GetMm(targetTerminal, "PinY") - GetMm(sourceTerminal, "PinY");
 
             List<int> sourceIds = cell.MemberIds.OrderBy(x => x).ToList();
+            List<GlueEdgeInfo> sourceInternalGlue = CaptureInternalGlue(page, sourceIds);
             SelectIds(page, sourceIds);
             List<double[]> sourcePoints = new List<double[]>();
             List<string> sourceMasters = new List<string>();
@@ -252,6 +261,11 @@ namespace EnergoLogicVisioEditor
                 foreach (int id in newIds) SetCellIdentity(page.Shapes.ItemFromID(id), newCellId);
                 GlueEndpoint(newAnchor, cell.Endpoint, targetTerminal, cell.ConnectionRow);
                 VerifyGlue(newAnchor, cell.Endpoint, (int)targetTerminal.ID, cell.ConnectionRow);
+                List<GlueEdgeInfo> duplicateInternalGlue = CaptureInternalGlue(page, newIds);
+                if (duplicateInternalGlue.Count != sourceInternalGlue.Count)
+                    throw new InvalidOperationException(
+                        "Visio потерял внутренние Glue при копировании ячейки; операция отменена"
+                    );
                 commit = true;
                 return String.Format(CultureInfo.CurrentCulture,
                     "✓ Ячейка скопирована {0}. Место {1} → {2}; сдвиг {3:0.00} мм; Glue восстановлен; identity создана.",
@@ -274,6 +288,7 @@ namespace EnergoLogicVisioEditor
             EnsureTerminalFree(page, (int)targetTerminal.ID, own);
             double dx = GetMm(targetTerminal, "PinX") - GetMm(sourceTerminal, "PinX");
             double dy = GetMm(targetTerminal, "PinY") - GetMm(sourceTerminal, "PinY");
+            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
 
             int scope = (int)app.BeginUndoScope(direction > 0 ? "EnergoLogic: Переместить ячейку вправо" : "EnergoLogic: Переместить ячейку влево");
             bool commit = false;
@@ -283,12 +298,14 @@ namespace EnergoLogicVisioEditor
                 DetachEndpoint(anchor, cell.Endpoint);
                 SelectIds(page, cell.MemberIds);
                 app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                int restoredInternal = RestoreInternalGlue(page, internalGlue);
                 GlueEndpoint(anchor, cell.Endpoint, targetTerminal, cell.ConnectionRow);
                 VerifyGlue(anchor, cell.Endpoint, (int)targetTerminal.ID, cell.ConnectionRow);
+                VerifyInternalGlue(page, internalGlue);
                 commit = true;
                 return String.Format(CultureInfo.CurrentCulture,
-                    "✓ Ячейка перемещена {0}. Место {1} → {2}; сдвиг {3:0.00} мм; Glue проверен.",
-                    direction > 0 ? "вправо" : "влево", cell.Slot, GetSlot(targetTerminal), dx);
+                    "✓ Ячейка перемещена {0}. Место {1} → {2}; сдвиг {3:0.00} мм; внутренние Glue проверены, восстановлено: {4}.",
+                    direction > 0 ? "вправо" : "влево", cell.Slot, GetSlot(targetTerminal), dx, restoredInternal);
             }
             finally { app.EndUndoScope(scope, commit); }
         }
@@ -308,14 +325,17 @@ namespace EnergoLogicVisioEditor
             dynamic page = app.ActivePage;
             List<int> ids = CurrentTopLevelSelection(page);
             EnsureNoExternalGlue(page, ids);
+            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, ids);
             int scope = (int)app.BeginUndoScope("EnergoLogic: Точный сдвиг");
             bool commit = false;
             try
             {
                 SelectIds(page, ids);
                 app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                int restoredInternal = RestoreInternalGlue(page, internalGlue);
+                VerifyInternalGlue(page, internalGlue);
                 commit = true;
-                return String.Format(CultureInfo.CurrentCulture, "✓ Точный сдвиг: X {0:0.###} мм, Y {1:0.###} мм.", dx, dy);
+                return String.Format(CultureInfo.CurrentCulture, "✓ Точный сдвиг: X {0:0.###} мм, Y {1:0.###} мм. Внутренние Glue проверены, восстановлено: {2}.", dx, dy, restoredInternal);
             }
             finally { app.EndUndoScope(scope, commit); }
         }
@@ -329,6 +349,7 @@ namespace EnergoLogicVisioEditor
             dynamic page = app.ActivePage;
             List<int> ids = CurrentTopLevelSelection(page);
             EnsureNoExternalGlue(page, ids);
+            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, ids);
             int scope = (int)app.BeginUndoScope(copy ? "EnergoLogic: Копировать с базовой точкой" : "EnergoLogic: Переместить с базовой точкой");
             bool commit = false;
             try
@@ -358,8 +379,16 @@ namespace EnergoLogicVisioEditor
                     dup.Move(dx - ndx, dy - ndy, "mm");
                     string cellId = "cell:" + Guid.NewGuid().ToString("N");
                     foreach (int id in newIds) if (HasCellIdentity(page.Shapes.ItemFromID(id))) SetCellIdentity(page.Shapes.ItemFromID(id), cellId);
+                    List<GlueEdgeInfo> duplicateGlue = CaptureInternalGlue(page, newIds);
+                    if (duplicateGlue.Count != internalGlue.Count)
+                        throw new InvalidOperationException("Visio потерял внутренние Glue при копировании по базовой точке; операция отменена");
                 }
-                else app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                else
+                {
+                    app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                    RestoreInternalGlue(page, internalGlue);
+                    VerifyInternalGlue(page, internalGlue);
+                }
                 commit = true;
                 return String.Format(CultureInfo.CurrentCulture, "✓ {0} по базовой точке: ΔX {1:0.###} мм, ΔY {2:0.###} мм.", copy ? "Копирование" : "Перемещение", dx, dy);
             }
@@ -473,6 +502,7 @@ namespace EnergoLogicVisioEditor
             List<int> ids = CurrentTopLevelSelection(page);
             if (ids.Count < 2) throw new InvalidOperationException("Для выравнивания выберите минимум два элемента");
             EnsureNoExternalGlue(page, ids);
+            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, ids);
             dynamic first = page.Shapes.ItemFromID(ids[0]);
             double target = GetMm(first, axis == "x" ? "PinX" : "PinY");
             int scope = (int)app.BeginUndoScope(axis == "x" ? "EnergoLogic: Выровнять по X" : "EnergoLogic: Выровнять по Y");
@@ -484,6 +514,8 @@ namespace EnergoLogicVisioEditor
                     dynamic shape = page.Shapes.ItemFromID(id);
                     SetMm(shape, axis == "x" ? "PinX" : "PinY", target);
                 }
+                RestoreInternalGlue(page, internalGlue);
+                VerifyInternalGlue(page, internalGlue);
                 SelectIds(page, ids);
                 commit = true;
                 return String.Format(CultureInfo.CurrentCulture, "✓ Выровнено {0} элементов по {1} = {2:0.###} мм.", ids.Count, axis.ToUpperInvariant(), target);
@@ -520,6 +552,9 @@ namespace EnergoLogicVisioEditor
             if (cells.Any(c => c.BusId != busId)) throw new InvalidOperationException("Все выбранные ячейки должны быть на одной шине");
             int startSlot = cells.Min(c => c.Slot);
             List<Tuple<CellInfo, object>> plan = new List<Tuple<CellInfo, object>>();
+            Dictionary<int, List<GlueEdgeInfo>> internalGlueByAnchor = new Dictionary<int, List<GlueEdgeInfo>>();
+            foreach (CellInfo cell in cells)
+                internalGlueByAnchor[cell.AnchorId] = CaptureInternalGlue(page, cell.MemberIds);
             HashSet<int> selectedMembers = new HashSet<int>(cells.SelectMany(c => c.MemberIds));
             for (int i = 0; i < cells.Count; i++)
             {
@@ -551,7 +586,10 @@ namespace EnergoLogicVisioEditor
                     DetachEndpoint(anchor, cell.Endpoint);
                     SelectIds(page, cell.MemberIds);
                     app.ActiveWindow.Selection.Move(dx, dy, "mm");
+                    RestoreInternalGlue(page, internalGlueByAnchor[cell.AnchorId]);
                     GlueEndpoint(anchor, cell.Endpoint, target, cell.ConnectionRow);
+                    VerifyGlue(anchor, cell.Endpoint, (int)target.ID, cell.ConnectionRow);
+                    VerifyInternalGlue(page, internalGlueByAnchor[cell.AnchorId]);
                 }
                 SelectIds(page, cells.SelectMany(c => c.MemberIds).Distinct().ToList());
                 commit = true;
@@ -988,6 +1026,57 @@ namespace EnergoLogicVisioEditor
         private bool HasEndpoint(dynamic shape, string endpoint)
         {
             return CellExists(shape, endpoint == "begin" ? "BeginX" : "EndX");
+        }
+
+        private List<GlueEdgeInfo> CaptureInternalGlue(dynamic page, IEnumerable<int> ids)
+        {
+            HashSet<int> members = new HashSet<int>(ids);
+            Dictionary<int, int> childParent = BuildChildParentMap(page);
+            List<GlueEdgeInfo> result = new List<GlueEdgeInfo>();
+            foreach (int sourceId in members)
+            {
+                dynamic source = page.Shapes.ItemFromID(sourceId);
+                foreach (string endpoint in new[] { "begin", "end" })
+                {
+                    GlueTarget target = TryGetGlueTarget(source, endpoint);
+                    if (target == null) continue;
+                    int owner = childParent.ContainsKey(target.TargetId) ? childParent[target.TargetId] : target.TargetId;
+                    if (!members.Contains(owner)) continue;
+                    result.Add(new GlueEdgeInfo {
+                        SourceId = sourceId,
+                        Endpoint = endpoint,
+                        TargetId = target.TargetId,
+                        Row = target.Row
+                    });
+                }
+            }
+            return result;
+        }
+
+        private int RestoreInternalGlue(dynamic page, IEnumerable<GlueEdgeInfo> edges)
+        {
+            int restored = 0;
+            foreach (GlueEdgeInfo edge in edges)
+            {
+                dynamic source = page.Shapes.ItemFromID(edge.SourceId);
+                GlueTarget current = TryGetGlueTarget(source, edge.Endpoint);
+                if (current != null && current.TargetId == edge.TargetId && current.Row == edge.Row)
+                    continue;
+                dynamic target = page.Shapes.ItemFromID(edge.TargetId);
+                GlueEndpoint(source, edge.Endpoint, target, edge.Row);
+                VerifyGlue(source, edge.Endpoint, edge.TargetId, edge.Row);
+                restored++;
+            }
+            return restored;
+        }
+
+        private void VerifyInternalGlue(dynamic page, IEnumerable<GlueEdgeInfo> edges)
+        {
+            foreach (GlueEdgeInfo edge in edges)
+            {
+                dynamic source = page.Shapes.ItemFromID(edge.SourceId);
+                VerifyGlue(source, edge.Endpoint, edge.TargetId, edge.Row);
+            }
         }
 
         private void DetachEndpoint(dynamic shape, string endpoint)
