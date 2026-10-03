@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.18"
+MANAGED_EXTENSION_VERSION = "2026.10.03.19"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -590,10 +590,14 @@ def install(namespace: dict) -> None:
                             to_name = str(connect.ToCell.NameU)
                         except Exception:
                             continue
+                        acceptable_target_names = {
+                            target_cell_name.casefold(),
+                            f"Connections.{item['target_connection_row']}.X".casefold(),
+                        }
                         if (
                             to_id == item["target_shape_id"]
                             and from_name.casefold() == source_cell_name.casefold()
-                            and to_name.casefold() == target_cell_name.casefold()
+                            and to_name.casefold() in acceptable_target_names
                         ):
                             verified = True
                             break

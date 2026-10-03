@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.18"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.19"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.18"
+    assert arguments["version"] == "2026.10.03.19"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.18"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.19"}'}],
                 "isError": False,
             }
 
@@ -201,6 +201,8 @@ def test_managed_visio_extension_has_transactional_exact_duplicate_tool():
     assert "GlueTo(target_cell)" in source
     assert "connects = shape.Connects" in source
     assert "Glue verification failed" in source
+    assert "acceptable_target_names" in source
+    assert "Connections.{item['target_connection_row']}.X" in source
     assert "BeginUndoScope" in source
     assert "EndUndoScope(scope_id, True)" in source
     assert "EndUndoScope(scope_id, False)" in source
