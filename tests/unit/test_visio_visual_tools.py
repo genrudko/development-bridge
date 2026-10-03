@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.53"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.54"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.53"
+    assert arguments["version"] == "2026.10.03.54"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.53"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.54"}'}],
                 "isError": False,
             }
 
@@ -535,3 +535,21 @@ def test_msaa_probe_falls_back_to_accessible_object_from_point():
     assert "class VARIANT" in source
     assert "point_diagnostics" in source
     assert "GetWindowRect(menu_hwnd" in source
+
+
+def test_managed_visio_extension_has_read_only_vsto_build_capability_probe():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    policy = (
+        Path(__file__).resolve().parents[2]
+        / "app" / "tools" / "visio.py"
+    ).read_text()
+    assert "def get_vsto_build_capabilities(" in source
+    assert '"devenv.exe"' in source
+    assert '"msbuild.exe"' in source
+    assert '"vswhere"' in source
+    assert '"office_targets"' in source
+    assert '"get_vsto_build_capabilities"' in policy

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.53"
+MANAGED_EXTENSION_VERSION = "2026.10.03.54"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2403,6 +2403,136 @@ End Property
                 "menu_window_handle": menu_hwnd,
                 "ui_action_launched": True,
             })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def get_vsto_build_capabilities() -> str:
+        """Read bounded Windows/.NET/VSTO build capabilities without mutation."""
+        try:
+            import json
+            import os
+            import shutil
+            import subprocess
+
+            tools = {
+                name: shutil.which(name)
+                for name in (
+                    "devenv.exe",
+                    "msbuild.exe",
+                    "dotnet.exe",
+                    "csc.exe",
+                    "regasm.exe",
+                    "gacutil.exe",
+                )
+            }
+            program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            program_files_x86 = Path(
+                os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+            )
+            windows = Path(os.environ.get("WINDIR", r"C:\Windows"))
+            known = {
+                "vswhere": program_files_x86
+                / "Microsoft Visual Studio"
+                / "Installer"
+                / "vswhere.exe",
+                "framework_msbuild_4": windows
+                / "Microsoft.NET"
+                / "Framework64"
+                / "v4.0.30319"
+                / "MSBuild.exe",
+                "framework_csc_4": windows
+                / "Microsoft.NET"
+                / "Framework64"
+                / "v4.0.30319"
+                / "csc.exe",
+                "framework_regasm_4": windows
+                / "Microsoft.NET"
+                / "Framework64"
+                / "v4.0.30319"
+                / "RegAsm.exe",
+                "vsto_runtime": program_files
+                / "Common Files"
+                / "microsoft shared"
+                / "VSTO",
+                "office_gac_pia": windows
+                / "Microsoft.NET"
+                / "assembly"
+                / "GAC_MSIL"
+                / "Microsoft.Office.Interop.Visio",
+            }
+            known_result = {
+                name: {"path": str(path), "exists": path.exists()}
+                for name, path in known.items()
+            }
+
+            vs_instances = []
+            vswhere = known["vswhere"]
+            if vswhere.exists():
+                try:
+                    proc = subprocess.run(
+                        [
+                            str(vswhere),
+                            "-all",
+                            "-products",
+                            "*",
+                            "-format",
+                            "json",
+                            "-utf8",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    if proc.returncode == 0 and proc.stdout.strip():
+                        raw = json.loads(proc.stdout)
+                        for item in raw:
+                            installation_path = str(item.get("installationPath", ""))
+                            install = Path(installation_path) if installation_path else None
+                            candidates = {}
+                            if install is not None:
+                                for label, relative in {
+                                    "devenv": Path("Common7/IDE/devenv.exe"),
+                                    "msbuild": Path("MSBuild/Current/Bin/MSBuild.exe"),
+                                    "office_targets": Path("MSBuild/Microsoft/VisualStudio/OfficeTools"),
+                                }.items():
+                                    candidate = install / relative
+                                    candidates[label] = {
+                                        "path": str(candidate),
+                                        "exists": candidate.exists(),
+                                    }
+                            vs_instances.append(
+                                {
+                                    "displayName": item.get("displayName"),
+                                    "installationVersion": item.get("installationVersion"),
+                                    "installationPath": installation_path,
+                                    "isComplete": item.get("isComplete"),
+                                    "isLaunchable": item.get("isLaunchable"),
+                                    "candidates": candidates,
+                                }
+                            )
+                except Exception as exc:
+                    vs_instances = [{"probe_error": f"{type(exc).__name__}: {exc}"}]
+
+            reference_dirs = []
+            for root in (
+                program_files_x86 / "Reference Assemblies" / "Microsoft" / "VSTO40",
+                program_files_x86 / "Microsoft Visual Studio",
+            ):
+                reference_dirs.append({"path": str(root), "exists": root.exists()})
+
+            return ok(
+                {
+                    "path_tools": tools,
+                    "known_paths": known_result,
+                    "visual_studio_instances": vs_instances,
+                    "reference_dirs": reference_dirs,
+                    "process_architecture": os.environ.get("PROCESSOR_ARCHITECTURE"),
+                    "program_files": str(program_files),
+                    "program_files_x86": str(program_files_x86),
+                }
+            )
         except Exception as exc:
             return err(exc)
 
