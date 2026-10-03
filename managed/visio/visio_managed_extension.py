@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.69"
+MANAGED_EXTENSION_VERSION = "2026.10.03.70"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1835,6 +1835,515 @@ for ($i = 0; $i -lt $all.Count; $i++) {{
             def delete_tree(root, subkey):
                 try:
                     with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ | winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY) as key:
+                        children = []
+                        index = 0
+                        while True:
+                            try:
+                                children.append(winreg.EnumKey(key, index))
+                                index += 1
+                            except OSError:
+                                break
+                    for child in children:
+                        delete_tree(root, subkey + "\\" + child)
+                    winreg.DeleteKeyEx(root, subkey, winreg.KEY_WOW64_64KEY, 0)
+                except FileNotFoundError:
+                    pass
+
+            for target in targets:
+                delete_tree(winreg.HKEY_CURRENT_USER, target)
+            return ok({"progid": progid, "removed": True, "hkcu_only": True})
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def install_energologic_commandbar_com_addin_probe(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        # Build/register a fixed non-autoloading command-bar-only COM add-in probe.
+        try:
+            import os
+            import shutil
+            import subprocess
+            import winreg
+
+            if os.name != "nt":
+                raise RuntimeError("command-bar COM add-in probe is Windows-only")
+
+            build_dir = workspace / "energologic_visio_qol_commandbar_probe"
+            build_dir.mkdir(parents=True, exist_ok=True)
+            source_path = build_dir / "EnergoLogicVisioQolCommandBarAddin.cs"
+            dll_path = build_dir / "EnergoLogic.VisioQolCommandBarAddin.dll"
+
+            source = r"""using System;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using Extensibility;
+using Microsoft.Office.Core;
+
+[assembly: ComVisible(true)]
+[assembly: AssemblyTitle("EnergoLogic Visio QoL CommandBar Add-in")]
+[assembly: AssemblyVersion("0.1.0.0")]
+
+namespace EnergoLogicVisioQolCommandBar
+{
+    [ComVisible(true)]
+    [Guid("F62D8474-1A5C-4A9E-88B5-4AA67D1C5510")]
+    [ProgId("EnergoLogic.VisioQolCommandBarAddin")]
+    [ClassInterface(ClassInterfaceType.None)]
+    public sealed class Connect : IDTExtensibility2
+    {
+        private object _application;
+        private CommandBar _bar;
+        private CommandBarButton _button;
+        private _CommandBarButtonEvents_ClickEventHandler _clickHandler;
+
+        public void OnConnection(object Application, ext_ConnectMode ConnectMode,
+            object AddInInst, ref Array custom)
+        {
+            _application = Application;
+            if (ConnectMode != ext_ConnectMode.ext_cm_Startup)
+                InstallUi();
+        }
+
+        public void OnDisconnection(ext_DisconnectMode RemoveMode, ref Array custom)
+        {
+            _button = null;
+            _bar = null;
+            _application = null;
+        }
+
+        public void OnAddInsUpdate(ref Array custom) { }
+
+        public void OnStartupComplete(ref Array custom)
+        {
+            InstallUi();
+        }
+
+        public void OnBeginShutdown(ref Array custom) { }
+
+        private void InstallUi()
+        {
+            if (_application == null)
+                throw new InvalidOperationException("Visio application is not connected");
+
+            dynamic app = _application;
+            CommandBars bars = (CommandBars)app.CommandBars;
+            const string barName = "EnergoLogic QoL Probe";
+            const string buttonTag = "EnergoLogic.Duplicate40.UndoProbe";
+
+            try
+            {
+                _bar = bars[barName];
+            }
+            catch
+            {
+                _bar = bars.Add(
+                    barName,
+                    MsoBarPosition.msoBarFloating,
+                    Missing.Value,
+                    true);
+            }
+
+            try { _bar.Context = "2*"; } catch { }
+
+            _button = null;
+            for (int i = 1; i <= _bar.Controls.Count; i++)
+            {
+                CommandBarControl control = _bar.Controls[i];
+                if (String.Equals(control.Tag, buttonTag, StringComparison.Ordinal))
+                {
+                    _button = control as CommandBarButton;
+                    if (_button != null)
+                        break;
+                }
+            }
+
+            if (_button == null)
+            {
+                _button = (CommandBarButton)_bar.Controls.Add(
+                    MsoControlType.msoControlButton,
+                    Missing.Value,
+                    Missing.Value,
+                    Missing.Value,
+                    true);
+            }
+
+            _button.Caption = "EnergoLogic Duplicate 40";
+            _button.Tag = buttonTag;
+            _button.Style = MsoButtonStyle.msoButtonCaption;
+            _button.TooltipText = "EnergoLogic Duplicate 40 — Undo qualification";
+            _button.Visible = true;
+            _button.OnAction = "!<EnergoLogic.VisioQolCommandBarAddin>";
+
+            _clickHandler = new _CommandBarButtonEvents_ClickEventHandler(OnProbeClick);
+            _button.Click += _clickHandler;
+            _bar.Visible = true;
+        }
+
+        private void OnProbeClick(CommandBarButton Ctrl, ref bool CancelDefault)
+        {
+            CancelDefault = false;
+            RunDuplicate40();
+        }
+
+        private void RunDuplicate40()
+        {
+            dynamic app = _application;
+            dynamic window = app.ActiveWindow;
+            dynamic selection = window.Selection;
+            int sourceCount = (int)selection.Count;
+            if (sourceCount < 1)
+                throw new InvalidOperationException("No shapes selected");
+
+            int scopeId = (int)app.BeginUndoScope("EnergoLogic: Duplicate Cell Probe");
+            bool commit = false;
+            try
+            {
+                app.DoCmd(1024);
+                dynamic duplicate = window.Selection;
+                if ((int)duplicate.Count != sourceCount)
+                    throw new InvalidOperationException("Duplicate selection count mismatch");
+                duplicate.Move(40.0, 0.0, "mm");
+                commit = true;
+            }
+            finally
+            {
+                app.EndUndoScope(scopeId, commit);
+            }
+        }
+    }
+}
+"""
+            source_path.write_text(source, encoding="utf-8")
+
+            extensibility_ref = Path(
+                r"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\PublicAssemblies\Microsoft.VisualStudio.Interop.dll"
+            )
+            office_ref = Path(
+                r"C:\Program Files\Microsoft Office\root\Office16\ADDINS\PowerPivot Excel Add-in\OFFICE.dll"
+            )
+            for reference in (extensibility_ref, office_ref):
+                if not reference.is_file():
+                    raise FileNotFoundError(f"required Microsoft interop assembly not found: {reference}")
+                shutil.copy2(reference, build_dir / reference.name)
+
+            csc = Path(r"C:\WINDOWS\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
+            if not csc.is_file():
+                raise FileNotFoundError(f"C# compiler not found: {csc}")
+            compile_result = subprocess.run(
+                [
+                    str(csc),
+                    "/nologo",
+                    "/target:library",
+                    "/platform:x64",
+                    "/optimize+",
+                    f"/reference:{extensibility_ref}",
+                    f"/reference:{office_ref}",
+                    f"/out:{dll_path}",
+                    str(source_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if compile_result.returncode != 0 or not dll_path.is_file():
+                raise RuntimeError(
+                    "C# command-bar add-in compilation failed: "
+                    + (compile_result.stdout + "\n" + compile_result.stderr)[-4000:]
+                )
+
+            clsid = "{F62D8474-1A5C-4A9E-88B5-4AA67D1C5510}"
+            progid = "EnergoLogic.VisioQolCommandBarAddin"
+            class_name = "EnergoLogicVisioQolCommandBar.Connect"
+            assembly_name = (
+                "EnergoLogic.VisioQolCommandBarAddin, Version=0.1.0.0, "
+                "Culture=neutral, PublicKeyToken=null"
+            )
+            codebase = dll_path.resolve().as_uri()
+
+            def set_string(root, subkey, name, value):
+                with winreg.CreateKeyEx(
+                    root, subkey, 0, winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY
+                ) as key:
+                    winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+
+            def set_dword(root, subkey, name, value):
+                with winreg.CreateKeyEx(
+                    root, subkey, 0, winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY
+                ) as key:
+                    winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, int(value))
+
+            classes = r"Software\Classes"
+            set_string(winreg.HKEY_CURRENT_USER, classes + "\\" + progid, "", "EnergoLogic Visio QoL CommandBar Add-in")
+            set_string(winreg.HKEY_CURRENT_USER, classes + "\\" + progid + r"\CLSID", "", clsid)
+            clsid_key = classes + "\\CLSID\\" + clsid
+            set_string(winreg.HKEY_CURRENT_USER, clsid_key, "", "EnergoLogic Visio QoL CommandBar Add-in")
+            set_string(winreg.HKEY_CURRENT_USER, clsid_key + r"\ProgId", "", progid)
+            category = "{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}"
+            set_string(
+                winreg.HKEY_CURRENT_USER,
+                clsid_key + "\\Implemented Categories\\" + category,
+                "",
+                "",
+            )
+            inproc = clsid_key + r"\InprocServer32"
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "", "mscoree.dll")
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "ThreadingModel", "Both")
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "Class", class_name)
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "Assembly", assembly_name)
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "RuntimeVersion", "v4.0.30319")
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "CodeBase", codebase)
+
+            addin_key = "Software\\Microsoft\\Visio\\Addins\\" + progid
+            set_string(winreg.HKEY_CURRENT_USER, addin_key, "FriendlyName", "EnergoLogic Visio QoL CommandBar")
+            set_string(winreg.HKEY_CURRENT_USER, addin_key, "Description", "EnergoLogic temporary command-bar Undo qualification")
+            set_dword(winreg.HKEY_CURRENT_USER, addin_key, "LoadBehavior", 0)
+
+            listed = False
+            discovery_error = None
+            try:
+                page_obj = visio._resolve_page(doc_name, parse_page(page))
+                addins = page_obj.Application.COMAddIns
+                addins.Update()
+                for index in range(1, int(addins.Count) + 1):
+                    if str(addins.Item(index).ProgId).casefold() == progid.casefold():
+                        listed = True
+                        break
+            except Exception as exc:
+                discovery_error = f"{type(exc).__name__}: {exc}"[:1200]
+
+            return ok({
+                "progid": progid,
+                "clsid": clsid,
+                "dll_path": str(dll_path),
+                "source_path": str(source_path),
+                "load_behavior": 0,
+                "hkcu_only": True,
+                "listed_in_com_addins": listed,
+                "discovery_error": discovery_error,
+                "ribbon_extensibility": False,
+                "command_bar_name": "EnergoLogic QoL Probe",
+                "button_caption": "EnergoLogic Duplicate 40",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def connect_energologic_commandbar_com_addin_probe(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        # Connect only the fixed non-autoloading command-bar probe.
+        try:
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            addins = app.COMAddIns
+            addins.Update()
+            addin = addins.Item("EnergoLogic.VisioQolCommandBarAddin")
+            before = bool(addin.Connect)
+            if not before:
+                addin.Connect = True
+            after = bool(addin.Connect)
+            command_bar_present = False
+            button_present = False
+            try:
+                bar = app.CommandBars.Item("EnergoLogic QoL Probe")
+                command_bar_present = bar is not None
+                if command_bar_present:
+                    for index in range(1, int(bar.Controls.Count) + 1):
+                        control = bar.Controls.Item(index)
+                        if str(control.Tag) == "EnergoLogic.Duplicate40.UndoProbe":
+                            button_present = True
+                            break
+            except Exception:
+                pass
+            return ok({
+                "progid": "EnergoLogic.VisioQolCommandBarAddin",
+                "connected_before": before,
+                "connected_after": after,
+                "command_bar_present": command_bar_present,
+                "button_present": button_present,
+                "load_behavior_remains": 0,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def get_energologic_commandbar_com_addin_probe_status(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        # Read current registration, connection and command-bar/button state.
+        try:
+            import winreg
+            progid = "EnergoLogic.VisioQolCommandBarAddin"
+            addin_key = "Software\\Microsoft\\Visio\\Addins\\" + progid
+            load_behavior = None
+            registry_exists = False
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    addin_key,
+                    0,
+                    winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+                ) as key:
+                    registry_exists = True
+                    load_behavior = int(winreg.QueryValueEx(key, "LoadBehavior")[0])
+            except FileNotFoundError:
+                pass
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            addins = app.COMAddIns
+            addins.Update()
+            listed = False
+            connected = False
+            for index in range(1, int(addins.Count) + 1):
+                item = addins.Item(index)
+                if str(item.ProgId).casefold() == progid.casefold():
+                    listed = True
+                    connected = bool(item.Connect)
+                    break
+
+            command_bar_present = False
+            command_bar_visible = False
+            button_present = False
+            button_visible = False
+            try:
+                bar = app.CommandBars.Item("EnergoLogic QoL Probe")
+                command_bar_present = bar is not None
+                command_bar_visible = bool(bar.Visible)
+                if bar is not None:
+                    for index in range(1, int(bar.Controls.Count) + 1):
+                        control = bar.Controls.Item(index)
+                        if str(control.Tag) == "EnergoLogic.Duplicate40.UndoProbe":
+                            button_present = True
+                            button_visible = bool(control.Visible)
+                            break
+            except Exception:
+                pass
+
+            return ok({
+                "progid": progid,
+                "registry_exists": registry_exists,
+                "load_behavior": load_behavior,
+                "listed_in_com_addins": listed,
+                "connected": connected,
+                "command_bar_present": command_bar_present,
+                "command_bar_visible": command_bar_visible,
+                "button_present": button_present,
+                "button_visible": button_visible,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def execute_energologic_commandbar_com_addin_probe(
+        shape_ids_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        # Execute the fixed Office CommandBar button after selecting exact source IDs.
+        try:
+            import json
+            import time
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids) or any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be unique positive integers")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            for sid in shape_ids:
+                window.Select(page_obj.Shapes.ItemFromID(sid), 2)
+            if int(window.Selection.Count) != len(shape_ids):
+                raise RuntimeError("Could not create the exact source selection")
+
+            addins = app.COMAddIns
+            addins.Update()
+            addin = addins.Item("EnergoLogic.VisioQolCommandBarAddin")
+            if not bool(addin.Connect):
+                raise RuntimeError("EnergoLogic command-bar add-in is not connected")
+
+            bar = app.CommandBars.Item("EnergoLogic QoL Probe")
+            button = None
+            for index in range(1, int(bar.Controls.Count) + 1):
+                control = bar.Controls.Item(index)
+                if str(control.Tag) == "EnergoLogic.Duplicate40.UndoProbe":
+                    button = control
+                    break
+            if button is None:
+                raise RuntimeError("EnergoLogic command-bar probe button was not found")
+
+            before_count = int(page_obj.Shapes.Count)
+            button.Execute()
+            expected = before_count + len(shape_ids)
+            for _ in range(50):
+                if int(page_obj.Shapes.Count) == expected:
+                    break
+                time.sleep(0.1)
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != expected:
+                raise RuntimeError(
+                    f"CommandBar probe expected {expected} shapes, got {after_count}"
+                )
+            return ok({
+                "document": str(page_obj.Document.Name),
+                "page": str(page_obj.Name),
+                "source_shape_ids": shape_ids,
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "launch_path": "Office CommandBarButton.Execute",
+                "in_process_callback_expected": True,
+                "load_behavior": 0,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def uninstall_energologic_commandbar_com_addin_probe() -> str:
+        # Disconnect and remove only the fixed command-bar probe registration.
+        try:
+            import winreg
+            progid = "EnergoLogic.VisioQolCommandBarAddin"
+            clsid = "{F62D8474-1A5C-4A9E-88B5-4AA67D1C5510}"
+            try:
+                page_obj = visio._resolve_page(
+                    "KRU-35_normal_scheme_v2_energologic_qol_host_v1.vsdm",
+                    "MCP-v2",
+                )
+                addins = page_obj.Application.COMAddIns
+                addins.Update()
+                addin = addins.Item(progid)
+                if bool(addin.Connect):
+                    addin.Connect = False
+            except Exception:
+                pass
+
+            targets = [
+                "Software\\Microsoft\\Visio\\Addins\\" + progid,
+                "Software\\Classes\\" + progid,
+                "Software\\Classes\\CLSID\\" + clsid,
+            ]
+
+            def delete_tree(root, subkey):
+                try:
+                    with winreg.OpenKey(
+                        root,
+                        subkey,
+                        0,
+                        winreg.KEY_READ | winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY,
+                    ) as key:
                         children = []
                         index = 0
                         while True:

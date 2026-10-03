@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.69"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.70"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.69"
+    assert arguments["version"] == "2026.10.03.70"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.69"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.70"}'}],
                 "isError": False,
             }
 
@@ -532,3 +532,27 @@ def test_graceful_restart_allows_stencil_documents_but_only_one_drawing():
     assert "if doc_type != 2:" in source
     assert "expected exactly one non-stencil Visio document" in source
     assert "document_inventory" in source
+
+
+def test_managed_visio_extension_has_nonautoloading_commandbar_only_addin_probe():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def install_energologic_commandbar_com_addin_probe(" in source
+    assert "def connect_energologic_commandbar_com_addin_probe(" in source
+    assert "def execute_energologic_commandbar_com_addin_probe(" in source
+    assert "def uninstall_energologic_commandbar_com_addin_probe(" in source
+    assert 'ProgId("EnergoLogic.VisioQolCommandBarAddin")' in source
+    assert 'ClassInterface(ClassInterfaceType.None)' in source
+    assert 'public sealed class Connect : IDTExtensibility2' in source
+    assert 'IRibbonExtensibility' not in source[source.index('namespace EnergoLogicVisioQolCommandBar'):source.index('"""', source.index('namespace EnergoLogicVisioQolCommandBar'))]
+    assert 'const string barName = "EnergoLogic QoL Probe"' in source
+    assert 'buttonTag = "EnergoLogic.Duplicate40.UndoProbe"' in source
+    assert '_button.Click += _clickHandler' in source
+    assert 'app.BeginUndoScope("EnergoLogic: Duplicate Cell Probe")' in source
+    assert 'app.DoCmd(1024)' in source
+    assert 'duplicate.Move(40.0, 0.0, "mm")' in source
+    assert 'set_dword(winreg.HKEY_CURRENT_USER, addin_key, "LoadBehavior", 0)' in source
+    assert 'button.Execute()' in source
