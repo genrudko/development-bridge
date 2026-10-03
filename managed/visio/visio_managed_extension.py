@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.02.14"
+MANAGED_EXTENSION_VERSION = "2026.10.03.15"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -341,6 +341,160 @@ def install(namespace: dict) -> None:
                 "new_page": str(duplicated.Name),
                 "index": int(duplicated.Index),
                 "shape_count": int(duplicated.Shapes.Count),
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def duplicate_shapes_exact(
+        shape_ids_json: str,
+        dx_mm: float,
+        dy_mm: float,
+        page: str = "",
+        doc_name: str = "",
+        select_result: bool = True,
+    ) -> str:
+        """Duplicate explicit top-level shapes and move the copy by an exact mm offset.
+
+        The native Visio Selection.Duplicate + Selection.Move operation is wrapped in
+        one UndoScope. Any exception rolls the entire duplicate/move operation back.
+        The source shapes are never modified.
+        """
+        try:
+            import json
+            import math
+
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids):
+                raise ValueError("shape_ids_json must not contain duplicate shape IDs")
+            if any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be positive integers")
+
+            dx = float(dx_mm)
+            dy = float(dy_mm)
+            if not math.isfinite(dx) or not math.isfinite(dy):
+                raise ValueError("dx_mm and dy_mm must be finite")
+            if abs(dx) > 2000.0 or abs(dy) > 2000.0:
+                raise ValueError("dx_mm and dy_mm must be within +/-2000 mm")
+            if abs(dx) < 1e-12 and abs(dy) < 1e-12:
+                raise ValueError("duplicate offset must not be zero")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            window = app.ActiveWindow
+            try:
+                window.Page = page_obj
+            except Exception:
+                try:
+                    page_obj.Activate()
+                except Exception:
+                    pass
+
+            def shape_snapshot(shape):
+                try:
+                    master = shape.Master
+                    master_name = str(master.NameU) if master is not None else None
+                except Exception:
+                    master_name = None
+                try:
+                    text_value = str(shape.Text)
+                except Exception:
+                    text_value = ""
+                try:
+                    pin_x_mm = float(shape.CellsU("PinX").ResultIU) * 25.4
+                    pin_y_mm = float(shape.CellsU("PinY").ResultIU) * 25.4
+                except Exception:
+                    pin_x_mm = None
+                    pin_y_mm = None
+                return {
+                    "shape_id": int(shape.ID),
+                    "shape_name": str(shape.Name),
+                    "master_name": master_name,
+                    "text": text_value,
+                    "pin_x_mm": pin_x_mm,
+                    "pin_y_mm": pin_y_mm,
+                }
+
+            source_shapes = [page_obj.Shapes.ItemFromID(sid) for sid in shape_ids]
+            source_snapshot = [shape_snapshot(shape) for shape in source_shapes]
+
+            previous_ids = []
+            try:
+                previous = window.Selection
+                for index in range(1, int(previous.Count) + 1):
+                    previous_ids.append(int(previous.Item(index).ID))
+            except Exception:
+                previous_ids = []
+
+            def select_ids(ids):
+                window.DeselectAll()
+                for sid in ids:
+                    window.Select(page_obj.Shapes.ItemFromID(int(sid)), 2)  # visSelect
+
+            select_ids(shape_ids)
+            selected = window.Selection
+            if int(selected.Count) != len(shape_ids):
+                raise RuntimeError(
+                    f"Visio selected {int(selected.Count)} shapes, expected {len(shape_ids)}"
+                )
+
+            scope_id = int(app.BeginUndoScope("EnergoLogic: Duplicate Shapes Exact"))
+            committed = False
+            try:
+                duplicated = selected.Duplicate()
+                if int(duplicated.Count) != len(shape_ids):
+                    raise RuntimeError(
+                        f"Visio duplicated {int(duplicated.Count)} shapes, expected {len(shape_ids)}"
+                    )
+                duplicated.Move(dx, dy, "mm")
+                new_ids = [
+                    int(duplicated.Item(index).ID)
+                    for index in range(1, int(duplicated.Count) + 1)
+                ]
+                if len(set(new_ids)) != len(new_ids):
+                    raise RuntimeError("Visio returned duplicate IDs in duplicated selection")
+                if set(new_ids) & set(shape_ids):
+                    raise RuntimeError("Visio duplicate selection reused source shape IDs")
+
+                new_snapshot = [
+                    shape_snapshot(page_obj.Shapes.ItemFromID(sid)) for sid in new_ids
+                ]
+
+                app.EndUndoScope(scope_id, True)
+                committed = True
+            except Exception:
+                try:
+                    app.EndUndoScope(scope_id, False)
+                except Exception:
+                    pass
+                try:
+                    select_ids(previous_ids)
+                except Exception:
+                    pass
+                raise
+
+            if bool(select_result):
+                select_ids(new_ids)
+            else:
+                try:
+                    select_ids(previous_ids)
+                except Exception:
+                    pass
+
+            return ok({
+                "source_shape_ids": shape_ids,
+                "new_shape_ids": new_ids,
+                "source_shapes": source_snapshot,
+                "new_shapes": new_snapshot,
+                "dx_mm": dx,
+                "dy_mm": dy,
+                "undo_scope": "EnergoLogic: Duplicate Shapes Exact",
+                "undo_committed": committed,
+                "result_selected": bool(select_result),
+                "mapping_basis": "selection-order; qualify before identity-sensitive use",
             })
         except Exception as exc:
             return err(exc)
