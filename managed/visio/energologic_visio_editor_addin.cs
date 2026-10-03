@@ -892,6 +892,8 @@ namespace EnergoLogicVisioEditor
             checkTab.Controls.Add(checks);
 
             _status = new TextBox { Dock=DockStyle.Fill, Multiline=true, ReadOnly=true, ScrollBars=ScrollBars.Vertical, BackColor=SystemColors.Window, Text="EnergoLogic готов. Выберите объект на схеме и используйте команду выше." };
+            _status.Name = "EnergoLogicStatus";
+            _status.AccessibleName = "EnergoLogic status";
             Panel statusPanel = new Panel { Dock=DockStyle.Fill, Padding=new Padding(8) };
             statusPanel.Controls.Add(_status);
 
@@ -935,8 +937,8 @@ namespace EnergoLogicVisioEditor
             p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50)); p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50));
             return p;
         }
-        private Button Button(string text, EventHandler h) { Button b=new Button{Text=text,Dock=DockStyle.Fill,Height=38,Margin=new Padding(5)}; b.Click+=h; return b; }
-        private Button ButtonWide(string text, EventHandler h) { Button b=new Button{Text=text,Width=330,Height=38,Margin=new Padding(4)}; b.Click+=h; return b; }
+        private Button Button(string text, EventHandler h) { Button b=new Button{Text=text,Dock=DockStyle.Fill,Height=38,Margin=new Padding(5),AccessibleName=text}; b.Click+=h; return b; }
+        private Button ButtonWide(string text, EventHandler h) { Button b=new Button{Text=text,Width=330,Height=38,Margin=new Padding(4),AccessibleName=text}; b.Click+=h; return b; }
         private NumericUpDown Num(decimal min, decimal max, decimal value) { return new NumericUpDown{Minimum=min,Maximum=max,Value=value,DecimalPlaces=2,Increment=0.5M,Dock=DockStyle.Fill}; }
     }
 }
