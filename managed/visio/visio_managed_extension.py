@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.26"
+MANAGED_EXTENSION_VERSION = "2026.10.03.27"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -483,7 +483,7 @@ def install(namespace: dict) -> None:
                     f"Visio selected {int(selected.Count)} shapes, expected {len(shape_ids)}"
                 )
 
-            scope_id = int(document.BeginUndoScope("EnergoLogic: Duplicate Shapes Exact"))
+            scope_id = int(app.BeginUndoScope("EnergoLogic: Duplicate Shapes Exact"))
             committed = False
             try:
                 duplicated = selected.Duplicate()
@@ -677,11 +677,11 @@ def install(namespace: dict) -> None:
                         "post_commit_connects_verification_required": True,
                     })
 
-                document.EndUndoScope(scope_id, True)
+                app.EndUndoScope(scope_id, True)
                 committed = True
             except Exception:
                 try:
-                    document.EndUndoScope(scope_id, False)
+                    app.EndUndoScope(scope_id, False)
                 except Exception:
                     pass
                 try:
@@ -690,9 +690,10 @@ def install(namespace: dict) -> None:
                     pass
                 raise
 
-            if bool(select_result):
-                select_ids(new_ids)
-            else:
+            # Selection.Duplicate already leaves the duplicate selected. Avoid a
+            # post-scope Select/Deselect operation so the operator's next Ctrl+Z
+            # targets the engineering transaction itself.
+            if not bool(select_result):
                 try:
                     select_ids(previous_ids)
                 except Exception:
@@ -714,7 +715,7 @@ def install(namespace: dict) -> None:
                 "identity_results": identity_results,
                 "glue_results": glue_results,
                 "undo_scope": "EnergoLogic: Duplicate Shapes Exact",
-                "undo_scope_owner": "document",
+                "undo_scope_owner": "application",
                 "undo_committed": committed,
                 "result_selected": bool(select_result),
                 "mapping_basis": "selection-order; qualify before identity-sensitive use",
