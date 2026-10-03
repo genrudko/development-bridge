@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.43"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.44"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.43"
+    assert arguments["version"] == "2026.10.03.44"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.43"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.44"}'}],
                 "isError": False,
             }
 
@@ -397,6 +397,8 @@ def test_managed_visio_extension_has_shapesheet_action_ui_probe():
     assert 'Actions.EnergoLogicUndoProbe.Action' in source
     assert 'CALLTHIS("EnergoLogicQolHost.UndoProbeDuplicate40FromShape",)' in source
     assert "chord(VK_SHIFT, VK_F10)" in source
+    assert '"&J EnergoLogic Undo Probe"' in source
+    assert "press(VK_J)" in source
     assert "expected_count = before_count + 8" in source
     assert "for _ in range(60):" in source
 

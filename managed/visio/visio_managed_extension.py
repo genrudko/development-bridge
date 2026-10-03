@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.43"
+MANAGED_EXTENSION_VERSION = "2026.10.03.44"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1315,7 +1315,7 @@ End Sub
                 "document": str(document.Name),
                 "page": str(page_obj.Name),
                 "trigger_shape_id": int(trigger.ID),
-                "menu": "EnergoLogic Undo Probe",
+                "menu": "J EnergoLogic Undo Probe",
                 "action_formula": str(
                     trigger.CellsU("Actions.EnergoLogicUndoProbe.Action").FormulaU
                 ),
@@ -1358,7 +1358,7 @@ End Sub
             SW_RESTORE = 9
             VK_SHIFT = 0x10
             VK_F10 = 0x79
-            VK_E = 0x45
+            VK_J = 0x4A
             KEYEVENTF_KEYUP = 0x0002
             root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
 
@@ -1393,7 +1393,7 @@ End Sub
                 time.sleep(0.2)
                 chord(VK_SHIFT, VK_F10)
                 time.sleep(0.45)
-                press(VK_E)
+                press(VK_J)
                 expected_count = before_count + 8
                 for _ in range(60):
                     time.sleep(0.1)
