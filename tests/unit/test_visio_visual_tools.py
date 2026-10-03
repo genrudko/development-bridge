@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.55"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.56"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.55"
+    assert arguments["version"] == "2026.10.03.56"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.55"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.56"}'}],
                 "isError": False,
             }
 
@@ -565,3 +565,27 @@ def test_vsto_probe_searches_classic_com_interop_references():
     assert '"office.dll"' in source
     assert '"microsoft.office.interop.visio.dll"' in source
     assert '"reference_candidates": sorted(set(reference_candidates))' in source
+
+
+def test_managed_visio_extension_has_bounded_classic_com_addin_probe():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def install_energologic_classic_com_addin_probe(" in source
+    assert "def uninstall_energologic_classic_com_addin_probe(" in source
+    assert 'ProgId("EnergoLogic.VisioQolAddin")' in source
+    assert 'Guid("7D679776-1D6B-4D0D-9123-E3E4FB21F806")' in source
+    assert 'label=\'EnergoLogic\'' in source
+    assert 'keytip=\'Z\'' in source
+    assert 'keytip=\'D\'' in source
+    assert 'app.BeginUndoScope("EnergoLogic: Duplicate Cell Probe")' in source
+    assert 'app.DoCmd(1024)' in source
+    assert 'duplicate.Move(40.0, 0.0, "mm")' in source
+    assert 'Software\\Microsoft\\Office\\Visio\\Addins' in source
+    assert "winreg.HKEY_CURRENT_USER" in source
+    assert "COMAddIns" in source
+    assert "addins.Update()" in source
+    assert "addin.Connect = True" in source

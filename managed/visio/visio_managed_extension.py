@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.55"
+MANAGED_EXTENSION_VERSION = "2026.10.03.56"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2403,6 +2403,275 @@ End Property
                 "menu_window_handle": menu_hwnd,
                 "ui_action_launched": True,
             })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def install_energologic_classic_com_addin_probe() -> str:
+        """Build and register a fixed HKCU-only EnergoLogic Visio COM add-in probe.
+
+        The add-in is intentionally tiny: one Ribbon tab and one fixed Duplicate-40
+        button used to qualify true in-process user-context Undo. No arbitrary source,
+        command, registry path or ProgID is accepted from callers.
+        """
+        try:
+            import json
+            import os
+            import subprocess
+            import winreg
+
+            if os.name != "nt":
+                raise RuntimeError("classic COM add-in probe is Windows-only")
+
+            build_dir = workspace / "energologic_visio_qol_addin_probe"
+            build_dir.mkdir(parents=True, exist_ok=True)
+            source_path = build_dir / "EnergoLogicVisioQolAddin.cs"
+            dll_path = build_dir / "EnergoLogic.VisioQolAddin.dll"
+
+            source = r"""using System;
+using System.Runtime.InteropServices;
+using System.Reflection;
+
+[assembly: ComVisible(true)]
+[assembly: AssemblyTitle("EnergoLogic Visio QoL Add-in")]
+[assembly: AssemblyVersion("0.1.0.0")]
+
+namespace EnergoLogicVisioQol
+{
+    public enum ext_ConnectMode
+    {
+        ext_cm_AfterStartup = 0,
+        ext_cm_Startup = 1,
+        ext_cm_External = 2,
+        ext_cm_CommandLine = 3,
+        ext_cm_Solution = 4,
+        ext_cm_UISetup = 5
+    }
+
+    public enum ext_DisconnectMode
+    {
+        ext_dm_HostShutdown = 0,
+        ext_dm_UserClosed = 1
+    }
+
+    [ComImport]
+    [Guid("B65AD801-ABAF-11D0-BB8B-00A0C90F2744")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
+    public interface IDTExtensibility2
+    {
+        void OnConnection([MarshalAs(UnmanagedType.IDispatch)] object Application,
+            ext_ConnectMode ConnectMode,
+            [MarshalAs(UnmanagedType.IDispatch)] object AddInInst,
+            ref Array custom);
+        void OnDisconnection(ext_DisconnectMode RemoveMode, ref Array custom);
+        void OnAddInsUpdate(ref Array custom);
+        void OnStartupComplete(ref Array custom);
+        void OnBeginShutdown(ref Array custom);
+    }
+
+    [ComImport]
+    [Guid("000C0396-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
+    public interface IRibbonExtensibility
+    {
+        [return: MarshalAs(UnmanagedType.BStr)]
+        string GetCustomUI([MarshalAs(UnmanagedType.BStr)] string RibbonID);
+    }
+
+    [ComVisible(true)]
+    [Guid("7D679776-1D6B-4D0D-9123-E3E4FB21F806")]
+    [ProgId("EnergoLogic.VisioQolAddin")]
+    [ClassInterface(ClassInterfaceType.AutoDual)]
+    public sealed class VisioQolAddin : IDTExtensibility2, IRibbonExtensibility
+    {
+        private object _application;
+
+        public void OnConnection(object Application, ext_ConnectMode ConnectMode,
+            object AddInInst, ref Array custom)
+        {
+            _application = Application;
+        }
+
+        public void OnDisconnection(ext_DisconnectMode RemoveMode, ref Array custom)
+        {
+            _application = null;
+        }
+
+        public void OnAddInsUpdate(ref Array custom) { }
+        public void OnStartupComplete(ref Array custom) { }
+        public void OnBeginShutdown(ref Array custom) { }
+
+        public string GetCustomUI(string RibbonID)
+        {
+            return @"<customUI xmlns='http://schemas.microsoft.com/office/2009/07/customui'>
+<ribbon><tabs>
+<tab id='EnergoLogicTab' label='EnergoLogic' keytip='Z'>
+<group id='EnergoLogicQolGroup' label='QoL'>
+<button id='EnergoLogicUndoProbeDuplicate40' label='Duplicate 40 (Undo probe)' keytip='D' size='large' onAction='OnUndoProbeDuplicate40'/>
+</group>
+</tab>
+</tabs></ribbon>
+</customUI>";
+        }
+
+        public void OnUndoProbeDuplicate40(object control)
+        {
+            if (_application == null)
+                throw new InvalidOperationException("Visio application is not connected");
+
+            dynamic app = _application;
+            dynamic window = app.ActiveWindow;
+            dynamic selection = window.Selection;
+            int sourceCount = (int)selection.Count;
+            if (sourceCount < 1)
+                throw new InvalidOperationException("No shapes selected");
+
+            int scopeId = (int)app.BeginUndoScope("EnergoLogic: Duplicate Cell Probe");
+            bool commit = false;
+            try
+            {
+                // visCmdObjectDuplicate = 1024. Using the native command from the
+                // in-process Ribbon callback gives Visio normal user-command context.
+                app.DoCmd(1024);
+                dynamic duplicate = window.Selection;
+                if ((int)duplicate.Count != sourceCount)
+                    throw new InvalidOperationException("Duplicate selection count mismatch");
+                duplicate.Move(40.0, 0.0, "mm");
+                commit = true;
+            }
+            finally
+            {
+                app.EndUndoScope(scopeId, commit);
+            }
+        }
+    }
+}
+"""
+            source_path.write_text(source, encoding="utf-8")
+
+            csc = Path(r"C:\WINDOWS\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
+            if not csc.is_file():
+                raise FileNotFoundError(f"C# compiler not found: {csc}")
+            compile_result = subprocess.run(
+                [
+                    str(csc),
+                    "/nologo",
+                    "/target:library",
+                    "/platform:x64",
+                    "/optimize+",
+                    f"/out:{dll_path}",
+                    str(source_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if compile_result.returncode != 0 or not dll_path.is_file():
+                raise RuntimeError(
+                    "C# add-in compilation failed: "
+                    + (compile_result.stdout + "\n" + compile_result.stderr)[-4000:]
+                )
+
+            clsid = "{7D679776-1D6B-4D0D-9123-E3E4FB21F806}"
+            progid = "EnergoLogic.VisioQolAddin"
+            class_name = "EnergoLogicVisioQol.VisioQolAddin"
+            assembly_name = "EnergoLogic.VisioQolAddin, Version=0.1.0.0, Culture=neutral, PublicKeyToken=null"
+            runtime_version = "v4.0.30319"
+            codebase = dll_path.resolve().as_uri()
+
+            def set_string(root, subkey, name, value):
+                with winreg.CreateKeyEx(root, subkey, 0, winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY) as key:
+                    winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+
+            def set_dword(root, subkey, name, value):
+                with winreg.CreateKeyEx(root, subkey, 0, winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY) as key:
+                    winreg.SetValueEx(key, name, 0, winreg.REG_DWORD, int(value))
+
+            classes = r"Software\Classes"
+            set_string(winreg.HKEY_CURRENT_USER, classes + "\\" + progid, "", "EnergoLogic Visio QoL Add-in")
+            set_string(winreg.HKEY_CURRENT_USER, classes + "\\" + progid + r"\CLSID", "", clsid)
+            clsid_key = classes + r"\CLSID\" + clsid
+            set_string(winreg.HKEY_CURRENT_USER, clsid_key, "", "EnergoLogic Visio QoL Add-in")
+            set_string(winreg.HKEY_CURRENT_USER, clsid_key + r"\ProgId", "", progid)
+            inproc = clsid_key + r"\InprocServer32"
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "", "mscoree.dll")
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "ThreadingModel", "Both")
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "Class", class_name)
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "Assembly", assembly_name)
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "RuntimeVersion", runtime_version)
+            set_string(winreg.HKEY_CURRENT_USER, inproc, "CodeBase", codebase)
+
+            office_key = r"Software\Microsoft\Office\Visio\Addins\" + progid
+            set_string(winreg.HKEY_CURRENT_USER, office_key, "FriendlyName", "EnergoLogic Visio QoL")
+            set_string(winreg.HKEY_CURRENT_USER, office_key, "Description", "EnergoLogic engineering QoL commands for Visio")
+            set_dword(winreg.HKEY_CURRENT_USER, office_key, "LoadBehavior", 3)
+
+            connected = False
+            connect_error = None
+            try:
+                app = visio._resolve_application()
+                addins = app.COMAddIns
+                addins.Update()
+                addin = addins.Item(progid)
+                addin.Connect = True
+                connected = bool(addin.Connect)
+            except Exception as exc:
+                connect_error = f"{type(exc).__name__}: {exc}"[:1000]
+
+            return ok({
+                "progid": progid,
+                "clsid": clsid,
+                "dll_path": str(dll_path),
+                "source_path": str(source_path),
+                "compiler": str(csc),
+                "compile_stdout": compile_result.stdout[-1000:],
+                "compile_stderr": compile_result.stderr[-1000:],
+                "hkcu_only": True,
+                "load_behavior": 3,
+                "connected": connected,
+                "connect_error": connect_error,
+                "ribbon_tab": "EnergoLogic",
+                "tab_keytip": "Z",
+                "button_keytip": "D",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def uninstall_energologic_classic_com_addin_probe() -> str:
+        """Remove only the fixed EnergoLogic classic COM add-in probe HKCU registration."""
+        try:
+            import winreg
+
+            clsid = "{7D679776-1D6B-4D0D-9123-E3E4FB21F806}"
+            progid = "EnergoLogic.VisioQolAddin"
+            targets = [
+                r"Software\Microsoft\Office\Visio\Addins\" + progid,
+                r"Software\Classes\" + progid,
+                r"Software\Classes\CLSID\" + clsid,
+            ]
+
+            def delete_tree(root, subkey):
+                try:
+                    with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ | winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY) as key:
+                        children = []
+                        index = 0
+                        while True:
+                            try:
+                                children.append(winreg.EnumKey(key, index))
+                                index += 1
+                            except OSError:
+                                break
+                    for child in children:
+                        delete_tree(root, subkey + "\\" + child)
+                    winreg.DeleteKeyEx(root, subkey, winreg.KEY_WOW64_64KEY, 0)
+                except FileNotFoundError:
+                    pass
+
+            for target in targets:
+                delete_tree(winreg.HKEY_CURRENT_USER, target)
+            return ok({"progid": progid, "removed": True, "hkcu_only": True})
         except Exception as exc:
             return err(exc)
 
