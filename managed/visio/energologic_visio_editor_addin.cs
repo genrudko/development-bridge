@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.2.1.0")]
+[assembly: AssemblyVersion("0.2.3.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("4A78D159-46C8-4AF8-9CA4-5B8A5D25F421")]
-    [ProgId("EnergoLogic.VisioEditorAddinV21")]
+    [Guid("782E02AF-5D14-4A70-A92D-0E1675BD2901")]
+    [ProgId("EnergoLogic.VisioEditorAddinV23")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -180,7 +180,7 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.2.1"; }
+        public string ApiVersion() { return "0.2.3"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -545,7 +545,8 @@ namespace EnergoLogicVisioEditor
                 try { return DiscoverCell(page, id); }
                 catch (Exception ex) { last = ex; }
             }
-            throw new InvalidOperationException("Не удалось определить ячейку по выделению. Выделите любой электрический элемент нужной ячейки.", last);
+            string reason = last == null ? "неизвестная причина" : last.Message;
+            throw new InvalidOperationException("Не удалось определить ячейку по выделению. Причина: " + reason, last);
         }
 
         private CellInfo DiscoverCell(dynamic page, int selectedId)
