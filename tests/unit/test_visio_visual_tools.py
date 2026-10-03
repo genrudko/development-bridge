@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.100"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.101"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.100"
+    assert arguments["version"] == "2026.10.03.101"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.100"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.101"}'}],
                 "isError": False,
             }
 
@@ -279,8 +279,8 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV34")' in cs
-    assert 'AssemblyVersion("0.3.4.0")' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV35")' in cs
+    assert 'AssemblyVersion("0.3.5.0")' in cs
     assert "public interface IEnergoLogicEditorApi" in cs
     assert "ClassInterface(ClassInterfaceType.AutoDual)" in cs
     assert "ApiDuplicateRight" in cs
@@ -288,7 +288,7 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     assert "ApiShowPanel" in cs
     assert "host.Object = this" in cs
     assert "def invoke_energologic_editor_api(" in ext
-    assert 'addins.Item("EnergoLogic.VisioEditorAddinV34")' in ext
+    assert 'addins.Item("EnergoLogic.VisioEditorAddinV35")' in ext
     assert '"duplicate_right": "ApiDuplicateRight"' in ext
     assert '"repair_glue_apply": "ApiRepairGlueApply"' in ext
 
@@ -326,7 +326,7 @@ def test_editor_cell_discovery_surfaces_inner_reason():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "Причина: " in cs
     assert "last.Message" in cs
-    assert 'ApiVersion() { return "0.3.4"; }' in cs
+    assert 'ApiVersion() { return "0.3.5"; }' in cs
 
 
 def test_editor_uses_robust_com_cell_exists_conversion():
@@ -337,7 +337,7 @@ def test_editor_uses_robust_com_cell_exists_conversion():
     assert "(bool)shape.CellExistsU" not in cs
     assert "(bool)target.CellExistsU" not in cs
     assert "(bool)terminal.CellExistsU" not in cs
-    assert 'ApiVersion() { return "0.3.4"; }' in cs
+    assert 'ApiVersion() { return "0.3.5"; }' in cs
 
 
 def test_editor_has_no_unsafe_explicit_dynamic_bool_casts():
@@ -345,7 +345,7 @@ def test_editor_has_no_unsafe_explicit_dynamic_bool_casts():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "(bool)" not in cs
     assert "Convert.ToInt32(sectionExistsRaw, CultureInfo.InvariantCulture) == 0" in cs
-    assert 'ApiVersion() { return "0.3.4"; }' in cs
+    assert 'ApiVersion() { return "0.3.5"; }' in cs
 
 
 def test_editor_uses_native_visio_connects_as_topology_source():
@@ -356,7 +356,7 @@ def test_editor_uses_native_visio_connects_as_topology_source():
     assert "connect.ToCell.NameU" in cs
     assert "connect.ToSheet.ID" in cs
     assert 'private readonly Regex _connectionCellRegex' in cs
-    assert 'ApiVersion() { return "0.3.4"; }' in cs
+    assert 'ApiVersion() { return "0.3.5"; }' in cs
 
 
 def test_editor_formula_fallback_resolves_vtd_shape_names_not_only_sheet_ids():
@@ -366,7 +366,7 @@ def test_editor_formula_fallback_resolves_vtd_shape_names_not_only_sheet_ids():
     assert "candidate.NameU" in cs
     assert "candidate.Name" in cs
     assert 'Regex.Match(targetRef, @"^Sheet\\.(\\d+)$"' in cs
-    assert 'ApiVersion() { return "0.3.4"; }' in cs
+    assert 'ApiVersion() { return "0.3.5"; }' in cs
 
 
 def test_editor_v28_repair_glue_understands_incoming_native_connects():
@@ -459,7 +459,7 @@ def test_editor_v33_distribute_pitch_avoids_dynamic_tuple_binder():
     assert "new Tuple<CellInfo, object>(cells[i], (object)target)" in cs
     assert "foreach (Tuple<CellInfo, object> row in plan)" in cs
     assert "Tuple.Create(cells[i], target)" not in cs
-    assert 'ApiVersion() { return "0.3.4"; }' in cs
+    assert 'ApiVersion() { return "0.3.5"; }' in cs
 
 
 def test_editor_v34_restores_and_verifies_internal_glue_after_moves():
@@ -474,4 +474,14 @@ def test_editor_v34_restores_and_verifies_internal_glue_after_moves():
     assert "VerifyInternalGlue(page, internalGlueByAnchor[cell.AnchorId])" in cs
     assert "RestoreInternalGlue(page, internalGlue)" in cs
     assert "Visio потерял внутренние Glue при копировании ячейки" in cs
-    assert 'ApiVersion() { return "0.3.4"; }' in cs
+    assert 'ApiVersion() { return "0.3.5"; }' in cs
+
+
+def test_editor_v35_verifies_glue_against_formula_when_connects_lag():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    assert "private GlueTarget TryGetGlueTargetFromFormula" in cs
+    assert "GlueTarget formulaTarget = TryGetGlueTargetFromFormula(shape, endpoint)" in cs
+    assert "formulaTarget.TargetId == targetId && formulaTarget.Row == row" in cs
+    assert "source {0} {1}; expected {2}/{3}" in cs
+    assert 'ApiVersion() { return "0.3.5"; }' in cs

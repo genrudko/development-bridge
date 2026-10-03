@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.4.0")]
+[assembly: AssemblyVersion("0.3.5.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -84,8 +84,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("A6E63A2D-0DA5-4E84-9B2B-5B3E6944B5F4")]
-    [ProgId("EnergoLogic.VisioEditorAddinV34")]
+    [Guid("D93F00C2-1C95-4D0A-A0A9-609E25B9794C")]
+    [ProgId("EnergoLogic.VisioEditorAddinV35")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -203,7 +203,7 @@ namespace EnergoLogicVisioEditor
         public string ApiNudgeUp() { return ExactOffset(0.0, 1.0); }
         public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
         public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
-        public string ApiVersion() { return "0.3.4"; }
+        public string ApiVersion() { return "0.3.5"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -986,7 +986,14 @@ namespace EnergoLogicVisioEditor
             catch { }
 
             // Fallback for environments where Connects observation lags immediately
-            // after GlueTo. This intentionally supports only explicit Sheet.ID formulas.
+            // after GlueTo. Read the source ShapeSheet formula directly.
+            return TryGetGlueTargetFromFormula(shape, endpoint);
+        }
+
+        private GlueTarget TryGetGlueTargetFromFormula(dynamic shape, string endpoint)
+        {
+            if (!HasEndpoint(shape, endpoint)) return null;
+            string sourceCellName = endpoint == "begin" ? "BeginX" : "EndX";
             string formula;
             try { formula = Convert.ToString(shape.CellsU(sourceCellName).FormulaU, CultureInfo.InvariantCulture) ?? ""; }
             catch { return null; }
@@ -1099,9 +1106,24 @@ namespace EnergoLogicVisioEditor
 
         private void VerifyGlue(dynamic shape, string endpoint, int targetId, int row)
         {
-            GlueTarget target = TryGetGlueTarget(shape, endpoint);
-            if (target == null || target.TargetId != targetId || target.Row != row)
-                throw new InvalidOperationException("Проверка Glue после операции не прошла");
+            GlueTarget nativeTarget = TryGetGlueTarget(shape, endpoint);
+            if (nativeTarget != null && nativeTarget.TargetId == targetId && nativeTarget.Row == row) return;
+
+            // Immediately after GlueTo Visio can expose a stale Connects collection while
+            // the ShapeSheet formula is already authoritative. Accept only an exact formula match.
+            GlueTarget formulaTarget = TryGetGlueTargetFromFormula(shape, endpoint);
+            if (formulaTarget != null && formulaTarget.TargetId == targetId && formulaTarget.Row == row) return;
+
+            int sourceId = 0;
+            try { sourceId = Convert.ToInt32(shape.ID, CultureInfo.InvariantCulture); } catch { }
+            string sourceCell = endpoint == "begin" ? "BeginX" : "EndX";
+            string formula = "";
+            try { formula = Convert.ToString(shape.CellsU(sourceCell).FormulaU, CultureInfo.InvariantCulture) ?? ""; } catch { }
+            string nativeText = nativeTarget == null ? "none" : nativeTarget.TargetId + "/" + nativeTarget.Row;
+            string formulaText = formulaTarget == null ? "none" : formulaTarget.TargetId + "/" + formulaTarget.Row;
+            throw new InvalidOperationException(String.Format(CultureInfo.InvariantCulture,
+                "Проверка Glue не прошла: source {0} {1}; expected {2}/{3}; native {4}; formulaTarget {5}; FormulaU={6}",
+                sourceId, endpoint, targetId, row, nativeText, formulaText, formula));
         }
 
         private string EndpointKey(int shapeId, string endpoint)
