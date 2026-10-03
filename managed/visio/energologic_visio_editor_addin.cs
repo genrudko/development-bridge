@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.2.9.0")]
+[assembly: AssemblyVersion("0.3.0.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -46,7 +46,7 @@ namespace EnergoLogicVisioEditor
 
 
     [ComVisible(true)]
-    [Guid("14C0E2AF-45F1-45E8-9F94-A9BE7DAE1C28")]
+    [Guid("BF9EC1EA-74FA-4AE4-93DB-9EE9622EC41A")]
     [InterfaceType(ComInterfaceType.InterfaceIsDual)]
     public interface IEnergoLogicEditorApi
     {
@@ -70,8 +70,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("78D3B7F1-CCF0-46B7-B9AD-4CA4CBB2CF37")]
-    [ProgId("EnergoLogic.VisioEditorAddinV29")]
+    [Guid("B66D6B8F-7388-4DFB-AD57-64E4D02856AE")]
+    [ProgId("EnergoLogic.VisioEditorAddinV30")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -183,7 +183,7 @@ namespace EnergoLogicVisioEditor
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
-        public string ApiVersion() { return "0.2.9"; }
+        public string ApiVersion() { return "0.3.0"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -482,7 +482,13 @@ namespace EnergoLogicVisioEditor
             candidates = candidates.OrderBy(c => c.Item2.DistanceMm).ToList();
             if (candidates.Count == 0) throw new InvalidOperationException("Рядом не найдено ни одной реальной connection point (≤ 1 мм)");
             if (candidates.Count > 1 && Math.Abs(candidates[0].Item2.DistanceMm - candidates[1].Item2.DistanceMm) < 0.05)
-                throw new InvalidOperationException("Найдено несколько одинаково близких connection point — автоматический ремонт запрещён");
+            {
+                string ambiguity = String.Join("; ", candidates.Take(6).Select(c => String.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0}->shape {1}/Connections.{2}@{3:0.###}mm",
+                    c.Item1, c.Item2.ShapeId, c.Item2.Row, c.Item2.DistanceMm)).ToArray());
+                throw new InvalidOperationException("Найдено несколько одинаково близких connection point — автоматический ремонт запрещён: " + ambiguity);
+            }
             var best = candidates[0];
             string description = String.Format(CultureInfo.CurrentCulture, "{0}: shape {1}, Connections.{2}, расстояние {3:0.###} мм", best.Item1, best.Item2.ShapeId, best.Item2.Row, best.Item2.DistanceMm);
             if (previewOnly) return "Кандидат Repair Glue: " + description;
@@ -920,7 +926,7 @@ namespace EnergoLogicVisioEditor
                         dynamic target;
                         try
                         {
-                            fromId = Convert.ToInt32(connect.FromSheet.ID, CultureInfo.InvariantCulture);
+                            fromId = Convert.ToInt32(source.ID, CultureInfo.InvariantCulture);
                             toId = Convert.ToInt32(connect.ToSheet.ID, CultureInfo.InvariantCulture);
                             fromName = Convert.ToString(connect.FromCell.NameU, CultureInfo.InvariantCulture) ?? "";
                             toName = Convert.ToString(connect.ToCell.NameU, CultureInfo.InvariantCulture) ?? "";
