@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.54"
+MANAGED_EXTENSION_VERSION = "2026.10.03.55"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2522,12 +2522,43 @@ End Property
             ):
                 reference_dirs.append({"path": str(root), "exists": root.exists()})
 
+            reference_candidates = []
+            search_roots = [
+                program_files / "Microsoft Visual Studio" / "2022" / "Community" / "Common7" / "IDE" / "PublicAssemblies",
+                program_files_x86 / "Microsoft Visual Studio" / "2022" / "Community" / "Common7" / "IDE" / "PublicAssemblies",
+                program_files_x86 / "Microsoft Visual Studio" / "Shared" / "Visual Studio Tools for Office",
+                program_files / "Microsoft Office" / "root",
+                program_files_x86 / "Microsoft Office" / "root",
+                windows / "Microsoft.NET" / "assembly" / "GAC_MSIL",
+            ]
+            wanted = {
+                "extensibility.dll",
+                "office.dll",
+                "microsoft.office.core.dll",
+                "microsoft.office.interop.visio.dll",
+                "microsoft.visualstudio.tools.applications.runtime.dll",
+            }
+            for search_root in search_roots:
+                if not search_root.exists():
+                    continue
+                try:
+                    for candidate in search_root.rglob("*.dll"):
+                        if candidate.name.casefold() in wanted:
+                            reference_candidates.append(str(candidate))
+                            if len(reference_candidates) >= 40:
+                                break
+                except (OSError, PermissionError):
+                    pass
+                if len(reference_candidates) >= 40:
+                    break
+
             return ok(
                 {
                     "path_tools": tools,
                     "known_paths": known_result,
                     "visual_studio_instances": vs_instances,
                     "reference_dirs": reference_dirs,
+                    "reference_candidates": sorted(set(reference_candidates)),
                     "process_architecture": os.environ.get("PROCESSOR_ARCHITECTURE"),
                     "program_files": str(program_files),
                     "program_files_x86": str(program_files_x86),
