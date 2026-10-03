@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.10.0")]
+[assembly: AssemblyVersion("0.3.11.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -94,8 +94,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("D1C940D2-5A7E-4B4B-A92A-2D443A0DBA85")]
-    [ProgId("EnergoLogic.VisioEditorAddinV310")]
+    [Guid("6D8D560D-1F9F-4CB8-BED7-5FCBB70B1F2C")]
+    [ProgId("EnergoLogic.VisioEditorAddinV311")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -231,7 +231,7 @@ namespace EnergoLogicVisioEditor
             lock (_asyncSync)
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
-        public string ApiVersion() { return "0.3.10"; }
+        public string ApiVersion() { return "0.3.11"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -721,8 +721,7 @@ namespace EnergoLogicVisioEditor
             bool commit = false;
             try
             {
-                GlueEndpoint(shape, best.Item1, page.Shapes.ItemFromID(best.Item2.ShapeId), best.Item2.Row);
-                VerifyGlue(shape, best.Item1, best.Item2.ShapeId, best.Item2.Row);
+                GlueEndpointWithRetry(shape, best.Item1, page.Shapes.ItemFromID(best.Item2.ShapeId), best.Item2.Row);
                 commit = true;
                 return "✓ Glue восстановлен. " + description;
             }
@@ -1207,8 +1206,7 @@ namespace EnergoLogicVisioEditor
             int restored = RestoreInternalGlue(page, state.InternalGlue);
             dynamic anchor = page.Shapes.ItemFromID(state.Cell.AnchorId);
             dynamic target = page.Shapes.ItemFromID(state.TargetTerminalId);
-            GlueEndpoint(anchor, state.Cell.Endpoint, target, state.Cell.ConnectionRow);
-            VerifyGlue(anchor, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow);
+            GlueEndpointWithRetry(anchor, state.Cell.Endpoint, target, state.Cell.ConnectionRow);
             VerifyInternalGlue(page, state.InternalGlue);
             return restored;
         }
@@ -1228,8 +1226,7 @@ namespace EnergoLogicVisioEditor
                     SettleVisioAfterGeometryChange();
                     RestoreInternalGlue(page, state.InternalGlue);
                     dynamic originalTerminal = page.Shapes.ItemFromID(state.Cell.BusTerminalId);
-                    GlueEndpoint(anchor, state.Cell.Endpoint, originalTerminal, state.Cell.ConnectionRow);
-                    VerifyGlue(anchor, state.Cell.Endpoint, state.Cell.BusTerminalId, state.Cell.ConnectionRow);
+                    GlueEndpointWithRetry(anchor, state.Cell.Endpoint, originalTerminal, state.Cell.ConnectionRow);
                     VerifyInternalGlue(page, state.InternalGlue);
                 }
                 catch (Exception ex)
@@ -1287,8 +1284,7 @@ namespace EnergoLogicVisioEditor
                 if (current != null && current.TargetId == edge.TargetId && current.Row == edge.Row)
                     continue;
                 dynamic target = page.Shapes.ItemFromID(edge.TargetId);
-                GlueEndpoint(source, edge.Endpoint, target, edge.Row);
-                VerifyGlue(source, edge.Endpoint, edge.TargetId, edge.Row);
+                GlueEndpointWithRetry(source, edge.Endpoint, target, edge.Row);
                 restored++;
             }
             return restored;
@@ -1319,6 +1315,40 @@ namespace EnergoLogicVisioEditor
             string targetName = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
             if (!CellExists(target, targetName)) throw new InvalidOperationException("У target отсутствует " + targetName);
             shape.CellsU(sourceName).GlueTo(target.CellsU(targetName));
+        }
+
+        private void GlueEndpointWithRetry(dynamic shape, string endpoint, dynamic target, int row)
+        {
+            int targetId = Convert.ToInt32(target.ID, CultureInfo.InvariantCulture);
+            Exception lastError = null;
+            for (int attempt = 1; attempt <= 6; attempt++)
+            {
+                try
+                {
+                    GlueEndpoint(shape, endpoint, target, row);
+                    for (int pump = 0; pump < 4; pump++)
+                    {
+                        System.Windows.Forms.Application.DoEvents();
+                        System.Threading.Thread.Sleep(50);
+                    }
+                    VerifyGlue(shape, endpoint, targetId, row);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    for (int pump = 0; pump < 2; pump++)
+                    {
+                        System.Windows.Forms.Application.DoEvents();
+                        System.Threading.Thread.Sleep(75);
+                    }
+                }
+            }
+            throw new InvalidOperationException(
+                "Glue не стабилизировался после 6 проверенных попыток: " +
+                (lastError == null ? "неизвестная причина" : lastError.Message),
+                lastError
+            );
         }
 
         private void VerifyGlue(dynamic shape, string endpoint, int targetId, int row)
