@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.37"
+MANAGED_EXTENSION_VERSION = "2026.10.03.38"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1429,17 +1429,27 @@ End Sub
 
             def ascii_text(value):
                 VK_SHIFT = 0x10
+                VK_CAPITAL = 0x14
+                caps_on = bool(user32.GetKeyState(VK_CAPITAL) & 1)
                 for char in value:
-                    code = int(user32.VkKeyScanW(ord(char)))
-                    if code == -1:
-                        raise RuntimeError(f"VkKeyScanW cannot type fixed macro name at {char!r}")
-                    vk = code & 0xFF
-                    shift_state = (code >> 8) & 0xFF
-                    if shift_state & 1:
+                    if "A" <= char <= "Z":
+                        vk = ord(char)
+                        use_shift = not caps_on
+                    elif "a" <= char <= "z":
+                        vk = ord(char.upper())
+                        use_shift = caps_on
+                    elif "0" <= char <= "9":
+                        vk = ord(char)
+                        use_shift = False
+                    else:
+                        raise RuntimeError(
+                            f"Fixed macro name contains unsupported character {char!r}"
+                        )
+                    if use_shift:
                         user32.keybd_event(VK_SHIFT, 0, 0, 0)
                     user32.keybd_event(vk, 0, 0, 0)
                     user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-                    if shift_state & 1:
+                    if use_shift:
                         user32.keybd_event(VK_SHIFT, 0, KEYEVENTF_KEYUP, 0)
                     time.sleep(0.01)
 
