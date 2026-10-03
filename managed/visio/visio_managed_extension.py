@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.45"
+MANAGED_EXTENSION_VERSION = "2026.10.03.46"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1220,11 +1220,118 @@ End Sub
 """
             component.CodeModule.AddFromString(vba_source)
 
+            undo_class_name = "EnergoLogicUndoUnit"
+            existing_undo = None
+            for index in range(1, int(components.Count) + 1):
+                candidate = components.Item(index)
+                if str(candidate.Name).casefold() == undo_class_name.casefold():
+                    existing_undo = candidate
+                    break
+            if existing_undo is not None:
+                components.Remove(existing_undo)
+
+            undo_component = components.Add(2)  # vbext_ct_ClassModule
+            undo_component.Name = undo_class_name
+            undo_source = """Option Explicit
+Implements Visio.IVBUndoUnit
+
+Private mPage As Visio.Page
+Private mSourceIds As String
+Private mNewIds As String
+Private mDxMm As Double
+Private mDyMm As Double
+Private mUndone As Boolean
+
+Public Sub Initialize(ByVal targetPage As Visio.Page, ByVal sourceIds As String, ByVal newIds As String, ByVal dxMm As Double, ByVal dyMm As Double)
+    Set mPage = targetPage
+    mSourceIds = sourceIds
+    mNewIds = newIds
+    mDxMm = dxMm
+    mDyMm = dyMm
+    mUndone = False
+End Sub
+
+Private Function SelectionIds(ByVal sel As Visio.Selection) As String
+    Dim i As Long
+    Dim result As String
+    For i = 1 To sel.Count
+        If Len(result) > 0 Then result = result & ","
+        result = result & CStr(sel.Item(i).ID)
+    Next i
+    SelectionIds = result
+End Function
+
+Private Sub DeleteCurrentDuplicate()
+    Dim raw As Variant
+    Dim item As Variant
+    raw = Split(mNewIds, ",")
+    For Each item In raw
+        If Len(CStr(item)) > 0 Then
+            mPage.Shapes.ItemFromID(CLng(item)).Delete
+        End If
+    Next item
+End Sub
+
+Private Sub RecreateDuplicate()
+    Dim win As Visio.Window
+    Dim dup As Visio.Selection
+    Dim raw As Variant
+    Dim item As Variant
+
+    Set win = Application.ActiveWindow
+    Set win.Page = mPage
+    win.DeselectAll
+    raw = Split(mSourceIds, ",")
+    For Each item In raw
+        If Len(CStr(item)) > 0 Then
+            win.Select mPage.Shapes.ItemFromID(CLng(item)), 2
+        End If
+    Next item
+    Application.DoCmd 1024
+    Set dup = win.Selection
+    dup.Move mDxMm, mDyMm, "mm"
+    mNewIds = SelectionIds(dup)
+End Sub
+
+Private Property Get IVBUndoUnit_Description() As String
+    IVBUndoUnit_Description = "EnergoLogic: Duplicate Cell"
+End Property
+
+Private Sub IVBUndoUnit_Do(ByVal pMgr As Visio.IVBUndoManager)
+    If mUndone Then
+        RecreateDuplicate
+    Else
+        DeleteCurrentDuplicate
+    End If
+    mUndone = Not mUndone
+    If Not (pMgr Is Nothing) Then
+        pMgr.Add Me
+    End If
+End Sub
+
+Private Sub IVBUndoUnit_OnNextAdd()
+End Sub
+
+Private Property Get IVBUndoUnit_UnitSize() As Long
+    IVBUndoUnit_UnitSize = 1024
+End Property
+
+Private Property Get IVBUndoUnit_UnitTypeCLSID() As String
+    IVBUndoUnit_UnitTypeCLSID = vbNullString
+End Property
+
+Private Property Get IVBUndoUnit_UnitTypeLong() As Long
+    IVBUndoUnit_UnitTypeLong = 46001
+End Property
+"""
+            undo_component.CodeModule.AddFromString(undo_source)
+
             return ok({
                 "document": str(document.Name),
                 "project_name": str(project.Name),
                 "module_name": module_name,
-                "host_version": "0.1-probe",
+                "undo_class_name": undo_class_name,
+                "host_version": "0.2-custom-undo-probe",
                 "persisted": False,
                 "note": "Use SaveAs after qualification to persist this in-memory VBA project change.",
             })
@@ -1405,20 +1512,42 @@ End Sub
                 time.sleep(0.5)
 
                 menu_hwnd = 0
-                for _ in range(20):
-                    candidate = int(user32.GetForegroundWindow())
-                    class_buf = ctypes.create_unicode_buffer(128)
-                    user32.GetClassNameW(candidate, class_buf, len(class_buf))
-                    if class_buf.value == "#32768":
-                        menu_hwnd = candidate
+                hmenu = 0
+                root_pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(root_hwnd, ctypes.byref(root_pid))
+                target_pid = int(root_pid.value)
+                EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+                for _ in range(30):
+                    candidates = []
+
+                    @EnumWindowsProc
+                    def enum_popup(candidate_hwnd, lparam):
+                        class_buf = ctypes.create_unicode_buffer(128)
+                        user32.GetClassNameW(candidate_hwnd, class_buf, len(class_buf))
+                        if class_buf.value != "#32768":
+                            return True
+                        pid = ctypes.c_ulong(0)
+                        user32.GetWindowThreadProcessId(candidate_hwnd, ctypes.byref(pid))
+                        if int(pid.value) != target_pid:
+                            return True
+                        if not bool(user32.IsWindowVisible(candidate_hwnd)):
+                            return True
+                        candidate_menu = int(user32.SendMessageW(candidate_hwnd, MN_GETHMENU, 0, 0))
+                        if candidate_menu:
+                            candidates.append((int(candidate_hwnd), candidate_menu))
+                        return True
+
+                    user32.EnumWindows(enum_popup, 0)
+                    if candidates:
+                        menu_hwnd, hmenu = candidates[-1]
                         break
                     time.sleep(0.05)
-                if not menu_hwnd:
-                    raise RuntimeError("Visio shortcut menu window (#32768) was not found")
-
-                hmenu = int(user32.SendMessageW(menu_hwnd, MN_GETHMENU, 0, 0))
-                if not hmenu:
-                    raise RuntimeError("Visio shortcut menu did not expose an HMENU")
+                if not menu_hwnd or not hmenu:
+                    raise RuntimeError(
+                        "Visio shortcut menu window (#32768 with HMENU) was not found "
+                        f"for PID {target_pid}"
+                    )
                 count = int(user32.GetMenuItemCount(hmenu))
                 target_index = None
                 for index in range(count):
