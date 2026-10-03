@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.71"
+MANAGED_EXTENSION_VERSION = "2026.10.03.72"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1711,6 +1711,7 @@ for ($i = 0; $i -lt $all.Count; $i++) {{
         """Invoke the fixed EnergoLogic Ribbon probe through real Office KeyTips."""
         try:
             import ctypes
+            import ctypes.wintypes
             import json
             import time
 
