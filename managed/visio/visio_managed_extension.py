@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.78"
+MANAGED_EXTENSION_VERSION = "2026.10.03.79"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1321,9 +1321,10 @@ def install(namespace: dict) -> None:
         page: str = "",
         doc_name: str = "",
     ) -> str:
-        # Select explicit shapes, return, then physically invoke the real WinForms button.
+        # Select explicit shapes, return, then invoke the real WinForms button from a child process.
         try:
             import base64
+            import gzip
             import json
             import os
             import subprocess
@@ -1352,57 +1353,35 @@ def install(namespace: dict) -> None:
                 raise RuntimeError("could not create exact EnergoLogic UI test selection")
 
             result_path = workspace / "energologic_editor_ui_test_result.json"
-            if result_path.exists():
-                result_path.unlink()
+            helper_path = workspace / "energologic_editor_ui_test_helper.py"
+            stdout_path = workspace / "energologic_editor_ui_test_stdout.txt"
+            stderr_path = workspace / "energologic_editor_ui_test_stderr.txt"
+            for target in (result_path, stdout_path, stderr_path):
+                if target.exists():
+                    target.unlink()
+            helper_path.write_bytes(gzip.decompress(base64.b64decode("H4sIAAAAAAAC/6VW3YrbRhS+11MMupKpVtgthWJwCKTeEkiXkGy7FLMMY+nIO6k0I2ZGuzalsE0hN+lV6VWeohQCuejPK9ivkCfpmRn9WGunaVpd2NKZOed85/vO/ORKloTSvDa1AkoJLyupDGFCSMMMl0IHQWNLzaYCPfxKbrgYmJ9pKdp3venMhpcQ5DZXxcxVwZdtosf4GQRBBjm5UdwAVaDrwkR22tSNxuiyKSTLpiTjqVloo2Iil88gNZcjcnKPnEkB04DgY50SH8bA2kQWTJLVZaWjJkZMQGhbKdMp57NTVmgYWWMqMy5Ws7A2+cln4aiBVDIuIpcEy/Q5PD5qU5GZAxhhnQlTq+vF5HK0N+cIXvT4zs2wT6gNUwaycErOVQ1xP4CkZvKG5rIWdtSh3Bte1sZI8c7htODpt3BsBJSSCu1h6I3fu98B73vlxU0dviarYKILgCqaJGMkyBnVZtqFrzWoTz7GEvvWyIoi8eZu1rKkDiDOG6/H49NPuxHDTQFoDucC1Eo+kiuekre3v5Dtm+0fux92z3e3ux+3v29f49fz3UvyNddchn1gz4oV3gbZvtr+uf1r+2Z3i/+/bX9Fl5/I2xc/h0Hn4ZrOU+3a5epGYJOh0k5x1K2vzT4FiJUTHWdEvqrkCzAXLsI5BnjkJly4OKPRwHdZ5z0xqQKGjNeCY9cBxbEcVFSydTSJ2ywfkcmdEMcy+lyxDe88I3y546YAV7awM5JrVtTQl18pmfagLh6enX519uD8m8fzqMVJl1IWcQebXkue0erA0Cf0bOopKbg2C+TJdvziss953yYdCACiLqn3a4qhRcUUK0dD9nlOLJqW+Ifas2CbYFlAwznuW9mBpCMym/nmGkbcA5ywqgKRRVbZI+o1HNpVGtxp92SO+D0UHe3VEpNxHwOx43basTOMzbgG8qQWdoHN7QKNBgsAMm6kanxdGL/u++h+lS6Gu4Yl3uHtZklp10WDYXEyuXxXAEuA87cuvbTv3SXurMQP74L0ihfZ+5rgqLp7a/9Q4wbO/9T4gQXXCm2ZifdAH1O7ZeGD1P68rnBzxN2BPOGrqzbIP8o+OA0OZG8CtBQdF74J0Qnvv/+L9A1hT5HoL0FrtoKLyEeLu50fyRrw1aJoz61BDbBOoTJk7v7wOkKYtrbpgbc/26wvbtwRTvEJci5YUeydUv/utGu6YYz3AJSTUsFKezvCVgsptbcCSsPmPuAUfbrRBsr5mpvI3xlGwd+iIgk8WgkAAA==")))
 
-            helper = (
-                "import ctypes,ctypes.wintypes,json,time,sys\\n"
-                "time.sleep(1.0)\\n"
-                "u=ctypes.windll.user32\\n"
-                "BM_CLICK=0x00F5\\n"
-                "title='EnergoLogic — инструменты Visio'\\n"
-                "button_text='Копировать →'\\n"
-                "result={'window_found':False,'button_found':False,'clicked':False,'error':''}\\n"
-                "wins=[]\\n"
-                "PROC=ctypes.WINFUNCTYPE(ctypes.c_bool,ctypes.c_void_p,ctypes.c_void_p)\\n"
-                "def wt(hwnd):\\n"
-                "    n=u.GetWindowTextLengthW(hwnd); b=ctypes.create_unicode_buffer(max(1,n+1)); u.GetWindowTextW(hwnd,b,len(b)); return b.value\\n"
-                "@PROC\\n"
-                "def ew(hwnd,l):\\n"
-                "    if u.IsWindowVisible(hwnd) and wt(hwnd)==title: wins.append(int(hwnd))\\n"
-                "    return True\\n"
-                "u.EnumWindows(ew,0)\\n"
-                "try:\\n"
-                "    if not wins: raise RuntimeError('EnergoLogic editor window not found')\\n"
-                "    result['window_found']=True; root=wins[-1]; children=[]\\n"
-                "    @PROC\\n"
-                "    def ec(hwnd,l):\\n"
-                "        if wt(hwnd)==button_text: children.append(int(hwnd))\\n"
-                "        return True\\n"
-                "    u.EnumChildWindows(root,ec,0)\\n"
-                "    if not children: raise RuntimeError('EnergoLogic Duplicate Right button not found')\\n"
-                "    result['button_found']=True; btn=children[-1]\\n"
-                "    u.SendMessageW(btn,BM_CLICK,0,0); result['clicked']=True\\n"
-                "except Exception as e: result['error']=str(e)\\n"
-                "open(sys.argv[1],'w',encoding='utf-8').write(json.dumps(result,ensure_ascii=False))\\n"
-            )
-            creationflags = 0x08000000 | 0x00000008 | 0x00000200
-            proc = subprocess.Popen(
-                [sys.executable, "-c", helper, str(result_path)],
-                cwd=str(workspace),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creationflags,
-                close_fds=True,
-            )
+            creationflags = 0x08000000  # CREATE_NO_WINDOW; stay in the interactive user session.
+            with open(stdout_path, "wb") as out, open(stderr_path, "wb") as err_file:
+                proc = subprocess.Popen(
+                    [sys.executable, str(helper_path), str(result_path)],
+                    cwd=str(workspace),
+                    stdin=subprocess.DEVNULL,
+                    stdout=out,
+                    stderr=err_file,
+                    creationflags=creationflags,
+                    close_fds=False,
+                )
             return ok({
                 "scheduled": True,
                 "action": "duplicate_right",
                 "button": "Копировать →",
                 "shape_ids": shape_ids,
                 "helper_pid": int(proc.pid),
+                "helper_path": str(helper_path),
                 "result_path": str(result_path),
+                "stdout_path": str(stdout_path),
+                "stderr_path": str(stderr_path),
                 "returns_before_ui_click": True,
             })
         except Exception as exc:
@@ -1410,15 +1389,20 @@ def install(namespace: dict) -> None:
 
     @mcp.tool()
     def get_energologic_editor_ui_test_result() -> str:
-        # Read the detached WinForms click helper result.
+        # Read the detached WinForms click helper result and process logs.
         try:
             import json
             result_path = workspace / "energologic_editor_ui_test_result.json"
-            if not result_path.is_file():
-                return ok({"available": False})
+            stdout_path = workspace / "energologic_editor_ui_test_stdout.txt"
+            stderr_path = workspace / "energologic_editor_ui_test_stderr.txt"
+            payload = None
+            if result_path.is_file():
+                payload = json.loads(result_path.read_text(encoding="utf-8-sig"))
             return ok({
-                "available": True,
-                "result": json.loads(result_path.read_text(encoding="utf-8-sig")),
+                "available": payload is not None,
+                "result": payload,
+                "stdout": stdout_path.read_text(encoding="utf-8", errors="replace")[-4000:] if stdout_path.is_file() else "",
+                "stderr": stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:] if stderr_path.is_file() else "",
             })
         except Exception as exc:
             return err(exc)
