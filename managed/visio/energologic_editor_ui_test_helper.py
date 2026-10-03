@@ -26,6 +26,10 @@ def main() -> int:
 
     try:
         user32 = ctypes.windll.user32
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:
+            pass
         bm_click = 0x00F5
         title = "EnergoLogic — инструменты Visio"
         button_text = "Копировать →"
