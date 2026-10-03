@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.79"
+MANAGED_EXTENSION_VERSION = "2026.10.03.80"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1403,6 +1403,61 @@ def install(namespace: dict) -> None:
                 "result": payload,
                 "stdout": stdout_path.read_text(encoding="utf-8", errors="replace")[-4000:] if stdout_path.is_file() else "",
                 "stderr": stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:] if stderr_path.is_file() else "",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def get_energologic_editor_ui_diagnostics() -> str:
+        # Read visible WinForms child controls and texts without touching the drawing.
+        try:
+            import ctypes
+            import os
+            if os.name != "nt":
+                raise RuntimeError("EnergoLogic UI diagnostics are Windows-only")
+            user32 = ctypes.windll.user32
+
+            def text_of(hwnd):
+                length = int(user32.GetWindowTextLengthW(hwnd))
+                buf = ctypes.create_unicode_buffer(max(1, length + 1))
+                user32.GetWindowTextW(hwnd, buf, len(buf))
+                return buf.value
+
+            def class_of(hwnd):
+                buf = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, buf, len(buf))
+                return buf.value
+
+            proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            windows = []
+            @proc
+            def enum_top(hwnd, _lparam):
+                if bool(user32.IsWindowVisible(hwnd)) and text_of(hwnd) == "EnergoLogic — инструменты Visio":
+                    windows.append(int(hwnd))
+                return True
+            user32.EnumWindows(enum_top, 0)
+            if not windows:
+                return ok({"window_found": False, "controls": []})
+            root = windows[-1]
+            controls = []
+            @proc
+            def enum_child(hwnd, _lparam):
+                value = text_of(hwnd)
+                cls = class_of(hwnd)
+                if value or "EDIT" in cls.upper() or "BUTTON" in cls.upper():
+                    controls.append({
+                        "hwnd": int(hwnd),
+                        "class": cls,
+                        "text": value,
+                        "visible": bool(user32.IsWindowVisible(hwnd)),
+                        "enabled": bool(user32.IsWindowEnabled(hwnd)),
+                    })
+                return True
+            user32.EnumChildWindows(root, enum_child, 0)
+            return ok({
+                "window_found": True,
+                "window_hwnd": root,
+                "controls": controls,
             })
         except Exception as exc:
             return err(exc)
