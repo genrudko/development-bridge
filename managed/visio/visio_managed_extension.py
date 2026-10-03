@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.56"
+MANAGED_EXTENSION_VERSION = "2026.10.03.57"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2407,7 +2407,10 @@ End Property
             return err(exc)
 
     @mcp.tool()
-    def install_energologic_classic_com_addin_probe() -> str:
+    def install_energologic_classic_com_addin_probe(
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
         """Build and register a fixed HKCU-only EnergoLogic Visio COM add-in probe.
 
         The add-in is intentionally tiny: one Ribbon tab and one fixed Duplicate-40
@@ -2610,7 +2613,8 @@ namespace EnergoLogicVisioQol
             connected = False
             connect_error = None
             try:
-                app = visio._resolve_application()
+                page_obj = visio._resolve_page(doc_name, parse_page(page))
+                app = page_obj.Application
                 addins = app.COMAddIns
                 addins.Update()
                 addin = addins.Item(progid)
@@ -2634,6 +2638,120 @@ namespace EnergoLogicVisioQol
                 "ribbon_tab": "EnergoLogic",
                 "tab_keytip": "Z",
                 "button_keytip": "D",
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def keyboard_run_energologic_classic_com_addin_probe(
+        shape_ids_json: str,
+        page: str = "",
+        doc_name: str = "",
+    ) -> str:
+        """Invoke the fixed EnergoLogic Ribbon probe through real Office KeyTips."""
+        try:
+            import ctypes
+            import json
+            import time
+
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids) or any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be unique positive integers")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            app = page_obj.Application
+            try:
+                app.ActiveWindow.Page = page_obj
+            except Exception:
+                page_obj.Activate()
+            window = app.ActiveWindow
+            window.DeselectAll()
+            for sid in shape_ids:
+                window.Select(page_obj.Shapes.ItemFromID(sid), 2)
+            if int(window.Selection.Count) != len(shape_ids):
+                raise RuntimeError("Could not create the exact source selection")
+
+            # Ensure our fixed COM add-in is actually connected before pressing KeyTips.
+            addins = app.COMAddIns
+            addins.Update()
+            addin = addins.Item("EnergoLogic.VisioQolAddin")
+            if not bool(addin.Connect):
+                addin.Connect = True
+            if not bool(addin.Connect):
+                raise RuntimeError("EnergoLogic classic COM add-in is registered but not connected")
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = int(window.WindowHandle32)
+            if hwnd <= 0:
+                raise RuntimeError("Visio active window returned an invalid HWND")
+            GA_ROOT = 2
+            SW_RESTORE = 9
+            VK_MENU = 0x12
+            VK_Z = 0x5A
+            VK_D = 0x44
+            KEYEVENTF_KEYUP = 0x0002
+            root_hwnd = int(user32.GetAncestor(hwnd, GA_ROOT)) or hwnd
+
+            def press(vk):
+                user32.keybd_event(vk, 0, 0, 0)
+                user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+
+            foreground_hwnd = int(user32.GetForegroundWindow())
+            current_thread = int(kernel32.GetCurrentThreadId())
+            target_thread = int(user32.GetWindowThreadProcessId(root_hwnd, None))
+            foreground_thread = (
+                int(user32.GetWindowThreadProcessId(foreground_hwnd, None))
+                if foreground_hwnd else 0
+            )
+            attached = []
+            before_count = int(page_obj.Shapes.Count)
+            try:
+                for other_thread in (foreground_thread, target_thread):
+                    if other_thread and other_thread != current_thread:
+                        if bool(user32.AttachThreadInput(current_thread, other_thread, True)):
+                            attached.append(other_thread)
+                user32.ShowWindow(root_hwnd, SW_RESTORE)
+                user32.BringWindowToTop(root_hwnd)
+                user32.SetForegroundWindow(root_hwnd)
+                user32.SetActiveWindow(root_hwnd)
+                time.sleep(0.25)
+
+                # Real Office Ribbon KeyTip path: Alt -> Z (EnergoLogic) -> D (probe).
+                press(VK_MENU)
+                time.sleep(0.35)
+                press(VK_Z)
+                time.sleep(0.35)
+                press(VK_D)
+                for _ in range(50):
+                    time.sleep(0.1)
+                    if int(page_obj.Shapes.Count) == before_count + len(shape_ids):
+                        break
+            finally:
+                for other_thread in reversed(attached):
+                    try:
+                        user32.AttachThreadInput(current_thread, other_thread, False)
+                    except Exception:
+                        pass
+
+            after_count = int(page_obj.Shapes.Count)
+            if after_count != before_count + len(shape_ids):
+                raise RuntimeError(
+                    f"EnergoLogic Ribbon probe expected {before_count + len(shape_ids)} shapes, "
+                    f"got {after_count}"
+                )
+            return ok({
+                "document": str(page_obj.Document.Name),
+                "page": str(page_obj.Name),
+                "shape_count_before": before_count,
+                "shape_count_after": after_count,
+                "source_shape_ids": shape_ids,
+                "progid": "EnergoLogic.VisioQolAddin",
+                "launch_path": "Office Ribbon KeyTips Alt-Z-D",
+                "ribbon_callback_launched": True,
             })
         except Exception as exc:
             return err(exc)
