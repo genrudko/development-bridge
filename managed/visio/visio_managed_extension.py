@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.68"
+MANAGED_EXTENSION_VERSION = "2026.10.03.69"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1391,15 +1391,44 @@ namespace EnergoLogicVisioQol
             )
             app = page_obj.Application
             documents = app.Documents
-            if int(documents.Count) != 1:
+            drawing_documents = []
+            document_inventory = []
+            for index in range(1, int(documents.Count) + 1):
+                candidate = documents.Item(index)
+                try:
+                    doc_type = int(candidate.Type)
+                except Exception:
+                    doc_type = None
+                try:
+                    candidate_name = str(candidate.Name)
+                except Exception:
+                    candidate_name = f"<document-{index}>"
+                try:
+                    candidate_full_name = str(candidate.FullName)
+                except Exception:
+                    candidate_full_name = ""
+                document_inventory.append({
+                    "index": index,
+                    "name": candidate_name,
+                    "full_name": candidate_full_name,
+                    "type": doc_type,
+                })
+                # VisDocumentTypes: visTypeStencil = 2. Stencils are support
+                # documents and do not block restarting the one qualification drawing.
+                if doc_type != 2:
+                    drawing_documents.append(candidate)
+
+            if len(drawing_documents) != 1:
                 raise RuntimeError(
-                    f"refusing graceful restart: expected one open Visio document, got {int(documents.Count)}"
+                    "refusing graceful restart: expected exactly one non-stencil Visio document; "
+                    f"inventory={document_inventory!r}"
                 )
-            document = documents.Item(1)
+            document = drawing_documents[0]
             full_name = Path(str(document.FullName)).resolve()
             if full_name != target.resolve():
                 raise RuntimeError(
-                    "refusing graceful restart: the only open Visio document is not the fixed qualification copy"
+                    "refusing graceful restart: the only non-stencil Visio document is not "
+                    f"the fixed qualification copy; inventory={document_inventory!r}"
                 )
 
             document.Save()
