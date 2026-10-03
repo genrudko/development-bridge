@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.42"
+MANAGED_EXTENSION_VERSION = "2026.10.03.43"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1394,7 +1394,11 @@ End Sub
                 chord(VK_SHIFT, VK_F10)
                 time.sleep(0.45)
                 press(VK_E)
-                time.sleep(1.0)
+                expected_count = before_count + 8
+                for _ in range(60):
+                    time.sleep(0.1)
+                    if int(page_obj.Shapes.Count) == expected_count:
+                        break
             finally:
                 for other_thread in reversed(attached):
                     try:
