@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.7.0")]
+[assembly: AssemblyVersion("0.3.8.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -89,12 +89,13 @@ namespace EnergoLogicVisioEditor
         string ApiNudgeUp();
         string ApiNudgeDown();
         string ApiRenumberCell(string newDesignation);
+        string ApiOperationStatus();
         string ApiVersion();
     }
 
     [ComVisible(true)]
-    [Guid("3D58EA6C-A51F-41B9-A46D-BF0FB3BA7C5A")]
-    [ProgId("EnergoLogic.VisioEditorAddinV37")]
+    [Guid("9974BD0D-D56E-45F5-BB8C-7A21485C6730")]
+    [ProgId("EnergoLogic.VisioEditorAddinV38")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -104,6 +105,11 @@ namespace EnergoLogicVisioEditor
         private CommandBar _bar;
         private CommandBarButton _toggleButton;
         private _CommandBarButtonEvents_ClickEventHandler _toggleHandler;
+        private readonly object _asyncSync = new object();
+        private bool _asyncPending = false;
+        private string _asyncToken = "";
+        private string _asyncState = "idle";
+        private string _asyncMessage = "EnergoLogic готов.";
         private readonly Regex _glueRegex = new Regex(
             @"(?<target>[^!(),]+)!Connections(?:\.X(?<rowx>\d+)|\.(?<row>\d+)\.X)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -212,7 +218,12 @@ namespace EnergoLogicVisioEditor
         public string ApiNudgeUp() { return ExactOffset(0.0, 1.0); }
         public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
         public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
-        public string ApiVersion() { return "0.3.7"; }
+        public string ApiOperationStatus()
+        {
+            lock (_asyncSync)
+                return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
+        }
+        public string ApiVersion() { return "0.3.8"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -641,26 +652,11 @@ namespace EnergoLogicVisioEditor
             if (!geometryCommit)
                 throw new InvalidOperationException("Геометрия распределения ячеек не была завершена");
 
-            SettleVisioAfterGeometryChange();
-            try
-            {
-                int restoredInternal = 0;
-                foreach (CellMoveState state in plan)
-                    restoredInternal += RestoreCellTopologyAfterMove(page, state);
-                SelectIds(page, cells.SelectMany(c => c.MemberIds).Distinct().ToList());
-                return String.Format(CultureInfo.CurrentCulture,
-                    "✓ Ячейки распределены по реальным точкам шины. Шаг: {0:0.###} мм. Перемещено: {1}; внутренних Glue восстановлено: {2}.",
-                    pitch, plan.Count, restoredInternal);
-            }
-            catch (Exception topologyError)
-            {
-                string compensation = CompensateCellMoves(page, plan);
-                throw new InvalidOperationException(
-                    "Распределение отменено: не удалось восстановить электрические связи после перемещения. " +
-                    compensation + " Причина: " + topologyError.Message,
-                    topologyError
-                );
-            }
+            List<int> finalSelection = cells.SelectMany(c => c.MemberIds).Distinct().ToList();
+            string successPrefix = String.Format(CultureInfo.CurrentCulture,
+                "✓ Ячейки распределены по реальным точкам шины. Шаг: {0:0.###} мм. Перемещено: {1}",
+                pitch, plan.Count);
+            return ScheduleTopologyCompletion(page, plan, finalSelection, successPrefix);
         }
 
         internal string RepairGlue(bool previewOnly, bool requireConfirmation)
@@ -1100,6 +1096,68 @@ namespace EnergoLogicVisioEditor
             return CellExists(shape, endpoint == "begin" ? "BeginX" : "EndX");
         }
 
+        private string ScheduleTopologyCompletion(dynamic page, List<CellMoveState> states, List<int> finalSelection, string successPrefix)
+        {
+            string token = "topology:" + Guid.NewGuid().ToString("N");
+            lock (_asyncSync)
+            {
+                if (_asyncPending)
+                    throw new InvalidOperationException("Предыдущая операция EnergoLogic ещё завершается");
+                _asyncPending = true;
+                _asyncToken = token;
+                _asyncState = "pending";
+                _asyncMessage = "Завершается восстановление электрических связей…";
+            }
+
+            if (_form == null || _form.IsDisposed) ShowPanel();
+            _form.BeginInvoke((MethodInvoker)delegate
+            {
+                string finalMessage;
+                string finalState;
+                try
+                {
+                    SettleVisioAfterGeometryChange();
+                    int restoredInternal = 0;
+                    foreach (CellMoveState state in states)
+                        restoredInternal += RestoreCellTopologyAfterMove(page, state);
+                    VerifyMovedCellsComplete(page, states);
+                    SelectIds(page, finalSelection);
+                    finalState = "success";
+                    finalMessage = successPrefix + "; внутренних Glue восстановлено: " + restoredInternal + ".";
+                }
+                catch (Exception topologyError)
+                {
+                    string compensation = CompensateCellMoves(page, states);
+                    finalState = compensation.StartsWith("Исходная", StringComparison.Ordinal) ? "failed_rolled_back" : "failed_needs_attention";
+                    finalMessage = "⚠ Не удалось завершить электрические связи. " + compensation + " Причина: " + topologyError.Message;
+                }
+
+                lock (_asyncSync)
+                {
+                    _asyncPending = false;
+                    _asyncState = finalState;
+                    _asyncMessage = finalMessage;
+                }
+                try { if (_form != null && !_form.IsDisposed) _form.SetStatus(finalMessage); } catch { }
+            });
+
+            return "⏳ Геометрия выполнена. EnergoLogic завершает и проверяет электрические связи… token=" + token;
+        }
+
+        private void VerifyMovedCellsComplete(dynamic page, IEnumerable<CellMoveState> states)
+        {
+            foreach (CellMoveState state in states)
+            {
+                CellInfo rediscovered = DiscoverCell(page, state.Cell.AnchorId);
+                if (rediscovered.MemberIds.Count != state.Cell.MemberIds.Count)
+                    throw new InvalidOperationException(
+                        "После перемещения состав ячейки " + state.Cell.AnchorId +
+                        " изменился: было " + state.Cell.MemberIds.Count +
+                        ", стало " + rediscovered.MemberIds.Count
+                    );
+            }
+        }
+
         private int RestoreCellTopologyAfterMove(dynamic page, CellMoveState state)
         {
             int restored = RestoreInternalGlue(page, state.InternalGlue);
@@ -1450,6 +1508,16 @@ namespace EnergoLogicVisioEditor
         {
             if (e.CloseReason == CloseReason.UserClosing) { e.Cancel=true; Hide(); return; }
             base.OnFormClosing(e);
+        }
+
+        public void SetStatus(string value)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke((MethodInvoker)delegate { SetStatus(value); });
+                return;
+            }
+            _status.Text = value ?? "";
         }
 
         private void Run(Func<string> action)
