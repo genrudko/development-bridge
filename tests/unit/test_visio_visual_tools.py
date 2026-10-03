@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.73"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.74"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.73"
+    assert arguments["version"] == "2026.10.03.74"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.73"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.74"}'}],
                 "isError": False,
             }
 
@@ -591,3 +591,17 @@ def test_managed_visio_extension_has_async_physical_commandbar_and_undo_probes()
     assert '"returns_before_physical_undo": True' in source
     assert 'u.mouse_event(0x0002' in source
     assert 'u.keybd_event(0x11' in source
+
+
+def test_managed_visio_extension_has_full_energologic_editor_ui_installer():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "def install_energologic_editor_ui(" in source
+    assert "def get_energologic_editor_ui_status(" in source
+    assert "def uninstall_energologic_editor_ui(" in source
+    assert "EnergoLogic.VisioEditorAddin" in source
+    assert "modeless WinForms panel + Visio CommandBar toggle" in source
+    assert '"LoadBehavior", 0' in source
