@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.48"
+MANAGED_EXTENSION_VERSION = "2026.10.03.49"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1837,9 +1837,25 @@ End Property
                 user32.BringWindowToTop(root_hwnd)
                 user32.SetForegroundWindow(root_hwnd)
                 user32.SetActiveWindow(root_hwnd)
+                user32.SetFocus(hwnd)
                 time.sleep(0.2)
                 chord(VK_SHIFT, VK_F10)
-                time.sleep(0.45)
+                menu_class = ""
+                menu_hwnd = 0
+                for _ in range(20):
+                    candidate = int(user32.GetForegroundWindow())
+                    class_buf = ctypes.create_unicode_buffer(128)
+                    user32.GetClassNameW(candidate, class_buf, len(class_buf))
+                    menu_class = class_buf.value
+                    if menu_class == "Net UI Tool Window":
+                        menu_hwnd = candidate
+                        break
+                    time.sleep(0.05)
+                if not menu_hwnd:
+                    raise RuntimeError(
+                        f"Visio shortcut menu did not become a Net UI Tool Window; "
+                        f"foreground={int(user32.GetForegroundWindow())}, class={menu_class!r}"
+                    )
                 press(VK_J)
                 expected_count = before_count + 8
                 for _ in range(60):
@@ -1865,6 +1881,8 @@ End Property
                 "shape_count_before": before_count,
                 "shape_count_after": after_count,
                 "launch_path": "Shape shortcut menu / Actions.EnergoLogicUndoProbe",
+                "menu_window_class": menu_class,
+                "menu_window_handle": menu_hwnd,
                 "ui_action_launched": True,
             })
         except Exception as exc:
