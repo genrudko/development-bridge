@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.47"
+MANAGED_EXTENSION_VERSION = "2026.10.03.48"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -1646,7 +1646,9 @@ End Property
                 user32.BringWindowToTop(root_hwnd)
                 user32.SetForegroundWindow(root_hwnd)
                 user32.SetActiveWindow(root_hwnd)
+                user32.SetFocus(hwnd)
                 time.sleep(0.2)
+                focused_child = int(user32.GetFocus())
                 chord(VK_SHIFT, VK_F10)
                 time.sleep(0.5)
 
@@ -1683,9 +1685,32 @@ End Property
                         break
                     time.sleep(0.05)
                 if not menu_hwnd or not hmenu:
+                    visible_windows = []
+
+                    @EnumWindowsProc
+                    def enum_diag(candidate_hwnd, lparam):
+                        pid = ctypes.c_ulong(0)
+                        user32.GetWindowThreadProcessId(candidate_hwnd, ctypes.byref(pid))
+                        if int(pid.value) != target_pid or not bool(user32.IsWindowVisible(candidate_hwnd)):
+                            return True
+                        class_buf = ctypes.create_unicode_buffer(256)
+                        user32.GetClassNameW(candidate_hwnd, class_buf, len(class_buf))
+                        length = int(user32.GetWindowTextLengthW(candidate_hwnd))
+                        text_buf = ctypes.create_unicode_buffer(max(1, length + 1))
+                        user32.GetWindowTextW(candidate_hwnd, text_buf, len(text_buf))
+                        visible_windows.append({
+                            "hwnd": int(candidate_hwnd),
+                            "class": class_buf.value,
+                            "text": text_buf.value[:200],
+                            "foreground": int(user32.GetForegroundWindow()) == int(candidate_hwnd),
+                        })
+                        return True
+
+                    user32.EnumWindows(enum_diag, 0)
                     raise RuntimeError(
-                        "Visio shortcut menu window (#32768 with HMENU) was not found "
-                        f"for PID {target_pid}"
+                        "Visio shortcut menu window (#32768 with HMENU) was not found; "
+                        f"pid={target_pid}; drawing_hwnd={hwnd}; focused_child={focused_child}; "
+                        f"visible_windows={visible_windows!r}"
                     )
                 count = int(user32.GetMenuItemCount(hmenu))
                 target_index = None

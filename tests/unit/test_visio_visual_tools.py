@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.03.47"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.03.48"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.03.47"
+    assert arguments["version"] == "2026.10.03.48"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.47"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.03.48"}'}],
                 "isError": False,
             }
 
@@ -462,3 +462,14 @@ def test_managed_visio_extension_has_bounded_shapesheet_cell_trigger_probe():
     assert 'cell_name = "Actions.EnergoLogicUndoProbe.Action"' in source
     assert "action_cell.Trigger()" in source
     assert '"launch_path": "ShapeSheet Cell.Trigger"' in source
+
+
+def test_mouse_shapesheet_probe_focuses_drawing_window_and_reports_ui_windows():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed" / "visio" / "visio_managed_extension.py"
+    ).read_text()
+    assert "user32.SetFocus(hwnd)" in source
+    assert "focused_child = int(user32.GetFocus())" in source
+    assert "visible_windows=" in source
