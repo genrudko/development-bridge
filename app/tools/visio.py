@@ -16,7 +16,7 @@ from app.container import ApplicationContainer
 
 
 VISIO_MANAGED_UPDATE_TOOL = "__openai_visio_managed_update"
-VISIO_MANAGED_EXTENSION_VERSION = "2026.10.03.60"
+VISIO_MANAGED_EXTENSION_VERSION = "2026.10.03.61"
 VISIO_MANAGED_EXTENSION_PATH = (
     Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py"
 )
@@ -44,6 +44,7 @@ VISIO_READ_ONLY_TOOLS = frozenset({
     "get_vtd_state",
     "get_extension_host_capabilities",
     "get_energologic_classic_com_addin_probe_status",
+    "get_energologic_visio_crash_diagnostics",
     "get_vsto_build_capabilities",
     "render_page_png",
     "read_connection_points",

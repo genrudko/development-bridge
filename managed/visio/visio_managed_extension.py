@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.60"
+MANAGED_EXTENSION_VERSION = "2026.10.03.61"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -2941,6 +2941,57 @@ namespace EnergoLogicVisioQol
             for target in targets:
                 delete_tree(winreg.HKEY_CURRENT_USER, target)
             return ok({"progid": progid, "removed": True, "hkcu_only": True})
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def get_energologic_visio_crash_diagnostics() -> str:
+        '''Read bounded Windows process/event diagnostics after the fixed add-in probe.'''
+        try:
+            import json
+            import os
+            import subprocess
+
+            if os.name != "nt":
+                raise RuntimeError("Visio crash diagnostics are Windows-only")
+
+            ps = r'''$ErrorActionPreference='SilentlyContinue'
+$procs = Get-CimInstance Win32_Process -Filter "Name='VISIO.EXE'" | Select-Object ProcessId,Name,CreationDate,ExecutablePath,CommandLine
+$since = (Get-Date).AddMinutes(-20)
+$events = Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$since} -ErrorAction SilentlyContinue |
+  Where-Object {
+    $_.ProviderName -in @('Application Error','.NET Runtime','Windows Error Reporting') -and
+    ($_.Message -match 'VISIO.EXE|EnergoLogic\.VisioQolAddin|EnergoLogicVisioQol')
+  } |
+  Select-Object -First 30 TimeCreated,ProviderName,Id,LevelDisplayName,Message
+[pscustomobject]@{processes=@($procs); events=@($events)} | ConvertTo-Json -Depth 5 -Compress
+'''
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    ps,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "PowerShell crash diagnostics failed: "
+                    + (result.stdout + "\n" + result.stderr)[-3000:]
+                )
+            payload = json.loads(result.stdout or "{}")
+            return ok({
+                "processes": payload.get("processes", []),
+                "events": payload.get("events", []),
+                "powershell_stderr": result.stderr[-1000:],
+            })
         except Exception as exc:
             return err(exc)
 
