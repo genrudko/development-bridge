@@ -251,3 +251,27 @@ def test_managed_visio_extension_has_read_only_undo_status_tool():
     assert '"document_undo_enabled": bool(page_obj.Document.UndoEnabled)' in source
     assert 'current_scope = int(app.CurrentScope)' in source
     assert '"undo_enabled_before": undo_enabled_before' in source
+
+
+def test_managed_visio_extension_has_transactional_exact_move_tool():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "managed"
+        / "visio"
+        / "visio_managed_extension.py"
+    ).read_text()
+
+    assert "def move_shapes_exact(" in source
+    assert 'detach_items_json: str = "[]"' in source
+    assert 'glue_items_json: str = "[]"' in source
+    assert 'document.BeginUndoScope("EnergoLogic: Move Shapes Exact")' in source
+    assert 'selected.Move(dx, dy, "mm")' in source
+    assert 'x_cell.FormulaU = f"{before_x_mm:.12g} mm"' in source
+    assert 'y_cell.FormulaU = f"{before_y_mm:.12g} mm"' in source
+    assert "connection_formula_matches" in source
+    assert "Detach verification failed" in source
+    assert "Visio exact move verification failed" in source
+    assert "Glue formula verification failed for moved shape" in source
+    assert "document.EndUndoScope(scope_id, False)" in source

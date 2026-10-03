@@ -346,6 +346,340 @@ def install(namespace: dict) -> None:
             return err(exc)
 
     @mcp.tool()
+    def move_shapes_exact(
+        shape_ids_json: str,
+        dx_mm: float,
+        dy_mm: float,
+        page: str = "",
+        doc_name: str = "",
+        select_result: bool = True,
+        detach_items_json: str = "[]",
+        glue_items_json: str = "[]",
+    ) -> str:
+        """Move explicit top-level shapes by an exact engineering offset.
+
+        Optional detach items break only an explicitly expected native Glue endpoint
+        by replacing its current absolute page coordinates with literal mm formulas.
+        Optional glue items then attach the moved endpoint to an explicitly selected
+        native connection point. The compound mutation rolls back on any failure.
+        """
+        try:
+            import json
+            import math
+
+            raw_ids = json.loads(shape_ids_json)
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("shape_ids_json must be a JSON array with 1..100 items")
+            shape_ids = [int(value) for value in raw_ids]
+            if len(set(shape_ids)) != len(shape_ids):
+                raise ValueError("shape_ids_json must not contain duplicate shape IDs")
+            if any(value <= 0 for value in shape_ids):
+                raise ValueError("shape IDs must be positive integers")
+
+            dx = float(dx_mm)
+            dy = float(dy_mm)
+            if not math.isfinite(dx) or not math.isfinite(dy):
+                raise ValueError("dx_mm and dy_mm must be finite")
+            if abs(dx) > 2000.0 or abs(dy) > 2000.0:
+                raise ValueError("dx_mm and dy_mm must be within +/-2000 mm")
+            if abs(dx) < 1e-12 and abs(dy) < 1e-12:
+                raise ValueError("move offset must not be zero")
+
+            page_obj = visio._resolve_page(doc_name, parse_page(page))
+            document = page_obj.Document
+            app = page_obj.Application
+            window = app.ActiveWindow
+            try:
+                window.Page = page_obj
+            except Exception:
+                try:
+                    page_obj.Activate()
+                except Exception:
+                    pass
+
+            def shape_snapshot(shape):
+                try:
+                    master = shape.Master
+                    master_name = str(master.NameU) if master is not None else None
+                except Exception:
+                    master_name = None
+                try:
+                    text_value = str(shape.Text)
+                except Exception:
+                    text_value = ""
+                try:
+                    pin_x_mm = float(shape.CellsU("PinX").ResultIU) * 25.4
+                    pin_y_mm = float(shape.CellsU("PinY").ResultIU) * 25.4
+                except Exception:
+                    pin_x_mm = None
+                    pin_y_mm = None
+                return {
+                    "shape_id": int(shape.ID),
+                    "shape_name": str(shape.Name),
+                    "master_name": master_name,
+                    "text": text_value,
+                    "pin_x_mm": pin_x_mm,
+                    "pin_y_mm": pin_y_mm,
+                }
+
+            def endpoint_cells(shape, endpoint):
+                if endpoint == "begin":
+                    return shape.CellsU("BeginX"), shape.CellsU("BeginY"), "BeginX", "BeginY"
+                if endpoint == "end":
+                    return shape.CellsU("EndX"), shape.CellsU("EndY"), "EndX", "EndY"
+                raise ValueError("endpoint must be begin/end")
+
+            def connection_formula_matches(formula_u, target_name, row_number):
+                value = str(formula_u).casefold()
+                return (
+                    str(target_name).casefold() in value
+                    and (
+                        f"connections.{row_number}.x" in value
+                        or f"connections.x{row_number}" in value
+                    )
+                )
+
+            source_shapes = [page_obj.Shapes.ItemFromID(sid) for sid in shape_ids]
+            source_snapshot = [shape_snapshot(shape) for shape in source_shapes]
+            if any(row["pin_x_mm"] is None or row["pin_y_mm"] is None for row in source_snapshot):
+                raise RuntimeError("Cannot determine PinX/PinY for all selected shapes")
+
+            raw_detach_items = json.loads(detach_items_json)
+            if not isinstance(raw_detach_items, list) or len(raw_detach_items) > 32:
+                raise ValueError("detach_items_json must be a JSON array with at most 32 items")
+            detach_items = []
+            seen_detach = set()
+            for raw in raw_detach_items:
+                if not isinstance(raw, dict):
+                    raise ValueError("each detach item must be an object")
+                sid = int(raw["shape_id"])
+                if sid not in shape_ids:
+                    raise ValueError(f"detach shape_id {sid} is not in moved shape IDs")
+                endpoint = str(raw["endpoint"]).strip().lower()
+                if endpoint not in {"begin", "end"}:
+                    raise ValueError(f"detach endpoint must be begin/end for shape {sid}")
+                target_sid = int(raw["expected_target_shape_id"])
+                row_number = int(raw["expected_target_connection_row"])
+                if target_sid <= 0:
+                    raise ValueError("expected_target_shape_id must be positive")
+                if row_number < 1 or row_number > 256:
+                    raise ValueError("expected_target_connection_row must be within 1..256")
+                key = (sid, endpoint)
+                if key in seen_detach:
+                    raise ValueError(f"duplicate detach endpoint for shape {sid}: {endpoint}")
+                seen_detach.add(key)
+                target = page_obj.Shapes.ItemFromID(target_sid)
+                source_shape = page_obj.Shapes.ItemFromID(sid)
+                source_x, source_y, source_x_name, source_y_name = endpoint_cells(
+                    source_shape, endpoint
+                )
+                before_formula = str(source_x.FormulaU)
+                if not connection_formula_matches(before_formula, str(target.Name), row_number):
+                    raise ValueError(
+                        f"shape {sid} {source_x_name} is not glued to expected target "
+                        f"{target_sid} Connections.{row_number}.X: {before_formula}"
+                    )
+                detach_items.append({
+                    "shape_id": sid,
+                    "endpoint": endpoint,
+                    "expected_target_shape_id": target_sid,
+                    "expected_target_connection_row": row_number,
+                    "source_x_name": source_x_name,
+                    "source_y_name": source_y_name,
+                })
+
+            raw_glue_items = json.loads(glue_items_json)
+            if not isinstance(raw_glue_items, list) or len(raw_glue_items) > 32:
+                raise ValueError("glue_items_json must be a JSON array with at most 32 items")
+            glue_items = []
+            seen_glue = set()
+            for raw in raw_glue_items:
+                if not isinstance(raw, dict):
+                    raise ValueError("each glue item must be an object")
+                sid = int(raw["shape_id"])
+                if sid not in shape_ids:
+                    raise ValueError(f"glue shape_id {sid} is not in moved shape IDs")
+                endpoint = str(raw["endpoint"]).strip().lower()
+                if endpoint not in {"begin", "end"}:
+                    raise ValueError(f"glue endpoint must be begin/end for shape {sid}")
+                target_sid = int(raw["target_shape_id"])
+                row_number = int(raw["target_connection_row"])
+                if target_sid <= 0:
+                    raise ValueError("glue target_shape_id must be positive")
+                if row_number < 1 or row_number > 256:
+                    raise ValueError("glue target_connection_row must be within 1..256")
+                key = (sid, endpoint)
+                if key in seen_glue:
+                    raise ValueError(f"duplicate glue endpoint for shape {sid}: {endpoint}")
+                seen_glue.add(key)
+                target = page_obj.Shapes.ItemFromID(target_sid)
+                target_cell_name = f"Connections.X{row_number}"
+                if not bool(target.CellExistsU(target_cell_name, 0)):
+                    raise KeyError(f"Target shape {target_sid} has no {target_cell_name}")
+                glue_items.append({
+                    "shape_id": sid,
+                    "endpoint": endpoint,
+                    "target_shape_id": target_sid,
+                    "target_connection_row": row_number,
+                })
+
+            previous_ids = []
+            try:
+                previous = window.Selection
+                for index in range(1, int(previous.Count) + 1):
+                    previous_ids.append(int(previous.Item(index).ID))
+            except Exception:
+                previous_ids = []
+
+            def select_ids(ids):
+                window.DeselectAll()
+                for sid in ids:
+                    window.Select(page_obj.Shapes.ItemFromID(int(sid)), 2)  # visSelect
+
+            select_ids(shape_ids)
+            selected = window.Selection
+            if int(selected.Count) != len(shape_ids):
+                raise RuntimeError(
+                    f"Visio selected {int(selected.Count)} shapes, expected {len(shape_ids)}"
+                )
+
+            scope_id = int(document.BeginUndoScope("EnergoLogic: Move Shapes Exact"))
+            committed = False
+            try:
+                detach_results = []
+                detach_tolerance_mm = 0.01
+                for item in detach_items:
+                    shape = page_obj.Shapes.ItemFromID(item["shape_id"])
+                    x_cell, y_cell, x_name, y_name = endpoint_cells(shape, item["endpoint"])
+                    before_x_formula = str(x_cell.FormulaU)
+                    before_y_formula = str(y_cell.FormulaU)
+                    before_x_mm = float(x_cell.ResultIU) * 25.4
+                    before_y_mm = float(y_cell.ResultIU) * 25.4
+                    x_cell.FormulaU = f"{before_x_mm:.12g} mm"
+                    y_cell.FormulaU = f"{before_y_mm:.12g} mm"
+                    after_x_formula = str(x_cell.FormulaU)
+                    after_y_formula = str(y_cell.FormulaU)
+                    after_x_mm = float(x_cell.ResultIU) * 25.4
+                    after_y_mm = float(y_cell.ResultIU) * 25.4
+                    if (
+                        abs(after_x_mm - before_x_mm) > detach_tolerance_mm
+                        or abs(after_y_mm - before_y_mm) > detach_tolerance_mm
+                    ):
+                        raise RuntimeError(
+                            f"Detach changed endpoint coordinates for shape {item['shape_id']}"
+                        )
+                    target = page_obj.Shapes.ItemFromID(item["expected_target_shape_id"])
+                    if connection_formula_matches(
+                        after_x_formula,
+                        str(target.Name),
+                        item["expected_target_connection_row"],
+                    ):
+                        raise RuntimeError(
+                            f"Detach verification failed for shape {item['shape_id']} {x_name}"
+                        )
+                    detach_results.append({
+                        "shape_id": item["shape_id"],
+                        "endpoint": item["endpoint"],
+                        "expected_target_shape_id": item["expected_target_shape_id"],
+                        "expected_target_connection_row": item["expected_target_connection_row"],
+                        "before": {
+                            "x_formula_u": before_x_formula,
+                            "y_formula_u": before_y_formula,
+                            "x_mm": before_x_mm,
+                            "y_mm": before_y_mm,
+                        },
+                        "after": {
+                            "x_formula_u": after_x_formula,
+                            "y_formula_u": after_y_formula,
+                            "x_mm": after_x_mm,
+                            "y_mm": after_y_mm,
+                        },
+                        "verified": True,
+                    })
+
+                selected.Move(dx, dy, "mm")
+
+                moved_snapshot = [
+                    shape_snapshot(page_obj.Shapes.ItemFromID(sid)) for sid in shape_ids
+                ]
+                tolerance_mm = 0.01
+                for source_row, moved_row in zip(source_snapshot, moved_snapshot):
+                    actual_dx = moved_row["pin_x_mm"] - source_row["pin_x_mm"]
+                    actual_dy = moved_row["pin_y_mm"] - source_row["pin_y_mm"]
+                    if abs(actual_dx - dx) > tolerance_mm or abs(actual_dy - dy) > tolerance_mm:
+                        raise RuntimeError(
+                            "Visio exact move verification failed for shape "
+                            f"{source_row['shape_id']}: requested ({dx:.6f}, {dy:.6f}) mm, "
+                            f"got ({actual_dx:.6f}, {actual_dy:.6f}) mm"
+                        )
+
+                glue_results = []
+                for item in glue_items:
+                    shape = page_obj.Shapes.ItemFromID(item["shape_id"])
+                    target = page_obj.Shapes.ItemFromID(item["target_shape_id"])
+                    x_cell, _y_cell, x_name, _y_name = endpoint_cells(shape, item["endpoint"])
+                    target_cell_name = f"Connections.X{item['target_connection_row']}"
+                    target_cell = target.CellsU(target_cell_name)
+                    x_cell.GlueTo(target_cell)
+                    endpoint_formula = str(x_cell.FormulaU)
+                    if not connection_formula_matches(
+                        endpoint_formula,
+                        str(target.Name),
+                        item["target_connection_row"],
+                    ):
+                        raise RuntimeError(
+                            f"Glue formula verification failed for moved shape {item['shape_id']} "
+                            f"to target {item['target_shape_id']} {target_cell_name}: "
+                            f"{endpoint_formula}"
+                        )
+                    glue_results.append({
+                        "shape_id": item["shape_id"],
+                        "endpoint": item["endpoint"],
+                        "target_shape_id": item["target_shape_id"],
+                        "target_connection_row": item["target_connection_row"],
+                        "endpoint_formula_u": endpoint_formula,
+                        "verified": True,
+                    })
+
+                document.EndUndoScope(scope_id, True)
+                committed = True
+            except Exception:
+                try:
+                    document.EndUndoScope(scope_id, False)
+                except Exception:
+                    pass
+                try:
+                    select_ids(previous_ids)
+                except Exception:
+                    pass
+                raise
+
+            if bool(select_result):
+                select_ids(shape_ids)
+            else:
+                try:
+                    select_ids(previous_ids)
+                except Exception:
+                    pass
+
+            return ok({
+                "shape_ids": shape_ids,
+                "source_shapes": source_snapshot,
+                "moved_shapes": moved_snapshot,
+                "dx_mm": dx,
+                "dy_mm": dy,
+                "verification_tolerance_mm": tolerance_mm,
+                "detach_results": detach_results,
+                "glue_results": glue_results,
+                "undo_scope": "EnergoLogic: Move Shapes Exact",
+                "undo_scope_owner": "document",
+                "undo_committed": committed,
+                "result_selected": bool(select_result),
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
     def duplicate_shapes_exact(
         shape_ids_json: str,
         dx_mm: float,
