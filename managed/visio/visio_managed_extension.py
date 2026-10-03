@@ -6,7 +6,7 @@ from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.03.16"
+MANAGED_EXTENSION_VERSION = "2026.10.03.17"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
 
 
@@ -457,7 +457,39 @@ def install(namespace: dict) -> None:
                     raise RuntimeError(
                         f"Visio duplicated {int(duplicated.Count)} shapes, expected {len(shape_ids)}"
                     )
-                duplicated.Move(dx, dy, "mm")
+
+                duplicate_ids_before_move = [
+                    int(duplicated.Item(index).ID)
+                    for index in range(1, int(duplicated.Count) + 1)
+                ]
+                duplicate_snapshot_before_move = [
+                    shape_snapshot(page_obj.Shapes.ItemFromID(sid))
+                    for sid in duplicate_ids_before_move
+                ]
+
+                def centroid(rows):
+                    coords = [
+                        (row["pin_x_mm"], row["pin_y_mm"])
+                        for row in rows
+                        if row["pin_x_mm"] is not None and row["pin_y_mm"] is not None
+                    ]
+                    if len(coords) != len(rows):
+                        raise RuntimeError("Cannot determine selection centroid for exact duplicate")
+                    return (
+                        sum(item[0] for item in coords) / len(coords),
+                        sum(item[1] for item in coords) / len(coords),
+                    )
+
+                source_centroid = centroid(source_snapshot)
+                duplicate_centroid = centroid(duplicate_snapshot_before_move)
+                native_dx = duplicate_centroid[0] - source_centroid[0]
+                native_dy = duplicate_centroid[1] - source_centroid[1]
+                correction_dx = dx - native_dx
+                correction_dy = dy - native_dy
+
+                # Visio Duplicate applies its own UI-style paste offset. Compensate
+                # it so the final engineering displacement equals the request.
+                duplicated.Move(correction_dx, correction_dy, "mm")
                 new_ids = [
                     int(duplicated.Item(index).ID)
                     for index in range(1, int(duplicated.Count) + 1)
@@ -470,6 +502,16 @@ def install(namespace: dict) -> None:
                 new_snapshot = [
                     shape_snapshot(page_obj.Shapes.ItemFromID(sid)) for sid in new_ids
                 ]
+                final_centroid = centroid(new_snapshot)
+                final_dx = final_centroid[0] - source_centroid[0]
+                final_dy = final_centroid[1] - source_centroid[1]
+                tolerance_mm = 0.01
+                if abs(final_dx - dx) > tolerance_mm or abs(final_dy - dy) > tolerance_mm:
+                    raise RuntimeError(
+                        "Visio exact duplicate verification failed: "
+                        f"requested ({dx:.6f}, {dy:.6f}) mm, "
+                        f"got ({final_dx:.6f}, {final_dy:.6f}) mm"
+                    )
 
                 app.EndUndoScope(scope_id, True)
                 committed = True
@@ -499,6 +541,10 @@ def install(namespace: dict) -> None:
                 "new_shapes": new_snapshot,
                 "dx_mm": dx,
                 "dy_mm": dy,
+                "native_duplicate_offset_mm": {"x": native_dx, "y": native_dy},
+                "applied_move_mm": {"x": correction_dx, "y": correction_dy},
+                "verified_final_offset_mm": {"x": final_dx, "y": final_dy},
+                "verification_tolerance_mm": tolerance_mm,
                 "undo_scope": "EnergoLogic: Duplicate Shapes Exact",
                 "undo_committed": committed,
                 "result_selected": bool(select_result),
