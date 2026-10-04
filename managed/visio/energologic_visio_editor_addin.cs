@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.47.0")]
+[assembly: AssemblyVersion("0.3.48.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -105,6 +105,10 @@ namespace EnergoLogicVisioEditor
         string ApiBaseMove(double bx, double by, double tx, double ty);
         string ApiStartBaseCopyInteractive();
         string ApiStartBaseMoveInteractive();
+        string ApiStartBaseCopyCapture();
+        string ApiStartBasePasteInteractive();
+        string ApiClearBaseClipboard();
+        string ApiBaseClipboardStatus();
         string ApiCancelInteractiveMode();
         string ApiInteractionStatus();
         string ApiMeasurePitch();
@@ -125,8 +129,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("C44C4B47-8A58-4E17-9D14-661C91EEF347")]
-    [ProgId("EnergoLogic.VisioEditorAddinV347")]
+    [Guid("64C8B1A5-7993-4CB0-A5FC-95E6D3F5F348")]
+    [ProgId("EnergoLogic.VisioEditorAddinV348")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -170,6 +174,17 @@ namespace EnergoLogicVisioEditor
         private string _interactiveBasePageNameU = "";
         private double _interactiveBaseXmm = 0.0;
         private double _interactiveBaseYmm = 0.0;
+        private string _interactiveBaseMode = "";
+
+        // Reusable same-page base-point copy buffer.
+        private bool _baseClipboardReady = false;
+        private List<int> _baseClipboardSelectionIds = new List<int>();
+        private string _baseClipboardDocumentName = "";
+        private string _baseClipboardPageNameU = "";
+        private double _baseClipboardXmm = 0.0;
+        private double _baseClipboardYmm = 0.0;
+        private readonly List<CommandBarButton> _contextPasteButtons =
+            new List<CommandBarButton>();
 
         private Process _pendingTopologyHelperProcess = null;
         private string _pendingTopologyPlanPath = "";
@@ -228,10 +243,12 @@ namespace EnergoLogicVisioEditor
             _contextHandlers.Clear();
             _contextRoots.Clear();
             _contextHostNames.Clear();
+            _contextPasteButtons.Clear();
             _ribbon = null;
             _contextMenuInstalled = false;
             _contextMenuError = "";
             try { CancelInteractiveBasePoint(false); } catch { }
+            try { ClearBaseClipboard(false); } catch { }
             try { if (_addInInstance != null) { dynamic host = _addInInstance; host.Object = null; } } catch { }
             _addInInstance = null;
             _application = null;
@@ -318,9 +335,10 @@ namespace EnergoLogicVisioEditor
         </group>
 
         <group id=""grpEnergoBasePoint"" label=""Базовая точка"">
-          <button id=""btnELBaseCopy"" label=""Копировать по точке"" imageMso=""Copy"" onAction=""OnRibbonBaseCopy"" keytip=""BC"" screentip=""Копирование относительно базовой точки"" supertip=""1. Выделите элементы. 2. Нажмите команду. 3. Щёлкните базовую точку на схеме. 4. Щёлкните целевую точку. Правый щелчок отменяет режим."" />
-          <button id=""btnELBaseMove"" label=""Переместить по точке"" imageMso=""Cut"" onAction=""OnRibbonBaseMove"" keytip=""BM"" screentip=""Перемещение относительно базовой точки"" supertip=""1. Выделите элементы. 2. Нажмите команду. 3. Щёлкните базовую точку на схеме. 4. Щёлкните целевую точку. Правый щелчок отменяет режим."" />
-          <button id=""btnELCancelMode"" label=""Отменить режим"" imageMso=""CancelRequest"" onAction=""OnRibbonCancelMode"" screentip=""Отменить интерактивную команду"" supertip=""Отменяет текущий режим выбора базовой/целевой точки и ничего не изменяет на схеме."" />
+          <button id=""btnELBaseCopyCapture"" label=""Копировать с базовой точкой"" imageMso=""Copy"" onAction=""OnRibbonBaseCopyCapture"" keytip=""BC"" screentip=""Запомнить выделение и базовую точку"" supertip=""1. Выделите элементы. 2. Нажмите команду. 3. Щёлкните базовую точку. После этого используйте «Вставить по базовой точке» в Ribbon или через ПКМ по пустому месту страницы. Буфер можно вставлять многократно."" />
+          <button id=""btnELBasePaste"" label=""Вставить по базовой точке"" imageMso=""Paste"" onAction=""OnRibbonBasePaste"" keytip=""BP"" screentip=""Вставить копию относительно запомненной базы"" supertip=""Требует ранее выполненное «Копировать с базовой точкой». Нажмите команду и щёлкните целевую точку. Исходное выделение копируется со смещением «цель − база». Буфер остаётся доступным для следующих вставок."" />
+          <button id=""btnELBaseMove"" label=""Переместить по базовой точке"" imageMso=""Cut"" onAction=""OnRibbonBaseMove"" keytip=""BM"" screentip=""Переместить относительно двух указанных точек"" supertip=""1. Выделите элементы. 2. Нажмите команду. 3. Щёлкните базовую точку. 4. Щёлкните целевую точку. Правый щелчок отменяет режим."" />
+          <button id=""btnELCancelMode"" label=""Отменить режим"" imageMso=""CancelRequest"" onAction=""OnRibbonCancelMode"" screentip=""Отменить интерактивную команду"" supertip=""Отменяет текущий выбор базовой или целевой точки. Запомненный буфер копирования при этом сохраняется."" />
         </group>
 
         <group id=""grpEnergoConnections"" label=""Соединения и шина"">
@@ -455,6 +473,22 @@ namespace EnergoLogicVisioEditor
             }
         }
 
+        private void PublishInteractiveStarter(Func<string> starter)
+        {
+            try
+            {
+                string result = starter();
+                EnsureForm().SetStatus(result);
+                ShowTransientStatus(result);
+            }
+            catch (Exception ex)
+            {
+                string message = "⚠ " + ex.GetBaseException().Message;
+                EnsureForm().SetStatus(message);
+                ShowTransientStatus(message);
+            }
+        }
+
         public void OnRibbonPanel(IRibbonControl control) { ShowPanel(); }
         public void OnRibbonHelp(IRibbonControl control) { HelpForm.ShowHelp(BuildHelpText()); }
         public void OnRibbonSelectCell(IRibbonControl control) { PublishUserCommand(() => SelectCell()); }
@@ -465,9 +499,19 @@ namespace EnergoLogicVisioEditor
         public void OnRibbonCaptureSample(IRibbonControl control) { PublishUserCommand(() => CaptureReplacementSample()); }
         public void OnRibbonReplace(IRibbonControl control) { PublishUserCommand(() => ReplaceEquipmentFromSample()); }
         public void OnRibbonInsert(IRibbonControl control) { PublishUserCommand(() => InsertEquipmentIntoConnectionFromSample()); }
-        public void OnRibbonBaseCopy(IRibbonControl control) { StartBasePointFromRibbon(true); }
+        public void OnRibbonBaseCopyCapture(IRibbonControl control)
+        {
+            PublishInteractiveStarter(() => StartBaseCopyCapture());
+        }
+        public void OnRibbonBasePaste(IRibbonControl control)
+        {
+            PublishInteractiveStarter(() => StartBasePasteInteractive());
+        }
         public void OnRibbonBaseMove(IRibbonControl control) { StartBasePointFromRibbon(false); }
-        public void OnRibbonCancelMode(IRibbonControl control) { ShowTransientStatus(CancelInteractiveBasePoint(true)); }
+        public void OnRibbonCancelMode(IRibbonControl control)
+        {
+            ShowTransientStatus(CancelInteractiveBasePoint(true));
+        }
         public void OnRibbonRepairGlue(IRibbonControl control) { PublishUserCommand(() => RepairGlue(false, true)); }
         public void OnRibbonReconnectBegin(IRibbonControl control) { PublishUserCommand(() => ReconnectEndpoint("begin")); }
         public void OnRibbonReconnectEnd(IRibbonControl control) { PublishUserCommand(() => ReconnectEndpoint("end")); }
@@ -511,19 +555,25 @@ namespace EnergoLogicVisioEditor
   Сначала запомните образец. Затем выберите внутреннюю линейную связь ячейки. Связь разрезается, а оборудование вставляется с естественной длиной.
 
 БАЗОВАЯ ТОЧКА
-• Копировать по точке
+• Копировать с базовой точкой
   1) Выделите элементы.
   2) Нажмите команду.
   3) Левой кнопкой укажите базовую точку.
-  4) Левой кнопкой укажите целевую точку.
-  Смещение определяется как «цель − база».
-  Правый щелчок отменяет режим.
+  Выделение и координаты базы сохраняются во внутреннем буфере EnergoLogic.
 
-• Переместить по точке
-  Те же два щелчка, но исходное выделение перемещается вместо копирования.
+• Вставить по базовой точке
+  После копирования нажмите команду и щёлкните целевую точку.
+  Смещение определяется как «цель − сохранённая база».
+  Буфер не очищается после вставки: одну копию можно разместить несколько раз.
+  Текущая реализация намеренно ограничена той же страницей документа.
+
+• Переместить по базовой точке
+  Выберите элементы, затем укажите базовую и целевую точки двумя щелчками.
+  Исходное выделение перемещается без создания копии.
 
 • Отменить режим
-  Отменяет незавершённый интерактивный выбор точек без изменения схемы.
+  Отменяет незавершённый интерактивный выбор точки без изменения схемы.
+  Сохранённый буфер копирования не очищается.
 
 СОЕДИНЕНИЯ И ШИНА
 • Восстановить соединение
@@ -618,6 +668,16 @@ EnergoLogic использует миллиметры в пользовател�
             {
                 RemoveExistingEnergoLogicContextRoot(host);
 
+                string context = "";
+                try
+                {
+                    context = Convert.ToString(
+                        ((dynamic)host).Context,
+                        CultureInfo.InvariantCulture
+                    ) ?? "";
+                }
+                catch { }
+
                 CommandBarPopup root = (CommandBarPopup)host.Controls.Add(
                     MsoControlType.msoControlPopup,
                     Missing.Value,
@@ -631,33 +691,156 @@ EnergoLogic использует миллиметры в пользовател�
                 root.Visible = true;
 
                 CommandBar menu = root.CommandBar;
-                AddContextButton(menu, "Панель…", "Panel", () => ShowPanel(), false);
-                AddContextButton(menu, "Выделить ячейку", "SelectCell",
-                    () => PublishUserCommand(() => SelectCell()), true);
-                AddContextButton(menu, "Копировать ячейку →", "DuplicateRight",
-                    () => PublishUserCommand(() => DuplicateCell(1)), false);
-                AddContextButton(menu, "Переместить ячейку →", "MoveRight",
-                    () => PublishUserCommand(() => MoveCell(1)), false);
-                AddContextButton(menu, "Копировать по базовой точке", "BaseCopy",
-                    () => StartBasePointFromRibbon(true), true);
-                AddContextButton(menu, "Переместить по базовой точке", "BaseMove",
-                    () => StartBasePointFromRibbon(false), false);
-                AddContextButton(menu, "Переподключить начало", "ReconnectBegin",
-                    () => PublishUserCommand(() => ReconnectEndpoint("begin")), true);
-                AddContextButton(menu, "Переподключить конец", "ReconnectEnd",
-                    () => PublishUserCommand(() => ReconnectEndpoint("end")), false);
-                AddContextButton(menu, "Восстановить соединение…", "RepairGlue",
-                    () => PublishUserCommand(() => RepairGlue(false, true)), false);
-                AddContextButton(menu, "Визуальная диагностика", "VisualDiagnostics",
-                    () => PublishDiagnosticCommand("визуальная диагностика", () => VisualDiagnostics()), true);
-                AddContextButton(menu, "Справка EnergoLogic", "Help",
-                    () => HelpForm.ShowHelp(BuildHelpText()), true);
+
+                if (String.Equals(context, "9", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Drawing Object Selected: operations that make sense on the
+                    // currently selected electrical/graphical object.
+                    AddContextButton(
+                        menu,
+                        "Копировать с базовой точкой",
+                        "BaseCopyCapture",
+                        () => PublishInteractiveStarter(
+                            () => StartBaseCopyCapture()
+                        ),
+                        false
+                    );
+                    AddContextButton(
+                        menu,
+                        "Переместить по базовой точке",
+                        "BaseMove",
+                        () => StartBasePointFromRibbon(false),
+                        false
+                    );
+
+                    AddContextButton(
+                        menu,
+                        "Выделить ячейку",
+                        "SelectCell",
+                        () => PublishUserCommand(() => SelectCell()),
+                        true
+                    );
+                    AddContextButton(
+                        menu,
+                        "Копировать ячейку →",
+                        "DuplicateRight",
+                        () => PublishUserCommand(() => DuplicateCell(1)),
+                        false
+                    );
+                    AddContextButton(
+                        menu,
+                        "Переместить ячейку →",
+                        "MoveRight",
+                        () => PublishUserCommand(() => MoveCell(1)),
+                        false
+                    );
+
+                    AddContextButton(
+                        menu,
+                        "Переподключить начало",
+                        "ReconnectBegin",
+                        () => PublishUserCommand(
+                            () => ReconnectEndpoint("begin")
+                        ),
+                        true
+                    );
+                    AddContextButton(
+                        menu,
+                        "Переподключить конец",
+                        "ReconnectEnd",
+                        () => PublishUserCommand(
+                            () => ReconnectEndpoint("end")
+                        ),
+                        false
+                    );
+                    AddContextButton(
+                        menu,
+                        "Восстановить соединение…",
+                        "RepairGlue",
+                        () => PublishUserCommand(
+                            () => RepairGlue(false, true)
+                        ),
+                        false
+                    );
+                    AddContextButton(
+                        menu,
+                        "Диагностика шины",
+                        "BusDiagnostics",
+                        () => PublishDiagnosticCommand(
+                            "диагностика шины",
+                            () => BusDiagnostics()
+                        ),
+                        true
+                    );
+                }
+                else if (String.Equals(
+                    context,
+                    "75",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    // Drawing Page Selected: page-level actions, especially paste
+                    // to an arbitrary target point.
+                    CommandBarButton pasteButton = AddContextButton(
+                        menu,
+                        "Вставить по базовой точке",
+                        "BasePaste",
+                        () => PublishInteractiveStarter(
+                            () => StartBasePasteInteractive()
+                        ),
+                        false
+                    );
+                    _contextPasteButtons.Add(pasteButton);
+
+                    AddContextButton(
+                        menu,
+                        "Проверка связей",
+                        "Doctor",
+                        () => PublishDiagnosticCommand(
+                            "проверка связей",
+                            () => Doctor()
+                        ),
+                        true
+                    );
+                    AddContextButton(
+                        menu,
+                        "Визуальная диагностика",
+                        "VisualDiagnostics",
+                        () => PublishDiagnosticCommand(
+                            "визуальная диагностика",
+                            () => VisualDiagnostics()
+                        ),
+                        false
+                    );
+                    AddContextButton(
+                        menu,
+                        "Точные параметры…",
+                        "Panel",
+                        () => ShowPanel(),
+                        true
+                    );
+                }
+
+                AddContextButton(
+                    menu,
+                    "Справка EnergoLogic",
+                    "Help",
+                    () => HelpForm.ShowHelp(BuildHelpText()),
+                    true
+                );
 
                 _contextRoots.Add(root);
                 string hostName = "";
-                try { hostName = Convert.ToString(host.Name, CultureInfo.InvariantCulture) ?? ""; } catch { }
+                try
+                {
+                    hostName = Convert.ToString(
+                        host.Name,
+                        CultureInfo.InvariantCulture
+                    ) ?? "";
+                }
+                catch { }
                 _contextHostNames.Add(hostName);
             }
+            UpdateContextPasteButtons();
         }
 
         private void RemoveExistingEnergoLogicContextRoot(CommandBar host)
@@ -676,7 +859,7 @@ EnergoLogic использует миллиметры в пользовател�
             }
         }
 
-        private void AddContextButton(
+        private CommandBarButton AddContextButton(
             CommandBar menu,
             string caption,
             string tagSuffix,
@@ -705,6 +888,15 @@ EnergoLogic использует миллиметры в пользовател�
             button.Click += handler;
             _contextButtons.Add(button);
             _contextHandlers.Add(handler);
+            return button;
+        }
+
+        private void UpdateContextPasteButtons()
+        {
+            foreach (CommandBarButton button in _contextPasteButtons)
+            {
+                try { button.Enabled = _baseClipboardReady; } catch { }
+            }
         }
 
         internal string UiStatus()
@@ -713,13 +905,14 @@ EnergoLogic использует миллиметры в пользовател�
             try { panelVisible = _form != null && !_form.IsDisposed && _form.Visible; } catch { }
             return String.Format(
                 CultureInfo.CurrentCulture,
-                "Ribbon={0}; ContextMenu={1}; ContextHosts={2}; Panel={3}; FallbackToolbar=hidden{4}",
+                "Ribbon={0}; ContextMenu={1}; ContextHosts={2}; Panel={3}; BaseClipboard={4}; FallbackToolbar=hidden{5}",
                 _ribbon != null ? "loaded" : "not_loaded",
                 _contextMenuInstalled ? "installed" : "not_installed",
                 _contextHostNames.Count == 0
                     ? "none"
                     : String.Join(",", _contextHostNames.ToArray()),
                 panelVisible ? "visible" : "hidden",
+                _baseClipboardReady ? "ready" : "empty",
                 String.IsNullOrWhiteSpace(_contextMenuError)
                     ? ""
                     : "; ContextError=" + _contextMenuError
@@ -757,6 +950,10 @@ EnergoLogic использует миллиметры в пользовател�
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiStartBaseCopyInteractive() { return StartInteractiveBasePoint(true); }
         public string ApiStartBaseMoveInteractive() { return StartInteractiveBasePoint(false); }
+        public string ApiStartBaseCopyCapture() { return StartBaseCopyCapture(); }
+        public string ApiStartBasePasteInteractive() { return StartBasePasteInteractive(); }
+        public string ApiClearBaseClipboard() { return ClearBaseClipboard(true); }
+        public string ApiBaseClipboardStatus() { return BaseClipboardStatus(); }
         public string ApiCancelInteractiveMode() { return CancelInteractiveBasePoint(true); }
         public string ApiInteractionStatus() { return InteractiveModeStatus(); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
@@ -777,7 +974,7 @@ EnergoLogic использует миллиметры в пользовател�
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.47"; }
+        public string ApiVersion() { return "0.3.48"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1713,6 +1910,148 @@ EnergoLogic использует миллиметры в пользовател�
             finally { app.EndUndoScope(scope, commit); }
         }
 
+        internal string StartBaseCopyCapture()
+        {
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count == 0)
+                throw new InvalidOperationException(
+                    "Сначала выделите элементы, которые нужно скопировать"
+                );
+
+            CancelInteractiveBasePoint(false);
+            _interactiveBaseMode = "capture_copy_base";
+            _interactiveBaseStage = 1;
+            _interactiveBaseSelectionIds = new List<int>(ids);
+            _interactiveBaseDocumentName = Convert.ToString(
+                page.Document.Name,
+                CultureInfo.InvariantCulture
+            ) ?? "";
+            _interactiveBasePageNameU = Convert.ToString(
+                page.NameU,
+                CultureInfo.InvariantCulture
+            ) ?? "";
+            RegisterInteractiveMouseEvent(app);
+
+            return
+                "Копирование с базовой точкой: щёлкните ЛКМ базовую точку. " +
+                "После этого вставку можно вызвать через Ribbon или ПКМ по пустому месту.";
+        }
+
+        internal string StartBasePasteInteractive()
+        {
+            if (!_baseClipboardReady)
+                throw new InvalidOperationException(
+                    "Буфер базовой точки пуст. Сначала выполните «Копировать с базовой точкой»."
+                );
+
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            string documentName = Convert.ToString(
+                page.Document.Name,
+                CultureInfo.InvariantCulture
+            ) ?? "";
+            string pageName = Convert.ToString(
+                page.NameU,
+                CultureInfo.InvariantCulture
+            ) ?? "";
+
+            if (!String.Equals(
+                    documentName,
+                    _baseClipboardDocumentName,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(
+                    pageName,
+                    _baseClipboardPageNameU,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    "Буфер базовой точки относится к другой странице. " +
+                    "Скопируйте элементы заново на текущей странице."
+                );
+
+            ValidateBaseClipboardShapes(page);
+            CancelInteractiveBasePoint(false);
+            _interactiveBaseMode = "paste_target";
+            _interactiveBaseStage = 3;
+            _interactiveBaseDocumentName = documentName;
+            _interactiveBasePageNameU = pageName;
+            RegisterInteractiveMouseEvent(app);
+
+            return String.Format(
+                CultureInfo.CurrentCulture,
+                "Вставка по базовой точке: щёлкните ЛКМ целевую точку. " +
+                "Сохранённая база X={0:0.###} мм, Y={1:0.###} мм. " +
+                "Правый щелчок отменяет вставку, но не очищает буфер.",
+                _baseClipboardXmm,
+                _baseClipboardYmm
+            );
+        }
+
+        internal string BaseClipboardStatus()
+        {
+            if (!_baseClipboardReady)
+                return "Буфер базовой точки пуст.";
+            return String.Format(
+                CultureInfo.CurrentCulture,
+                "Буфер базовой точки готов: элементов {0}; база X={1:0.###} мм, " +
+                "Y={2:0.###} мм; страница {3}.",
+                _baseClipboardSelectionIds.Count,
+                _baseClipboardXmm,
+                _baseClipboardYmm,
+                _baseClipboardPageNameU
+            );
+        }
+
+        internal string ClearBaseClipboard(bool report)
+        {
+            bool wasReady = _baseClipboardReady;
+            _baseClipboardReady = false;
+            _baseClipboardSelectionIds = new List<int>();
+            _baseClipboardDocumentName = "";
+            _baseClipboardPageNameU = "";
+            _baseClipboardXmm = 0.0;
+            _baseClipboardYmm = 0.0;
+            UpdateContextPasteButtons();
+            return report
+                ? (wasReady
+                    ? "✓ Буфер базовой точки очищен."
+                    : "Буфер базовой точки уже пуст.")
+                : "";
+        }
+
+        private void ValidateBaseClipboardShapes(dynamic page)
+        {
+            if (_baseClipboardSelectionIds.Count == 0)
+                throw new InvalidOperationException(
+                    "Буфер базовой точки не содержит элементов"
+                );
+            foreach (int id in _baseClipboardSelectionIds)
+            {
+                try { page.Shapes.ItemFromID(id); }
+                catch
+                {
+                    ClearBaseClipboard(false);
+                    throw new InvalidOperationException(
+                        "Исходное выделение из буфера изменилось или было удалено. " +
+                        "Скопируйте элементы заново."
+                    );
+                }
+            }
+        }
+
+        private void RegisterInteractiveMouseEvent(dynamic app)
+        {
+            dynamic eventList = app.EventList;
+            _interactiveMouseEvent = eventList.AddAdvise(
+                (short)709,
+                this,
+                "",
+                "EnergoLogic.BasePoint"
+            );
+            _interactiveBaseActive = true;
+        }
+
         internal string StartInteractiveBasePoint(bool copy)
         {
             dynamic app = App;
@@ -1727,6 +2066,7 @@ EnergoLogic использует миллиметры в пользовател�
             CancelInteractiveBasePoint(false);
 
             _interactiveBaseCopy = copy;
+            _interactiveBaseMode = copy ? "quick_copy" : "quick_move";
             _interactiveBaseStage = 1;
             _interactiveBaseSelectionIds = new List<int>(ids);
             _interactiveBaseDocumentName = Convert.ToString(
@@ -1740,14 +2080,7 @@ EnergoLogic использует миллиметры в пользовател�
 
             // Visio visEvtCodeMouseDown = 709. AddAdvise notifications provide a
             // MouseEvent subject with Button/x/y in internal drawing units.
-            dynamic eventList = app.EventList;
-            _interactiveMouseEvent = eventList.AddAdvise(
-                (short)709,
-                this,
-                "",
-                "EnergoLogic.BasePoint"
-            );
-            _interactiveBaseActive = true;
+            RegisterInteractiveMouseEvent(app);
 
             return (copy
                 ? "Копирование по базовой точке"
@@ -1760,7 +2093,11 @@ EnergoLogic использует миллиметры в пользовател�
             if (!_interactiveBaseActive)
                 return "Интерактивный режим не активен.";
             if (_interactiveBaseStage == 1)
-                return "Ожидание базовой точки.";
+                return _interactiveBaseMode == "capture_copy_base"
+                    ? "Ожидание базовой точки для копирования."
+                    : "Ожидание базовой точки.";
+            if (_interactiveBaseStage == 3)
+                return "Ожидание целевой точки для вставки из буфера.";
             if (_interactiveBaseStage == 2)
                 return String.Format(
                     CultureInfo.CurrentCulture,
@@ -1781,6 +2118,7 @@ EnergoLogic использует миллиметры в пользовател�
             _interactiveMouseEvent = null;
             _interactiveBaseActive = false;
             _interactiveBaseCopy = false;
+            _interactiveBaseMode = "";
             _interactiveBaseStage = 0;
             _interactiveBaseSelectionIds = new List<int>();
             _interactiveBaseDocumentName = "";
@@ -1856,6 +2194,61 @@ EnergoLogic использует миллиметры в пользовател�
                     CancelInteractiveBasePoint(false);
                     ShowTransientStatus(
                         "⚠ Страница изменилась. Режим базовой точки отменён."
+                    );
+                    return true;
+                }
+
+                if (_interactiveBaseMode == "capture_copy_base" &&
+                    _interactiveBaseStage == 1)
+                {
+                    _baseClipboardReady = true;
+                    _baseClipboardSelectionIds = new List<int>(
+                        _interactiveBaseSelectionIds
+                    );
+                    _baseClipboardDocumentName = _interactiveBaseDocumentName;
+                    _baseClipboardPageNameU = _interactiveBasePageNameU;
+                    _baseClipboardXmm = xmm;
+                    _baseClipboardYmm = ymm;
+                    CancelInteractiveBasePoint(false);
+                    UpdateContextPasteButtons();
+
+                    string captured = String.Format(
+                        CultureInfo.CurrentCulture,
+                        "✓ Базовая точка копирования запомнена: X={0:0.###} мм, " +
+                        "Y={1:0.###} мм; элементов {2}. " +
+                        "Теперь используйте «Вставить по базовой точке».",
+                        xmm,
+                        ymm,
+                        _baseClipboardSelectionIds.Count
+                    );
+                    EnsureForm().SetStatus(captured);
+                    ShowTransientStatus(captured);
+                    return true;
+                }
+
+                if (_interactiveBaseMode == "paste_target" &&
+                    _interactiveBaseStage == 3)
+                {
+                    ValidateBaseClipboardShapes(page);
+                    List<int> selection = new List<int>(
+                        _baseClipboardSelectionIds
+                    );
+                    double bx = _baseClipboardXmm;
+                    double by = _baseClipboardYmm;
+                    CancelInteractiveBasePoint(false);
+
+                    SelectIds(page, selection);
+                    string result = BasePointTransform(
+                        true,
+                        bx,
+                        by,
+                        xmm,
+                        ymm
+                    );
+                    EnsureForm().SetStatus(result);
+                    ShowTransientStatus(
+                        result +
+                        " Буфер сохранён — можно вставить ещё одну копию."
                     );
                     return true;
                 }
