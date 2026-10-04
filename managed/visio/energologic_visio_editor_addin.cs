@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.42.0")]
+[assembly: AssemblyVersion("0.3.43.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -121,8 +121,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("9B58B36A-B7CF-4A30-825B-0D71D24AF342")]
-    [ProgId("EnergoLogic.VisioEditorAddinV342")]
+    [Guid("8A0C9D8A-956F-4E64-B991-9A88F39AF343")]
+    [ProgId("EnergoLogic.VisioEditorAddinV343")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -571,7 +571,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.42"; }
+        public string ApiVersion() { return "0.3.43"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -3415,97 +3415,173 @@ namespace EnergoLogicVisioEditor
             HashSet<string> connected =
                 new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // Microsoft Visio guarantees that Page.Connects contains one Connect
-            // object for every connection on the page. This avoids recursively
-            // querying Shape.Connects for every top-level and nested shape.
-            dynamic connects = page.Connects;
-            int count = 0;
-            try { count = Convert.ToInt32(connects.Count, CultureInfo.InvariantCulture); }
-            catch { count = 0; }
-
-            for (int index = 1; index <= count; index++)
+            // VTD live qualification proved Shape.Connects authoritative in this
+            // host. Scan each shape's native collection exactly once, instead of
+            // calling TryGetGlueTarget separately for Begin and End.
+            Action<dynamic> inspect = null;
+            inspect = source =>
             {
-                dynamic connect;
-                try { connect = connects.Item(index); }
-                catch { continue; }
-
-                dynamic source;
-                dynamic target;
-                string fromName;
-                string toName;
                 int sourceId;
-                int targetId;
+                try { sourceId = Convert.ToInt32(source.ID, CultureInfo.InvariantCulture); }
+                catch { return; }
+
+                HashSet<string> nativeEndpoints =
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
-                    source = connect.FromSheet;
-                    target = connect.ToSheet;
-                    fromName = Convert.ToString(
-                        connect.FromCell.NameU,
-                        CultureInfo.InvariantCulture
-                    ) ?? "";
-                    toName = Convert.ToString(
-                        connect.ToCell.NameU,
-                        CultureInfo.InvariantCulture
-                    ) ?? "";
-                    sourceId = Convert.ToInt32(source.ID, CultureInfo.InvariantCulture);
-                    targetId = Convert.ToInt32(target.ID, CultureInfo.InvariantCulture);
-                }
-                catch { continue; }
-
-                string sourceEndpoint = "";
-                if (String.Equals(fromName, "BeginX", StringComparison.OrdinalIgnoreCase))
-                    sourceEndpoint = "begin";
-                else if (String.Equals(fromName, "EndX", StringComparison.OrdinalIgnoreCase))
-                    sourceEndpoint = "end";
-                if (!String.IsNullOrEmpty(sourceEndpoint))
-                    connected.Add(EndpointKey(sourceId, sourceEndpoint));
-
-                Match cellMatch = _connectionCellRegex.Match(toName);
-                if (!cellMatch.Success) continue;
-                int row = cellMatch.Groups[1].Success
-                    ? Int32.Parse(cellMatch.Groups[1].Value, CultureInfo.InvariantCulture)
-                    : Int32.Parse(cellMatch.Groups[2].Value, CultureInfo.InvariantCulture);
-
-                // If the target connection point lies exactly on a top-level
-                // Begin/End endpoint, mark that receiving endpoint connected too.
-                try
-                {
-                    double pageX = 0.0, pageY = 0.0;
-                    if (!TryGetConnectionPointPageCoordinates(
-                            target,
-                            row,
-                            out pageX,
-                            out pageY))
-                        continue;
-
-                    int endpointOwnerId = targetId;
-                    int ownerId;
-                    if (childParent.TryGetValue(targetId, out ownerId))
-                        endpointOwnerId = ownerId;
-                    dynamic endpointOwner = page.Shapes.ItemFromID(endpointOwnerId);
-                    double pointX = pageX * 25.4;
-                    double pointY = pageY * 25.4;
-
-                    foreach (string endpoint in new[] { "begin", "end" })
+                    dynamic connects = source.Connects;
+                    int count = Convert.ToInt32(connects.Count, CultureInfo.InvariantCulture);
+                    for (int index = 1; index <= count; index++)
                     {
-                        if (!HasEndpoint(endpointOwner, endpoint)) continue;
-                        double endpointX = GetMm(
-                            endpointOwner,
-                            endpoint == "begin" ? "BeginX" : "EndX"
+                        dynamic connect;
+                        dynamic target;
+                        string fromName;
+                        string toName;
+                        int targetId;
+                        try
+                        {
+                            connect = connects.Item(index);
+                            target = connect.ToSheet;
+                            fromName = Convert.ToString(
+                                connect.FromCell.NameU,
+                                CultureInfo.InvariantCulture
+                            ) ?? "";
+                            toName = Convert.ToString(
+                                connect.ToCell.NameU,
+                                CultureInfo.InvariantCulture
+                            ) ?? "";
+                            targetId = Convert.ToInt32(
+                                target.ID,
+                                CultureInfo.InvariantCulture
+                            );
+                        }
+                        catch { continue; }
+
+                        string sourceEndpoint = "";
+                        if (String.Equals(
+                                fromName,
+                                "BeginX",
+                                StringComparison.OrdinalIgnoreCase))
+                            sourceEndpoint = "begin";
+                        else if (String.Equals(
+                                fromName,
+                                "EndX",
+                                StringComparison.OrdinalIgnoreCase))
+                            sourceEndpoint = "end";
+                        if (String.IsNullOrEmpty(sourceEndpoint)) continue;
+
+                        connected.Add(EndpointKey(sourceId, sourceEndpoint));
+                        nativeEndpoints.Add(sourceEndpoint);
+
+                        Match cellMatch = _connectionCellRegex.Match(toName);
+                        if (!cellMatch.Success) continue;
+                        int row = cellMatch.Groups[1].Success
+                            ? Int32.Parse(
+                                cellMatch.Groups[1].Value,
+                                CultureInfo.InvariantCulture
+                              )
+                            : Int32.Parse(
+                                cellMatch.Groups[2].Value,
+                                CultureInfo.InvariantCulture
+                              );
+                        MarkReceivingEndpointConnected(
+                            page,
+                            childParent,
+                            target,
+                            targetId,
+                            row,
+                            connected
                         );
-                        double endpointY = GetMm(
-                            endpointOwner,
-                            endpoint == "begin" ? "BeginY" : "EndY"
-                        );
-                        double dx = pointX - endpointX;
-                        double dy = pointY - endpointY;
-                        if (Math.Sqrt(dx * dx + dy * dy) <= 0.02)
-                            connected.Add(EndpointKey(endpointOwnerId, endpoint));
                     }
                 }
                 catch { }
-            }
+
+                // Bounded fallback for the short post-GlueTo interval where Visio
+                // may expose the ShapeSheet formula before Shape.Connects catches up.
+                foreach (string endpoint in new[] { "begin", "end" })
+                {
+                    if (nativeEndpoints.Contains(endpoint) ||
+                        !HasEndpoint(source, endpoint))
+                        continue;
+
+                    GlueTarget formulaTarget = null;
+                    try { formulaTarget = TryGetGlueTargetFromFormula(source, endpoint); }
+                    catch { formulaTarget = null; }
+                    if (formulaTarget == null) continue;
+
+                    connected.Add(EndpointKey(sourceId, endpoint));
+                    try
+                    {
+                        dynamic target = page.Shapes.ItemFromID(formulaTarget.TargetId);
+                        MarkReceivingEndpointConnected(
+                            page,
+                            childParent,
+                            target,
+                            formulaTarget.TargetId,
+                            formulaTarget.Row,
+                            connected
+                        );
+                    }
+                    catch { }
+                }
+
+                try
+                {
+                    for (int child = 1; child <= (int)source.Shapes.Count; child++)
+                        inspect(source.Shapes.Item(child));
+                }
+                catch { }
+            };
+
+            for (int index = 1; index <= (int)page.Shapes.Count; index++)
+                inspect(page.Shapes.Item(index));
             return connected;
+        }
+
+        private void MarkReceivingEndpointConnected(
+            dynamic page,
+            Dictionary<int, int> childParent,
+            dynamic target,
+            int targetId,
+            int row,
+            HashSet<string> connected)
+        {
+            try
+            {
+                double pageX = 0.0, pageY = 0.0;
+                if (!TryGetConnectionPointPageCoordinates(
+                        target,
+                        row,
+                        out pageX,
+                        out pageY))
+                    return;
+
+                int endpointOwnerId = targetId;
+                int ownerId;
+                if (childParent.TryGetValue(targetId, out ownerId))
+                    endpointOwnerId = ownerId;
+                dynamic endpointOwner = page.Shapes.ItemFromID(endpointOwnerId);
+                double pointX = pageX * 25.4;
+                double pointY = pageY * 25.4;
+
+                foreach (string endpoint in new[] { "begin", "end" })
+                {
+                    if (!HasEndpoint(endpointOwner, endpoint)) continue;
+                    double endpointX = GetMm(
+                        endpointOwner,
+                        endpoint == "begin" ? "BeginX" : "EndX"
+                    );
+                    double endpointY = GetMm(
+                        endpointOwner,
+                        endpoint == "begin" ? "BeginY" : "EndY"
+                    );
+                    double dx = pointX - endpointX;
+                    double dy = pointY - endpointY;
+                    if (Math.Sqrt(dx * dx + dy * dy) <= 0.02)
+                        connected.Add(EndpointKey(endpointOwnerId, endpoint));
+                }
+            }
+            catch { }
         }
 
         private int GetConnectionPointRowCount(dynamic shape)

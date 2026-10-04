@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.04.142"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.04.143"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.04.142"
+    assert arguments["version"] == "2026.10.04.143"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.04.142"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.04.143"}'}],
                 "isError": False,
             }
 
@@ -279,8 +279,8 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV342")' in cs
-    assert 'AssemblyVersion("0.3.42.0")' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV343")' in cs
+    assert 'AssemblyVersion("0.3.43.0")' in cs
     assert "public interface IEnergoLogicEditorApi" in cs
     assert "ClassInterface(ClassInterfaceType.AutoDual)" in cs
     assert "ApiDuplicateRight" in cs
@@ -288,7 +288,7 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     assert "ApiShowPanel" in cs
     assert "host.Object = this" in cs
     assert "def invoke_energologic_editor_api(" in ext
-    assert 'addins.Item("EnergoLogic.VisioEditorAddinV342")' in ext
+    assert 'addins.Item("EnergoLogic.VisioEditorAddinV343")' in ext
     assert '"duplicate_right": "ApiDuplicateRight"' in ext
     assert '"repair_glue_apply": "ApiRepairGlueApply"' in ext
 
@@ -326,7 +326,7 @@ def test_editor_cell_discovery_surfaces_inner_reason():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "Причина: " in cs
     assert "last.Message" in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_uses_robust_com_cell_exists_conversion():
@@ -337,7 +337,7 @@ def test_editor_uses_robust_com_cell_exists_conversion():
     assert "(bool)shape.CellExistsU" not in cs
     assert "(bool)target.CellExistsU" not in cs
     assert "(bool)terminal.CellExistsU" not in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_has_no_unsafe_explicit_dynamic_bool_casts():
@@ -345,7 +345,7 @@ def test_editor_has_no_unsafe_explicit_dynamic_bool_casts():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "(bool)" not in cs
     assert "Convert.ToInt32(sectionExistsRaw, CultureInfo.InvariantCulture) == 0" in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_uses_native_visio_connects_as_topology_source():
@@ -356,7 +356,7 @@ def test_editor_uses_native_visio_connects_as_topology_source():
     assert "connect.ToCell.NameU" in cs
     assert "connect.ToSheet.ID" in cs
     assert 'private readonly Regex _connectionCellRegex' in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_formula_fallback_resolves_vtd_shape_names_not_only_sheet_ids():
@@ -366,7 +366,7 @@ def test_editor_formula_fallback_resolves_vtd_shape_names_not_only_sheet_ids():
     assert "candidate.NameU" in cs
     assert "candidate.Name" in cs
     assert 'Regex.Match(targetRef, @"^Sheet\\.(\\d+)$"' in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v28_repair_glue_understands_incoming_native_connects():
@@ -403,6 +403,7 @@ def test_editor_builds_native_glue_index_once_per_diagnostic_command():
 
 
 
+
 def test_editor_v30_uses_current_source_shape_for_native_connect_index():
     from pathlib import Path
     cs = (
@@ -412,12 +413,10 @@ def test_editor_v30_uses_current_source_shape_for_native_connect_index():
     start = cs.index("private HashSet<string> BuildConnectedEndpointIndex(")
     end = cs.index("private int GetConnectionPointRowCount", start)
     block = cs[start:end]
-    assert "source = connect.FromSheet;" in block
+    assert "dynamic connects = source.Connects;" in block
     assert "connect.FromCell.NameU" in block
-    assert 'String.Equals(fromName, "BeginX"' in block
-    assert 'String.Equals(fromName, "EndX"' in block
+    assert 'String.Equals(' in block and '"BeginX"' in block and '"EndX"' in block
     assert "connected.Add(EndpointKey(sourceId, sourceEndpoint))" in block
-    # Repair Glue keeps the ambiguity fail-closed guard.
     assert "ambiguity = String.Join" in cs
     assert "автоматический ремонт запрещён:" in cs
 
@@ -432,11 +431,11 @@ def test_editor_v31_reuses_proven_glue_target_parser_for_connectivity_index():
     start = cs.index("private HashSet<string> BuildConnectedEndpointIndex(")
     end = cs.index("private int GetConnectionPointRowCount", start)
     block = cs[start:end]
-    assert "target = connect.ToSheet;" in block
-    assert "connect.ToCell.NameU" in block
+    assert "dynamic connects = source.Connects;" in block
     assert "_connectionCellRegex.Match(toName)" in block
-    assert "TryGetConnectionPointPageCoordinates(" in block
-    assert "connected.Add(EndpointKey(endpointOwnerId, endpoint))" in block
+    assert "MarkReceivingEndpointConnected(" in block
+    assert "TryGetGlueTargetFromFormula(source, endpoint)" in block
+    assert "inspect(source.Shapes.Item(child))" in block
 
 
 def test_editor_v32_product_bundle_has_safe_base_copy_coordinates_nudge_and_renumber():
@@ -476,7 +475,7 @@ def test_editor_v33_distribute_pitch_avoids_dynamic_tuple_binder():
     assert "new CellMoveState" in cs
     assert "Tuple.Create(cells[i], target)" not in cs
     assert "Tuple<CellInfo, dynamic>" not in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v34_restores_and_verifies_internal_glue_after_moves():
@@ -492,7 +491,7 @@ def test_editor_v34_restores_and_verifies_internal_glue_after_moves():
     assert "VerifyInternalGlue(page, state.InternalGlue)" in cs
     assert "RestoreInternalGlue(page, internalGlue)" in cs
     assert "Visio потерял внутренние Glue при копировании ячейки" in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v35_verifies_glue_against_formula_when_connects_lag():
@@ -502,7 +501,7 @@ def test_editor_v35_verifies_glue_against_formula_when_connects_lag():
     assert "GlueTarget formulaTarget = TryGetGlueTargetFromFormula(shape, endpoint)" in cs
     assert "formulaTarget.TargetId == targetId && formulaTarget.Row == row" in cs
     assert "source {0} {1}; expected {2}/{3}" in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v36_settles_visio_before_restoring_glue():
@@ -512,7 +511,7 @@ def test_editor_v36_settles_visio_before_restoring_glue():
     assert "System.Windows.Forms.Application.DoEvents()" in cs
     assert "System.Threading.Thread.Sleep(25)" in cs
     assert cs.count("SettleVisioAfterGeometryChange();") >= 5
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v37_restores_topology_after_geometry_scope_and_compensates():
@@ -526,7 +525,7 @@ def test_editor_v37_restores_topology_after_geometry_scope_and_compensates():
     assert "Исходная геометрия и Glue восстановлены." in cs
     assert 'App.ActiveWindow.Selection.Move(-state.Dx, -state.Dy, "mm")' in cs
     assert "RestoreCellTopologyAfterMove(page, state)" in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v38_schedules_post_return_topology_completion():
@@ -543,7 +542,7 @@ def test_editor_v38_schedules_post_return_topology_completion():
     assert "VerifyMovedCellsComplete" in cs
     assert "public void SetStatus(string value)" in cs
     assert '"operation_status": "ApiOperationStatus"' in ext
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v38_installer_migrates_legacy_versions_and_disconnect_cleans_ui():
@@ -556,7 +555,7 @@ def test_editor_v38_installer_migrates_legacy_versions_and_disconnect_cleans_ui(
     for version in range(31, 38):
         assert f"EnergoLogic.VisioEditorAddinV{version}" in ext
     assert 'stale_bar = app.CommandBars.Item("EnergoLogic")' in ext
-    assert '"migration": "v3.1-v3.41 -> v3.42"' in ext
+    assert '"migration": "v3.1-v3.42 -> v3.43"' in ext
 
 
 def test_editor_v39_normalizes_non_bus_child_glue_into_cell_graph():
@@ -632,7 +631,7 @@ def test_editor_v314_normalizes_half_glued_endpoint_before_native_glue():
     glue_retry = cs[cs.index("private void GlueEndpointWithRetry"):cs.index("private void VerifyGlue")]
     assert glue_retry.index("VerifyGlue(shape, endpoint, targetId, row);") < glue_retry.index("System.Windows.Forms.Application.DoEvents();")
     assert "attempt <= 6" in glue_retry
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v315_suppresses_visio_events_only_around_native_glue_retry():
@@ -645,7 +644,7 @@ def test_editor_v315_suppresses_visio_events_only_around_native_glue_retry():
     assert "App.EventsEnabled = previousEventsEnabled;" in glue_retry
     assert glue_retry.index("App.EventsEnabled = 0;") < glue_retry.index("GlueEndpoint(shape, endpoint, target, row);")
     assert "6 event-isolated попыток" in glue_retry
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v316_uses_external_process_boundary_for_pending_topology():
@@ -664,7 +663,7 @@ def test_editor_v316_uses_external_process_boundary_for_pending_topology():
     assert ".GlueTo(" in helper
     assert "TOPOLOGY_HELPER_SOURCE_B64" in ext
     assert "helper_compile_args" in ext
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 
@@ -678,7 +677,7 @@ def test_editor_v317_external_plan_is_complete_and_not_inprocess_prefiltered():
     assert "Dictionary<string, GlueEdgeInfo> unique" in block
     assert '"EDGE\\t{0}\\t{1}\\t{2}\\t{3}"' in block
     assert "Topology plan contains conflicting targets" in block
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 def test_editor_v318_restores_bus_anchor_before_internal_edges():
     from pathlib import Path
@@ -690,7 +689,7 @@ def test_editor_v318_restores_bus_anchor_before_internal_edges():
     internal = block.index("foreach (GlueEdgeInfo edge in state.InternalGlue)")
     assert anchor < internal
     assert "TargetId = state.TargetTerminalId" in block
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 def test_editor_v319_binds_and_resolves_explicit_cell_identity():
     from pathlib import Path
@@ -710,7 +709,7 @@ def test_editor_v319_binds_and_resolves_explicit_cell_identity():
     assert "conflicting" not in bind.lower() or "конфликтующие EnergoLogicCellId" in bind
     assert '"bind_cell_identity": "ApiBindCellIdentity"' in ext
     assert 'ButtonWide("Закрепить состав ячейки"' in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v319_identity_membership_is_not_geometry_derived():
@@ -745,7 +744,7 @@ def test_editor_v320_replaces_equipment_from_sample_fail_closed():
     assert "app.EndUndoScope(scope, commit)" in replace
     assert '"capture_replacement_sample": "ApiCaptureReplacementSample"' in ext
     assert '"replace_equipment_from_sample": "ApiReplaceEquipmentFromSample"' in ext
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 def test_editor_v320_has_visio_2010_replacement_fallback():
     from pathlib import Path
@@ -772,7 +771,7 @@ def test_editor_v321_defers_replacement_topology_until_after_callback():
     assert "RestoreReplacementTopology(" not in replace
     assert "VerifyReplacementTopology(" not in replace
     assert "ReplacementCompletionState pending" in replace
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 
@@ -809,7 +808,7 @@ def test_editor_v322_requires_consecutive_clean_replacement_topology_cycles():
     assert "completedCycles >= 6" in complete
     assert '"state=stabilizing; token="' in complete
     assert "topology стабилизирована" in complete
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v322_ui_keeps_polling_while_stabilizing():
@@ -830,7 +829,7 @@ def test_editor_v323_has_no_post_verification_visio_or_ui_mutation():
     tail = complete[complete.index("lock (_asyncSync)", complete.index("catch (Exception topologyError)")):]
     assert "_form.SetStatus(finalMessage)" not in tail
     assert "The caller owns status rendering" in tail
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v323_ui_timer_owns_topology_status_rendering():
@@ -858,7 +857,7 @@ def test_editor_v324_external_helper_owns_glue_truth():
     assert '"PASS\\t" +' in helper
     assert "repaired.ToString" in helper
     assert "verified.ToString" in helper
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 
@@ -919,7 +918,7 @@ def test_editor_v326_replacement_does_not_touch_visio_after_helper_pass():
     for forbidden in ("ResolveLivePage(", "Shapes.ItemFromID", "GetMm(", "GetCellIdentity(", "DiscoverCell(", "SelectIds("):
         assert forbidden not in branch
     assert "verifiedGlue = replacement.ExpectedGlue.Count;" in branch
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v327_defaults_to_drop_rewire_on_modern_visio():
@@ -932,7 +931,7 @@ def test_editor_v327_defaults_to_drop_rewire_on_modern_visio():
     assert "if (!useNativeReplaceShape)" in replace
     assert "target.Delete();" in replace
     assert "delayed dependency rewrite" in replace
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v328_bind_identity_no_longer_mutates_electrical_shapes():
@@ -971,7 +970,7 @@ def test_editor_v329_preserves_one_dimensional_endpoint_geometry():
     assert 'SetMm(replacement, "EndX", oldEndX)' in replace
     assert 'SetMm(replacement, "EndY", oldEndY)' in replace
     assert "engineering length оборудования" in replace
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v330_cell_identity_is_pagesheet_backed():
@@ -989,7 +988,7 @@ def test_editor_v330_cell_identity_is_pagesheet_backed():
     assert "page.PageSheet" in setter
     assert "pageSheet.AddNamedRow" in setter
     assert 'shape.AddNamedRow' not in setter
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v330_bind_identity_does_not_schedule_topology_repair():
@@ -1016,10 +1015,10 @@ def test_editor_current_build_has_unique_com_class_guid():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert '[Guid("9B58B36A-B7CF-4A30-825B-0D71D24AF342")]' in cs
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV342")' in cs
-    assert 'clsid = "{9B58B36A-B7CF-4A30-825B-0D71D24AF342}"' in ext
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert '[Guid("8A0C9D8A-956F-4E64-B991-9A88F39AF343")]' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV343")' in cs
+    assert 'clsid = "{8A0C9D8A-956F-4E64-B991-9A88F39AF343}"' in ext
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 def test_editor_v332_glues_replacement_bus_anchor_in_process():
     from pathlib import Path
@@ -1033,7 +1032,7 @@ def test_editor_v332_glues_replacement_bus_anchor_in_process():
     assert anchor < glue < delete
     assert "page.Shapes.ItemFromID(cell.BusTerminalId)" in block[anchor:delete]
     assert "VerifyGlue(" in block[anchor:delete]
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v332_has_unique_com_class_guid():
@@ -1041,9 +1040,9 @@ def test_editor_v332_has_unique_com_class_guid():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert '[Guid("9B58B36A-B7CF-4A30-825B-0D71D24AF342")]' in cs
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV342")' in cs
-    assert 'clsid = "{9B58B36A-B7CF-4A30-825B-0D71D24AF342}"' in ext
+    assert '[Guid("8A0C9D8A-956F-4E64-B991-9A88F39AF343")]' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV343")' in cs
+    assert 'clsid = "{8A0C9D8A-956F-4E64-B991-9A88F39AF343}"' in ext
 
 
 def test_editor_insert_equipment_api_is_exposed_in_ui_and_managed_bridge():
@@ -1057,7 +1056,7 @@ def test_editor_insert_equipment_api_is_exposed_in_ui_and_managed_bridge():
     assert '"insert_equipment_into_connection_from_sample": "ApiInsertEquipmentIntoConnectionFromSample"' in ext
     assert 'ButtonWide("Вставить образец в связь"' in cs
     assert "RunInsertEquipment()" in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 def test_editor_v334_splits_connection_around_natural_length_equipment():
     from pathlib import Path
@@ -1079,7 +1078,7 @@ def test_editor_v334_splits_connection_around_natural_length_equipment():
     assert 'connection,\n                        "end"' in block
     assert "ExpectedMemberCount = cell.MemberIds.Count + 1" in block
     assert "FindConnectionPointRowAtEndpoint" in block
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v334_capture_sample_builds_vtd_insert_port_profile():
@@ -1109,7 +1108,7 @@ def test_editor_v335_bus_editing_uses_native_vtd_shape_data():
     assert "EnsureTerminalFree(page, lastTerminalId" in cs
     assert '"extend_bus_right": "ApiExtendBusRight"' in ext
     assert '"trim_bus_right": "ApiTrimBusRight"' in ext
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v335_dynamic_bus_slots_use_vtd_user_nt_ut():
@@ -1165,7 +1164,7 @@ def test_editor_v336_normalizes_incoming_child_glue_to_top_level_endpoint():
     assert "endpointOwnerId = ownerId" in block
     assert "dynamic endpointOwner = page.Shapes.ItemFromID(endpointOwnerId)" in block
     assert "connected.Add(EndpointKey(endpointOwnerId, endpoint))" in block
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v336_repair_and_diagnostics_ignore_own_group_children():
@@ -1196,7 +1195,7 @@ def test_editor_v337_resolves_both_vtd_connection_row_name_forms():
     index = cs[cs.index("private HashSet<string> BuildConnectedEndpointIndex"):start]
     assert "_connectionCellRegex.Match(toName)" in index
     assert "TryGetConnectionPointPageCoordinates" in index
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v337_connection_point_scan_deduplicates_aliases():
@@ -1229,7 +1228,7 @@ def test_editor_v338_exposes_native_ribbon_and_context_menu():
     assert "ApiUiStatus()" in cs
     assert '"ui_status": "ApiUiStatus"' in ext
     assert 'native RibbonX + drawing context menu + modeless WinForms parameter panel' in ext
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v338_ribbon_commands_use_shared_async_aware_command_runner():
@@ -1277,7 +1276,7 @@ def test_editor_v339_installs_submenu_into_existing_visio_drawing_popups():
     assert "RemoveExistingEnergoLogicContextRoot(host)" in block
     assert "_contextRoots.Add(root)" in block
     assert "_contextHostNames.Add(hostName)" in block
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v339_disconnect_deletes_only_energologic_context_roots():
@@ -1296,7 +1295,7 @@ def test_editor_v340_context_submenu_uses_static_commandbar_type():
     assert "CommandBar menu = root.CommandBar;" in cs
     assert "private void AddContextButton(\n            CommandBar menu," in cs
     assert "dynamic menu = root.CommandBar" not in cs
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v341_uses_live_qualified_visio_popup_context_ids():
@@ -1310,25 +1309,26 @@ def test_editor_v341_uses_live_qualified_visio_popup_context_ids():
     assert 'String.Equals(context, "2"' not in block
     assert "Drawing Object Selected" in block
     assert "Drawing Page Selected" in block
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
-def test_editor_v342_diagnostics_use_page_connects_snapshot():
+
+def test_editor_v343_diagnostics_scan_each_shape_connects_once():
     from pathlib import Path
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     start = cs.index("private HashSet<string> BuildConnectedEndpointIndex(")
     end = cs.index("private int GetConnectionPointRowCount", start)
     block = cs[start:end]
-    assert "dynamic connects = page.Connects;" in block
-    assert "connect.FromSheet" in block
-    assert "connect.ToSheet" in block
+    assert "dynamic connects = source.Connects;" in block
     assert "connect.FromCell.NameU" in block
     assert "connect.ToCell.NameU" in block
-    assert "inspect(source.Shapes.Item(child))" not in block
+    assert "dynamic connects = page.Connects;" not in block
+    assert "TryGetGlueTarget(source, sourceEndpoint)" not in block
+    assert "TryGetGlueTargetFromFormula(source, endpoint)" in block
+    assert "inspect(source.Shapes.Item(child))" in block
     visual = cs[cs.index("internal string VisualDiagnostics()"):cs.index("private dynamic ResolveSelectedBus")]
     assert "BuildConnectedEndpointIndex(page, visualChildParent)" in visual
-    assert 'ApiVersion() { return "0.3.42"; }' in cs
-
+    assert 'ApiVersion() { return "0.3.43"; }' in cs
 
 
 def test_editor_v342_connection_points_use_cellssrc():
@@ -1344,3 +1344,14 @@ def test_editor_v342_connection_points_use_cellssrc():
     assert "(short)(row - 1)" in block
     assert "string[][] aliases" not in block
     assert "shape.CellsU(names[0])" not in block
+
+
+def test_editor_v343_receiving_endpoint_normalization_is_shared():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    start = cs.index("private void MarkReceivingEndpointConnected(")
+    end = cs.index("private int GetConnectionPointRowCount", start)
+    block = cs[start:end]
+    assert "TryGetConnectionPointPageCoordinates(" in block
+    assert "childParent.TryGetValue(targetId, out ownerId)" in block
+    assert "connected.Add(EndpointKey(endpointOwnerId, endpoint))" in block
