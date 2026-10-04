@@ -2386,7 +2386,7 @@ namespace EnergoLogicVisioEditor
                 string formula = Convert.ToString(cell.FormulaU, CultureInfo.InvariantCulture) ?? "";
                 formula = formula.Trim();
                 if (formula.Length >= 2 && formula[0] == '"' && formula[formula.Length - 1] == '"')
-                    return formula.Substring(1, formula.Length - 2).Replace("""", """);
+                    return formula.Substring(1, formula.Length - 2).Replace("\"\"", "\"");
             }
             catch { }
             return "";
@@ -2441,7 +2441,7 @@ namespace EnergoLogicVisioEditor
             string cellName = "User." + rowName;
             if (!CellExists(pageSheet, cellName))
                 pageSheet.AddNamedRow(visSectionUser, rowName, 0);
-            pageSheet.CellsU(cellName).FormulaU = """ + (cellId ?? "").Replace(""", """") + """;
+            pageSheet.CellsU(cellName).FormulaU = "\"" + (cellId ?? "").Replace("\"", "\"\"") + "\"";
         }
     }
 

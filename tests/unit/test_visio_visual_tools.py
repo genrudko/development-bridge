@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.04.128"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.04.129"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.04.128"
+    assert arguments["version"] == "2026.10.04.129"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.04.128"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.04.129"}'}],
                 "isError": False,
             }
 
@@ -985,3 +985,10 @@ def test_editor_v330_bind_identity_does_not_schedule_topology_repair():
     assert "ScheduleStableTopologyCompletion" not in block
     assert "CaptureInternalGlue" not in block
     assert "BuildReplacementExpectedGlue" not in block
+
+
+def test_editor_v330_pagesheet_string_escaping_is_valid_csharp():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    assert '.Replace("\\\"\\\"", "\\\"")' in cs
+    assert 'FormulaU = "\\\"" + (cellId ?? "").Replace("\\\"", "\\\"\\\"") + "\\\"";' in cs
