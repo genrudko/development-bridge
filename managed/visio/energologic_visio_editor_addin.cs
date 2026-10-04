@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.35.0")]
+[assembly: AssemblyVersion("0.3.36.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -120,8 +120,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("6F661F76-44D3-4CC8-8B2B-E64E8F8BF335")]
-    [ProgId("EnergoLogic.VisioEditorAddinV335")]
+    [Guid("98DC22DA-BC28-48C5-B79B-C90E6A7CF336")]
+    [ProgId("EnergoLogic.VisioEditorAddinV336")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -283,7 +283,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.35"; }
+        public string ApiVersion() { return "0.3.36"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1500,6 +1500,7 @@ namespace EnergoLogicVisioEditor
             dynamic shape = page.Shapes.ItemFromID(ids[0]);
             List<ConnectionPointInfo> points = GetAllConnectionPoints(page);
             HashSet<string> connectedEndpoints = BuildConnectedEndpointIndex(page);
+            Dictionary<int, int> repairChildParent = BuildChildParentMap(page);
             List<Tuple<string, double, double>> endpoints = new List<Tuple<string, double, double>>();
             foreach (string endpoint in new[] { "begin", "end" })
             {
@@ -1514,7 +1515,11 @@ namespace EnergoLogicVisioEditor
             {
                 foreach (ConnectionPointInfo p in points)
                 {
-                    if (p.ShapeId == ids[0]) continue;
+                    int pointOwner;
+                    if (p.ShapeId == ids[0] ||
+                        (repairChildParent.TryGetValue(p.ShapeId, out pointOwner) &&
+                         pointOwner == ids[0]))
+                        continue;
                     double d = Math.Sqrt(Math.Pow(p.Xmm - ep.Item2, 2) + Math.Pow(p.Ymm - ep.Item3, 2));
                     if (d <= 1.0)
                     {
@@ -1557,6 +1562,7 @@ namespace EnergoLogicVisioEditor
             dynamic page = App.ActivePage;
             List<ConnectionPointInfo> points = GetAllConnectionPoints(page);
             HashSet<string> connectedEndpoints = BuildConnectedEndpointIndex(page);
+            Dictionary<int, int> doctorChildParent = BuildChildParentMap(page);
             List<int> bad = new List<int>();
             List<string> messages = new List<string>();
             for (int i = 1; i <= (int)page.Shapes.Count; i++)
@@ -1568,7 +1574,17 @@ namespace EnergoLogicVisioEditor
                     if (!HasEndpoint(shape, ep) || connectedEndpoints.Contains(EndpointKey(id, ep))) continue;
                     double x = GetMm(shape, ep == "begin" ? "BeginX" : "EndX");
                     double y = GetMm(shape, ep == "begin" ? "BeginY" : "EndY");
-                    var near = points.Where(p => p.ShapeId != id && Math.Sqrt(Math.Pow(p.Xmm - x, 2) + Math.Pow(p.Ymm - y, 2)) <= 0.8).ToList();
+                    var near = points.Where(p =>
+                    {
+                        int owner;
+                        if (p.ShapeId == id) return false;
+                        if (doctorChildParent.TryGetValue(p.ShapeId, out owner) && owner == id)
+                            return false;
+                        return Math.Sqrt(
+                            Math.Pow(p.Xmm - x, 2) +
+                            Math.Pow(p.Ymm - y, 2)
+                        ) <= 0.8;
+                    }).ToList();
                     if (near.Count > 0)
                     {
                         bad.Add(id);
@@ -1774,9 +1790,11 @@ namespace EnergoLogicVisioEditor
             List<ConnectionPointInfo> candidates = new List<ConnectionPointInfo>();
             foreach (ConnectionPointInfo p in GetAllConnectionPoints(page))
             {
-                if (p.ShapeId == sourceId) continue;
-
                 int owner;
+                if (p.ShapeId == sourceId ||
+                    (childParent.TryGetValue(p.ShapeId, out owner) && owner == sourceId))
+                    continue;
+
                 if (childParent.TryGetValue(p.ShapeId, out owner))
                 {
                     try
@@ -1857,6 +1875,7 @@ namespace EnergoLogicVisioEditor
             dynamic page = App.ActivePage;
             List<ConnectionPointInfo> points = GetAllConnectionPoints(page);
             HashSet<string> connectedEndpoints = BuildConnectedEndpointIndex(page);
+            Dictionary<int, int> visualChildParent = BuildChildParentMap(page);
             HashSet<int> problemIds = new HashSet<int>();
             List<string> messages = new List<string>();
 
@@ -1873,9 +1892,16 @@ namespace EnergoLogicVisioEditor
                     double x = GetMm(shape, endpoint == "begin" ? "BeginX" : "EndX");
                     double y = GetMm(shape, endpoint == "begin" ? "BeginY" : "EndY");
                     bool near = points.Any(p =>
-                        p.ShapeId != id &&
-                        Math.Sqrt(Math.Pow(p.Xmm - x, 2) + Math.Pow(p.Ymm - y, 2)) <= 0.8
-                    );
+                    {
+                        int owner;
+                        if (p.ShapeId == id) return false;
+                        if (visualChildParent.TryGetValue(p.ShapeId, out owner) && owner == id)
+                            return false;
+                        return Math.Sqrt(
+                            Math.Pow(p.Xmm - x, 2) +
+                            Math.Pow(p.Ymm - y, 2)
+                        ) <= 0.8;
+                    });
                     if (near)
                     {
                         problemIds.Add(id);
@@ -3090,6 +3116,7 @@ namespace EnergoLogicVisioEditor
         private HashSet<string> BuildConnectedEndpointIndex(dynamic page)
         {
             HashSet<string> connected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<int, int> childParent = BuildChildParentMap(page);
             Action<dynamic> inspect = null;
             inspect = source =>
             {
@@ -3118,15 +3145,26 @@ namespace EnergoLogicVisioEditor
                         target.XYToPage(localX, localY, out pageX, out pageY);
                         double pointX = pageX * 25.4;
                         double pointY = pageY * 25.4;
+                        int endpointOwnerId = glue.TargetId;
+                        int ownerId;
+                        if (childParent.TryGetValue(glue.TargetId, out ownerId))
+                            endpointOwnerId = ownerId;
+                        dynamic endpointOwner = page.Shapes.ItemFromID(endpointOwnerId);
                         foreach (string targetEndpoint in new[] { "begin", "end" })
                         {
-                            if (!HasEndpoint(target, targetEndpoint)) continue;
-                            double endpointX = GetMm(target, targetEndpoint == "begin" ? "BeginX" : "EndX");
-                            double endpointY = GetMm(target, targetEndpoint == "begin" ? "BeginY" : "EndY");
+                            if (!HasEndpoint(endpointOwner, targetEndpoint)) continue;
+                            double endpointX = GetMm(
+                                endpointOwner,
+                                targetEndpoint == "begin" ? "BeginX" : "EndX"
+                            );
+                            double endpointY = GetMm(
+                                endpointOwner,
+                                targetEndpoint == "begin" ? "BeginY" : "EndY"
+                            );
                             double dx = pointX - endpointX;
                             double dy = pointY - endpointY;
                             if (Math.Sqrt(dx * dx + dy * dy) <= 0.02)
-                                connected.Add(EndpointKey(glue.TargetId, targetEndpoint));
+                                connected.Add(EndpointKey(endpointOwnerId, targetEndpoint));
                         }
                     }
                     catch { }
