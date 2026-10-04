@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.33.0")]
+[assembly: AssemblyVersion("0.3.34.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -114,8 +114,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("92191C8E-1C12-4F3E-A012-95A3E431F333")]
-    [ProgId("EnergoLogic.VisioEditorAddinV333")]
+    [Guid("F7028167-E35C-4AD5-AD2A-4AA1D248F334")]
+    [ProgId("EnergoLogic.VisioEditorAddinV334")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -138,6 +138,8 @@ namespace EnergoLogicVisioEditor
         private ReplacementCompletionState _pendingReplacement = null;
         private object _replacementMaster = null;
         private string _replacementMasterName = "";
+        private string _replacementInsertSourceEndpoint = "";
+        private int _replacementInsertReceiveRow = 0;
         private Process _pendingTopologyHelperProcess = null;
         private string _pendingTopologyPlanPath = "";
         private string _pendingTopologyResultPath = "";
@@ -269,7 +271,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.33"; }
+        public string ApiVersion() { return "0.3.34"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -496,7 +498,41 @@ namespace EnergoLogicVisioEditor
 
             _replacementMaster = master;
             _replacementMasterName = name;
-            return "✓ Образец замены запомнен: " + name + ".";
+            _replacementInsertSourceEndpoint = "";
+            _replacementInsertReceiveRow = 0;
+
+            try
+            {
+                GlueTarget begin = TryGetGlueTarget(shape, "begin");
+                GlueTarget end = TryGetGlueTarget(shape, "end");
+                if ((begin == null) != (end == null))
+                {
+                    _replacementInsertSourceEndpoint = begin != null ? "begin" : "end";
+                    string receiveEndpoint = _replacementInsertSourceEndpoint == "begin" ? "end" : "begin";
+                    _replacementInsertReceiveRow = FindConnectionPointRowAtEndpoint(
+                        shape,
+                        receiveEndpoint,
+                        0.10
+                    );
+                }
+            }
+            catch
+            {
+                _replacementInsertSourceEndpoint = "";
+                _replacementInsertReceiveRow = 0;
+            }
+
+            string insertProfile =
+                !String.IsNullOrWhiteSpace(_replacementInsertSourceEndpoint) &&
+                _replacementInsertReceiveRow > 0
+                ? String.Format(
+                    CultureInfo.CurrentCulture,
+                    " Профиль вставки: {0} → Connections.{1}.",
+                    _replacementInsertSourceEndpoint,
+                    _replacementInsertReceiveRow
+                )
+                : " Профиль вставки не определён; образец доступен только для замены.";
+            return "✓ Образец замены запомнен: " + name + "." + insertProfile;
         }
 
         internal string ReplaceEquipmentFromSample()
@@ -690,6 +726,12 @@ namespace EnergoLogicVisioEditor
         {
             if (_replacementMaster == null)
                 throw new InvalidOperationException("Сначала выберите элемент-образец и нажмите «Запомнить образец»");
+            if (String.IsNullOrWhiteSpace(_replacementInsertSourceEndpoint) ||
+                _replacementInsertReceiveRow <= 0)
+                throw new InvalidOperationException(
+                    "У образца не удалось определить безопасный VTD port profile для вставки. " +
+                    "Для этого master доступна только замена оборудования."
+                );
 
             dynamic app = App;
             dynamic page = app.ActivePage;
@@ -697,8 +739,8 @@ namespace EnergoLogicVisioEditor
             if (ids.Count != 1)
                 throw new InvalidOperationException("Для вставки выберите ровно одну 1-D связь");
 
-            int oldId = ids[0];
-            dynamic connection = page.Shapes.ItemFromID(oldId);
+            int connectionId = ids[0];
+            dynamic connection = page.Shapes.ItemFromID(connectionId);
             if (!HasEndpoint(connection, "begin") || !HasEndpoint(connection, "end"))
                 throw new InvalidOperationException("Выбранный объект не является 1-D связью с Begin/End");
 
@@ -706,10 +748,10 @@ namespace EnergoLogicVisioEditor
             if (String.IsNullOrWhiteSpace(cellId))
                 throw new InvalidOperationException("Перед вставкой закрепите состав ячейки");
 
-            CellInfo cell = DiscoverCell(page, oldId);
-            if (oldId == cell.AnchorId)
+            CellInfo cell = DiscoverCell(page, connectionId);
+            if (connectionId == cell.AnchorId)
                 throw new InvalidOperationException(
-                    "Нельзя вставлять оборудование заменой bus-anchor связи; выберите внутреннюю 1-D связь"
+                    "Нельзя разрезать bus-anchor ячейки; выберите внутреннюю 1-D связь"
                 );
 
             GlueTarget beginTarget = TryGetGlueTarget(connection, "begin");
@@ -719,18 +761,24 @@ namespace EnergoLogicVisioEditor
                     "Для вставки выбранная связь должна иметь Glue на обоих концах"
                 );
 
-            // A connection used as a target by another member cannot be replaced by
-            // one apparatus without a richer port mapping.
             List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
-            if (internalGlue.Any(edge => edge.TargetId == oldId))
+            if (internalGlue.Any(edge => edge.TargetId == connectionId))
                 throw new InvalidOperationException(
-                    "К выбранной связи подключены другие элементы; вставка требует отдельного port mapping"
+                    "К выбранной связи подключены другие элементы; автоматический разрез неоднозначен"
                 );
 
             double beginX = GetMm(connection, "BeginX");
             double beginY = GetMm(connection, "BeginY");
             double endX = GetMm(connection, "EndX");
             double endY = GetMm(connection, "EndY");
+            double dx = endX - beginX;
+            double dy = endY - beginY;
+            double connectionLength = Math.Sqrt(dx * dx + dy * dy);
+            if (connectionLength < 2.0)
+                throw new InvalidOperationException("Выбранная связь слишком короткая для вставки");
+
+            double ux = dx / connectionLength;
+            double uy = dy / connectionLength;
             double centerX = (beginX + endX) / 2.0;
             double centerY = (beginY + endY) / 2.0;
 
@@ -738,36 +786,122 @@ namespace EnergoLogicVisioEditor
             bool commit = false;
             try
             {
-                // Detach the old connector before dropping the apparatus so VTD sees
-                // a single authoritative path throughout the transaction.
-                DetachEndpoint(connection, "begin");
-                DetachEndpoint(connection, "end");
-
                 dynamic inserted = page.Drop(_replacementMaster, centerX / 25.4, centerY / 25.4);
                 if (inserted == null)
                     throw new InvalidOperationException("Visio не вернул вставленный shape");
+                int insertedId = Convert.ToInt32(inserted.ID, CultureInfo.InvariantCulture);
 
-                int newId = Convert.ToInt32(inserted.ID, CultureInfo.InvariantCulture);
                 if (!HasEndpoint(inserted, "begin") || !HasEndpoint(inserted, "end"))
                     throw new InvalidOperationException(
-                        "Master-образец не является совместимым 1-D оборудованием с Begin/End"
+                        "Master-образец не является совместимым 1-D оборудованием"
+                    );
+                string receiveEndpoint =
+                    _replacementInsertSourceEndpoint == "begin" ? "end" : "begin";
+                int liveReceiveRow = FindConnectionPointRowAtEndpoint(inserted, receiveEndpoint, 0.10);
+                if (liveReceiveRow != _replacementInsertReceiveRow)
+                    throw new InvalidOperationException(
+                        "Port profile master изменился после Drop; автоматическая вставка остановлена"
                     );
 
-                SetCellIdentity(inserted, cellId);
-                SetMm(inserted, "BeginX", beginX);
-                SetMm(inserted, "BeginY", beginY);
-                SetMm(inserted, "EndX", endX);
-                SetMm(inserted, "EndY", endY);
+                double nativeBeginX = GetMm(inserted, "BeginX");
+                double nativeBeginY = GetMm(inserted, "BeginY");
+                double nativeEndX = GetMm(inserted, "EndX");
+                double nativeEndY = GetMm(inserted, "EndY");
+                double nativeLength = Math.Sqrt(
+                    Math.Pow(nativeEndX - nativeBeginX, 2) +
+                    Math.Pow(nativeEndY - nativeBeginY, 2)
+                );
+                const double minLeadMm = 1.0;
+                if (nativeLength < 0.5)
+                    throw new InvalidOperationException("У master некорректная инженерная длина");
+                if (nativeLength + 2.0 * minLeadMm > connectionLength)
+                    throw new InvalidOperationException(
+                        String.Format(
+                            CultureInfo.CurrentCulture,
+                            "Оборудование не помещается в выбранную связь: длина master {0:0.###} мм, " +
+                            "доступно {1:0.###} мм. Нужна более длинная связь или другой аппарат.",
+                            nativeLength,
+                            connectionLength
+                        )
+                    );
 
-                try { connection.Delete(); }
-                catch (Exception ex)
+                // Keep the master at its natural length and align it with the selected
+                // connection. Begin -> End follows the original connection direction.
+                double half = nativeLength / 2.0;
+                double insertBeginX = centerX - ux * half;
+                double insertBeginY = centerY - uy * half;
+                double insertEndX = centerX + ux * half;
+                double insertEndY = centerY + uy * half;
+                SetMm(inserted, "BeginX", insertBeginX);
+                SetMm(inserted, "BeginY", insertBeginY);
+                SetMm(inserted, "EndX", insertEndX);
+                SetMm(inserted, "EndY", insertEndY);
+                SetCellIdentity(inserted, cellId);
+
+                // Split the existing connector instead of deleting it. One side keeps
+                // its original target; the other side terminates at the apparatus'
+                // receive port. The apparatus' source endpoint takes the opposite
+                // original target.
+                DetachEndpoint(connection, "begin");
+                DetachEndpoint(connection, "end");
+                dynamic receiveShape = inserted;
+
+                if (_replacementInsertSourceEndpoint == "begin")
                 {
-                    throw new InvalidOperationException("Не удалось удалить исходную связь после вставки", ex);
+                    GlueEndpoint(
+                        inserted,
+                        "begin",
+                        page.Shapes.ItemFromID(beginTarget.TargetId),
+                        beginTarget.Row
+                    );
+                    GlueEndpoint(
+                        connection,
+                        "begin",
+                        receiveShape,
+                        _replacementInsertReceiveRow
+                    );
+                    GlueEndpoint(
+                        connection,
+                        "end",
+                        page.Shapes.ItemFromID(endTarget.TargetId),
+                        endTarget.Row
+                    );
+                }
+                else
+                {
+                    GlueEndpoint(
+                        inserted,
+                        "end",
+                        page.Shapes.ItemFromID(endTarget.TargetId),
+                        endTarget.Row
+                    );
+                    GlueEndpoint(
+                        connection,
+                        "begin",
+                        page.Shapes.ItemFromID(beginTarget.TargetId),
+                        beginTarget.Row
+                    );
+                    GlueEndpoint(
+                        connection,
+                        "end",
+                        receiveShape,
+                        _replacementInsertReceiveRow
+                    );
                 }
 
+                // Verify every newly-authored edge before leaving the UI callback.
+                GlueTarget insertedSource = TryGetGlueTarget(
+                    inserted,
+                    _replacementInsertSourceEndpoint
+                );
+                if (insertedSource == null)
+                    throw new InvalidOperationException("Не удалось подтвердить source-port вставленного аппарата");
+                GlueTarget splitBegin = TryGetGlueTarget(connection, "begin");
+                GlueTarget splitEnd = TryGetGlueTarget(connection, "end");
+                if (splitBegin == null || splitEnd == null)
+                    throw new InvalidOperationException("Не удалось подтвердить оба сегмента разрезанной связи");
+
                 List<GlueEdgeInfo> expected = new List<GlueEdgeInfo>();
-                // Preserve the bus anchor first, followed by every unaffected internal
-                // edge, then the two new apparatus endpoints.
                 expected.Add(new GlueEdgeInfo {
                     SourceId = cell.AnchorId,
                     Endpoint = cell.Endpoint,
@@ -776,44 +910,92 @@ namespace EnergoLogicVisioEditor
                 });
                 foreach (GlueEdgeInfo edge in internalGlue)
                 {
-                    if (edge.SourceId == oldId) continue;
+                    if (edge.SourceId == connectionId) continue;
                     expected.Add(edge);
                 }
                 expected.Add(new GlueEdgeInfo {
-                    SourceId = newId,
-                    Endpoint = "begin",
-                    TargetId = beginTarget.TargetId,
-                    Row = beginTarget.Row
+                    SourceId = insertedId,
+                    Endpoint = _replacementInsertSourceEndpoint,
+                    TargetId = insertedSource.TargetId,
+                    Row = insertedSource.Row
                 });
                 expected.Add(new GlueEdgeInfo {
-                    SourceId = newId,
+                    SourceId = connectionId,
+                    Endpoint = "begin",
+                    TargetId = splitBegin.TargetId,
+                    Row = splitBegin.Row
+                });
+                expected.Add(new GlueEdgeInfo {
+                    SourceId = connectionId,
                     Endpoint = "end",
-                    TargetId = endTarget.TargetId,
-                    Row = endTarget.Row
+                    TargetId = splitEnd.TargetId,
+                    Row = splitEnd.Row
                 });
 
                 List<int> expectedMembers = cell.MemberIds
-                    .Select(id => id == oldId ? newId : id)
+                    .Concat(new[] { insertedId })
                     .Distinct()
                     .OrderBy(id => id)
                     .ToList();
 
                 ReplacementCompletionState pending = new ReplacementCompletionState {
-                    ReplacementId = newId,
+                    ReplacementId = insertedId,
                     CellId = cellId,
                     Xmm = centerX,
                     Ymm = centerY,
-                    ExpectedMemberCount = cell.MemberIds.Count,
+                    ExpectedMemberCount = cell.MemberIds.Count + 1,
                     ExpectedMemberIds = expectedMembers,
                     ExpectedGlue = expected,
-                    SuccessPrefix = "✓ Оборудование вставлено в выбранную связь: " + _replacementMasterName
+                    SuccessPrefix = String.Format(
+                        CultureInfo.CurrentCulture,
+                        "✓ Оборудование вставлено в связь: {0}; исходная связь разрезана, длина аппарата {1:0.###} мм",
+                        _replacementMasterName,
+                        nativeLength
+                    )
                 };
 
-                SelectIds(page, new[] { newId });
+                SelectIds(page, new[] { insertedId });
                 commit = true;
                 return ScheduleStableTopologyCompletion(page, pending);
             }
             finally { app.EndUndoScope(scope, commit); }
+        }
+
+        private int FindConnectionPointRowAtEndpoint(
+            dynamic shape,
+            string endpoint,
+            double toleranceMm)
+        {
+            string xCell = endpoint == "begin" ? "BeginX" : "EndX";
+            string yCell = endpoint == "begin" ? "BeginY" : "EndY";
+            double endpointX = GetMm(shape, xCell);
+            double endpointY = GetMm(shape, yCell);
+            List<Tuple<int, double>> candidates = new List<Tuple<int, double>>();
+            for (int row = 1; row <= 32; row++)
+            {
+                string xName = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
+                string yName = "Connections.Y" + row.ToString(CultureInfo.InvariantCulture);
+                if (!CellExists(shape, xName) || !CellExists(shape, yName)) continue;
+                try
+                {
+                    double localX = (double)shape.CellsU(xName).ResultIU;
+                    double localY = (double)shape.CellsU(yName).ResultIU;
+                    double pageX = 0.0, pageY = 0.0;
+                    shape.XYToPage(localX, localY, out pageX, out pageY);
+                    double dx = pageX * 25.4 - endpointX;
+                    double dy = pageY * 25.4 - endpointY;
+                    double distance = Math.Sqrt(dx * dx + dy * dy);
+                    if (distance <= toleranceMm)
+                        candidates.Add(Tuple.Create(row, distance));
+                }
+                catch { }
+            }
+            if (candidates.Count == 0) return 0;
+            candidates = candidates.OrderBy(item => item.Item2).ToList();
+            if (candidates.Count > 1 &&
+                Math.Abs(candidates[0].Item2 - candidates[1].Item2) < 0.01)
+                return 0;
+            return candidates[0].Item1;
         }
 
         private List<GlueEdgeInfo> BuildReplacementExpectedGlue(
