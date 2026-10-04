@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.37.0")]
+[assembly: AssemblyVersion("0.3.38.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -97,6 +97,7 @@ namespace EnergoLogicVisioEditor
         string ApiReconnectBegin();
         string ApiReconnectEnd();
         string ApiShowPanel();
+        string ApiUiStatus();
         string ApiExactOffset(double dxMm, double dyMm);
         string ApiAlignX();
         string ApiAlignY();
@@ -120,10 +121,10 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("A5BFEB63-9E60-4A1A-A2B3-DBA0EE92F337")]
-    [ProgId("EnergoLogic.VisioEditorAddinV337")]
+    [Guid("1B72DC21-5C05-4531-897A-A53353BDF338")]
+    [ProgId("EnergoLogic.VisioEditorAddinV338")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
-    public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
+    public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
         private object _application;
         private object _addInInstance;
@@ -131,6 +132,13 @@ namespace EnergoLogicVisioEditor
         private CommandBar _bar;
         private CommandBarButton _toggleButton;
         private _CommandBarButtonEvents_ClickEventHandler _toggleHandler;
+        private CommandBar _contextBar;
+        private readonly List<CommandBarButton> _contextButtons = new List<CommandBarButton>();
+        private readonly List<_CommandBarButtonEvents_ClickEventHandler> _contextHandlers =
+            new List<_CommandBarButtonEvents_ClickEventHandler>();
+        private IRibbonUI _ribbon;
+        private bool _contextMenuInstalled = false;
+        private string _contextMenuError = "";
         private readonly object _asyncSync = new object();
         private bool _asyncPending = false;
         private string _asyncToken = "";
@@ -163,8 +171,18 @@ namespace EnergoLogicVisioEditor
             _application = Application;
             _addInInstance = AddInInst;
             try { dynamic host = AddInInst; host.Object = this; } catch { }
-            InstallToggleButton();
-            ShowPanel();
+            try { InstallToggleButton(); } catch { }
+            try
+            {
+                InstallContextMenu();
+                _contextMenuInstalled = true;
+                _contextMenuError = "";
+            }
+            catch (Exception ex)
+            {
+                _contextMenuInstalled = false;
+                _contextMenuError = ex.GetBaseException().Message;
+            }
         }
 
         public void OnDisconnection(ext_DisconnectMode RemoveMode, ref Array custom)
@@ -175,12 +193,23 @@ namespace EnergoLogicVisioEditor
                     _toggleButton.Click -= _toggleHandler;
             }
             catch { }
+            for (int i = 0; i < _contextButtons.Count && i < _contextHandlers.Count; i++)
+            {
+                try { _contextButtons[i].Click -= _contextHandlers[i]; } catch { }
+            }
+            try { if (_contextBar != null) _contextBar.Delete(); } catch { }
             try { if (_form != null && !_form.IsDisposed) _form.Dispose(); } catch { }
             try { if (_bar != null) _bar.Delete(); } catch { }
             _form = null;
             _toggleHandler = null;
             _toggleButton = null;
             _bar = null;
+            _contextButtons.Clear();
+            _contextHandlers.Clear();
+            _contextBar = null;
+            _ribbon = null;
+            _contextMenuInstalled = false;
+            _contextMenuError = "";
             try { if (_addInInstance != null) { dynamic host = _addInInstance; host.Object = null; } } catch { }
             _addInInstance = null;
             _application = null;
@@ -227,7 +256,9 @@ namespace EnergoLogicVisioEditor
             _toggleButton.Visible = true;
             _toggleHandler = new _CommandBarButtonEvents_ClickEventHandler(OnToggleClick);
             _toggleButton.Click += _toggleHandler;
-            _bar.Visible = true;
+            // Keep the legacy toolbar as a non-visible recovery path. The normal
+            // product UI is RibbonX + context menu.
+            _bar.Visible = false;
         }
 
         private void OnToggleClick(CommandBarButton Ctrl, ref bool CancelDefault)
@@ -236,13 +267,189 @@ namespace EnergoLogicVisioEditor
             ShowPanel();
         }
 
-        public void ShowPanel()
+        private EditorForm EnsureForm()
         {
             if (_form == null || _form.IsDisposed)
                 _form = new EditorForm(this);
-            if (!_form.Visible) _form.Show();
-            _form.BringToFront();
-            _form.Activate();
+            return _form;
+        }
+
+        public string GetCustomUI(string RibbonID)
+        {
+            return @"<?xml version=""1.0"" encoding=""UTF-8""?>
+<customUI xmlns=""http://schemas.microsoft.com/office/2006/01/customui"" onLoad=""OnRibbonLoad"">
+  <ribbon>
+    <tabs>
+      <tab id=""tabEnergoLogic"" label=""EnergoLogic"" keytip=""EL"">
+        <group id=""grpEnergoCell"" label=""Ячейка"">
+          <button id=""btnELSelectCell"" label=""Выделить ячейку"" onAction=""OnRibbonSelectCell"" keytip=""S""/>
+          <button id=""btnELDuplicateLeft"" label=""Копировать ←"" onAction=""OnRibbonDuplicateLeft"" keytip=""L""/>
+          <button id=""btnELDuplicateRight"" label=""Копировать →"" onAction=""OnRibbonDuplicateRight"" keytip=""R""/>
+          <button id=""btnELMoveLeft"" label=""Переместить ←"" onAction=""OnRibbonMoveLeft""/>
+          <button id=""btnELMoveRight"" label=""Переместить →"" onAction=""OnRibbonMoveRight""/>
+        </group>
+        <group id=""grpEnergoEquipment"" label=""Оборудование"">
+          <button id=""btnELCaptureSample"" label=""Запомнить образец"" onAction=""OnRibbonCaptureSample""/>
+          <button id=""btnELReplace"" label=""Заменить"" onAction=""OnRibbonReplace""/>
+          <button id=""btnELInsert"" label=""Вставить в связь"" onAction=""OnRibbonInsert""/>
+        </group>
+        <group id=""grpEnergoConnections"" label=""Соединения и шина"">
+          <button id=""btnELRepairGlue"" label=""Repair Glue"" onAction=""OnRibbonRepairGlue""/>
+          <button id=""btnELReconnectBegin"" label=""Reconnect Begin"" onAction=""OnRibbonReconnectBegin""/>
+          <button id=""btnELReconnectEnd"" label=""Reconnect End"" onAction=""OnRibbonReconnectEnd""/>
+          <button id=""btnELExtendBus"" label=""Расширить шину →"" onAction=""OnRibbonExtendBus""/>
+          <button id=""btnELTrimBus"" label=""Обрезать шину"" onAction=""OnRibbonTrimBus""/>
+          <button id=""btnELBusDiag"" label=""Диагностика шины"" onAction=""OnRibbonBusDiagnostics""/>
+        </group>
+        <group id=""grpEnergoGeometry"" label=""Геометрия"">
+          <button id=""btnELAlignX"" label=""Выровнять X"" onAction=""OnRibbonAlignX""/>
+          <button id=""btnELAlignY"" label=""Выровнять Y"" onAction=""OnRibbonAlignY""/>
+          <button id=""btnELCoords"" label=""Координаты"" onAction=""OnRibbonCoordinates""/>
+          <menu id=""menuELPresets"" label=""Пресеты"" keytip=""P"">
+            <button id=""btnELNudge5Left"" label=""Сдвиг 5 мм ←"" onAction=""OnRibbonNudge5Left""/>
+            <button id=""btnELNudge5Right"" label=""Сдвиг 5 мм →"" onAction=""OnRibbonNudge5Right""/>
+            <button id=""btnELNudge5Up"" label=""Сдвиг 5 мм ↑"" onAction=""OnRibbonNudge5Up""/>
+            <button id=""btnELNudge5Down"" label=""Сдвиг 5 мм ↓"" onAction=""OnRibbonNudge5Down""/>
+            <button id=""btnELPitch40"" label=""Шаг ячеек 40 мм"" onAction=""OnRibbonPitch40""/>
+          </menu>
+        </group>
+        <group id=""grpEnergoCheck"" label=""Проверка"">
+          <button id=""btnELVisualDiag"" label=""Визуальная диагностика"" onAction=""OnRibbonVisualDiagnostics"" keytip=""D""/>
+          <button id=""btnELDoctor"" label=""Scheme Doctor"" onAction=""OnRibbonDoctor""/>
+          <button id=""btnELPanel"" label=""Панель…"" size=""large"" onAction=""OnRibbonPanel"" keytip=""O""/>
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>";
+        }
+
+        public void OnRibbonLoad(IRibbonUI ribbonUI)
+        {
+            _ribbon = ribbonUI;
+        }
+
+        private void PublishUserCommand(Func<string> action)
+        {
+            EditorForm form = EnsureForm();
+            try
+            {
+                string result = action();
+                form.AcceptExternalResult(result);
+            }
+            catch (Exception ex)
+            {
+                form.SetStatus("⚠ " + ex.GetBaseException().Message);
+            }
+        }
+
+        public void OnRibbonPanel(IRibbonControl control) { ShowPanel(); }
+        public void OnRibbonSelectCell(IRibbonControl control) { PublishUserCommand(() => SelectCell()); }
+        public void OnRibbonDuplicateLeft(IRibbonControl control) { PublishUserCommand(() => DuplicateCell(-1)); }
+        public void OnRibbonDuplicateRight(IRibbonControl control) { PublishUserCommand(() => DuplicateCell(1)); }
+        public void OnRibbonMoveLeft(IRibbonControl control) { PublishUserCommand(() => MoveCell(-1)); }
+        public void OnRibbonMoveRight(IRibbonControl control) { PublishUserCommand(() => MoveCell(1)); }
+        public void OnRibbonCaptureSample(IRibbonControl control) { PublishUserCommand(() => CaptureReplacementSample()); }
+        public void OnRibbonReplace(IRibbonControl control) { PublishUserCommand(() => ReplaceEquipmentFromSample()); }
+        public void OnRibbonInsert(IRibbonControl control) { PublishUserCommand(() => InsertEquipmentIntoConnectionFromSample()); }
+        public void OnRibbonRepairGlue(IRibbonControl control) { PublishUserCommand(() => RepairGlue(false, true)); }
+        public void OnRibbonReconnectBegin(IRibbonControl control) { PublishUserCommand(() => ReconnectEndpoint("begin")); }
+        public void OnRibbonReconnectEnd(IRibbonControl control) { PublishUserCommand(() => ReconnectEndpoint("end")); }
+        public void OnRibbonExtendBus(IRibbonControl control) { PublishUserCommand(() => ExtendBusRight()); }
+        public void OnRibbonTrimBus(IRibbonControl control) { PublishUserCommand(() => TrimBusRight()); }
+        public void OnRibbonBusDiagnostics(IRibbonControl control) { PublishUserCommand(() => BusDiagnostics()); }
+        public void OnRibbonAlignX(IRibbonControl control) { PublishUserCommand(() => Align("x")); }
+        public void OnRibbonAlignY(IRibbonControl control) { PublishUserCommand(() => Align("y")); }
+        public void OnRibbonCoordinates(IRibbonControl control) { PublishUserCommand(() => Coordinates()); }
+        public void OnRibbonNudge5Left(IRibbonControl control) { PublishUserCommand(() => ExactOffset(-5.0, 0.0)); }
+        public void OnRibbonNudge5Right(IRibbonControl control) { PublishUserCommand(() => ExactOffset(5.0, 0.0)); }
+        public void OnRibbonNudge5Up(IRibbonControl control) { PublishUserCommand(() => ExactOffset(0.0, 5.0)); }
+        public void OnRibbonNudge5Down(IRibbonControl control) { PublishUserCommand(() => ExactOffset(0.0, -5.0)); }
+        public void OnRibbonPitch40(IRibbonControl control) { PublishUserCommand(() => DistributePitch(40.0)); }
+        public void OnRibbonVisualDiagnostics(IRibbonControl control) { PublishUserCommand(() => VisualDiagnostics()); }
+        public void OnRibbonDoctor(IRibbonControl control) { PublishUserCommand(() => Doctor()); }
+
+        private void InstallContextMenu()
+        {
+            dynamic app = App;
+            CommandBars bars = (CommandBars)app.CommandBars;
+            const string contextName = "EnergoLogic.Context";
+            try
+            {
+                CommandBar existing = bars[contextName];
+                if (existing != null) existing.Delete();
+            }
+            catch { }
+
+            _contextBar = bars.Add(
+                contextName,
+                MsoBarPosition.msoBarPopup,
+                Missing.Value,
+                true
+            );
+            dynamic popup = _contextBar;
+            popup.Context = "2"; // visUIObjSetDrawing
+
+            AddContextButton("EnergoLogic — Панель…", "Panel", () => ShowPanel(), false);
+            AddContextButton("Выделить ячейку", "SelectCell", () => PublishUserCommand(() => SelectCell()), true);
+            AddContextButton("Копировать ячейку →", "DuplicateRight", () => PublishUserCommand(() => DuplicateCell(1)), false);
+            AddContextButton("Переместить ячейку →", "MoveRight", () => PublishUserCommand(() => MoveCell(1)), false);
+            AddContextButton("Reconnect End", "ReconnectEnd", () => PublishUserCommand(() => ReconnectEndpoint("end")), true);
+            AddContextButton("Визуальная диагностика", "VisualDiagnostics", () => PublishUserCommand(() => VisualDiagnostics()), true);
+        }
+
+        private void AddContextButton(
+            string caption,
+            string tagSuffix,
+            Action action,
+            bool beginGroup)
+        {
+            CommandBarButton button = (CommandBarButton)_contextBar.Controls.Add(
+                MsoControlType.msoControlButton,
+                Missing.Value,
+                Missing.Value,
+                Missing.Value,
+                true
+            );
+            button.Caption = caption;
+            button.Tag = "EnergoLogic.Context." + tagSuffix;
+            button.Style = MsoButtonStyle.msoButtonCaption;
+            button.BeginGroup = beginGroup;
+            button.Visible = true;
+
+            _CommandBarButtonEvents_ClickEventHandler handler =
+                delegate(CommandBarButton Ctrl, ref bool CancelDefault)
+                {
+                    CancelDefault = false;
+                    action();
+                };
+            button.Click += handler;
+            _contextButtons.Add(button);
+            _contextHandlers.Add(handler);
+        }
+
+        internal string UiStatus()
+        {
+            bool panelVisible = false;
+            try { panelVisible = _form != null && !_form.IsDisposed && _form.Visible; } catch { }
+            return String.Format(
+                CultureInfo.CurrentCulture,
+                "Ribbon={0}; ContextMenu={1}; Panel={2}; FallbackToolbar=hidden{3}",
+                _ribbon != null ? "loaded" : "not_loaded",
+                _contextMenuInstalled ? "installed" : "not_installed",
+                panelVisible ? "visible" : "hidden",
+                String.IsNullOrWhiteSpace(_contextMenuError)
+                    ? ""
+                    : "; ContextError=" + _contextMenuError
+            );
+        }
+
+        public void ShowPanel()
+        {
+            EditorForm form = EnsureForm();
+            if (!form.Visible) form.Show();
+            form.BringToFront();
+            form.Activate();
         }
 
         public string ApiDuplicateLeft() { return DuplicateCell(-1); }
@@ -260,6 +467,7 @@ namespace EnergoLogicVisioEditor
         public string ApiReconnectBegin() { return ReconnectEndpoint("begin"); }
         public string ApiReconnectEnd() { return ReconnectEndpoint("end"); }
         public string ApiShowPanel() { ShowPanel(); return "✓ Панель EnergoLogic показана."; }
+        public string ApiUiStatus() { return UiStatus(); }
         public string ApiExactOffset(double dxMm, double dyMm) { return ExactOffset(dxMm, dyMm); }
         public string ApiAlignX() { return Align("x"); }
         public string ApiAlignY() { return Align("y"); }
@@ -283,7 +491,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.37"; }
+        public string ApiVersion() { return "0.3.38"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -983,7 +1191,8 @@ namespace EnergoLogicVisioEditor
             double endpointX = GetMm(shape, xCell);
             double endpointY = GetMm(shape, yCell);
             List<Tuple<int, double>> candidates = new List<Tuple<int, double>>();
-            for (int row = 1; row <= 32; row++)
+            int connectionPointRows = GetConnectionPointRowCount(shape);
+            for (int row = 1; row <= connectionPointRows; row++)
             {
                 string xName = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
                 string yName = "Connections.Y" + row.ToString(CultureInfo.InvariantCulture);
@@ -3182,6 +3391,25 @@ namespace EnergoLogicVisioEditor
             return connected;
         }
 
+        private int GetConnectionPointRowCount(dynamic shape)
+        {
+            const short visSectionConnectionPts = 7;
+            try
+            {
+                object exists = shape.SectionExists(visSectionConnectionPts, 0);
+                if (Convert.ToInt32(exists, CultureInfo.InvariantCulture) == 0)
+                    return 0;
+                return Math.Max(
+                    0,
+                    Convert.ToInt32(
+                        shape.RowCount(visSectionConnectionPts),
+                        CultureInfo.InvariantCulture
+                    )
+                );
+            }
+            catch { return 0; }
+        }
+
         private bool TryGetConnectionPointPageCoordinates(
             dynamic shape,
             int row,
@@ -3219,7 +3447,8 @@ namespace EnergoLogicVisioEditor
             {
                 int sid = (int)shape.ID;
                 HashSet<string> physical = new HashSet<string>(StringComparer.Ordinal);
-                for (int row = 1; row <= 32; row++)
+                int connectionPointRows = GetConnectionPointRowCount(shape);
+                for (int row = 1; row <= connectionPointRows; row++)
                 {
                     double px = 0.0, py = 0.0;
                     if (!TryGetConnectionPointPageCoordinates(shape, row, out px, out py))
@@ -3461,6 +3690,14 @@ namespace EnergoLogicVisioEditor
                 return;
             }
             _status.Text = value ?? "";
+        }
+
+        internal void AcceptExternalResult(string result)
+        {
+            _status.Text = result ?? "";
+            if (!String.IsNullOrEmpty(result) &&
+                result.StartsWith("⏳", StringComparison.Ordinal))
+                StartTopologyCompletionTimer();
         }
 
         private void Run(Func<string> action)
