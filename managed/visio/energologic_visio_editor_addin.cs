@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.39.0")]
+[assembly: AssemblyVersion("0.3.40.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -121,8 +121,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("55AD5A2C-A8C0-4CF5-A7FC-A3CC4FC6F339")]
-    [ProgId("EnergoLogic.VisioEditorAddinV339")]
+    [Guid("B1EC0497-C3A5-4300-893C-29AC99BDF340")]
+    [ProgId("EnergoLogic.VisioEditorAddinV340")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -434,7 +434,7 @@ namespace EnergoLogicVisioEditor
                 root.BeginGroup = true;
                 root.Visible = true;
 
-                dynamic menu = root.CommandBar;
+                CommandBar menu = root.CommandBar;
                 AddContextButton(menu, "Панель…", "Panel", () => ShowPanel(), false);
                 AddContextButton(menu, "Выделить ячейку", "SelectCell",
                     () => PublishUserCommand(() => SelectCell()), true);
@@ -475,7 +475,7 @@ namespace EnergoLogicVisioEditor
         }
 
         private void AddContextButton(
-            dynamic menu,
+            CommandBar menu,
             string caption,
             string tagSuffix,
             Action action,
@@ -571,7 +571,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.39"; }
+        public string ApiVersion() { return "0.3.40"; }
 
         internal string DuplicateCell(int direction)
         {
