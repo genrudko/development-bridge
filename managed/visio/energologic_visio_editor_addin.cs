@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.14.0")]
+[assembly: AssemblyVersion("0.3.15.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -95,8 +95,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("6989E63C-E667-4B14-B85B-210710468940")]
-    [ProgId("EnergoLogic.VisioEditorAddinV314")]
+    [Guid("E82068B0-D05D-4646-82B0-0CA923733CAF")]
+    [ProgId("EnergoLogic.VisioEditorAddinV315")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -238,7 +238,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.14"; }
+        public string ApiVersion() { return "0.3.15"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1420,48 +1420,68 @@ namespace EnergoLogicVisioEditor
         {
             int targetId = Convert.ToInt32(target.ID, CultureInfo.InvariantCulture);
             Exception lastError = null;
-            for (int attempt = 1; attempt <= 6; attempt++)
+            int previousEventsEnabled = 1;
+            bool eventsSuppressed = false;
+            try
             {
-                try
-                {
-                    NormalizeEndpointPairForGlue(shape, endpoint);
-                    GlueEndpoint(shape, endpoint, target, row);
+                // VTD reacts to the same cell mutations that GlueTo produces. In the
+                // in-process COM add-in path that reaction can synchronously rewrite a
+                // freshly glued EndX back to a literal while EndY remains referenced.
+                // Visio documents EventsEnabled as the application-wide switch that
+                // suppresses event firing/add-on execution. Keep the critical GlueTo
+                // section bounded and restore the exact previous value in finally.
+                previousEventsEnabled = Convert.ToInt32(App.EventsEnabled, CultureInfo.InvariantCulture);
+                App.EventsEnabled = 0;
+                eventsSuppressed = true;
 
-                    // Prefer the state produced synchronously by native GlueTo. Pumping
-                    // the UI before the first verification gives VTD a chance to rewrite
-                    // a freshly restored endpoint back into the observed half-glued form.
+                for (int attempt = 1; attempt <= 6; attempt++)
+                {
                     try
                     {
-                        VerifyGlue(shape, endpoint, targetId, row);
-                        return;
-                    }
-                    catch (Exception immediateError)
-                    {
-                        lastError = immediateError;
-                    }
+                        NormalizeEndpointPairForGlue(shape, endpoint);
+                        GlueEndpoint(shape, endpoint, target, row);
 
-                    for (int pump = 0; pump < 2; pump++)
-                    {
-                        System.Windows.Forms.Application.DoEvents();
-                        System.Threading.Thread.Sleep(25);
                         try
                         {
                             VerifyGlue(shape, endpoint, targetId, row);
                             return;
                         }
-                        catch (Exception settleError)
+                        catch (Exception immediateError)
                         {
-                            lastError = settleError;
+                            lastError = immediateError;
+                        }
+
+                        for (int pump = 0; pump < 2; pump++)
+                        {
+                            System.Windows.Forms.Application.DoEvents();
+                            System.Threading.Thread.Sleep(25);
+                            try
+                            {
+                                VerifyGlue(shape, endpoint, targetId, row);
+                                return;
+                            }
+                            catch (Exception settleError)
+                            {
+                                lastError = settleError;
+                            }
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    lastError = ex;
+                    catch (Exception ex)
+                    {
+                        lastError = ex;
+                    }
                 }
             }
+            finally
+            {
+                if (eventsSuppressed)
+                {
+                    try { App.EventsEnabled = previousEventsEnabled; } catch { }
+                }
+            }
+
             throw new InvalidOperationException(
-                "Glue не стабилизировался после 6 нормализованных попыток: " +
+                "Glue не стабилизировался после 6 event-isolated попыток: " +
                 (lastError == null ? "неизвестная причина" : lastError.Message),
                 lastError
             );
