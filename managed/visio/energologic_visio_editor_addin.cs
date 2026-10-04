@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.36.0")]
+[assembly: AssemblyVersion("0.3.37.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -120,8 +120,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("98DC22DA-BC28-48C5-B79B-C90E6A7CF336")]
-    [ProgId("EnergoLogic.VisioEditorAddinV336")]
+    [Guid("A5BFEB63-9E60-4A1A-A2B3-DBA0EE92F337")]
+    [ProgId("EnergoLogic.VisioEditorAddinV337")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -283,7 +283,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.36"; }
+        public string ApiVersion() { return "0.3.37"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -3135,14 +3135,13 @@ namespace EnergoLogicVisioEditor
                     try
                     {
                         dynamic target = page.Shapes.ItemFromID(glue.TargetId);
-                        string xName = "Connections.X" + glue.Row.ToString(CultureInfo.InvariantCulture);
-                        string yName = "Connections.Y" + glue.Row.ToString(CultureInfo.InvariantCulture);
-                        if (!CellExists(target, xName) || !CellExists(target, yName)) continue;
-
-                        double localX = (double)target.CellsU(xName).ResultIU;
-                        double localY = (double)target.CellsU(yName).ResultIU;
                         double pageX = 0, pageY = 0;
-                        target.XYToPage(localX, localY, out pageX, out pageY);
+                        if (!TryGetConnectionPointPageCoordinates(
+                                target,
+                                glue.Row,
+                                out pageX,
+                                out pageY))
+                            continue;
                         double pointX = pageX * 25.4;
                         double pointY = pageY * 25.4;
                         int endpointOwnerId = glue.TargetId;
@@ -3183,6 +3182,35 @@ namespace EnergoLogicVisioEditor
             return connected;
         }
 
+        private bool TryGetConnectionPointPageCoordinates(
+            dynamic shape,
+            int row,
+            out double pageX,
+            out double pageY)
+        {
+            pageX = 0.0;
+            pageY = 0.0;
+            string rowText = row.ToString(CultureInfo.InvariantCulture);
+            string[][] aliases = new[] {
+                new[] { "Connections.X" + rowText, "Connections.Y" + rowText },
+                new[] { "Connections." + rowText + ".X", "Connections." + rowText + ".Y" }
+            };
+            foreach (string[] names in aliases)
+            {
+                try
+                {
+                    if (!CellExists(shape, names[0]) || !CellExists(shape, names[1]))
+                        continue;
+                    double localX = (double)shape.CellsU(names[0]).ResultIU;
+                    double localY = (double)shape.CellsU(names[1]).ResultIU;
+                    shape.XYToPage(localX, localY, out pageX, out pageY);
+                    return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
         private List<ConnectionPointInfo> GetAllConnectionPoints(dynamic page)
         {
             List<ConnectionPointInfo> result = new List<ConnectionPointInfo>();
@@ -3190,25 +3218,32 @@ namespace EnergoLogicVisioEditor
             addShape = shape =>
             {
                 int sid = (int)shape.ID;
+                HashSet<string> physical = new HashSet<string>(StringComparer.Ordinal);
                 for (int row = 1; row <= 32; row++)
                 {
-                    string xName = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
-                    string yName = "Connections.Y" + row.ToString(CultureInfo.InvariantCulture);
-                    try
-                    {
-                        if (!CellExists(shape, xName)) continue;
-                        double x = (double)shape.CellsU(xName).ResultIU;
-                        double y = (double)shape.CellsU(yName).ResultIU;
-                        double px = 0, py = 0;
-                        shape.XYToPage(x, y, out px, out py);
-                        result.Add(new ConnectionPointInfo { ShapeId = sid, Row = row, Xmm = px * 25.4, Ymm = py * 25.4 });
-                    }
-                    catch { }
+                    double px = 0.0, py = 0.0;
+                    if (!TryGetConnectionPointPageCoordinates(shape, row, out px, out py))
+                        continue;
+                    string key =
+                        Math.Round(px * 25.4, 4).ToString("0.0000", CultureInfo.InvariantCulture) + "|" +
+                        Math.Round(py * 25.4, 4).ToString("0.0000", CultureInfo.InvariantCulture);
+                    if (!physical.Add(key)) continue;
+                    result.Add(new ConnectionPointInfo {
+                        ShapeId = sid,
+                        Row = row,
+                        Xmm = px * 25.4,
+                        Ymm = py * 25.4
+                    });
                 }
-                try { for (int i = 1; i <= (int)shape.Shapes.Count; i++) addShape(shape.Shapes.Item(i)); }
+                try
+                {
+                    for (int i = 1; i <= (int)shape.Shapes.Count; i++)
+                        addShape(shape.Shapes.Item(i));
+                }
                 catch { }
             };
-            for (int i = 1; i <= (int)page.Shapes.Count; i++) addShape(page.Shapes.Item(i));
+            for (int i = 1; i <= (int)page.Shapes.Count; i++)
+                addShape(page.Shapes.Item(i));
             return result;
         }
 
