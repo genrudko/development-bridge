@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.20.0")]
+[assembly: AssemblyVersion("0.3.21.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -41,6 +41,18 @@ namespace EnergoLogicVisioEditor
         public double Dx;
         public double Dy;
         public List<GlueEdgeInfo> InternalGlue = new List<GlueEdgeInfo>();
+    }
+
+    internal sealed class ReplacementCompletionState
+    {
+        public int ReplacementId;
+        public string CellId = "";
+        public double Xmm;
+        public double Ymm;
+        public int ExpectedMemberCount;
+        public List<int> ExpectedMemberIds = new List<int>();
+        public List<GlueEdgeInfo> ExpectedGlue = new List<GlueEdgeInfo>();
+        public string SuccessPrefix = "";
     }
 
     internal sealed class CellInfo
@@ -101,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("08DA44F1-A58D-4E53-8F2F-A1107D57F320")]
-    [ProgId("EnergoLogic.VisioEditorAddinV320")]
+    [Guid("9D1B5AC1-0C47-4C18-BB03-7ED263E8F321")]
+    [ProgId("EnergoLogic.VisioEditorAddinV321")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -122,6 +134,7 @@ namespace EnergoLogicVisioEditor
         private List<CellMoveState> _pendingStates = null;
         private List<int> _pendingFinalSelection = null;
         private string _pendingSuccessPrefix = "";
+        private ReplacementCompletionState _pendingReplacement = null;
         private object _replacementMaster = null;
         private string _replacementMasterName = "";
         private Process _pendingTopologyHelperProcess = null;
@@ -252,7 +265,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.20"; }
+        public string ApiVersion() { return "0.3.21"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -545,10 +558,6 @@ namespace EnergoLogicVisioEditor
                     replacement.CellsU("Angle").FormulaU =
                         oldAngle.ToString("0.############", CultureInfo.InvariantCulture) + " rad";
 
-                int restored = RestoreReplacementTopology(
-                    page, cell, internalGlue, oldId, newId, replacement
-                );
-
                 if (!SupportsNativeReplaceShape())
                 {
                     try { target.Delete(); }
@@ -558,34 +567,100 @@ namespace EnergoLogicVisioEditor
                     }
                 }
 
-                VerifyReplacementTopology(page, cell, internalGlue, oldId, newId, replacement);
-
                 if (Math.Abs(GetMm(replacement, "PinX") - oldX) > 0.1 ||
                     Math.Abs(GetMm(replacement, "PinY") - oldY) > 0.1)
                     throw new InvalidOperationException("После замены изменился engineering anchor оборудования");
-
                 if (!String.Equals(GetCellIdentity(replacement), cellId, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("После замены потеряна identity ячейки");
 
-                CellInfo rediscovered = DiscoverCell(page, newId);
-                if (rediscovered.MemberIds.Count != cell.MemberIds.Count)
-                    throw new InvalidOperationException(
-                        "После замены изменился логический состав ячейки: было " +
-                        cell.MemberIds.Count + ", стало " + rediscovered.MemberIds.Count
-                    );
+                List<GlueEdgeInfo> expected = BuildReplacementExpectedGlue(
+                    cell, internalGlue, oldId, newId
+                );
+                List<int> expectedMembers = cell.MemberIds
+                    .Select(id => id == oldId ? newId : id)
+                    .Distinct()
+                    .OrderBy(id => id)
+                    .ToList();
+
+                ReplacementCompletionState pending = new ReplacementCompletionState {
+                    ReplacementId = newId,
+                    CellId = cellId,
+                    Xmm = oldX,
+                    Ymm = oldY,
+                    ExpectedMemberCount = cell.MemberIds.Count,
+                    ExpectedMemberIds = expectedMembers,
+                    ExpectedGlue = expected,
+                    SuccessPrefix = String.Format(
+                        CultureInfo.CurrentCulture,
+                        "✓ Оборудование заменено: {0} → {1}. Backend: {2}",
+                        String.IsNullOrWhiteSpace(oldMasterName) ? ("shape " + oldId) : oldMasterName,
+                        _replacementMasterName,
+                        backend
+                    )
+                };
 
                 SelectIds(page, new[] { newId });
                 commit = true;
-                return String.Format(
-                    CultureInfo.CurrentCulture,
-                    "✓ Оборудование заменено: {0} → {1}. Backend: {2}; topology проверена, восстановлено Glue: {3}.",
-                    String.IsNullOrWhiteSpace(oldMasterName) ? ("shape " + oldId) : oldMasterName,
-                    _replacementMasterName,
-                    backend,
-                    restored
-                );
+                return ScheduleReplacementTopologyCompletion(page, pending);
             }
             finally { app.EndUndoScope(scope, commit); }
+        }
+
+        private List<GlueEdgeInfo> BuildReplacementExpectedGlue(
+            CellInfo cell,
+            IEnumerable<GlueEdgeInfo> internalGlue,
+            int oldId,
+            int newId)
+        {
+            List<GlueEdgeInfo> expected = new List<GlueEdgeInfo>();
+
+            // Bus anchor first. VTD may rewrite dependent internal formulas after it.
+            expected.Add(new GlueEdgeInfo {
+                SourceId = cell.AnchorId == oldId ? newId : cell.AnchorId,
+                Endpoint = cell.Endpoint,
+                TargetId = cell.BusTerminalId,
+                Row = cell.ConnectionRow
+            });
+
+            foreach (GlueEdgeInfo edge in internalGlue)
+            {
+                expected.Add(new GlueEdgeInfo {
+                    SourceId = edge.SourceId == oldId ? newId : edge.SourceId,
+                    Endpoint = edge.Endpoint,
+                    TargetId = edge.TargetId == oldId ? newId : edge.TargetId,
+                    Row = edge.Row
+                });
+            }
+            return expected;
+        }
+
+        private string ScheduleReplacementTopologyCompletion(
+            dynamic page,
+            ReplacementCompletionState pending)
+        {
+            string documentName = Convert.ToString(page.Document.Name, CultureInfo.InvariantCulture) ?? "";
+            string pageNameU = "";
+            try { pageNameU = Convert.ToString(page.NameU, CultureInfo.InvariantCulture) ?? ""; }
+            catch { pageNameU = Convert.ToString(page.Name, CultureInfo.InvariantCulture) ?? ""; }
+            string token = "topology:" + Guid.NewGuid().ToString("N");
+
+            lock (_asyncSync)
+            {
+                if (_asyncPending)
+                    throw new InvalidOperationException("Предыдущая операция EnergoLogic ещё завершается");
+                CleanupTopologyHelperArtifacts();
+                _asyncPending = true;
+                _asyncToken = token;
+                _asyncState = "pending";
+                _asyncMessage = "Оборудование заменено. Ожидается финальная проверка электрических связей…";
+                _pendingDocumentName = documentName;
+                _pendingPageNameU = pageNameU;
+                _pendingStates = null;
+                _pendingReplacement = pending;
+                _pendingFinalSelection = new List<int> { pending.ReplacementId };
+                _pendingSuccessPrefix = pending.SuccessPrefix;
+            }
+            return "⏳ Оборудование заменено. EnergoLogic завершит электрические связи следующим шагом… token=" + token;
         }
 
         private bool SupportsNativeReplaceShape()
@@ -1598,24 +1673,35 @@ namespace EnergoLogicVisioEditor
         {
             string documentName;
             string pageNameU;
-            List<CellMoveState> states;
+            List<CellMoveState> states = null;
+            ReplacementCompletionState replacement = null;
             List<int> finalSelection;
             string successPrefix;
             string token;
+
             lock (_asyncSync)
             {
-                if (!_asyncPending || _pendingStates == null)
+                if (!_asyncPending || (_pendingStates == null && _pendingReplacement == null))
                     return "✓ Нет незавершённых операций EnergoLogic.";
+
                 documentName = _pendingDocumentName;
                 pageNameU = _pendingPageNameU;
-                states = new List<CellMoveState>(_pendingStates);
+                if (_pendingStates != null)
+                    states = new List<CellMoveState>(_pendingStates);
+                replacement = _pendingReplacement;
                 finalSelection = new List<int>(_pendingFinalSelection ?? new List<int>());
                 successPrefix = _pendingSuccessPrefix;
                 token = _asyncToken;
 
                 if (_pendingTopologyHelperProcess == null)
                 {
-                    StartExternalTopologyRestore(documentName, pageNameU, states, token);
+                    if (replacement != null)
+                        StartExternalExpectedGlueRestore(
+                            documentName, pageNameU, replacement.ExpectedGlue, token
+                        );
+                    else
+                        StartExternalTopologyRestore(documentName, pageNameU, states, token);
+
                     _asyncState = "external_restoring";
                     _asyncMessage = "Электрические связи восстанавливаются внешним COM-процессом…";
                     return "state=external_restoring; token=" + token + "; message=" + _asyncMessage;
@@ -1647,25 +1733,65 @@ namespace EnergoLogicVisioEditor
                     );
 
                 dynamic livePage = ResolveLivePage(documentName, pageNameU);
-                int verifiedInternal = 0;
-                foreach (CellMoveState state in states)
+                int verifiedGlue = 0;
+
+                if (replacement != null)
                 {
-                    VerifyInternalGlue(livePage, state.InternalGlue);
-                    dynamic anchor = livePage.Shapes.ItemFromID(state.Cell.AnchorId);
-                    VerifyGlue(anchor, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow);
-                    verifiedInternal += state.InternalGlue.Count;
+                    foreach (GlueEdgeInfo edge in replacement.ExpectedGlue)
+                    {
+                        dynamic source = livePage.Shapes.ItemFromID(edge.SourceId);
+                        VerifyGlue(source, edge.Endpoint, edge.TargetId, edge.Row);
+                        verifiedGlue++;
+                    }
+
+                    dynamic replacementShape = livePage.Shapes.ItemFromID(replacement.ReplacementId);
+                    if (Math.Abs(GetMm(replacementShape, "PinX") - replacement.Xmm) > 0.1 ||
+                        Math.Abs(GetMm(replacementShape, "PinY") - replacement.Ymm) > 0.1)
+                        throw new InvalidOperationException("После внешней topology-фазы изменился engineering anchor replacement shape");
+
+                    if (!String.Equals(
+                            GetCellIdentity(replacementShape),
+                            replacement.CellId,
+                            StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("После внешней topology-фазы потеряна identity ячейки");
+
+                    CellInfo rediscovered = DiscoverCell(livePage, replacement.ReplacementId);
+                    List<int> actualMembers = rediscovered.MemberIds.OrderBy(id => id).ToList();
+                    if (actualMembers.Count != replacement.ExpectedMemberCount ||
+                        !actualMembers.SequenceEqual(replacement.ExpectedMemberIds))
+                        throw new InvalidOperationException(
+                            "После замены изменился логический состав ячейки"
+                        );
+
+                    SelectIds(livePage, finalSelection);
+                    finalState = "success";
+                    finalMessage = successPrefix +
+                        "; внешним COM-процессом проверено Glue: " + verifiedGlue + ".";
                 }
-                VerifyMovedCellsComplete(livePage, states);
-                SelectIds(livePage, finalSelection);
-                finalState = "success";
-                finalMessage = successPrefix + "; внешним COM-процессом проверено внутренних Glue: " + verifiedInternal + ".";
+                else
+                {
+                    int verifiedInternal = 0;
+                    foreach (CellMoveState state in states)
+                    {
+                        VerifyInternalGlue(livePage, state.InternalGlue);
+                        dynamic anchor = livePage.Shapes.ItemFromID(state.Cell.AnchorId);
+                        VerifyGlue(anchor, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow);
+                        verifiedInternal += state.InternalGlue.Count;
+                    }
+                    VerifyMovedCellsComplete(livePage, states);
+                    SelectIds(livePage, finalSelection);
+                    finalState = "success";
+                    finalMessage = successPrefix +
+                        "; внешним COM-процессом проверено внутренних Glue: " +
+                        verifiedInternal + ".";
+                }
             }
             catch (Exception topologyError)
             {
                 finalState = "failed_needs_attention";
                 finalMessage =
                     "⚠ Не удалось завершить электрические связи внешним COM-процессом. " +
-                    "Геометрия оставлена для диагностики; исходная страница не затронута. Причина: " +
+                    "Изменение оставлено для диагностики; исходная страница не затронута. Причина: " +
                     topologyError.Message;
             }
 
@@ -1677,6 +1803,7 @@ namespace EnergoLogicVisioEditor
                 _pendingDocumentName = "";
                 _pendingPageNameU = "";
                 _pendingStates = null;
+                _pendingReplacement = null;
                 _pendingFinalSelection = null;
                 _pendingSuccessPrefix = "";
                 CleanupTopologyHelperArtifacts();
@@ -1689,6 +1816,27 @@ namespace EnergoLogicVisioEditor
             string documentName,
             string pageNameU,
             IEnumerable<CellMoveState> states,
+            string token)
+        {
+            List<GlueEdgeInfo> expected = new List<GlueEdgeInfo>();
+            foreach (CellMoveState state in states)
+            {
+                expected.Add(new GlueEdgeInfo {
+                    SourceId = state.Cell.AnchorId,
+                    Endpoint = state.Cell.Endpoint,
+                    TargetId = state.TargetTerminalId,
+                    Row = state.Cell.ConnectionRow
+                });
+                foreach (GlueEdgeInfo edge in state.InternalGlue)
+                    expected.Add(edge);
+            }
+            StartExternalExpectedGlueRestore(documentName, pageNameU, expected, token);
+        }
+
+        private void StartExternalExpectedGlueRestore(
+            string documentName,
+            string pageNameU,
+            IEnumerable<GlueEdgeInfo> expectedEdges,
             string token)
         {
             string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "";
@@ -1707,37 +1855,26 @@ namespace EnergoLogicVisioEditor
             lines.Add("PAGE\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(pageNameU)));
             HashSet<string> unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             dynamic livePage = ResolveLivePage(documentName, pageNameU);
-            foreach (CellMoveState state in states)
-            {
-                // VTD reacts to the bus-anchor Glue and can rewrite dependent internal
-                // endpoint formulas. Restore the external bus anchor first, then make
-                // internal edges (notably 244.End -> TSN2) the final authoritative Glue.
-                dynamic anchor = livePage.Shapes.ItemFromID(state.Cell.AnchorId);
-                GlueTarget currentAnchor = TryGetGlueTarget(anchor, state.Cell.Endpoint);
-                if (currentAnchor == null ||
-                    currentAnchor.TargetId != state.TargetTerminalId ||
-                    currentAnchor.Row != state.Cell.ConnectionRow)
-                {
-                    string anchorKey = EndpointKey(state.Cell.AnchorId, state.Cell.Endpoint);
-                    if (unique.Add(anchorKey))
-                        lines.Add(String.Format(CultureInfo.InvariantCulture,
-                            "EDGE\t{0}\t{1}\t{2}\t{3}",
-                            state.Cell.AnchorId, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow));
-                }
 
-                foreach (GlueEdgeInfo edge in state.InternalGlue)
-                {
-                    dynamic source = livePage.Shapes.ItemFromID(edge.SourceId);
-                    GlueTarget current = TryGetGlueTarget(source, edge.Endpoint);
-                    if (current != null && current.TargetId == edge.TargetId && current.Row == edge.Row)
-                        continue;
-                    string key = EndpointKey(edge.SourceId, edge.Endpoint);
-                    if (unique.Add(key))
-                        lines.Add(String.Format(CultureInfo.InvariantCulture,
-                            "EDGE\t{0}\t{1}\t{2}\t{3}",
-                            edge.SourceId, edge.Endpoint, edge.TargetId, edge.Row));
-                }
+            foreach (GlueEdgeInfo edge in expectedEdges)
+            {
+                dynamic source = livePage.Shapes.ItemFromID(edge.SourceId);
+                GlueTarget current = TryGetGlueTarget(source, edge.Endpoint);
+                if (current != null && current.TargetId == edge.TargetId && current.Row == edge.Row)
+                    continue;
+
+                string key = EndpointKey(edge.SourceId, edge.Endpoint);
+                if (unique.Add(key))
+                    lines.Add(String.Format(
+                        CultureInfo.InvariantCulture,
+                        "EDGE\t{0}\t{1}\t{2}\t{3}",
+                        edge.SourceId,
+                        edge.Endpoint,
+                        edge.TargetId,
+                        edge.Row
+                    ));
             }
+
             File.WriteAllLines(_pendingTopologyPlanPath, lines.ToArray(), Encoding.UTF8);
 
             ProcessStartInfo info = new ProcessStartInfo();
@@ -2211,7 +2348,7 @@ namespace EnergoLogicVisioEditor
             cells.Controls.Add(bindIdentity,0,3);
             cells.SetColumnSpan(bindIdentity,2);
             cells.Controls.Add(Button("Запомнить образец", (s,e)=>Run(()=>_addin.CaptureReplacementSample())),0,4);
-            cells.Controls.Add(Button("Заменить по образцу", (s,e)=>Run(()=>_addin.ReplaceEquipmentFromSample())),1,4);
+            cells.Controls.Add(Button("Заменить по образцу", (s,e)=>RunReplaceEquipment()),1,4);
             _renumber = new TextBox { Dock=DockStyle.Fill, Margin=new Padding(5), AccessibleName="Новое обозначение ячейки" };
             cells.Controls.Add(_renumber,0,5);
             cells.Controls.Add(Button("Перенумеровать", (s,e)=>Run(()=>_addin.RenumberCell(_renumber.Text))),1,5);
@@ -2296,6 +2433,18 @@ namespace EnergoLogicVisioEditor
         private void Run(Func<string> action)
         {
             try { _status.Text = action(); }
+            catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
+        }
+
+        private void RunReplaceEquipment()
+        {
+            try
+            {
+                string result = _addin.ReplaceEquipmentFromSample();
+                _status.Text = result;
+                if (result.StartsWith("⏳", StringComparison.Ordinal))
+                    StartTopologyCompletionTimer();
+            }
             catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
         }
 

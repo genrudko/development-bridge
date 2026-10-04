@@ -56,9 +56,6 @@ namespace EnergoLogicTopologyRestore
 
                 if (String.IsNullOrWhiteSpace(documentName) || String.IsNullOrWhiteSpace(pageName))
                     throw new InvalidOperationException("Topology plan is missing document/page identity");
-                if (edges.Count == 0)
-                    throw new InvalidOperationException("Topology plan has no edges");
-
                 dynamic app = Marshal.GetActiveObject("Visio.Application");
                 dynamic document = null;
                 for (int index = 1; index <= (int)app.Documents.Count; index++)
