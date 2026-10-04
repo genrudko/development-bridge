@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.27.0")]
+[assembly: AssemblyVersion("0.3.28.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("9A7903D3-1371-4AF6-B80A-01F6C039F327")]
-    [ProgId("EnergoLogic.VisioEditorAddinV327")]
+    [Guid("8E75F86D-AF28-455B-B20C-62492D9BF328")]
+    [ProgId("EnergoLogic.VisioEditorAddinV328")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.27"; }
+        public string ApiVersion() { return "0.3.28"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -441,6 +441,29 @@ namespace EnergoLogicVisioEditor
                 }
             }
 
+            if (alreadyComplete)
+            {
+                SelectIds(page, cell.MemberIds);
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ Состав ячейки уже закреплён: {0} элементов; identity {1}.",
+                    cell.MemberIds.Count,
+                    cellId
+                );
+            }
+
+            // Capture electrical truth BEFORE writing any User.* cells. VTD reacts
+            // even to identity metadata writes and can asynchronously turn 244.End
+            // into half-Glue (EndX literal / EndY referenced). Capturing afterwards
+            // loses that edge from the expected topology plan.
+            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
+            List<GlueEdgeInfo> expectedGlue = BuildReplacementExpectedGlue(
+                cell,
+                internalGlue,
+                -1,
+                -1
+            );
+
             int scope = (int)app.BeginUndoScope("EnergoLogic: Закрепить состав ячейки");
             bool commit = false;
             try
@@ -456,16 +479,26 @@ namespace EnergoLogicVisioEditor
                             "Не удалось подтвердить EnergoLogicCellId у shape " + id
                         );
                 }
+
                 SelectIds(page, cell.MemberIds);
                 commit = true;
-                return String.Format(
-                    CultureInfo.CurrentCulture,
-                    alreadyComplete
-                        ? "✓ Состав ячейки уже закреплён: {0} элементов; identity {1}."
-                        : "✓ Состав ячейки закреплён: {0} элементов; identity {1}.",
-                    cell.MemberIds.Count,
-                    cellId
-                );
+
+                ReplacementCompletionState pending = new ReplacementCompletionState {
+                    ReplacementId = cell.AnchorId,
+                    CellId = cellId,
+                    Xmm = GetMm(page.Shapes.ItemFromID(cell.AnchorId), "PinX"),
+                    Ymm = GetMm(page.Shapes.ItemFromID(cell.AnchorId), "PinY"),
+                    ExpectedMemberCount = cell.MemberIds.Count,
+                    ExpectedMemberIds = cell.MemberIds.OrderBy(id => id).ToList(),
+                    ExpectedGlue = expectedGlue,
+                    SuccessPrefix = String.Format(
+                        CultureInfo.CurrentCulture,
+                        "✓ Состав ячейки закреплён: {0} элементов; identity {1}",
+                        cell.MemberIds.Count,
+                        cellId
+                    )
+                };
+                return ScheduleStableTopologyCompletion(page, pending);
             }
             finally { app.EndUndoScope(scope, commit); }
         }
@@ -611,7 +644,7 @@ namespace EnergoLogicVisioEditor
 
                 SelectIds(page, new[] { newId });
                 commit = true;
-                return ScheduleReplacementTopologyCompletion(page, pending);
+                return ScheduleStableTopologyCompletion(page, pending);
             }
             finally { app.EndUndoScope(scope, commit); }
         }
@@ -644,7 +677,7 @@ namespace EnergoLogicVisioEditor
             return expected;
         }
 
-        private string ScheduleReplacementTopologyCompletion(
+        private string ScheduleStableTopologyCompletion(
             dynamic page,
             ReplacementCompletionState pending)
         {
@@ -664,7 +697,7 @@ namespace EnergoLogicVisioEditor
                 _asyncPending = true;
                 _asyncToken = token;
                 _asyncState = "pending";
-                _asyncMessage = "Оборудование заменено. Ожидается финальная проверка электрических связей…";
+                _asyncMessage = "Изменение выполнено. Ожидается финальная проверка электрических связей…";
                 _pendingDocumentName = documentName;
                 _pendingPageNameU = pageNameU;
                 _pendingStates = null;
@@ -672,7 +705,7 @@ namespace EnergoLogicVisioEditor
                 _pendingFinalSelection = new List<int> { pending.ReplacementId };
                 _pendingSuccessPrefix = pending.SuccessPrefix;
             }
-            return "⏳ Оборудование заменено. EnergoLogic завершит электрические связи следующим шагом… token=" + token;
+            return "⏳ Изменение выполнено. EnergoLogic завершит электрические связи следующим шагом… token=" + token;
         }
 
         private bool SupportsNativeReplaceShape()
@@ -2397,7 +2430,7 @@ namespace EnergoLogicVisioEditor
             cells.Controls.Add(Button("Переместить →", (s,e)=>Run(()=>_addin.MoveCell(1))),1,1);
             cells.Controls.Add(Button("Выделить всю ячейку", (s,e)=>Run(()=>_addin.SelectCell())),0,2);
             cells.SetColumnSpan(cells.GetControlFromPosition(0,2),2);
-            Button bindIdentity = ButtonWide("Закрепить состав ячейки", (s,e)=>Run(()=>_addin.BindCellIdentity()));
+            Button bindIdentity = ButtonWide("Закрепить состав ячейки", (s,e)=>RunBindCellIdentity());
             cells.Controls.Add(bindIdentity,0,3);
             cells.SetColumnSpan(bindIdentity,2);
             cells.Controls.Add(Button("Запомнить образец", (s,e)=>Run(()=>_addin.CaptureReplacementSample())),0,4);
@@ -2486,6 +2519,18 @@ namespace EnergoLogicVisioEditor
         private void Run(Func<string> action)
         {
             try { _status.Text = action(); }
+            catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
+        }
+
+        private void RunBindCellIdentity()
+        {
+            try
+            {
+                string result = _addin.BindCellIdentity();
+                _status.Text = result;
+                if (result.StartsWith("⏳", StringComparison.Ordinal))
+                    StartTopologyCompletionTimer();
+            }
             catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
         }
 
