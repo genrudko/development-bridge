@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Diagnostics;
+using System.IO;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Extensibility;
@@ -12,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.15.0")]
+[assembly: AssemblyVersion("0.3.16.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -95,8 +98,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("E82068B0-D05D-4646-82B0-0CA923733CAF")]
-    [ProgId("EnergoLogic.VisioEditorAddinV315")]
+    [Guid("89DDBB87-8513-5078-9BF3-1DA6D75B2454")]
+    [ProgId("EnergoLogic.VisioEditorAddinV316")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -116,6 +119,9 @@ namespace EnergoLogicVisioEditor
         private List<CellMoveState> _pendingStates = null;
         private List<int> _pendingFinalSelection = null;
         private string _pendingSuccessPrefix = "";
+        private Process _pendingTopologyHelperProcess = null;
+        private string _pendingTopologyPlanPath = "";
+        private string _pendingTopologyResultPath = "";
         private readonly Regex _glueRegex = new Regex(
             @"(?<target>[^!(),]+)!Connections(?:\.X(?<rowx>\d+)|\.(?<row>\d+)\.X)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -238,7 +244,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.15"; }
+        public string ApiVersion() { return "0.3.16"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1157,6 +1163,7 @@ namespace EnergoLogicVisioEditor
             {
                 if (_asyncPending)
                     throw new InvalidOperationException("Предыдущая операция EnergoLogic ещё завершается");
+                CleanupTopologyHelperArtifacts();
                 _asyncPending = true;
                 _asyncToken = token;
                 _asyncState = "pending";
@@ -1182,44 +1189,67 @@ namespace EnergoLogicVisioEditor
             {
                 if (!_asyncPending || _pendingStates == null)
                     return "✓ Нет незавершённых операций EnergoLogic.";
-                _asyncState = "completing";
-                _asyncMessage = "Восстанавливаются и проверяются электрические связи…";
                 documentName = _pendingDocumentName;
                 pageNameU = _pendingPageNameU;
                 states = new List<CellMoveState>(_pendingStates);
                 finalSelection = new List<int>(_pendingFinalSelection ?? new List<int>());
                 successPrefix = _pendingSuccessPrefix;
                 token = _asyncToken;
+
+                if (_pendingTopologyHelperProcess == null)
+                {
+                    StartExternalTopologyRestore(documentName, pageNameU, states, token);
+                    _asyncState = "external_restoring";
+                    _asyncMessage = "Электрические связи восстанавливаются внешним COM-процессом…";
+                    return "state=external_restoring; token=" + token + "; message=" + _asyncMessage;
+                }
+
+                if (!_pendingTopologyHelperProcess.HasExited)
+                {
+                    _asyncState = "external_restoring";
+                    _asyncMessage = "Электрические связи восстанавливаются внешним COM-процессом…";
+                    return "state=external_restoring; token=" + token + "; message=" + _asyncMessage;
+                }
+
+                _asyncState = "verifying";
+                _asyncMessage = "Проверяются восстановленные электрические связи…";
             }
 
             string finalMessage;
             string finalState;
             try
             {
+                int exitCode = _pendingTopologyHelperProcess.ExitCode;
+                string helperResult = File.Exists(_pendingTopologyResultPath)
+                    ? File.ReadAllText(_pendingTopologyResultPath, Encoding.UTF8)
+                    : "";
+                if (exitCode != 0 || !helperResult.StartsWith("PASS", StringComparison.Ordinal))
+                    throw new InvalidOperationException(
+                        "Внешний topology helper завершился с ошибкой: exit=" + exitCode +
+                        "; result=" + helperResult
+                    );
+
                 dynamic livePage = ResolveLivePage(documentName, pageNameU);
-                SettleVisioAfterGeometryChange();
-                int restoredInternal = 0;
+                int verifiedInternal = 0;
                 foreach (CellMoveState state in states)
-                    restoredInternal += RestoreCellTopologyAfterMove(livePage, state);
+                {
+                    VerifyInternalGlue(livePage, state.InternalGlue);
+                    dynamic anchor = livePage.Shapes.ItemFromID(state.Cell.AnchorId);
+                    VerifyGlue(anchor, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow);
+                    verifiedInternal += state.InternalGlue.Count;
+                }
                 VerifyMovedCellsComplete(livePage, states);
                 SelectIds(livePage, finalSelection);
                 finalState = "success";
-                finalMessage = successPrefix + "; внутренних Glue восстановлено: " + restoredInternal + ".";
+                finalMessage = successPrefix + "; внешним COM-процессом проверено внутренних Glue: " + verifiedInternal + ".";
             }
             catch (Exception topologyError)
             {
-                string compensation;
-                try
-                {
-                    dynamic livePage = ResolveLivePage(documentName, pageNameU);
-                    compensation = CompensateCellMoves(livePage, states);
-                }
-                catch (Exception compensationError)
-                {
-                    compensation = "ВНИМАНИЕ: компенсация не выполнена: " + compensationError.Message + ".";
-                }
-                finalState = compensation.StartsWith("Исходная", StringComparison.Ordinal) ? "failed_rolled_back" : "failed_needs_attention";
-                finalMessage = "⚠ Не удалось завершить электрические связи. " + compensation + " Причина: " + topologyError.Message;
+                finalState = "failed_needs_attention";
+                finalMessage =
+                    "⚠ Не удалось завершить электрические связи внешним COM-процессом. " +
+                    "Геометрия оставлена для диагностики; исходная страница не затронута. Причина: " +
+                    topologyError.Message;
             }
 
             lock (_asyncSync)
@@ -1232,9 +1262,75 @@ namespace EnergoLogicVisioEditor
                 _pendingStates = null;
                 _pendingFinalSelection = null;
                 _pendingSuccessPrefix = "";
+                CleanupTopologyHelperArtifacts();
             }
             try { if (_form != null && !_form.IsDisposed) _form.SetStatus(finalMessage); } catch { }
             return "state=" + finalState + "; token=" + token + "; message=" + finalMessage;
+        }
+
+        private void StartExternalTopologyRestore(
+            string documentName,
+            string pageNameU,
+            IEnumerable<CellMoveState> states,
+            string token)
+        {
+            string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "";
+            string helperPath = Path.Combine(assemblyDir, "EnergoLogic.TopologyRestoreHelper.exe");
+            if (!File.Exists(helperPath))
+                throw new FileNotFoundException("Не найден внешний topology helper", helperPath);
+
+            string suffix = token.Replace(":", "-");
+            string tempDir = Path.GetTempPath();
+            _pendingTopologyPlanPath = Path.Combine(tempDir, "energologic-" + suffix + ".plan");
+            _pendingTopologyResultPath = Path.Combine(tempDir, "energologic-" + suffix + ".result");
+            try { File.Delete(_pendingTopologyResultPath); } catch { }
+
+            List<string> lines = new List<string>();
+            lines.Add("DOC\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(documentName)));
+            lines.Add("PAGE\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(pageNameU)));
+            HashSet<string> unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (CellMoveState state in states)
+            {
+                foreach (GlueEdgeInfo edge in state.InternalGlue)
+                {
+                    string key = EndpointKey(edge.SourceId, edge.Endpoint);
+                    if (unique.Add(key))
+                        lines.Add(String.Format(CultureInfo.InvariantCulture,
+                            "EDGE\t{0}\t{1}\t{2}\t{3}",
+                            edge.SourceId, edge.Endpoint, edge.TargetId, edge.Row));
+                }
+                string anchorKey = EndpointKey(state.Cell.AnchorId, state.Cell.Endpoint);
+                if (unique.Add(anchorKey))
+                    lines.Add(String.Format(CultureInfo.InvariantCulture,
+                        "EDGE\t{0}\t{1}\t{2}\t{3}",
+                        state.Cell.AnchorId, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow));
+            }
+            File.WriteAllLines(_pendingTopologyPlanPath, lines.ToArray(), Encoding.UTF8);
+
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = helperPath;
+            info.Arguments = QuoteProcessArgument(_pendingTopologyPlanPath) + " " +
+                             QuoteProcessArgument(_pendingTopologyResultPath);
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            _pendingTopologyHelperProcess = Process.Start(info);
+            if (_pendingTopologyHelperProcess == null)
+                throw new InvalidOperationException("Не удалось запустить внешний topology helper");
+        }
+
+        private string QuoteProcessArgument(string value)
+        {
+            return "\"" + (value ?? "").Replace("\"", "\\\"") + "\"";
+        }
+
+        private void CleanupTopologyHelperArtifacts()
+        {
+            try { if (_pendingTopologyHelperProcess != null) _pendingTopologyHelperProcess.Dispose(); } catch { }
+            _pendingTopologyHelperProcess = null;
+            try { if (!String.IsNullOrWhiteSpace(_pendingTopologyPlanPath)) File.Delete(_pendingTopologyPlanPath); } catch { }
+            try { if (!String.IsNullOrWhiteSpace(_pendingTopologyResultPath)) File.Delete(_pendingTopologyResultPath); } catch { }
+            _pendingTopologyPlanPath = "";
+            _pendingTopologyResultPath = "";
         }
 
         private dynamic ResolveLivePage(string documentName, string pageNameU)
@@ -1773,7 +1869,13 @@ namespace EnergoLogicVisioEditor
                 Timer timer = _topologyTimer;
                 _topologyTimer = null;
                 if (timer != null) { timer.Stop(); timer.Dispose(); }
-                try { _status.Text = _addin.CompletePendingTopology(); }
+                try
+                {
+                    string result = _addin.CompletePendingTopology();
+                    _status.Text = result;
+                    if (result.StartsWith("state=external_restoring", StringComparison.Ordinal))
+                        StartTopologyCompletionTimer();
+                }
                 catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
             };
             _topologyTimer.Start();
