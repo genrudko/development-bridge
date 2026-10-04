@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.29.0")]
+[assembly: AssemblyVersion("0.3.30.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -114,7 +114,7 @@ namespace EnergoLogicVisioEditor
 
     [ComVisible(true)]
     [Guid("A07B90DB-F873-45A8-82A5-286E83C0F329")]
-    [ProgId("EnergoLogic.VisioEditorAddinV329")]
+    [ProgId("EnergoLogic.VisioEditorAddinV330")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.29"; }
+        public string ApiVersion() { return "0.3.30"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -441,29 +441,6 @@ namespace EnergoLogicVisioEditor
                 }
             }
 
-            if (alreadyComplete)
-            {
-                SelectIds(page, cell.MemberIds);
-                return String.Format(
-                    CultureInfo.CurrentCulture,
-                    "✓ Состав ячейки уже закреплён: {0} элементов; identity {1}.",
-                    cell.MemberIds.Count,
-                    cellId
-                );
-            }
-
-            // Capture electrical truth BEFORE writing any User.* cells. VTD reacts
-            // even to identity metadata writes and can asynchronously turn 244.End
-            // into half-Glue (EndX literal / EndY referenced). Capturing afterwards
-            // loses that edge from the expected topology plan.
-            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
-            List<GlueEdgeInfo> expectedGlue = BuildReplacementExpectedGlue(
-                cell,
-                internalGlue,
-                -1,
-                -1
-            );
-
             int scope = (int)app.BeginUndoScope("EnergoLogic: Закрепить состав ячейки");
             bool commit = false;
             try
@@ -482,23 +459,14 @@ namespace EnergoLogicVisioEditor
 
                 SelectIds(page, cell.MemberIds);
                 commit = true;
-
-                ReplacementCompletionState pending = new ReplacementCompletionState {
-                    ReplacementId = cell.AnchorId,
-                    CellId = cellId,
-                    Xmm = GetMm(page.Shapes.ItemFromID(cell.AnchorId), "PinX"),
-                    Ymm = GetMm(page.Shapes.ItemFromID(cell.AnchorId), "PinY"),
-                    ExpectedMemberCount = cell.MemberIds.Count,
-                    ExpectedMemberIds = cell.MemberIds.OrderBy(id => id).ToList(),
-                    ExpectedGlue = expectedGlue,
-                    SuccessPrefix = String.Format(
-                        CultureInfo.CurrentCulture,
-                        "✓ Состав ячейки закреплён: {0} элементов; identity {1}",
-                        cell.MemberIds.Count,
-                        cellId
-                    )
-                };
-                return ScheduleStableTopologyCompletion(page, pending);
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    alreadyComplete
+                        ? "✓ Состав ячейки уже закреплён: {0} элементов; identity {1}."
+                        : "✓ Состав ячейки закреплён: {0} элементов; identity {1}.",
+                    cell.MemberIds.Count,
+                    cellId
+                );
             }
             finally { app.EndUndoScope(scope, commit); }
         }
@@ -2406,30 +2374,74 @@ namespace EnergoLogicVisioEditor
             return !String.IsNullOrWhiteSpace(GetCellIdentity(shape));
         }
 
-        private string GetCellIdentity(dynamic shape)
+        private string CellIdentityPageCellName(int shapeId)
         {
-            if (!CellExists(shape, "User.EnergoLogicCellId")) return "";
+            return "User.EnergoLogicCell_" + shapeId.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private string FormulaStringValue(dynamic cell)
+        {
             try
             {
-                string formula = Convert.ToString(
-                    shape.CellsU("User.EnergoLogicCellId").FormulaU,
-                    CultureInfo.InvariantCulture
-                ) ?? "";
+                string formula = Convert.ToString(cell.FormulaU, CultureInfo.InvariantCulture) ?? "";
                 formula = formula.Trim();
                 if (formula.Length >= 2 && formula[0] == '"' && formula[formula.Length - 1] == '"')
-                    return formula.Substring(1, formula.Length - 2);
+                    return formula.Substring(1, formula.Length - 2).Replace("""", """);
             }
             catch { }
+            return "";
+        }
+
+        private string GetCellIdentity(dynamic shape)
+        {
+            // Production identity lives on PageSheet, not on electrical VTD shapes.
+            // Writing User.* metadata into VTD apparatus can trigger its automation
+            // and corrupt otherwise unrelated Glue. PageSheet keeps semantics outside
+            // the electrical drawing objects while remaining persisted in Visio.
+            try
+            {
+                dynamic page = shape.ContainingPage;
+                if (page != null)
+                {
+                    dynamic pageSheet = page.PageSheet;
+                    string cellName = CellIdentityPageCellName(
+                        Convert.ToInt32(shape.ID, CultureInfo.InvariantCulture)
+                    );
+                    if (CellExists(pageSheet, cellName))
+                    {
+                        string value = FormulaStringValue(pageSheet.CellsU(cellName));
+                        if (!String.IsNullOrWhiteSpace(value)) return value;
+                    }
+                }
+            }
+            catch { }
+
+            // Read-only compatibility with v3.19-v3.29 disposable pages.
+            if (CellExists(shape, "User.EnergoLogicCellId"))
+            {
+                string legacy = FormulaStringValue(shape.CellsU("User.EnergoLogicCellId"));
+                if (!String.IsNullOrWhiteSpace(legacy)) return legacy;
+            }
             return "";
         }
 
         private void SetCellIdentity(dynamic shape, string cellId)
         {
             const short visSectionUser = 242;
-            object sectionExistsRaw = shape.SectionExists(visSectionUser, 0);
-            if (Convert.ToInt32(sectionExistsRaw, CultureInfo.InvariantCulture) == 0) shape.AddSection(visSectionUser);
-            if (!CellExists(shape, "User.EnergoLogicCellId")) shape.AddNamedRow(visSectionUser, "EnergoLogicCellId", 0);
-            shape.CellsU("User.EnergoLogicCellId").FormulaU = "\"" + cellId + "\"";
+            dynamic page = shape.ContainingPage;
+            if (page == null)
+                throw new InvalidOperationException("Shape не принадлежит странице Visio");
+            dynamic pageSheet = page.PageSheet;
+            object sectionExistsRaw = pageSheet.SectionExists(visSectionUser, 0);
+            if (Convert.ToInt32(sectionExistsRaw, CultureInfo.InvariantCulture) == 0)
+                pageSheet.AddSection(visSectionUser);
+
+            int shapeId = Convert.ToInt32(shape.ID, CultureInfo.InvariantCulture);
+            string rowName = "EnergoLogicCell_" + shapeId.ToString(CultureInfo.InvariantCulture);
+            string cellName = "User." + rowName;
+            if (!CellExists(pageSheet, cellName))
+                pageSheet.AddNamedRow(visSectionUser, rowName, 0);
+            pageSheet.CellsU(cellName).FormulaU = """ + (cellId ?? "").Replace(""", """") + """;
         }
     }
 
