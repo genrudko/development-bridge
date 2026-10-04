@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.48.0")]
+[assembly: AssemblyVersion("0.3.49.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -84,6 +84,9 @@ namespace EnergoLogicVisioEditor
     {
         string ApiDuplicateLeft();
         string ApiDuplicateRight();
+        string ApiDuplicateSelectedLeft();
+        string ApiDuplicateSelectedRight();
+        string ApiDuplicateSelected();
         string ApiMoveLeft();
         string ApiMoveRight();
         string ApiSelectCell();
@@ -101,6 +104,10 @@ namespace EnergoLogicVisioEditor
         string ApiExactOffset(double dxMm, double dyMm);
         string ApiAlignX();
         string ApiAlignY();
+        string ApiDistributeSelectionX();
+        string ApiDistributeSelectionY();
+        string ApiMeasureSelectionDistance();
+        string ApiSnapSelectionGrid5();
         string ApiBaseCopy(double bx, double by, double tx, double ty);
         string ApiBaseMove(double bx, double by, double tx, double ty);
         string ApiStartBaseCopyInteractive();
@@ -129,8 +136,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("64C8B1A5-7993-4CB0-A5FC-95E6D3F5F348")]
-    [ProgId("EnergoLogic.VisioEditorAddinV348")]
+    [Guid("7FA902A8-D36C-4ED0-B299-445A538AF349")]
+    [ProgId("EnergoLogic.VisioEditorAddinV349")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -328,6 +335,12 @@ namespace EnergoLogicVisioEditor
           <button id=""btnELMoveRight"" label=""Переместить →"" imageMso=""Cut"" onAction=""OnRibbonMoveRight"" screentip=""Переместить ячейку вправо"" supertip=""Перемещает выбранную ячейку на соседнее свободное место шины вправо. Занятое место блокирует операцию."" />
         </group>
 
+        <group id=""grpEnergoSelection"" label=""Выбранное"">
+          <button id=""btnELDuplicateSelectedLeft"" label=""Копировать выбранное ←"" imageMso=""Copy"" onAction=""OnRibbonDuplicateSelectedLeft"" screentip=""Копировать только текущее выделение влево"" supertip=""Копирует ровно выделенные элементы на один фактический шаг шины влево. Ячейка целиком автоматически не выбирается. Внешние электрические связи исходника не переносятся на копию; внутренние связи внутри выделения сохраняются."" />
+          <button id=""btnELDuplicateSelectedRight"" label=""Копировать выбранное →"" imageMso=""Copy"" onAction=""OnRibbonDuplicateSelectedRight"" screentip=""Копировать только текущее выделение вправо"" supertip=""Копирует ровно выделенные элементы на один фактический шаг шины вправо. Ячейка целиком автоматически не выбирается. Внешние электрические связи исходника не переносятся на копию; внутренние связи внутри выделения сохраняются."" />
+          <button id=""btnELDuplicateSelected"" label=""Дублировать выбранное"" imageMso=""Copy"" onAction=""OnRibbonDuplicateSelected"" screentip=""Создать независимую копию текущего выделения"" supertip=""Дублирует ровно текущее выделение со штатным смещением Visio. Внешние соединения не копируются; принадлежность к исходной ячейке у неполной копии сбрасывается."" />
+        </group>
+
         <group id=""grpEnergoEquipment"" label=""Оборудование"">
           <button id=""btnELCaptureSample"" label=""Запомнить образец"" imageMso=""Copy"" onAction=""OnRibbonCaptureSample"" screentip=""Запомнить тип оборудования"" supertip=""Выберите одну фигуру оборудования. Её мастер-фигура будет использована командами «Заменить» и «Вставить в связь»."" />
           <button id=""btnELReplace"" label=""Заменить"" imageMso=""ReplaceDialog"" onAction=""OnRibbonReplace"" screentip=""Заменить оборудование по образцу"" supertip=""Выберите один элемент ячейки. EnergoLogic заменит его ранее запомненной мастер-фигурой и восстановит электрическую топологию."" />
@@ -354,7 +367,15 @@ namespace EnergoLogicVisioEditor
           <button id=""btnELAlignX"" label=""Выровнять X"" imageMso=""AlignCenter"" onAction=""OnRibbonAlignX"" screentip=""Выровнять выделение по X"" supertip=""Выравнивает центры выбранных элементов по вертикальной оси без изменения электрической топологии."" />
           <button id=""btnELAlignY"" label=""Выровнять Y"" imageMso=""AlignMiddle"" onAction=""OnRibbonAlignY"" screentip=""Выровнять выделение по Y"" supertip=""Выравнивает центры выбранных элементов по горизонтальной оси без изменения электрической топологии."" />
           <button id=""btnELCoords"" label=""Координаты"" imageMso=""FindDialog"" onAction=""OnRibbonCoordinates"" screentip=""Показать координаты выделения"" supertip=""Показывает инженерные координаты и размеры выбранных элементов в миллиметрах."" />
+          <button id=""btnELDistributeX"" label=""Распределить X"" imageMso=""DistributeHorizontally"" onAction=""OnRibbonDistributeX"" screentip=""Равномерно распределить по X"" supertip=""Для трёх и более выделенных элементов сохраняет крайние X и равномерно распределяет промежуточные. Внешние электрические связи блокируют операцию."" />
+          <button id=""btnELDistributeY"" label=""Распределить Y"" imageMso=""DistributeVertically"" onAction=""OnRibbonDistributeY"" screentip=""Равномерно распределить по Y"" supertip=""Для трёх и более выделенных элементов сохраняет крайние Y и равномерно распределяет промежуточные. Внешние электрические связи блокируют операцию."" />
+          <button id=""btnELMeasureDistance"" label=""Расстояние"" imageMso=""Ruler"" onAction=""OnRibbonMeasureDistance"" screentip=""Измерить расстояние между двумя элементами"" supertip=""Выберите ровно два элемента. Показывает ΔX, ΔY и прямое расстояние между их PinX/PinY в миллиметрах. Схему не изменяет."" />
+          <button id=""btnELSnapGrid5"" label=""На сетку 5 мм"" imageMso=""GridSettings"" onAction=""OnRibbonSnapGrid5"" screentip=""Привязать выделение к сетке 5 мм"" supertip=""Перемещает выделение как единый блок так, чтобы опорная точка первого элемента попала на ближайший узел сетки 5 мм. Внешние электрические связи блокируют операцию."" />
           <menu id=""menuELPresets"" label=""Пресеты"" imageMso=""FileProperties"" keytip=""P"" screentip=""Частые точные операции"" supertip=""Набор готовых геометрических операций без открытия дополнительной панели."">
+            <button id=""btnELNudge1Left"" label=""Сдвиг 1 мм ←"" imageMso=""Cut"" onAction=""OnRibbonNudge1Left"" screentip=""Сдвинуть на 1 мм влево"" supertip=""Точный сдвиг выделения на −1 мм по X."" />
+            <button id=""btnELNudge1Right"" label=""Сдвиг 1 мм →"" imageMso=""Cut"" onAction=""OnRibbonNudge1Right"" screentip=""Сдвинуть на 1 мм вправо"" supertip=""Точный сдвиг выделения на +1 мм по X."" />
+            <button id=""btnELNudge1Up"" label=""Сдвиг 1 мм ↑"" imageMso=""Cut"" onAction=""OnRibbonNudge1Up"" screentip=""Сдвинуть на 1 мм вверх"" supertip=""Точный сдвиг выделения на +1 мм по Y."" />
+            <button id=""btnELNudge1Down"" label=""Сдвиг 1 мм ↓"" imageMso=""Cut"" onAction=""OnRibbonNudge1Down"" screentip=""Сдвинуть на 1 мм вниз"" supertip=""Точный сдвиг выделения на −1 мм по Y."" />
             <button id=""btnELNudge5Left"" label=""Сдвиг 5 мм ←"" imageMso=""Cut"" onAction=""OnRibbonNudge5Left"" screentip=""Сдвинуть на 5 мм влево"" supertip=""Точный сдвиг выделения на −5 мм по X."" />
             <button id=""btnELNudge5Right"" label=""Сдвиг 5 мм →"" imageMso=""Cut"" onAction=""OnRibbonNudge5Right"" screentip=""Сдвинуть на 5 мм вправо"" supertip=""Точный сдвиг выделения на +5 мм по X."" />
             <button id=""btnELNudge5Up"" label=""Сдвиг 5 мм ↑"" imageMso=""Cut"" onAction=""OnRibbonNudge5Up"" screentip=""Сдвинуть на 5 мм вверх"" supertip=""Точный сдвиг выделения на +5 мм по Y."" />
@@ -494,6 +515,9 @@ namespace EnergoLogicVisioEditor
         public void OnRibbonSelectCell(IRibbonControl control) { PublishUserCommand(() => SelectCell()); }
         public void OnRibbonDuplicateLeft(IRibbonControl control) { PublishUserCommand(() => DuplicateCell(-1)); }
         public void OnRibbonDuplicateRight(IRibbonControl control) { PublishUserCommand(() => DuplicateCell(1)); }
+        public void OnRibbonDuplicateSelectedLeft(IRibbonControl control) { PublishUserCommand(() => DuplicateSelectedByPitch(-1)); }
+        public void OnRibbonDuplicateSelectedRight(IRibbonControl control) { PublishUserCommand(() => DuplicateSelectedByPitch(1)); }
+        public void OnRibbonDuplicateSelected(IRibbonControl control) { PublishUserCommand(() => DuplicateSelectedNative()); }
         public void OnRibbonMoveLeft(IRibbonControl control) { PublishUserCommand(() => MoveCell(-1)); }
         public void OnRibbonMoveRight(IRibbonControl control) { PublishUserCommand(() => MoveCell(1)); }
         public void OnRibbonCaptureSample(IRibbonControl control) { PublishUserCommand(() => CaptureReplacementSample()); }
@@ -520,7 +544,15 @@ namespace EnergoLogicVisioEditor
         public void OnRibbonBusDiagnostics(IRibbonControl control) { PublishDiagnosticCommand("диагностика шины", () => BusDiagnostics()); }
         public void OnRibbonAlignX(IRibbonControl control) { PublishUserCommand(() => Align("x")); }
         public void OnRibbonAlignY(IRibbonControl control) { PublishUserCommand(() => Align("y")); }
+        public void OnRibbonDistributeX(IRibbonControl control) { PublishUserCommand(() => DistributeSelection("x")); }
+        public void OnRibbonDistributeY(IRibbonControl control) { PublishUserCommand(() => DistributeSelection("y")); }
+        public void OnRibbonMeasureDistance(IRibbonControl control) { PublishDiagnosticCommand("расстояние", () => MeasureSelectionDistance()); }
+        public void OnRibbonSnapGrid5(IRibbonControl control) { PublishUserCommand(() => SnapSelectionToGrid(5.0)); }
         public void OnRibbonCoordinates(IRibbonControl control) { PublishDiagnosticCommand("координаты", () => Coordinates()); }
+        public void OnRibbonNudge1Left(IRibbonControl control) { PublishUserCommand(() => ExactOffset(-1.0, 0.0)); }
+        public void OnRibbonNudge1Right(IRibbonControl control) { PublishUserCommand(() => ExactOffset(1.0, 0.0)); }
+        public void OnRibbonNudge1Up(IRibbonControl control) { PublishUserCommand(() => ExactOffset(0.0, 1.0)); }
+        public void OnRibbonNudge1Down(IRibbonControl control) { PublishUserCommand(() => ExactOffset(0.0, -1.0)); }
         public void OnRibbonNudge5Left(IRibbonControl control) { PublishUserCommand(() => ExactOffset(-5.0, 0.0)); }
         public void OnRibbonNudge5Right(IRibbonControl control) { PublishUserCommand(() => ExactOffset(5.0, 0.0)); }
         public void OnRibbonNudge5Up(IRibbonControl control) { PublishUserCommand(() => ExactOffset(0.0, 5.0)); }
@@ -539,10 +571,21 @@ namespace EnergoLogicVisioEditor
   Выберите любой элемент электрической ячейки. EnergoLogic выделит весь её состав.
 
 • Копировать ← / →
-  Выберите элемент ячейки. Создаётся соседняя копия на один шаг шины с восстановлением внутренних соединений.
+  Это команда именно для всей ячейки: достаточно выбрать любой её элемент, после чего EnergoLogic копирует полный состав ячейки на соседнее место шины.
 
 • Переместить ← / →
-  Перемещает ячейку на соседнее свободное место. Если место занято — операция блокируется.
+  Это команда именно для всей ячейки. Перемещает её на соседнее свободное место; если место занято — операция блокируется.
+
+ВЫБРАННОЕ
+• Копировать выбранное ← / →
+  Копирует ровно текущее выделение на один фактический шаг шины влево или вправо.
+  Один выбранный аппарат означает один скопированный аппарат; ячейка автоматически не расширяется.
+  Внешние электрические связи исходных элементов не переносятся на копию.
+  Внутренние связи между одновременно выбранными элементами сохраняются.
+
+• Дублировать выбранное
+  Создаёт независимую копию ровно текущего выделения со штатным смещением Visio.
+  У неполной копии принадлежность к исходной ячейке сбрасывается.
 
 ОБОРУДОВАНИЕ
 • Запомнить образец
@@ -598,8 +641,17 @@ namespace EnergoLogicVisioEditor
 • Координаты
   Показывает координаты и размеры выделения в миллиметрах.
 
+• Распределить X / Y
+  Для трёх и более элементов равномерно распределяет промежуточные элементы между крайними.
+
+• Расстояние
+  Для двух элементов показывает ΔX, ΔY и прямое расстояние между опорными точками.
+
+• На сетку 5 мм
+  Сдвигает выделение единым блоком к ближайшему узлу сетки 5 мм.
+
 • Пресеты
-  Быстрые сдвиги на 5 мм и распределение ячеек с шагом 40 мм.
+  Быстрые сдвиги на 1 и 5 мм и распределение ячеек с шагом 40 мм.
 
 ПРОВЕРКА
 • Проверка связей
@@ -696,6 +748,28 @@ EnergoLogic использует миллиметры в пользовател�
                 {
                     // Drawing Object Selected: operations that make sense on the
                     // currently selected electrical/graphical object.
+                    AddContextButton(
+                        menu,
+                        "Копировать выбранное ←",
+                        "DuplicateSelectedLeft",
+                        () => PublishUserCommand(() => DuplicateSelectedByPitch(-1)),
+                        false
+                    );
+                    AddContextButton(
+                        menu,
+                        "Копировать выбранное →",
+                        "DuplicateSelectedRight",
+                        () => PublishUserCommand(() => DuplicateSelectedByPitch(1)),
+                        false
+                    );
+                    AddContextButton(
+                        menu,
+                        "Дублировать выбранное",
+                        "DuplicateSelected",
+                        () => PublishUserCommand(() => DuplicateSelectedNative()),
+                        false
+                    );
+
                     AddContextButton(
                         menu,
                         "Копировать с базовой точкой",
@@ -929,6 +1003,9 @@ EnergoLogic использует миллиметры в пользовател�
 
         public string ApiDuplicateLeft() { return DuplicateCell(-1); }
         public string ApiDuplicateRight() { return DuplicateCell(1); }
+        public string ApiDuplicateSelectedLeft() { return DuplicateSelectedByPitch(-1); }
+        public string ApiDuplicateSelectedRight() { return DuplicateSelectedByPitch(1); }
+        public string ApiDuplicateSelected() { return DuplicateSelectedNative(); }
         public string ApiMoveLeft() { return MoveCell(-1); }
         public string ApiMoveRight() { return MoveCell(1); }
         public string ApiSelectCell() { return SelectCell(); }
@@ -946,6 +1023,10 @@ EnergoLogic использует миллиметры в пользовател�
         public string ApiExactOffset(double dxMm, double dyMm) { return ExactOffset(dxMm, dyMm); }
         public string ApiAlignX() { return Align("x"); }
         public string ApiAlignY() { return Align("y"); }
+        public string ApiDistributeSelectionX() { return DistributeSelection("x"); }
+        public string ApiDistributeSelectionY() { return DistributeSelection("y"); }
+        public string ApiMeasureSelectionDistance() { return MeasureSelectionDistance(); }
+        public string ApiSnapSelectionGrid5() { return SnapSelectionToGrid(5.0); }
         public string ApiBaseCopy(double bx, double by, double tx, double ty) { return BasePointTransform(true, bx, by, tx, ty); }
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
         public string ApiStartBaseCopyInteractive() { return StartInteractiveBasePoint(true); }
@@ -974,7 +1055,265 @@ EnergoLogic использует миллиметры в пользовател�
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.48"; }
+        public string ApiVersion() { return "0.3.49"; }
+
+        private int CountExternalGlue(dynamic page, List<int> ids)
+        {
+            HashSet<int> selected = new HashSet<int>(ids);
+            Dictionary<int, int> childParent = BuildChildParentMap(page);
+            int count = 0;
+            foreach (int id in ids)
+            {
+                dynamic shape = page.Shapes.ItemFromID(id);
+                foreach (string endpoint in new[] { "begin", "end" })
+                {
+                    GlueTarget target = TryGetGlueTarget(shape, endpoint);
+                    if (target == null) continue;
+                    int owner = childParent.ContainsKey(target.TargetId)
+                        ? childParent[target.TargetId]
+                        : target.TargetId;
+                    if (!selected.Contains(owner)) count++;
+                }
+            }
+            return count;
+        }
+
+        private int DetachExternalGlueFromSelection(dynamic page, List<int> ids)
+        {
+            HashSet<int> selected = new HashSet<int>(ids);
+            Dictionary<int, int> childParent = BuildChildParentMap(page);
+            int detached = 0;
+            foreach (int id in ids)
+            {
+                dynamic shape = page.Shapes.ItemFromID(id);
+                foreach (string endpoint in new[] { "begin", "end" })
+                {
+                    GlueTarget target = TryGetGlueTarget(shape, endpoint);
+                    if (target == null) continue;
+                    int owner = childParent.ContainsKey(target.TargetId)
+                        ? childParent[target.TargetId]
+                        : target.TargetId;
+                    if (selected.Contains(owner)) continue;
+                    DetachEndpoint(shape, endpoint);
+                    detached++;
+                }
+            }
+            return detached;
+        }
+
+        private void ClearCellIdentity(dynamic shape)
+        {
+            try { SetCellIdentity(shape, ""); } catch { }
+            try
+            {
+                if (CellExists(shape, "User.EnergoLogicCellId"))
+                    shape.CellsU("User.EnergoLogicCellId").FormulaU = "\"\"";
+            }
+            catch { }
+        }
+
+        private bool SelectionIsCompleteIdentityGroup(
+            dynamic page,
+            List<int> ids,
+            out string cellId)
+        {
+            cellId = "";
+            if (ids.Count == 0) return false;
+            foreach (int id in ids)
+            {
+                string current = GetCellIdentity(page.Shapes.ItemFromID(id));
+                if (String.IsNullOrWhiteSpace(current)) return false;
+                if (String.IsNullOrWhiteSpace(cellId)) cellId = current;
+                else if (!String.Equals(cellId, current, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            int total = 0;
+            for (int i = 1; i <= (int)page.Shapes.Count; i++)
+            {
+                dynamic shape = page.Shapes.Item(i);
+                if (String.Equals(
+                        GetCellIdentity(shape),
+                        cellId,
+                        StringComparison.OrdinalIgnoreCase))
+                    total++;
+            }
+            return total == ids.Count;
+        }
+
+        private double ResolveSelectedCopyPitchMm(dynamic page, List<int> ids)
+        {
+            List<double> pitches = new List<double>();
+            foreach (int id in ids)
+            {
+                try
+                {
+                    CellInfo cell = DiscoverCell(page, id);
+                    dynamic bus = page.Shapes.ItemFromID(cell.BusId);
+                    double pitch = GetBusPitchMm(bus);
+                    if (!pitches.Any(p => Math.Abs(p - pitch) <= 0.01))
+                        pitches.Add(pitch);
+                }
+                catch { }
+            }
+            if (pitches.Count == 1) return pitches[0];
+            if (pitches.Count > 1)
+                throw new InvalidOperationException(
+                    "Выбранные элементы относятся к шинам с разным шагом. Используйте копирование с базовой точкой."
+                );
+
+            for (int i = 1; i <= (int)page.Shapes.Count; i++)
+            {
+                dynamic shape = page.Shapes.Item(i);
+                if (!CellExists(shape, "Prop.rt")) continue;
+                try
+                {
+                    double pitch = GetBusPitchMm(shape);
+                    if (!pitches.Any(p => Math.Abs(p - pitch) <= 0.01))
+                        pitches.Add(pitch);
+                }
+                catch { }
+            }
+            if (pitches.Count == 1) return pitches[0];
+            throw new InvalidOperationException(
+                "Не удалось однозначно определить шаг шины. Используйте «Копировать с базовой точкой»."
+            );
+        }
+
+        private string DuplicateSelectedCore(
+            bool useDesiredOffset,
+            double desiredDx,
+            double desiredDy,
+            string operationName)
+        {
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count == 0)
+                throw new InvalidOperationException("Сначала выделите элементы для копирования");
+
+            List<GlueEdgeInfo> sourceInternalGlue = CaptureInternalGlue(page, ids);
+            int sourceExternalGlue = CountExternalGlue(page, ids);
+            string sourceCellId;
+            bool completeCellIdentity =
+                SelectionIsCompleteIdentityGroup(page, ids, out sourceCellId);
+
+            List<double[]> sourcePoints = new List<double[]>();
+            foreach (int id in ids)
+            {
+                dynamic shape = page.Shapes.ItemFromID(id);
+                sourcePoints.Add(new double[] {
+                    GetMm(shape, "PinX"),
+                    GetMm(shape, "PinY")
+                });
+            }
+
+            int scope = (int)app.BeginUndoScope("EnergoLogic: " + operationName);
+            bool commit = false;
+            try
+            {
+                SelectIds(page, ids);
+                dynamic duplicated = app.ActiveWindow.Selection.Duplicate();
+                if (duplicated == null) duplicated = app.ActiveWindow.Selection;
+                if ((int)duplicated.Count != ids.Count)
+                    throw new InvalidOperationException("Visio вернул неполную копию выделения");
+
+                List<int> newIds = SelectionIds(duplicated);
+                if (useDesiredOffset)
+                {
+                    List<double[]> duplicatePoints = new List<double[]>();
+                    foreach (int id in newIds)
+                    {
+                        dynamic shape = page.Shapes.ItemFromID(id);
+                        duplicatePoints.Add(new double[] {
+                            GetMm(shape, "PinX"),
+                            GetMm(shape, "PinY")
+                        });
+                    }
+                    double nativeDx =
+                        duplicatePoints.Average(p => p[0]) -
+                        sourcePoints.Average(p => p[0]);
+                    double nativeDy =
+                        duplicatePoints.Average(p => p[1]) -
+                        sourcePoints.Average(p => p[1]);
+                    duplicated.Move(
+                        desiredDx - nativeDx,
+                        desiredDy - nativeDy,
+                        "mm"
+                    );
+                }
+
+                SettleVisioAfterGeometryChange();
+                int detached = DetachExternalGlueFromSelection(page, newIds);
+
+                string newCellId = completeCellIdentity
+                    ? "cell:" + Guid.NewGuid().ToString("N")
+                    : "";
+                foreach (int id in newIds)
+                {
+                    dynamic shape = page.Shapes.ItemFromID(id);
+                    ClearCellIdentity(shape);
+                    if (completeCellIdentity)
+                        SetCellIdentity(shape, newCellId);
+                }
+
+                SettleVisioAfterGeometryChange();
+                List<GlueEdgeInfo> duplicateInternalGlue =
+                    CaptureInternalGlue(page, newIds);
+                if (duplicateInternalGlue.Count != sourceInternalGlue.Count)
+                    throw new InvalidOperationException(
+                        "Visio потерял внутренние соединения выбранных элементов; операция отменена"
+                    );
+
+                SelectIds(page, newIds);
+                commit = true;
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ {0}: скопировано элементов {1}. " +
+                    "Внутренних соединений сохранено: {2}; внешних связей в исходнике: {3}; " +
+                    "отсоединено у копии: {4}.{5}",
+                    operationName,
+                    newIds.Count,
+                    duplicateInternalGlue.Count,
+                    sourceExternalGlue,
+                    detached,
+                    completeCellIdentity
+                        ? " Полная ячейка получила новую identity."
+                        : " Копия не наследует принадлежность к исходной ячейке."
+                );
+            }
+            finally
+            {
+                app.EndUndoScope(scope, commit);
+            }
+        }
+
+        internal string DuplicateSelectedByPitch(int direction)
+        {
+            if (direction != -1 && direction != 1)
+                throw new ArgumentOutOfRangeException("direction");
+            dynamic page = App.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            double pitch = ResolveSelectedCopyPitchMm(page, ids);
+            return DuplicateSelectedCore(
+                true,
+                direction * pitch,
+                0.0,
+                direction < 0
+                    ? "Копировать выбранное влево"
+                    : "Копировать выбранное вправо"
+            );
+        }
+
+        internal string DuplicateSelectedNative()
+        {
+            return DuplicateSelectedCore(
+                false,
+                0.0,
+                0.0,
+                "Дублировать выбранное"
+            );
+        }
 
         internal string DuplicateCell(int direction)
         {
@@ -2317,8 +2656,9 @@ EnergoLogic использует миллиметры в пользовател�
             dynamic app = App;
             dynamic page = app.ActivePage;
             List<int> ids = CurrentTopLevelSelection(page);
-            EnsureNoExternalGlue(page, ids);
+            if (!copy) EnsureNoExternalGlue(page, ids);
             List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, ids);
+            int sourceExternalGlue = copy ? CountExternalGlue(page, ids) : 0;
             int scope = (int)app.BeginUndoScope(copy ? "EnergoLogic: Копировать с базовой точкой" : "EnergoLogic: Переместить с базовой точкой");
             bool commit = false;
             try
@@ -2347,8 +2687,22 @@ EnergoLogic использует миллиметры в пользовател�
                     double ndy = now.Average(p => p[1]) - src.Average(p => p[1]);
                     dup.Move(dx - ndx, dy - ndy, "mm");
                     SettleVisioAfterGeometryChange();
-                    string cellId = "cell:" + Guid.NewGuid().ToString("N");
-                    foreach (int id in newIds) if (HasCellIdentity(page.Shapes.ItemFromID(id))) SetCellIdentity(page.Shapes.ItemFromID(id), cellId);
+                    int detachedExternal = DetachExternalGlueFromSelection(page, newIds);
+
+                    string sourceCellId;
+                    bool completeCellIdentity =
+                        SelectionIsCompleteIdentityGroup(page, ids, out sourceCellId);
+                    string newCellId = completeCellIdentity
+                        ? "cell:" + Guid.NewGuid().ToString("N")
+                        : "";
+                    foreach (int id in newIds)
+                    {
+                        dynamic newShape = page.Shapes.ItemFromID(id);
+                        ClearCellIdentity(newShape);
+                        if (completeCellIdentity)
+                            SetCellIdentity(newShape, newCellId);
+                    }
+
                     List<GlueEdgeInfo> duplicateGlue = CaptureInternalGlue(page, newIds);
                     if (duplicateGlue.Count != internalGlue.Count)
                         throw new InvalidOperationException("Visio потерял внутренние соединения при копировании по базовой точке; операция отменена");
@@ -2361,7 +2715,15 @@ EnergoLogic использует миллиметры в пользовател�
                     VerifyInternalGlue(page, internalGlue);
                 }
                 commit = true;
-                return String.Format(CultureInfo.CurrentCulture, "✓ {0} по базовой точке: ΔX {1:0.###} мм, ΔY {2:0.###} мм.", copy ? "Копирование" : "Перемещение", dx, dy);
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    copy
+                        ? "✓ Копирование по базовой точке: ΔX {0:0.###} мм, ΔY {1:0.###} мм. Внешние связи исходника не перенесены: {2}."
+                        : "✓ Перемещение по базовой точке: ΔX {0:0.###} мм, ΔY {1:0.###} мм.",
+                    dx,
+                    dy,
+                    sourceExternalGlue
+                );
             }
             finally { app.EndUndoScope(scope, commit); }
         }
@@ -2493,6 +2855,115 @@ EnergoLogic использует миллиметры в пользовател�
                 return String.Format(CultureInfo.CurrentCulture, "✓ Выровнено {0} элементов по {1} = {2:0.###} мм.", ids.Count, axis.ToUpperInvariant(), target);
             }
             finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string DistributeSelection(string axis)
+        {
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count < 3)
+                throw new InvalidOperationException(
+                    "Для распределения выберите минимум три элемента"
+                );
+            EnsureNoExternalGlue(page, ids);
+            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, ids);
+            string cellName = axis == "x" ? "PinX" : "PinY";
+            List<Tuple<int, double>> ordered = new List<Tuple<int, double>>();
+            foreach (int id in ids)
+            {
+                double coordinate = GetMm(
+                    page.Shapes.ItemFromID(id),
+                    cellName
+                );
+                ordered.Add(Tuple.Create(id, coordinate));
+            }
+            ordered = ordered
+                .OrderBy(item => item.Item2)
+                .ToList();
+
+            double first = ordered.First().Item2;
+            double last = ordered.Last().Item2;
+            double step = (last - first) / (ordered.Count - 1);
+            if (Math.Abs(step) < 1e-9)
+                throw new InvalidOperationException(
+                    "Крайние элементы имеют одинаковую координату"
+                );
+
+            int scope = (int)app.BeginUndoScope(
+                axis == "x"
+                    ? "EnergoLogic: Равномерно распределить по X"
+                    : "EnergoLogic: Равномерно распределить по Y"
+            );
+            bool commit = false;
+            try
+            {
+                for (int i = 1; i < ordered.Count - 1; i++)
+                    SetMm(
+                        page.Shapes.ItemFromID(ordered[i].Item1),
+                        cellName,
+                        first + step * i
+                    );
+                SettleVisioAfterGeometryChange();
+                RestoreInternalGlue(page, internalGlue);
+                VerifyInternalGlue(page, internalGlue);
+                SelectIds(page, ids);
+                commit = true;
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ Равномерно распределено {0} элементов по {1}; шаг {2:0.###} мм.",
+                    ids.Count,
+                    axis.ToUpperInvariant(),
+                    Math.Abs(step)
+                );
+            }
+            finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string MeasureSelectionDistance()
+        {
+            dynamic page = App.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count != 2)
+                throw new InvalidOperationException(
+                    "Для измерения расстояния выберите ровно два элемента"
+                );
+            dynamic first = page.Shapes.ItemFromID(ids[0]);
+            dynamic second = page.Shapes.ItemFromID(ids[1]);
+            double dx = GetMm(second, "PinX") - GetMm(first, "PinX");
+            double dy = GetMm(second, "PinY") - GetMm(first, "PinY");
+            double distance = Math.Sqrt(dx * dx + dy * dy);
+            return String.Format(
+                CultureInfo.CurrentCulture,
+                "Расстояние #{0} → #{1}: ΔX {2:0.###} мм; ΔY {3:0.###} мм; L {4:0.###} мм.",
+                ids[0],
+                ids[1],
+                dx,
+                dy,
+                distance
+            );
+        }
+
+        internal string SnapSelectionToGrid(double gridMm)
+        {
+            if (gridMm <= 0.0)
+                throw new ArgumentOutOfRangeException("gridMm");
+            dynamic page = App.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            dynamic anchor = page.Shapes.ItemFromID(ids[0]);
+            double x = GetMm(anchor, "PinX");
+            double y = GetMm(anchor, "PinY");
+            double targetX = Math.Round(x / gridMm) * gridMm;
+            double targetY = Math.Round(y / gridMm) * gridMm;
+            double dx = targetX - x;
+            double dy = targetY - y;
+            if (Math.Abs(dx) < 1e-9 && Math.Abs(dy) < 1e-9)
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ Выделение уже находится на сетке {0:0.###} мм.",
+                    gridMm
+                );
+            return ExactOffset(dx, dy);
         }
 
         internal string MeasurePitch()
