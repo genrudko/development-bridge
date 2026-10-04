@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.18.0")]
+[assembly: AssemblyVersion("0.3.19.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -92,14 +92,15 @@ namespace EnergoLogicVisioEditor
         string ApiNudgeUp();
         string ApiNudgeDown();
         string ApiRenumberCell(string newDesignation);
+        string ApiBindCellIdentity();
         string ApiOperationStatus();
         string ApiCompletePendingTopology();
         string ApiVersion();
     }
 
     [ComVisible(true)]
-    [Guid("6BC8DE0D-79B4-4E0D-9E0A-C6E6A7E0F318")]
-    [ProgId("EnergoLogic.VisioEditorAddinV318")]
+    [Guid("A2ECDF6D-77BB-4B3A-8B29-3B736850F319")]
+    [ProgId("EnergoLogic.VisioEditorAddinV319")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -238,13 +239,14 @@ namespace EnergoLogicVisioEditor
         public string ApiNudgeUp() { return ExactOffset(0.0, 1.0); }
         public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
         public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
+        public string ApiBindCellIdentity() { return BindCellIdentity(); }
         public string ApiOperationStatus()
         {
             lock (_asyncSync)
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.18"; }
+        public string ApiVersion() { return "0.3.19"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -382,6 +384,69 @@ namespace EnergoLogicVisioEditor
             CellInfo cell = DiscoverCellFromSelection(page);
             SelectIds(page, cell.MemberIds);
             return "✓ Выделена вся ячейка: " + cell.MemberIds.Count + " элементов, место шины " + cell.Slot + ".";
+        }
+
+        internal string BindCellIdentity()
+        {
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            CellInfo cell = DiscoverCellFromSelection(page);
+            HashSet<string> existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (int id in cell.MemberIds)
+            {
+                string identity = GetCellIdentity(page.Shapes.ItemFromID(id));
+                if (!String.IsNullOrWhiteSpace(identity)) existing.Add(identity);
+            }
+            if (existing.Count > 1)
+                throw new InvalidOperationException(
+                    "В составе ячейки найдены конфликтующие EnergoLogicCellId: " +
+                    String.Join(", ", existing.OrderBy(x => x).ToArray())
+                );
+
+            string cellId = existing.Count == 1
+                ? existing.First()
+                : "cell:" + Guid.NewGuid().ToString("N");
+
+            bool alreadyComplete = true;
+            foreach (int id in cell.MemberIds)
+            {
+                if (!String.Equals(
+                        GetCellIdentity(page.Shapes.ItemFromID(id)),
+                        cellId,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    alreadyComplete = false;
+                    break;
+                }
+            }
+
+            int scope = (int)app.BeginUndoScope("EnergoLogic: Закрепить состав ячейки");
+            bool commit = false;
+            try
+            {
+                foreach (int id in cell.MemberIds)
+                    SetCellIdentity(page.Shapes.ItemFromID(id), cellId);
+
+                foreach (int id in cell.MemberIds)
+                {
+                    string actual = GetCellIdentity(page.Shapes.ItemFromID(id));
+                    if (!String.Equals(actual, cellId, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException(
+                            "Не удалось подтвердить EnergoLogicCellId у shape " + id
+                        );
+                }
+                SelectIds(page, cell.MemberIds);
+                commit = true;
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    alreadyComplete
+                        ? "✓ Состав ячейки уже закреплён: {0} элементов; identity {1}."
+                        : "✓ Состав ячейки закреплён: {0} элементов; identity {1}.",
+                    cell.MemberIds.Count,
+                    cellId
+                );
+            }
+            finally { app.EndUndoScope(scope, commit); }
         }
 
         internal string ExactOffset(double dx, double dy)
@@ -799,6 +864,13 @@ namespace EnergoLogicVisioEditor
         {
             Dictionary<int, int> childParent = BuildChildParentMap(page);
             HashSet<int> top = TopLevelIds(page);
+            if (!top.Contains(selectedId))
+                throw new InvalidOperationException("Выбранный объект не является top-level элементом схемы");
+
+            string explicitCellId = GetCellIdentity(page.Shapes.ItemFromID(selectedId));
+            if (!String.IsNullOrWhiteSpace(explicitCellId))
+                return DiscoverCellByIdentity(page, selectedId, explicitCellId, childParent, top);
+
             Dictionary<int, HashSet<int>> graph = new Dictionary<int, HashSet<int>>();
             foreach (int id in top) graph[id] = new HashSet<int>();
             foreach (int id in top)
@@ -828,7 +900,6 @@ namespace EnergoLogicVisioEditor
                     }
                 }
             }
-            if (!top.Contains(selectedId)) throw new InvalidOperationException("Выбранный объект не является top-level элементом схемы");
             HashSet<int> core = new HashSet<int>();
             Stack<int> stack = new Stack<int>();
             stack.Push(selectedId);
@@ -887,6 +958,87 @@ namespace EnergoLogicVisioEditor
                 BusId = anchor.Item3,
                 BusTerminalId = anchor.Item2.TargetId,
                 Slot = slot,
+                ConnectionRow = anchor.Item2.Row,
+                Endpoint = anchor.Item2.Endpoint,
+                CoreIds = core.OrderBy(x => x).ToList(),
+                MemberIds = members
+            };
+        }
+
+        private CellInfo DiscoverCellByIdentity(
+            dynamic page,
+            int selectedId,
+            string cellId,
+            Dictionary<int, int> childParent,
+            HashSet<int> top)
+        {
+            List<int> members = new List<int>();
+            foreach (int id in top)
+            {
+                string candidateId = GetCellIdentity(page.Shapes.ItemFromID(id));
+                if (String.Equals(candidateId, cellId, StringComparison.OrdinalIgnoreCase))
+                    members.Add(id);
+            }
+            members.Sort();
+            if (members.Count == 0 || !members.Contains(selectedId))
+                throw new InvalidOperationException("EnergoLogicCellId не разрешается в состав выбранной ячейки");
+
+            HashSet<int> memberSet = new HashSet<int>(members);
+            Dictionary<int, HashSet<int>> graph = new Dictionary<int, HashSet<int>>();
+            foreach (int id in members) graph[id] = new HashSet<int>();
+
+            List<Tuple<int, GlueTarget, int>> anchors = new List<Tuple<int, GlueTarget, int>>();
+            foreach (int id in members)
+            {
+                dynamic shape = page.Shapes.ItemFromID(id);
+                foreach (string ep in new[] { "begin", "end" })
+                {
+                    GlueTarget target = TryGetGlueTarget(shape, ep);
+                    if (target == null) continue;
+
+                    int parentId = 0;
+                    if (childParent.TryGetValue(target.TargetId, out parentId) &&
+                        IsNumberedBusTerminal(page, target.TargetId))
+                    {
+                        anchors.Add(Tuple.Create(id, target, parentId));
+                        continue;
+                    }
+
+                    int graphTargetId = target.TargetId;
+                    if (childParent.TryGetValue(graphTargetId, out parentId))
+                        graphTargetId = parentId;
+                    if (memberSet.Contains(graphTargetId) && graphTargetId != id)
+                    {
+                        graph[id].Add(graphTargetId);
+                        graph[graphTargetId].Add(id);
+                    }
+                }
+            }
+
+            if (anchors.Count != 1)
+                throw new InvalidOperationException(
+                    "Ячейка с identity " + cellId +
+                    " должна иметь ровно один внешний Glue к шине; найдено: " + anchors.Count
+                );
+
+            var anchor = anchors[0];
+            HashSet<int> core = new HashSet<int>();
+            Stack<int> stack = new Stack<int>();
+            stack.Push(anchor.Item1);
+            while (stack.Count > 0)
+            {
+                int cur = stack.Pop();
+                if (!core.Add(cur)) continue;
+                foreach (int next in graph[cur])
+                    if (!core.Contains(next)) stack.Push(next);
+            }
+
+            dynamic terminal = page.Shapes.ItemFromID(anchor.Item2.TargetId);
+            return new CellInfo {
+                AnchorId = anchor.Item1,
+                BusId = anchor.Item3,
+                BusTerminalId = anchor.Item2.TargetId,
+                Slot = GetSlot(terminal),
                 ConnectionRow = anchor.Item2.Row,
                 Endpoint = anchor.Item2.Endpoint,
                 CoreIds = core.OrderBy(x => x).ToList(),
@@ -1720,7 +1872,24 @@ namespace EnergoLogicVisioEditor
 
         private bool HasCellIdentity(dynamic shape)
         {
-            return CellExists(shape, "User.EnergoLogicCellId");
+            return !String.IsNullOrWhiteSpace(GetCellIdentity(shape));
+        }
+
+        private string GetCellIdentity(dynamic shape)
+        {
+            if (!CellExists(shape, "User.EnergoLogicCellId")) return "";
+            try
+            {
+                string formula = Convert.ToString(
+                    shape.CellsU("User.EnergoLogicCellId").FormulaU,
+                    CultureInfo.InvariantCulture
+                ) ?? "";
+                formula = formula.Trim();
+                if (formula.Length >= 2 && formula[0] == '"' && formula[formula.Length - 1] == '"')
+                    return formula.Substring(1, formula.Length - 2);
+            }
+            catch { }
+            return "";
         }
 
         private void SetCellIdentity(dynamic shape, string cellId)
@@ -1773,9 +1942,12 @@ namespace EnergoLogicVisioEditor
             cells.Controls.Add(Button("Переместить →", (s,e)=>Run(()=>_addin.MoveCell(1))),1,1);
             cells.Controls.Add(Button("Выделить всю ячейку", (s,e)=>Run(()=>_addin.SelectCell())),0,2);
             cells.SetColumnSpan(cells.GetControlFromPosition(0,2),2);
+            Button bindIdentity = ButtonWide("Закрепить состав ячейки", (s,e)=>Run(()=>_addin.BindCellIdentity()));
+            cells.Controls.Add(bindIdentity,0,3);
+            cells.SetColumnSpan(bindIdentity,2);
             _renumber = new TextBox { Dock=DockStyle.Fill, Margin=new Padding(5), AccessibleName="Новое обозначение ячейки" };
-            cells.Controls.Add(_renumber,0,3);
-            cells.Controls.Add(Button("Перенумеровать", (s,e)=>Run(()=>_addin.RenumberCell(_renumber.Text))),1,3);
+            cells.Controls.Add(_renumber,0,4);
+            cells.Controls.Add(Button("Перенумеровать", (s,e)=>Run(()=>_addin.RenumberCell(_renumber.Text))),1,4);
             cellTab.Controls.Add(cells);
 
             FlowLayoutPanel gluePanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 120, FlowDirection = FlowDirection.TopDown, Padding = new Padding(10) };
@@ -1917,7 +2089,7 @@ namespace EnergoLogicVisioEditor
 
         private TableLayoutPanel Panel2()
         {
-            TableLayoutPanel p=new TableLayoutPanel{Dock=DockStyle.Top,Height=220,ColumnCount=2,RowCount=4,Padding=new Padding(10)};
+            TableLayoutPanel p=new TableLayoutPanel{Dock=DockStyle.Top,Height=270,ColumnCount=2,RowCount=5,Padding=new Padding(10)};
             p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50)); p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50));
             return p;
         }
