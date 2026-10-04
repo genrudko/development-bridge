@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.40.0")]
+[assembly: AssemblyVersion("0.3.41.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -121,8 +121,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("B1EC0497-C3A5-4300-893C-29AC99BDF340")]
-    [ProgId("EnergoLogic.VisioEditorAddinV340")]
+    [Guid("E7766CFD-D7C3-4127-BE64-E7F041D4F341")]
+    [ProgId("EnergoLogic.VisioEditorAddinV341")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -404,11 +404,11 @@ namespace EnergoLogicVisioEditor
                 try { context = Convert.ToString(((dynamic)host).Context, CultureInfo.InvariantCulture) ?? ""; } catch { }
                 observed.Add(name + "[Context=" + context + "]");
 
-                // Visio drawing shortcut menus advertise drawing context as 2 or 2*.
-                // Never mutate unrelated popup menus.
-                if (String.Equals(context, "2", StringComparison.OrdinalIgnoreCase) ||
-                    String.Equals(context, "2*", StringComparison.OrdinalIgnoreCase) ||
-                    context.StartsWith("2;", StringComparison.OrdinalIgnoreCase))
+                // Live Visio qualification: the built-in right-click popup bars
+                // expose stable contexts 9 (Drawing Object Selected) and
+                // 75 (Drawing Page Selected). Add EnergoLogic only to those hosts.
+                if (String.Equals(context, "9", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(context, "75", StringComparison.OrdinalIgnoreCase))
                     candidates.Add(host);
             }
 
@@ -571,7 +571,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.40"; }
+        public string ApiVersion() { return "0.3.41"; }
 
         internal string DuplicateCell(int direction)
         {
