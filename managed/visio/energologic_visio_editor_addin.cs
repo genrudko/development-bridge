@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.38.0")]
+[assembly: AssemblyVersion("0.3.39.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -121,8 +121,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("1B72DC21-5C05-4531-897A-A53353BDF338")]
-    [ProgId("EnergoLogic.VisioEditorAddinV338")]
+    [Guid("55AD5A2C-A8C0-4CF5-A7FC-A3CC4FC6F339")]
+    [ProgId("EnergoLogic.VisioEditorAddinV339")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -132,7 +132,8 @@ namespace EnergoLogicVisioEditor
         private CommandBar _bar;
         private CommandBarButton _toggleButton;
         private _CommandBarButtonEvents_ClickEventHandler _toggleHandler;
-        private CommandBar _contextBar;
+        private readonly List<CommandBarPopup> _contextRoots = new List<CommandBarPopup>();
+        private readonly List<string> _contextHostNames = new List<string>();
         private readonly List<CommandBarButton> _contextButtons = new List<CommandBarButton>();
         private readonly List<_CommandBarButtonEvents_ClickEventHandler> _contextHandlers =
             new List<_CommandBarButtonEvents_ClickEventHandler>();
@@ -197,7 +198,10 @@ namespace EnergoLogicVisioEditor
             {
                 try { _contextButtons[i].Click -= _contextHandlers[i]; } catch { }
             }
-            try { if (_contextBar != null) _contextBar.Delete(); } catch { }
+            foreach (CommandBarPopup root in _contextRoots)
+            {
+                try { ((dynamic)root).Delete(true); } catch { try { ((dynamic)root).Delete(); } catch { } }
+            }
             try { if (_form != null && !_form.IsDisposed) _form.Dispose(); } catch { }
             try { if (_bar != null) _bar.Delete(); } catch { }
             _form = null;
@@ -206,7 +210,8 @@ namespace EnergoLogicVisioEditor
             _bar = null;
             _contextButtons.Clear();
             _contextHandlers.Clear();
-            _contextBar = null;
+            _contextRoots.Clear();
+            _contextHostNames.Clear();
             _ribbon = null;
             _contextMenuInstalled = false;
             _contextMenuError = "";
@@ -373,38 +378,110 @@ namespace EnergoLogicVisioEditor
         {
             dynamic app = App;
             CommandBars bars = (CommandBars)app.CommandBars;
-            const string contextName = "EnergoLogic.Context";
-            try
+
+            _contextRoots.Clear();
+            _contextHostNames.Clear();
+            _contextButtons.Clear();
+            _contextHandlers.Clear();
+
+            List<CommandBar> candidates = new List<CommandBar>();
+            List<string> observed = new List<string>();
+            for (int index = 1; index <= bars.Count; index++)
             {
-                CommandBar existing = bars[contextName];
-                if (existing != null) existing.Delete();
+                CommandBar host = null;
+                try { host = bars[index]; } catch { continue; }
+                if (host == null) continue;
+
+                int typeValue;
+                try { typeValue = Convert.ToInt32(host.Type, CultureInfo.InvariantCulture); }
+                catch { continue; }
+                if (typeValue != Convert.ToInt32(MsoBarType.msoBarTypePopup, CultureInfo.InvariantCulture))
+                    continue;
+
+                string name = "";
+                string context = "";
+                try { name = Convert.ToString(host.Name, CultureInfo.InvariantCulture) ?? ""; } catch { }
+                try { context = Convert.ToString(((dynamic)host).Context, CultureInfo.InvariantCulture) ?? ""; } catch { }
+                observed.Add(name + "[Context=" + context + "]");
+
+                // Visio drawing shortcut menus advertise drawing context as 2 or 2*.
+                // Never mutate unrelated popup menus.
+                if (String.Equals(context, "2", StringComparison.OrdinalIgnoreCase) ||
+                    String.Equals(context, "2*", StringComparison.OrdinalIgnoreCase) ||
+                    context.StartsWith("2;", StringComparison.OrdinalIgnoreCase))
+                    candidates.Add(host);
             }
-            catch { }
 
-            _contextBar = bars.Add(
-                contextName,
-                MsoBarPosition.msoBarPopup,
-                Missing.Value,
-                true
-            );
-            dynamic popup = _contextBar;
-            popup.Context = "2"; // visUIObjSetDrawing
+            if (candidates.Count == 0)
+                throw new InvalidOperationException(
+                    "Не найден штатный Visio popup для drawing-context. Popup bars: " +
+                    String.Join("; ", observed.Take(20).ToArray())
+                );
 
-            AddContextButton("EnergoLogic — Панель…", "Panel", () => ShowPanel(), false);
-            AddContextButton("Выделить ячейку", "SelectCell", () => PublishUserCommand(() => SelectCell()), true);
-            AddContextButton("Копировать ячейку →", "DuplicateRight", () => PublishUserCommand(() => DuplicateCell(1)), false);
-            AddContextButton("Переместить ячейку →", "MoveRight", () => PublishUserCommand(() => MoveCell(1)), false);
-            AddContextButton("Reconnect End", "ReconnectEnd", () => PublishUserCommand(() => ReconnectEndpoint("end")), true);
-            AddContextButton("Визуальная диагностика", "VisualDiagnostics", () => PublishUserCommand(() => VisualDiagnostics()), true);
+            foreach (CommandBar host in candidates)
+            {
+                RemoveExistingEnergoLogicContextRoot(host);
+
+                CommandBarPopup root = (CommandBarPopup)host.Controls.Add(
+                    MsoControlType.msoControlPopup,
+                    Missing.Value,
+                    Missing.Value,
+                    Missing.Value,
+                    true
+                );
+                root.Caption = "EnergoLogic";
+                root.Tag = "EnergoLogic.Context.Root";
+                root.BeginGroup = true;
+                root.Visible = true;
+
+                dynamic menu = root.CommandBar;
+                AddContextButton(menu, "Панель…", "Panel", () => ShowPanel(), false);
+                AddContextButton(menu, "Выделить ячейку", "SelectCell",
+                    () => PublishUserCommand(() => SelectCell()), true);
+                AddContextButton(menu, "Копировать ячейку →", "DuplicateRight",
+                    () => PublishUserCommand(() => DuplicateCell(1)), false);
+                AddContextButton(menu, "Переместить ячейку →", "MoveRight",
+                    () => PublishUserCommand(() => MoveCell(1)), false);
+                AddContextButton(menu, "Reconnect Begin", "ReconnectBegin",
+                    () => PublishUserCommand(() => ReconnectEndpoint("begin")), true);
+                AddContextButton(menu, "Reconnect End", "ReconnectEnd",
+                    () => PublishUserCommand(() => ReconnectEndpoint("end")), false);
+                AddContextButton(menu, "Repair Glue…", "RepairGlue",
+                    () => PublishUserCommand(() => RepairGlue(false, true)), false);
+                AddContextButton(menu, "Визуальная диагностика", "VisualDiagnostics",
+                    () => PublishUserCommand(() => VisualDiagnostics()), true);
+
+                _contextRoots.Add(root);
+                string hostName = "";
+                try { hostName = Convert.ToString(host.Name, CultureInfo.InvariantCulture) ?? ""; } catch { }
+                _contextHostNames.Add(hostName);
+            }
+        }
+
+        private void RemoveExistingEnergoLogicContextRoot(CommandBar host)
+        {
+            for (int index = host.Controls.Count; index >= 1; index--)
+            {
+                CommandBarControl control = null;
+                try { control = host.Controls[index]; } catch { continue; }
+                if (control == null) continue;
+                string tag = "";
+                try { tag = control.Tag ?? ""; } catch { }
+                if (!String.Equals(tag, "EnergoLogic.Context.Root", StringComparison.Ordinal))
+                    continue;
+                try { ((dynamic)control).Delete(true); }
+                catch { try { ((dynamic)control).Delete(); } catch { } }
+            }
         }
 
         private void AddContextButton(
+            dynamic menu,
             string caption,
             string tagSuffix,
             Action action,
             bool beginGroup)
         {
-            CommandBarButton button = (CommandBarButton)_contextBar.Controls.Add(
+            CommandBarButton button = (CommandBarButton)menu.Controls.Add(
                 MsoControlType.msoControlButton,
                 Missing.Value,
                 Missing.Value,
@@ -434,9 +511,12 @@ namespace EnergoLogicVisioEditor
             try { panelVisible = _form != null && !_form.IsDisposed && _form.Visible; } catch { }
             return String.Format(
                 CultureInfo.CurrentCulture,
-                "Ribbon={0}; ContextMenu={1}; Panel={2}; FallbackToolbar=hidden{3}",
+                "Ribbon={0}; ContextMenu={1}; ContextHosts={2}; Panel={3}; FallbackToolbar=hidden{4}",
                 _ribbon != null ? "loaded" : "not_loaded",
                 _contextMenuInstalled ? "installed" : "not_installed",
+                _contextHostNames.Count == 0
+                    ? "none"
+                    : String.Join(",", _contextHostNames.ToArray()),
                 panelVisible ? "visible" : "hidden",
                 String.IsNullOrWhiteSpace(_contextMenuError)
                     ? ""
@@ -491,7 +571,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.38"; }
+        public string ApiVersion() { return "0.3.39"; }
 
         internal string DuplicateCell(int direction)
         {
