@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.34.0")]
+[assembly: AssemblyVersion("0.3.35.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -90,6 +90,12 @@ namespace EnergoLogicVisioEditor
         string ApiRepairGluePreview();
         string ApiRepairGlueApply();
         string ApiDoctor();
+        string ApiVisualDiagnostics();
+        string ApiBusDiagnostics();
+        string ApiExtendBusRight();
+        string ApiTrimBusRight();
+        string ApiReconnectBegin();
+        string ApiReconnectEnd();
         string ApiShowPanel();
         string ApiExactOffset(double dxMm, double dyMm);
         string ApiAlignX();
@@ -114,8 +120,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("F7028167-E35C-4AD5-AD2A-4AA1D248F334")]
-    [ProgId("EnergoLogic.VisioEditorAddinV334")]
+    [Guid("6F661F76-44D3-4CC8-8B2B-E64E8F8BF335")]
+    [ProgId("EnergoLogic.VisioEditorAddinV335")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -247,6 +253,12 @@ namespace EnergoLogicVisioEditor
         public string ApiRepairGluePreview() { return RepairGlue(true, false); }
         public string ApiRepairGlueApply() { return RepairGlue(false, false); }
         public string ApiDoctor() { return Doctor(); }
+        public string ApiVisualDiagnostics() { return VisualDiagnostics(); }
+        public string ApiBusDiagnostics() { return BusDiagnostics(); }
+        public string ApiExtendBusRight() { return ExtendBusRight(); }
+        public string ApiTrimBusRight() { return TrimBusRight(); }
+        public string ApiReconnectBegin() { return ReconnectEndpoint("begin"); }
+        public string ApiReconnectEnd() { return ReconnectEndpoint("end"); }
         public string ApiShowPanel() { ShowPanel(); return "✓ Панель EnergoLogic показана."; }
         public string ApiExactOffset(double dxMm, double dyMm) { return ExactOffset(dxMm, dyMm); }
         public string ApiAlignX() { return Align("x"); }
@@ -271,7 +283,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.34"; }
+        public string ApiVersion() { return "0.3.35"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1569,6 +1581,443 @@ namespace EnergoLogicVisioEditor
             return "⚠ Scheme Doctor: найдено проблем: " + messages.Count + ". Проблемные элементы выделены.\r\n" + String.Join("\r\n", messages.Take(8).ToArray());
         }
 
+        internal string BusDiagnostics()
+        {
+            dynamic page = App.ActivePage;
+            dynamic bus = ResolveSelectedBus(page);
+            int busId = Convert.ToInt32(bus.ID, CultureInfo.InvariantCulture);
+            int pointCount = GetBusPointCount(bus);
+            double pitch = GetBusPitchMm(bus);
+            double width = GetMm(bus, "Width");
+
+            SortedDictionary<int, int> terminals = GetActiveBusTerminals(bus);
+            List<string> structural = new List<string>();
+            if (terminals.Count != pointCount)
+                structural.Add(
+                    "активных terminal " + terminals.Count +
+                    ", Shape Data ожидает " + pointCount
+                );
+            for (int slot = 1; slot <= pointCount; slot++)
+                if (!terminals.ContainsKey(slot))
+                    structural.Add("не найден slot " + slot);
+
+            Dictionary<int, List<int>> occupancy = new Dictionary<int, List<int>>();
+            foreach (int slot in terminals.Keys)
+                occupancy[slot] = new List<int>();
+
+            for (int i = 1; i <= (int)page.Shapes.Count; i++)
+            {
+                dynamic shape = page.Shapes.Item(i);
+                int sourceId = Convert.ToInt32(shape.ID, CultureInfo.InvariantCulture);
+                if (sourceId == busId) continue;
+                foreach (string endpoint in new[] { "begin", "end" })
+                {
+                    GlueTarget target = TryGetGlueTarget(shape, endpoint);
+                    if (target == null) continue;
+                    foreach (KeyValuePair<int, int> pair in terminals)
+                    {
+                        if (pair.Value == target.TargetId)
+                            occupancy[pair.Key].Add(sourceId);
+                    }
+                }
+            }
+
+            List<string> free = occupancy
+                .Where(pair => pair.Value.Count == 0)
+                .Select(pair => pair.Key.ToString(CultureInfo.InvariantCulture))
+                .ToList();
+            List<string> occupied = occupancy
+                .Where(pair => pair.Value.Count > 0)
+                .Select(pair =>
+                    pair.Key.ToString(CultureInfo.InvariantCulture) +
+                    "→" + String.Join(",", pair.Value.Distinct().OrderBy(x => x))
+                )
+                .ToList();
+
+            string prefix = structural.Count == 0 ? "✓" : "⚠";
+            string result = String.Format(
+                CultureInfo.CurrentCulture,
+                "{0} Шина {1} (shape {2}): точек {3}; шаг {4:0.###} мм; ширина {5:0.###} мм. " +
+                "Занято: [{6}]. Свободно: [{7}].",
+                prefix,
+                SafeText(bus).Replace("
+", " ").Replace("
+", " ").Trim(),
+                busId,
+                pointCount,
+                pitch,
+                width,
+                String.Join("; ", occupied.ToArray()),
+                String.Join(", ", free.ToArray())
+            );
+            if (structural.Count > 0)
+                result += "
+Structural: " + String.Join("; ", structural.ToArray());
+            return result;
+        }
+
+        internal string ExtendBusRight()
+        {
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            dynamic bus = ResolveSelectedBus(page);
+            int busId = Convert.ToInt32(bus.ID, CultureInfo.InvariantCulture);
+            int current = GetBusPointCount(bus);
+            if (current >= 10)
+                throw new InvalidOperationException("VTD master поддерживает максимум 10 точек подключения");
+
+            double oldPitch = GetBusPitchMm(bus);
+            SortedDictionary<int, int> before = GetActiveBusTerminals(bus);
+
+            int scope = (int)app.BeginUndoScope("EnergoLogic: Расширить шину вправо");
+            bool commit = false;
+            try
+            {
+                SetBusPointCount(bus, current + 1);
+                SettleVisioAfterGeometryChange();
+
+                if (GetBusPointCount(bus) != current + 1)
+                    throw new InvalidOperationException("Shape Data шины не приняла новое количество точек");
+                if (Math.Abs(GetBusPitchMm(bus) - oldPitch) > 0.01)
+                    throw new InvalidOperationException("При расширении неожиданно изменился шаг шины");
+
+                dynamic newTerminal = GetBusTerminalBySlot(page, busId, current + 1);
+                int newSlot = GetSlot(newTerminal);
+                if (newSlot != current + 1)
+                    throw new InvalidOperationException("Новый terminal получил неверный номер места");
+                EnsureTerminalFree(page, Convert.ToInt32(newTerminal.ID, CultureInfo.InvariantCulture), new HashSet<int>());
+
+                SortedDictionary<int, int> after = GetActiveBusTerminals(bus);
+                foreach (KeyValuePair<int, int> pair in before)
+                    if (!after.ContainsKey(pair.Key) || after[pair.Key] != pair.Value)
+                        throw new InvalidOperationException("При расширении изменилась identity существующего bus terminal");
+
+                commit = true;
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ Шина расширена вправо: {0} → {1} точек; шаг {2:0.###} мм; новый slot {3}.",
+                    current,
+                    current + 1,
+                    oldPitch,
+                    newSlot
+                );
+            }
+            finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string TrimBusRight()
+        {
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            dynamic bus = ResolveSelectedBus(page);
+            int busId = Convert.ToInt32(bus.ID, CultureInfo.InvariantCulture);
+            int current = GetBusPointCount(bus);
+            if (current <= 1)
+                throw new InvalidOperationException("Нельзя уменьшить шину меньше одной точки подключения");
+
+            dynamic lastTerminal = GetBusTerminalBySlot(page, busId, current);
+            int lastTerminalId = Convert.ToInt32(lastTerminal.ID, CultureInfo.InvariantCulture);
+            EnsureTerminalFree(page, lastTerminalId, new HashSet<int>());
+
+            double oldPitch = GetBusPitchMm(bus);
+            SortedDictionary<int, int> before = GetActiveBusTerminals(bus);
+
+            int scope = (int)app.BeginUndoScope("EnergoLogic: Обрезать шину справа");
+            bool commit = false;
+            try
+            {
+                SetBusPointCount(bus, current - 1);
+                SettleVisioAfterGeometryChange();
+
+                if (GetBusPointCount(bus) != current - 1)
+                    throw new InvalidOperationException("Shape Data шины не приняла уменьшение количества точек");
+                if (Math.Abs(GetBusPitchMm(bus) - oldPitch) > 0.01)
+                    throw new InvalidOperationException("При обрезке неожиданно изменился шаг шины");
+
+                SortedDictionary<int, int> after = GetActiveBusTerminals(bus);
+                if (after.ContainsKey(current))
+                    throw new InvalidOperationException("Последний terminal остался активным после обрезки");
+                for (int slot = 1; slot < current; slot++)
+                    if (!after.ContainsKey(slot) || !before.ContainsKey(slot) || after[slot] != before[slot])
+                        throw new InvalidOperationException("При обрезке изменилась identity существующего bus terminal");
+
+                commit = true;
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ Шина обрезана справа: {0} → {1} точек; удалён свободный slot {2}.",
+                    current,
+                    current - 1,
+                    current
+                );
+            }
+            finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string ReconnectEndpoint(string endpoint)
+        {
+            endpoint = (endpoint ?? "").Trim().ToLowerInvariant();
+            if (endpoint != "begin" && endpoint != "end")
+                throw new ArgumentException("endpoint должен быть begin или end");
+
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count != 1)
+                throw new InvalidOperationException("Для Reconnect выберите один 1-D элемент");
+            int sourceId = ids[0];
+            dynamic source = page.Shapes.ItemFromID(sourceId);
+            if (!HasEndpoint(source, endpoint))
+                throw new InvalidOperationException("У выбранного элемента нет endpoint " + endpoint);
+
+            double x = GetMm(source, endpoint == "begin" ? "BeginX" : "EndX");
+            double y = GetMm(source, endpoint == "begin" ? "BeginY" : "EndY");
+            GlueTarget current = TryGetGlueTarget(source, endpoint);
+            Dictionary<int, int> childParent = BuildChildParentMap(page);
+
+            List<ConnectionPointInfo> candidates = new List<ConnectionPointInfo>();
+            foreach (ConnectionPointInfo p in GetAllConnectionPoints(page))
+            {
+                if (p.ShapeId == sourceId) continue;
+
+                int owner;
+                if (childParent.TryGetValue(p.ShapeId, out owner))
+                {
+                    try
+                    {
+                        dynamic parent = page.Shapes.ItemFromID(owner);
+                        if (CellExists(parent, "Prop.tp") && CellExists(parent, "Prop.rt"))
+                        {
+                            try { GetSlot(page.Shapes.ItemFromID(p.ShapeId)); }
+                            catch { continue; } // hidden/inactive VTD bus terminal
+                        }
+                    }
+                    catch { }
+                }
+
+                double dx = p.Xmm - x;
+                double dy = p.Ymm - y;
+                double distance = Math.Sqrt(dx * dx + dy * dy);
+                if (distance <= 1.0)
+                    candidates.Add(new ConnectionPointInfo {
+                        ShapeId = p.ShapeId,
+                        Row = p.Row,
+                        Xmm = p.Xmm,
+                        Ymm = p.Ymm,
+                        DistanceMm = distance
+                    });
+            }
+
+            candidates = candidates.OrderBy(item => item.DistanceMm).ToList();
+            if (candidates.Count == 0)
+                throw new InvalidOperationException(
+                    "Рядом с endpoint не найдено активной connection point (≤ 1 мм)"
+                );
+            if (candidates.Count > 1 &&
+                Math.Abs(candidates[0].DistanceMm - candidates[1].DistanceMm) < 0.05)
+                throw new InvalidOperationException(
+                    "Reconnect неоднозначен: найдено несколько одинаково близких connection point"
+                );
+
+            ConnectionPointInfo best = candidates[0];
+            if (current != null &&
+                current.TargetId == best.ShapeId &&
+                current.Row == best.Row)
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ {0} уже подключён к shape {1}/Connections.{2}.",
+                    endpoint,
+                    best.ShapeId,
+                    best.Row
+                );
+
+            int scope = (int)app.BeginUndoScope("EnergoLogic: Reconnect " + endpoint);
+            bool commit = false;
+            try
+            {
+                if (current != null) DetachEndpoint(source, endpoint);
+                dynamic target = page.Shapes.ItemFromID(best.ShapeId);
+                GlueEndpointWithRetry(source, endpoint, target, best.Row);
+                VerifyGlue(source, endpoint, best.ShapeId, best.Row);
+                commit = true;
+                string previous = current == null
+                    ? "none"
+                    : current.TargetId + "/Connections." + current.Row;
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ Reconnect {0}: {1} → {2}/Connections.{3}; расстояние {4:0.###} мм.",
+                    endpoint,
+                    previous,
+                    best.ShapeId,
+                    best.Row,
+                    best.DistanceMm
+                );
+            }
+            finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string VisualDiagnostics()
+        {
+            dynamic page = App.ActivePage;
+            List<ConnectionPointInfo> points = GetAllConnectionPoints(page);
+            HashSet<string> connectedEndpoints = BuildConnectedEndpointIndex(page);
+            HashSet<int> problemIds = new HashSet<int>();
+            List<string> messages = new List<string>();
+
+            // Visual touch without real Glue.
+            for (int i = 1; i <= (int)page.Shapes.Count; i++)
+            {
+                dynamic shape = page.Shapes.Item(i);
+                int id = Convert.ToInt32(shape.ID, CultureInfo.InvariantCulture);
+                foreach (string endpoint in new[] { "begin", "end" })
+                {
+                    if (!HasEndpoint(shape, endpoint) ||
+                        connectedEndpoints.Contains(EndpointKey(id, endpoint)))
+                        continue;
+                    double x = GetMm(shape, endpoint == "begin" ? "BeginX" : "EndX");
+                    double y = GetMm(shape, endpoint == "begin" ? "BeginY" : "EndY");
+                    bool near = points.Any(p =>
+                        p.ShapeId != id &&
+                        Math.Sqrt(Math.Pow(p.Xmm - x, 2) + Math.Pow(p.Ymm - y, 2)) <= 0.8
+                    );
+                    if (near)
+                    {
+                        problemIds.Add(id);
+                        messages.Add("shape " + id + " " + endpoint + ": касание без Glue");
+                    }
+                }
+            }
+
+            // Bus structure and active terminal continuity.
+            for (int i = 1; i <= (int)page.Shapes.Count; i++)
+            {
+                dynamic shape = page.Shapes.Item(i);
+                if (!CellExists(shape, "Prop.tp") || !CellExists(shape, "Prop.rt")) continue;
+                int id = Convert.ToInt32(shape.ID, CultureInfo.InvariantCulture);
+                try
+                {
+                    int expected = GetBusPointCount(shape);
+                    SortedDictionary<int, int> active = GetActiveBusTerminals(shape);
+                    bool bad = active.Count != expected;
+                    for (int slot = 1; slot <= expected; slot++)
+                        if (!active.ContainsKey(slot)) bad = true;
+                    if (bad)
+                    {
+                        problemIds.Add(id);
+                        messages.Add(
+                            "bus " + id + ": active terminals " + active.Count +
+                            ", expected " + expected
+                        );
+                    }
+                }
+                catch (Exception ex)
+                {
+                    problemIds.Add(id);
+                    messages.Add("bus " + id + ": " + ex.Message);
+                }
+            }
+
+            // Persisted cell_id must resolve to exactly one bus anchor and a connected
+            // member graph. Validate one representative per identity.
+            Dictionary<string, int> identityRepresentative =
+                new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 1; i <= (int)page.Shapes.Count; i++)
+            {
+                dynamic shape = page.Shapes.Item(i);
+                int id = Convert.ToInt32(shape.ID, CultureInfo.InvariantCulture);
+                string identity = GetCellIdentity(shape);
+                if (!String.IsNullOrWhiteSpace(identity) &&
+                    !identityRepresentative.ContainsKey(identity))
+                    identityRepresentative.Add(identity, id);
+            }
+            foreach (KeyValuePair<string, int> pair in identityRepresentative)
+            {
+                try { DiscoverCell(page, pair.Value); }
+                catch (Exception ex)
+                {
+                    problemIds.Add(pair.Value);
+                    messages.Add("cell " + pair.Key + ": " + ex.Message);
+                }
+            }
+
+            if (problemIds.Count > 0)
+                SelectIds(page, problemIds.OrderBy(id => id).ToList());
+
+            if (messages.Count == 0)
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ Visual Diagnostics: structural-проблем не найдено. Проверено cell_id: {0}.",
+                    identityRepresentative.Count
+                );
+
+            return "⚠ Visual Diagnostics: найдено проблем: " + messages.Count +
+                ". Проблемные top-level элементы выделены.
+" +
+                String.Join("
+", messages.Take(12).ToArray());
+        }
+
+        private dynamic ResolveSelectedBus(dynamic page)
+        {
+            List<int> selection = CurrentTopLevelSelection(page);
+            if (selection.Count == 1)
+            {
+                dynamic selected = page.Shapes.ItemFromID(selection[0]);
+                if (CellExists(selected, "Prop.tp") && CellExists(selected, "Prop.rt"))
+                    return selected;
+            }
+
+            CellInfo cell = DiscoverCellFromSelection(page);
+            dynamic bus = page.Shapes.ItemFromID(cell.BusId);
+            if (!CellExists(bus, "Prop.tp") || !CellExists(bus, "Prop.rt"))
+                throw new InvalidOperationException("Шина ячейки не поддерживает VTD Shape Data tp/rt");
+            return bus;
+        }
+
+        private int GetBusPointCount(dynamic bus)
+        {
+            if (!CellExists(bus, "Prop.tp"))
+                throw new InvalidOperationException("У шины отсутствует Prop.tp");
+            int count = Convert.ToInt32(
+                Math.Round((double)bus.CellsU("Prop.tp").ResultIU),
+                CultureInfo.InvariantCulture
+            );
+            if (count < 1 || count > 10)
+                throw new InvalidOperationException("Некорректное количество точек подключения шины: " + count);
+            return count;
+        }
+
+        private double GetBusPitchMm(dynamic bus)
+        {
+            if (!CellExists(bus, "Prop.rt"))
+                throw new InvalidOperationException("У шины отсутствует Prop.rt");
+            return (double)bus.CellsU("Prop.rt").ResultIU * 25.4;
+        }
+
+        private void SetBusPointCount(dynamic bus, int count)
+        {
+            if (count < 1 || count > 10)
+                throw new ArgumentOutOfRangeException("count");
+            bus.CellsU("Prop.tp").FormulaU =
+                "INDEX(" + (count - 1).ToString(CultureInfo.InvariantCulture) +
+                ",Prop.tp.Format)";
+        }
+
+        private SortedDictionary<int, int> GetActiveBusTerminals(dynamic bus)
+        {
+            SortedDictionary<int, int> result = new SortedDictionary<int, int>();
+            for (int i = 1; i <= (int)bus.Shapes.Count; i++)
+            {
+                dynamic child = bus.Shapes.Item(i);
+                int slot;
+                try { slot = GetSlot(child); }
+                catch { continue; }
+                if (result.ContainsKey(slot))
+                    throw new InvalidOperationException("На шине дублируется slot " + slot);
+                result.Add(slot, Convert.ToInt32(child.ID, CultureInfo.InvariantCulture));
+            }
+            return result;
+        }
+
         private List<CellInfo> SelectedCells(dynamic page)
         {
             List<int> selection = CurrentTopLevelSelection(page);
@@ -1842,9 +2291,37 @@ namespace EnergoLogicVisioEditor
                     return Convert.ToInt32(Math.Round((double)terminal.CellsU("User.slot").ResultIU));
             }
             catch { }
+
             int slot;
-            if (Int32.TryParse(SafeText(terminal).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out slot) && slot > 0) return slot;
-            throw new InvalidOperationException("У connection point шины отсутствует номер места");
+            if (Int32.TryParse(
+                    SafeText(terminal).Trim(),
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out slot) &&
+                slot > 0)
+                return slot;
+
+            // VTD bus master pre-creates hidden connection-point children. When
+            // Prop.tp activates a new one, its Text can lag, while User.nt/ut are
+            // authoritative immediately: active when ut=FALSE, slot=nt+1.
+            try
+            {
+                if (CellExists(terminal, "User.nt") && CellExists(terminal, "User.ut"))
+                {
+                    bool hidden = Math.Abs((double)terminal.CellsU("User.ut").ResultIU) > 0.5;
+                    if (!hidden)
+                    {
+                        int nt = Convert.ToInt32(
+                            Math.Round((double)terminal.CellsU("User.nt").ResultIU),
+                            CultureInfo.InvariantCulture
+                        );
+                        if (nt >= 0) return nt + 1;
+                    }
+                }
+            }
+            catch { }
+
+            throw new InvalidOperationException("У connection point шины отсутствует активный номер места");
         }
 
         private void EnsureTerminalFree(dynamic page, int terminalId, HashSet<int> allowedOwners)
@@ -2871,8 +3348,14 @@ namespace EnergoLogicVisioEditor
             geoTab.Controls.Add(geo);
 
             FlowLayoutPanel checks = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, Padding = new Padding(14), WrapContents=false };
+            checks.Controls.Add(ButtonWide("Визуальная диагностика", (s,e)=>Run(()=>_addin.VisualDiagnostics())));
             checks.Controls.Add(ButtonWide("Проверить схему", (s,e)=>Run(()=>_addin.Doctor())));
-            checks.Controls.Add(new Label { AutoSize=true, MaximumSize=new Size(350,0), Text="Scheme Doctor ищет опасные случаи: визуальное касание без реального Glue и выделяет проблемные элементы." });
+            checks.Controls.Add(ButtonWide("Диагностика шины", (s,e)=>Run(()=>_addin.BusDiagnostics())));
+            checks.Controls.Add(ButtonWide("Расширить шину →", (s,e)=>Run(()=>_addin.ExtendBusRight())));
+            checks.Controls.Add(ButtonWide("Обрезать шину справа", (s,e)=>Run(()=>_addin.TrimBusRight())));
+            checks.Controls.Add(ButtonWide("Reconnect Begin", (s,e)=>Run(()=>_addin.ReconnectEndpoint("begin"))));
+            checks.Controls.Add(ButtonWide("Reconnect End", (s,e)=>Run(()=>_addin.ReconnectEndpoint("end"))));
+            checks.Controls.Add(new Label { AutoSize=true, MaximumSize=new Size(350,0), Text="Диагностика не перекрашивает схему: проблемные top-level элементы только выделяются. Extend/Trim используют штатные VTD Shape Data Prop.tp/Prop.rt." });
             checkTab.Controls.Add(checks);
 
             _status = new TextBox { Dock=DockStyle.Fill, Multiline=true, ReadOnly=true, ScrollBars=ScrollBars.Vertical, BackColor=SystemColors.Window, Text="EnergoLogic готов. Выберите объект на схеме и используйте команду выше." };
