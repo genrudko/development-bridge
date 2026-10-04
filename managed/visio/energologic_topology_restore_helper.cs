@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace EnergoLogicTopologyRestore
 {
@@ -168,41 +169,84 @@ namespace EnergoLogicTopologyRestore
                     throw new InvalidOperationException("Visio page not found: " + pageName);
 
                 int repaired = 0;
-                int verified = 0;
-                foreach (Edge edge in edges)
+                int verified = edges.Count;
+                int cleanRounds = 0;
+                int rounds = 0;
+                const int requiredCleanRounds = 8;
+                const int maxRounds = 20;
+                const int pollMilliseconds = 250;
+
+                for (rounds = 1; rounds <= maxRounds; rounds++)
                 {
-                    try
+                    int repairedThisRound = 0;
+
+                    foreach (Edge edge in edges)
                     {
-                        dynamic source = page.Shapes.ItemFromID(edge.SourceId);
-                        if (!IsGlueCorrect(page, edge))
+                        try
                         {
-                            GlueAndVerify(page, edge);
-                            repaired++;
-                        }
-                        else
-                        {
-                            // Re-read through the external COM process so PASS always
-                            // means the actual live Visio topology matched the plan.
                             if (!IsGlueCorrect(page, edge))
-                                throw new InvalidOperationException("External Glue verification was not stable");
+                            {
+                                GlueAndVerify(page, edge);
+                                repaired++;
+                                repairedThisRound++;
+                            }
                         }
-                        verified++;
+                        catch (Exception edgeError)
+                        {
+                            throw new InvalidOperationException(
+                                String.Format(CultureInfo.InvariantCulture,
+                                    "External Glue repair failed: source {0} {1}; target {2}/{3}",
+                                    edge.SourceId, edge.Endpoint, edge.TargetId, edge.Row),
+                                edgeError);
+                        }
                     }
-                    catch (Exception edgeError)
+
+                    // Verify the complete expected topology after all repairs in this
+                    // round. Formula-pair verification rejects VTD half-Glue.
+                    foreach (Edge edge in edges)
                     {
-                        throw new InvalidOperationException(
-                            String.Format(CultureInfo.InvariantCulture,
-                                "External Glue verification failed: source {0} {1}; target {2}/{3}",
-                                edge.SourceId, edge.Endpoint, edge.TargetId, edge.Row),
-                            edgeError);
+                        if (!IsGlueCorrect(page, edge))
+                            throw new InvalidOperationException(
+                                String.Format(
+                                    CultureInfo.InvariantCulture,
+                                    "External topology verification failed after repair: source {0} {1}; target {2}/{3}",
+                                    edge.SourceId,
+                                    edge.Endpoint,
+                                    edge.TargetId,
+                                    edge.Row
+                                )
+                            );
                     }
+
+                    if (repairedThisRound == 0)
+                        cleanRounds++;
+                    else
+                        cleanRounds = 0;
+
+                    if (cleanRounds >= requiredCleanRounds)
+                        break;
+
+                    // The helper runs out of process while the add-in callback has
+                    // already returned. Sleeping here leaves Visio's UI/VTD message
+                    // loop free to process delayed rewrites before the next check.
+                    Thread.Sleep(pollMilliseconds);
                 }
+
+                if (cleanRounds < requiredCleanRounds)
+                    throw new InvalidOperationException(
+                        "External topology did not stabilize: clean=" +
+                        cleanRounds.ToString(CultureInfo.InvariantCulture) +
+                        "/" + requiredCleanRounds.ToString(CultureInfo.InvariantCulture) +
+                        "; rounds=" + rounds.ToString(CultureInfo.InvariantCulture)
+                    );
 
                 File.WriteAllText(
                     resultPath,
                     "PASS\t" +
                     repaired.ToString(CultureInfo.InvariantCulture) + "\t" +
-                    verified.ToString(CultureInfo.InvariantCulture),
+                    verified.ToString(CultureInfo.InvariantCulture) + "\t" +
+                    rounds.ToString(CultureInfo.InvariantCulture) + "\t" +
+                    cleanRounds.ToString(CultureInfo.InvariantCulture),
                     Encoding.UTF8
                 );
                 return 0;

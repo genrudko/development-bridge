@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.25.0")]
+[assembly: AssemblyVersion("0.3.26.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("8E9D3160-A441-4944-9471-728178F5F325")]
-    [ProgId("EnergoLogic.VisioEditorAddinV325")]
+    [Guid("B0DB7395-E237-4F35-BED6-AE59C2C5F326")]
+    [ProgId("EnergoLogic.VisioEditorAddinV326")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.25"; }
+        public string ApiVersion() { return "0.3.26"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1739,39 +1739,17 @@ namespace EnergoLogicVisioEditor
                     );
                 int repairedByHelper = ParseTopologyHelperRepairCount(helperResult);
 
-                dynamic livePage = ResolveLivePage(documentName, pageNameU);
                 int verifiedGlue = 0;
 
                 if (replacement != null)
                 {
-                    // Glue verification is authoritative in the external helper.
-                    // In-process Connects can remain stale until the Visio/VTD callback
-                    // boundary, which caused false green results in v3.20-v3.23.
+                    // The external helper owns the complete post-callback topology
+                    // truth and its stabilization window. Phase 1 already verified
+                    // replacement geometry + identity before scheduling. Do not touch
+                    // Visio at all after helper PASS; even read-only COM access can
+                    // give VTD another callback opportunity after the clean window.
                     verifiedGlue = replacement.ExpectedGlue.Count;
 
-                    dynamic replacementShape = livePage.Shapes.ItemFromID(replacement.ReplacementId);
-                    if (Math.Abs(GetMm(replacementShape, "PinX") - replacement.Xmm) > 0.1 ||
-                        Math.Abs(GetMm(replacementShape, "PinY") - replacement.Ymm) > 0.1)
-                        throw new InvalidOperationException("После внешней topology-фазы изменился engineering anchor replacement shape");
-
-                    if (!String.Equals(
-                            GetCellIdentity(replacementShape),
-                            replacement.CellId,
-                            StringComparison.OrdinalIgnoreCase))
-                        throw new InvalidOperationException("После внешней topology-фазы потеряна identity ячейки");
-
-                    CellInfo rediscovered = DiscoverCell(livePage, replacement.ReplacementId);
-                    List<int> actualMembers = rediscovered.MemberIds.OrderBy(id => id).ToList();
-                    if (actualMembers.Count != replacement.ExpectedMemberCount ||
-                        !actualMembers.SequenceEqual(replacement.ExpectedMemberIds))
-                        throw new InvalidOperationException(
-                            "После замены изменился логический состав ячейки"
-                        );
-
-                    // Do not touch Visio after the final topology verification.
-                    // The replacement is already selected by the phase-1 command.
-                    // Any extra UI/selection callback here gives VTD another chance
-                    // to rewrite dependent ShapeSheet formulas after our clean check.
                     int completedCycles;
                     int stablePasses;
                     lock (_asyncSync)
@@ -1812,6 +1790,7 @@ namespace EnergoLogicVisioEditor
                 }
                 else
                 {
+                    dynamic livePage = ResolveLivePage(documentName, pageNameU);
                     int verifiedInternal = 0;
                     foreach (CellMoveState state in states)
                     {
