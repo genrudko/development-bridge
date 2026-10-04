@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.32.0")]
+[assembly: AssemblyVersion("0.3.33.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -107,14 +107,15 @@ namespace EnergoLogicVisioEditor
         string ApiBindCellIdentity();
         string ApiCaptureReplacementSample();
         string ApiReplaceEquipmentFromSample();
+        string ApiInsertEquipmentIntoConnectionFromSample();
         string ApiOperationStatus();
         string ApiCompletePendingTopology();
         string ApiVersion();
     }
 
     [ComVisible(true)]
-    [Guid("4AD14F1D-A796-4E3E-B386-6E9DB2E9F332")]
-    [ProgId("EnergoLogic.VisioEditorAddinV332")]
+    [Guid("92191C8E-1C12-4F3E-A012-95A3E431F333")]
+    [ProgId("EnergoLogic.VisioEditorAddinV333")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -261,13 +262,14 @@ namespace EnergoLogicVisioEditor
         public string ApiBindCellIdentity() { return BindCellIdentity(); }
         public string ApiCaptureReplacementSample() { return CaptureReplacementSample(); }
         public string ApiReplaceEquipmentFromSample() { return ReplaceEquipmentFromSample(); }
+        public string ApiInsertEquipmentIntoConnectionFromSample() { return InsertEquipmentIntoConnectionFromSample(); }
         public string ApiOperationStatus()
         {
             lock (_asyncSync)
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.32"; }
+        public string ApiVersion() { return "0.3.33"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -675,6 +677,136 @@ namespace EnergoLogicVisioEditor
                         _replacementMasterName,
                         backend
                     )
+                };
+
+                SelectIds(page, new[] { newId });
+                commit = true;
+                return ScheduleStableTopologyCompletion(page, pending);
+            }
+            finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string InsertEquipmentIntoConnectionFromSample()
+        {
+            if (_replacementMaster == null)
+                throw new InvalidOperationException("Сначала выберите элемент-образец и нажмите «Запомнить образец»");
+
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count != 1)
+                throw new InvalidOperationException("Для вставки выберите ровно одну 1-D связь");
+
+            int oldId = ids[0];
+            dynamic connection = page.Shapes.ItemFromID(oldId);
+            if (!HasEndpoint(connection, "begin") || !HasEndpoint(connection, "end"))
+                throw new InvalidOperationException("Выбранный объект не является 1-D связью с Begin/End");
+
+            string cellId = GetCellIdentity(connection);
+            if (String.IsNullOrWhiteSpace(cellId))
+                throw new InvalidOperationException("Перед вставкой закрепите состав ячейки");
+
+            CellInfo cell = DiscoverCell(page, oldId);
+            if (oldId == cell.AnchorId)
+                throw new InvalidOperationException(
+                    "Нельзя вставлять оборудование заменой bus-anchor связи; выберите внутреннюю 1-D связь"
+                );
+
+            GlueTarget beginTarget = TryGetGlueTarget(connection, "begin");
+            GlueTarget endTarget = TryGetGlueTarget(connection, "end");
+            if (beginTarget == null || endTarget == null)
+                throw new InvalidOperationException(
+                    "Для вставки выбранная связь должна иметь Glue на обоих концах"
+                );
+
+            // A connection used as a target by another member cannot be replaced by
+            // one apparatus without a richer port mapping.
+            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
+            if (internalGlue.Any(edge => edge.TargetId == oldId))
+                throw new InvalidOperationException(
+                    "К выбранной связи подключены другие элементы; вставка требует отдельного port mapping"
+                );
+
+            double beginX = GetMm(connection, "BeginX");
+            double beginY = GetMm(connection, "BeginY");
+            double endX = GetMm(connection, "EndX");
+            double endY = GetMm(connection, "EndY");
+            double centerX = (beginX + endX) / 2.0;
+            double centerY = (beginY + endY) / 2.0;
+
+            int scope = (int)app.BeginUndoScope("EnergoLogic: Вставить оборудование в связь");
+            bool commit = false;
+            try
+            {
+                // Detach the old connector before dropping the apparatus so VTD sees
+                // a single authoritative path throughout the transaction.
+                DetachEndpoint(connection, "begin");
+                DetachEndpoint(connection, "end");
+
+                dynamic inserted = page.Drop(_replacementMaster, centerX / 25.4, centerY / 25.4);
+                if (inserted == null)
+                    throw new InvalidOperationException("Visio не вернул вставленный shape");
+
+                int newId = Convert.ToInt32(inserted.ID, CultureInfo.InvariantCulture);
+                if (!HasEndpoint(inserted, "begin") || !HasEndpoint(inserted, "end"))
+                    throw new InvalidOperationException(
+                        "Master-образец не является совместимым 1-D оборудованием с Begin/End"
+                    );
+
+                SetCellIdentity(inserted, cellId);
+                SetMm(inserted, "BeginX", beginX);
+                SetMm(inserted, "BeginY", beginY);
+                SetMm(inserted, "EndX", endX);
+                SetMm(inserted, "EndY", endY);
+
+                try { connection.Delete(); }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException("Не удалось удалить исходную связь после вставки", ex);
+                }
+
+                List<GlueEdgeInfo> expected = new List<GlueEdgeInfo>();
+                // Preserve the bus anchor first, followed by every unaffected internal
+                // edge, then the two new apparatus endpoints.
+                expected.Add(new GlueEdgeInfo {
+                    SourceId = cell.AnchorId,
+                    Endpoint = cell.Endpoint,
+                    TargetId = cell.BusTerminalId,
+                    Row = cell.ConnectionRow
+                });
+                foreach (GlueEdgeInfo edge in internalGlue)
+                {
+                    if (edge.SourceId == oldId) continue;
+                    expected.Add(edge);
+                }
+                expected.Add(new GlueEdgeInfo {
+                    SourceId = newId,
+                    Endpoint = "begin",
+                    TargetId = beginTarget.TargetId,
+                    Row = beginTarget.Row
+                });
+                expected.Add(new GlueEdgeInfo {
+                    SourceId = newId,
+                    Endpoint = "end",
+                    TargetId = endTarget.TargetId,
+                    Row = endTarget.Row
+                });
+
+                List<int> expectedMembers = cell.MemberIds
+                    .Select(id => id == oldId ? newId : id)
+                    .Distinct()
+                    .OrderBy(id => id)
+                    .ToList();
+
+                ReplacementCompletionState pending = new ReplacementCompletionState {
+                    ReplacementId = newId,
+                    CellId = cellId,
+                    Xmm = centerX,
+                    Ymm = centerY,
+                    ExpectedMemberCount = cell.MemberIds.Count,
+                    ExpectedMemberIds = expectedMembers,
+                    ExpectedGlue = expected,
+                    SuccessPrefix = "✓ Оборудование вставлено в выбранную связь: " + _replacementMasterName
                 };
 
                 SelectIds(page, new[] { newId });
@@ -2514,9 +2646,12 @@ namespace EnergoLogicVisioEditor
             cells.SetColumnSpan(bindIdentity,2);
             cells.Controls.Add(Button("Запомнить образец", (s,e)=>Run(()=>_addin.CaptureReplacementSample())),0,4);
             cells.Controls.Add(Button("Заменить по образцу", (s,e)=>RunReplaceEquipment()),1,4);
+            Button insertEquipment = ButtonWide("Вставить образец в связь", (s,e)=>RunInsertEquipment());
+            cells.Controls.Add(insertEquipment,0,5);
+            cells.SetColumnSpan(insertEquipment,2);
             _renumber = new TextBox { Dock=DockStyle.Fill, Margin=new Padding(5), AccessibleName="Новое обозначение ячейки" };
-            cells.Controls.Add(_renumber,0,5);
-            cells.Controls.Add(Button("Перенумеровать", (s,e)=>Run(()=>_addin.RenumberCell(_renumber.Text))),1,5);
+            cells.Controls.Add(_renumber,0,6);
+            cells.Controls.Add(Button("Перенумеровать", (s,e)=>Run(()=>_addin.RenumberCell(_renumber.Text))),1,6);
             cellTab.Controls.Add(cells);
 
             FlowLayoutPanel gluePanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 120, FlowDirection = FlowDirection.TopDown, Padding = new Padding(10) };
@@ -2613,6 +2748,18 @@ namespace EnergoLogicVisioEditor
             catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
         }
 
+        private void RunInsertEquipment()
+        {
+            try
+            {
+                string result = _addin.InsertEquipmentIntoConnectionFromSample();
+                _status.Text = result;
+                if (result.StartsWith("⏳", StringComparison.Ordinal))
+                    StartTopologyCompletionTimer();
+            }
+            catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
+        }
+
         private void RunReplaceEquipment()
         {
             try
@@ -2683,7 +2830,7 @@ namespace EnergoLogicVisioEditor
 
         private TableLayoutPanel Panel2()
         {
-            TableLayoutPanel p=new TableLayoutPanel{Dock=DockStyle.Top,Height=320,ColumnCount=2,RowCount=6,Padding=new Padding(10)};
+            TableLayoutPanel p=new TableLayoutPanel{Dock=DockStyle.Top,Height=365,ColumnCount=2,RowCount=7,Padding=new Padding(10)};
             p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50)); p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50));
             return p;
         }
