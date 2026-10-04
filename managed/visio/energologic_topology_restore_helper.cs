@@ -22,6 +22,56 @@ namespace EnergoLogicTopologyRestore
             return Encoding.UTF8.GetString(Convert.FromBase64String(value));
         }
 
+        private static bool ConnectionCellMatches(string nameU, int row)
+        {
+            string expected1 = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
+            string expected2 = "Connections." + row.ToString(CultureInfo.InvariantCulture) + ".X";
+            return String.Equals(nameU ?? "", expected1, StringComparison.OrdinalIgnoreCase) ||
+                   String.Equals(nameU ?? "", expected2, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsGlueCorrect(dynamic source, Edge edge)
+        {
+            string sourceCellName = edge.Endpoint == "begin" ? "BeginX" : "EndX";
+            try
+            {
+                dynamic connects = source.Connects;
+                for (int index = 1; index <= (int)connects.Count; index++)
+                {
+                    dynamic connect = connects.Item(index);
+                    string fromName = Convert.ToString(connect.FromCell.NameU, CultureInfo.InvariantCulture) ?? "";
+                    if (!String.Equals(fromName, sourceCellName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    int targetId = Convert.ToInt32(connect.ToSheet.ID, CultureInfo.InvariantCulture);
+                    string targetCell = Convert.ToString(connect.ToCell.NameU, CultureInfo.InvariantCulture) ?? "";
+                    if (targetId == edge.TargetId && ConnectionCellMatches(targetCell, edge.Row))
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static void GlueAndVerify(dynamic page, Edge edge)
+        {
+            dynamic source = page.Shapes.ItemFromID(edge.SourceId);
+            dynamic target = page.Shapes.ItemFromID(edge.TargetId);
+            string sourceCellName = edge.Endpoint == "begin" ? "BeginX" : "EndX";
+            string targetCellName = "Connections.X" + edge.Row.ToString(CultureInfo.InvariantCulture);
+            source.CellsU(sourceCellName).GlueTo(target.CellsU(targetCellName));
+            if (!IsGlueCorrect(source, edge))
+                throw new InvalidOperationException(
+                    String.Format(
+                        CultureInfo.InvariantCulture,
+                        "External GlueTo verification failed: source {0} {1}; target {2}/{3}",
+                        edge.SourceId,
+                        edge.Endpoint,
+                        edge.TargetId,
+                        edge.Row
+                    )
+                );
+        }
+
         private static int Main(string[] args)
         {
             string resultPath = args.Length > 1 ? args[1] : "";
@@ -86,27 +136,44 @@ namespace EnergoLogicTopologyRestore
                 if (page == null)
                     throw new InvalidOperationException("Visio page not found: " + pageName);
 
+                int repaired = 0;
+                int verified = 0;
                 foreach (Edge edge in edges)
                 {
                     try
                     {
                         dynamic source = page.Shapes.ItemFromID(edge.SourceId);
-                        dynamic target = page.Shapes.ItemFromID(edge.TargetId);
-                        string sourceCellName = edge.Endpoint == "begin" ? "BeginX" : "EndX";
-                        string targetCellName = "Connections.X" + edge.Row.ToString(CultureInfo.InvariantCulture);
-                        source.CellsU(sourceCellName).GlueTo(target.CellsU(targetCellName));
+                        if (!IsGlueCorrect(source, edge))
+                        {
+                            GlueAndVerify(page, edge);
+                            repaired++;
+                        }
+                        else
+                        {
+                            // Re-read through the external COM process so PASS always
+                            // means the actual live Visio topology matched the plan.
+                            if (!IsGlueCorrect(source, edge))
+                                throw new InvalidOperationException("External Glue verification was not stable");
+                        }
+                        verified++;
                     }
                     catch (Exception edgeError)
                     {
                         throw new InvalidOperationException(
                             String.Format(CultureInfo.InvariantCulture,
-                                "External GlueTo failed: source {0} {1}; target {2}/{3}",
+                                "External Glue verification failed: source {0} {1}; target {2}/{3}",
                                 edge.SourceId, edge.Endpoint, edge.TargetId, edge.Row),
                             edgeError);
                     }
                 }
 
-                File.WriteAllText(resultPath, "PASS\t" + edges.Count.ToString(CultureInfo.InvariantCulture), Encoding.UTF8);
+                File.WriteAllText(
+                    resultPath,
+                    "PASS\t" +
+                    repaired.ToString(CultureInfo.InvariantCulture) + "\t" +
+                    verified.ToString(CultureInfo.InvariantCulture),
+                    Encoding.UTF8
+                );
                 return 0;
             }
             catch (Exception ex)

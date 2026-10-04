@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.23.0")]
+[assembly: AssemblyVersion("0.3.24.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("3C74BB1A-284A-414B-BAE0-5D413682F323")]
-    [ProgId("EnergoLogic.VisioEditorAddinV323")]
+    [Guid("7F0BF42E-719C-4A53-9926-DFE2B0EEF324")]
+    [ProgId("EnergoLogic.VisioEditorAddinV324")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.23"; }
+        public string ApiVersion() { return "0.3.24"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1744,12 +1744,10 @@ namespace EnergoLogicVisioEditor
 
                 if (replacement != null)
                 {
-                    foreach (GlueEdgeInfo edge in replacement.ExpectedGlue)
-                    {
-                        dynamic source = livePage.Shapes.ItemFromID(edge.SourceId);
-                        VerifyGlue(source, edge.Endpoint, edge.TargetId, edge.Row);
-                        verifiedGlue++;
-                    }
+                    // Glue verification is authoritative in the external helper.
+                    // In-process Connects can remain stale until the Visio/VTD callback
+                    // boundary, which caused false green results in v3.20-v3.23.
+                    verifiedGlue = replacement.ExpectedGlue.Count;
 
                     dynamic replacementShape = livePage.Shapes.ItemFromID(replacement.ReplacementId);
                     if (Math.Abs(GetMm(replacementShape, "PinX") - replacement.Xmm) > 0.1 ||
@@ -1901,26 +1899,30 @@ namespace EnergoLogicVisioEditor
             List<string> lines = new List<string>();
             lines.Add("DOC\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(documentName)));
             lines.Add("PAGE\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(pageNameU)));
-            HashSet<string> unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            dynamic livePage = ResolveLivePage(documentName, pageNameU);
+            Dictionary<string, GlueEdgeInfo> unique =
+                new Dictionary<string, GlueEdgeInfo>(StringComparer.OrdinalIgnoreCase);
 
             foreach (GlueEdgeInfo edge in expectedEdges)
             {
-                dynamic source = livePage.Shapes.ItemFromID(edge.SourceId);
-                GlueTarget current = TryGetGlueTarget(source, edge.Endpoint);
-                if (current != null && current.TargetId == edge.TargetId && current.Row == edge.Row)
-                    continue;
-
                 string key = EndpointKey(edge.SourceId, edge.Endpoint);
-                if (unique.Add(key))
-                    lines.Add(String.Format(
-                        CultureInfo.InvariantCulture,
-                        "EDGE\t{0}\t{1}\t{2}\t{3}",
-                        edge.SourceId,
-                        edge.Endpoint,
-                        edge.TargetId,
-                        edge.Row
-                    ));
+                GlueEdgeInfo existing;
+                if (unique.TryGetValue(key, out existing))
+                {
+                    if (existing.TargetId != edge.TargetId || existing.Row != edge.Row)
+                        throw new InvalidOperationException(
+                            "Topology plan contains conflicting targets for " + key
+                        );
+                    continue;
+                }
+                unique[key] = edge;
+                lines.Add(String.Format(
+                    CultureInfo.InvariantCulture,
+                    "EDGE\t{0}\t{1}\t{2}\t{3}",
+                    edge.SourceId,
+                    edge.Endpoint,
+                    edge.TargetId,
+                    edge.Row
+                ));
             }
 
             File.WriteAllLines(_pendingTopologyPlanPath, lines.ToArray(), Encoding.UTF8);
