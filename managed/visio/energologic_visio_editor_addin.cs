@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.19.0")]
+[assembly: AssemblyVersion("0.3.20.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -93,14 +93,16 @@ namespace EnergoLogicVisioEditor
         string ApiNudgeDown();
         string ApiRenumberCell(string newDesignation);
         string ApiBindCellIdentity();
+        string ApiCaptureReplacementSample();
+        string ApiReplaceEquipmentFromSample();
         string ApiOperationStatus();
         string ApiCompletePendingTopology();
         string ApiVersion();
     }
 
     [ComVisible(true)]
-    [Guid("A2ECDF6D-77BB-4B3A-8B29-3B736850F319")]
-    [ProgId("EnergoLogic.VisioEditorAddinV319")]
+    [Guid("08DA44F1-A58D-4E53-8F2F-A1107D57F320")]
+    [ProgId("EnergoLogic.VisioEditorAddinV320")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -120,6 +122,8 @@ namespace EnergoLogicVisioEditor
         private List<CellMoveState> _pendingStates = null;
         private List<int> _pendingFinalSelection = null;
         private string _pendingSuccessPrefix = "";
+        private object _replacementMaster = null;
+        private string _replacementMasterName = "";
         private Process _pendingTopologyHelperProcess = null;
         private string _pendingTopologyPlanPath = "";
         private string _pendingTopologyResultPath = "";
@@ -240,13 +244,15 @@ namespace EnergoLogicVisioEditor
         public string ApiNudgeDown() { return ExactOffset(0.0, -1.0); }
         public string ApiRenumberCell(string newDesignation) { return RenumberCell(newDesignation); }
         public string ApiBindCellIdentity() { return BindCellIdentity(); }
+        public string ApiCaptureReplacementSample() { return CaptureReplacementSample(); }
+        public string ApiReplaceEquipmentFromSample() { return ReplaceEquipmentFromSample(); }
         public string ApiOperationStatus()
         {
             lock (_asyncSync)
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.19"; }
+        public string ApiVersion() { return "0.3.20"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -447,6 +453,265 @@ namespace EnergoLogicVisioEditor
                 );
             }
             finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string CaptureReplacementSample()
+        {
+            dynamic page = App.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count != 1)
+                throw new InvalidOperationException("Для образца замены выберите ровно один элемент");
+
+            dynamic shape = page.Shapes.ItemFromID(ids[0]);
+            dynamic master = null;
+            try { master = shape.Master; } catch { }
+            if (master == null)
+                throw new InvalidOperationException("У выбранного элемента нет master — использовать его как образец нельзя");
+
+            string name = MasterName(shape);
+            if (String.IsNullOrWhiteSpace(name))
+            {
+                try { name = Convert.ToString(master.Name, CultureInfo.CurrentCulture) ?? ""; } catch { }
+            }
+            if (String.IsNullOrWhiteSpace(name))
+                throw new InvalidOperationException("Не удалось определить имя master у образца");
+
+            _replacementMaster = master;
+            _replacementMasterName = name;
+            return "✓ Образец замены запомнен: " + name + ".";
+        }
+
+        internal string ReplaceEquipmentFromSample()
+        {
+            if (_replacementMaster == null)
+                throw new InvalidOperationException("Сначала выберите элемент-образец и нажмите «Запомнить образец»");
+
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count != 1)
+                throw new InvalidOperationException("Для замены выберите ровно один элемент");
+
+            int oldId = ids[0];
+            dynamic target = page.Shapes.ItemFromID(oldId);
+            string cellId = GetCellIdentity(target);
+            if (String.IsNullOrWhiteSpace(cellId))
+                throw new InvalidOperationException(
+                    "Перед заменой закрепите состав ячейки, чтобы EnergoLogic мог проверить topology после операции"
+                );
+
+            CellInfo cell = DiscoverCell(page, oldId);
+            EnsureReplaceTargetSafe(page, cell, oldId);
+
+            string oldMasterName = MasterName(target);
+            string oldText = SafeText(target);
+            double oldX = GetMm(target, "PinX");
+            double oldY = GetMm(target, "PinY");
+            double oldAngle = 0.0;
+            bool hasAngle = CellExists(target, "Angle");
+            if (hasAngle)
+            {
+                try { oldAngle = Convert.ToDouble(target.CellsU("Angle").ResultIU, CultureInfo.InvariantCulture); }
+                catch { hasAngle = false; }
+            }
+            List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
+            bool targetWasAnchor = oldId == cell.AnchorId;
+
+            int scope = (int)app.BeginUndoScope("EnergoLogic: Заменить оборудование по образцу");
+            bool commit = false;
+            try
+            {
+                dynamic replacement;
+                string backend;
+                if (SupportsNativeReplaceShape())
+                {
+                    replacement = target.ReplaceShape(_replacementMaster, 1);
+                    backend = "native ReplaceShape";
+                }
+                else
+                {
+                    replacement = page.Drop(_replacementMaster, oldX / 25.4, oldY / 25.4);
+                    backend = "Visio 2010 compatibility";
+                    if (targetWasAnchor)
+                        DetachEndpoint(target, cell.Endpoint);
+                }
+                if (replacement == null)
+                    throw new InvalidOperationException("Visio не вернул replacement shape");
+
+                int newId = Convert.ToInt32(replacement.ID, CultureInfo.InvariantCulture);
+                try { replacement.Text = oldText; } catch { }
+                SetCellIdentity(replacement, cellId);
+                if (hasAngle && CellExists(replacement, "Angle"))
+                    replacement.CellsU("Angle").FormulaU =
+                        oldAngle.ToString("0.############", CultureInfo.InvariantCulture) + " rad";
+
+                int restored = RestoreReplacementTopology(
+                    page, cell, internalGlue, oldId, newId, replacement
+                );
+
+                if (!SupportsNativeReplaceShape())
+                {
+                    try { target.Delete(); }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException("Не удалось удалить исходный shape после compatibility replacement", ex);
+                    }
+                }
+
+                VerifyReplacementTopology(page, cell, internalGlue, oldId, newId, replacement);
+
+                if (Math.Abs(GetMm(replacement, "PinX") - oldX) > 0.1 ||
+                    Math.Abs(GetMm(replacement, "PinY") - oldY) > 0.1)
+                    throw new InvalidOperationException("После замены изменился engineering anchor оборудования");
+
+                if (!String.Equals(GetCellIdentity(replacement), cellId, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("После замены потеряна identity ячейки");
+
+                CellInfo rediscovered = DiscoverCell(page, newId);
+                if (rediscovered.MemberIds.Count != cell.MemberIds.Count)
+                    throw new InvalidOperationException(
+                        "После замены изменился логический состав ячейки: было " +
+                        cell.MemberIds.Count + ", стало " + rediscovered.MemberIds.Count
+                    );
+
+                SelectIds(page, new[] { newId });
+                commit = true;
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "✓ Оборудование заменено: {0} → {1}. Backend: {2}; topology проверена, восстановлено Glue: {3}.",
+                    String.IsNullOrWhiteSpace(oldMasterName) ? ("shape " + oldId) : oldMasterName,
+                    _replacementMasterName,
+                    backend,
+                    restored
+                );
+            }
+            finally { app.EndUndoScope(scope, commit); }
+        }
+
+        private bool SupportsNativeReplaceShape()
+        {
+            try
+            {
+                string version = Convert.ToString(App.Version, CultureInfo.InvariantCulture) ?? "";
+                string majorText = version.Split('.')[0].Split(',')[0];
+                int major;
+                if (Int32.TryParse(majorText, NumberStyles.Integer, CultureInfo.InvariantCulture, out major))
+                    return major >= 15;
+            }
+            catch { }
+            return false;
+        }
+
+        private void EnsureReplaceTargetSafe(dynamic page, CellInfo cell, int targetId)
+        {
+            HashSet<int> members = new HashSet<int>(cell.MemberIds);
+            Dictionary<int, int> childParent = BuildChildParentMap(page);
+            foreach (int sourceId in TopLevelIds(page))
+            {
+                dynamic source = page.Shapes.ItemFromID(sourceId);
+                foreach (string endpoint in new[] { "begin", "end" })
+                {
+                    GlueTarget glue = TryGetGlueTarget(source, endpoint);
+                    if (glue == null) continue;
+                    int owner = childParent.ContainsKey(glue.TargetId)
+                        ? childParent[glue.TargetId]
+                        : glue.TargetId;
+
+                    if (sourceId == targetId)
+                    {
+                        if (members.Contains(owner)) continue;
+                        if (targetId == cell.AnchorId &&
+                            glue.TargetId == cell.BusTerminalId &&
+                            glue.Row == cell.ConnectionRow)
+                            continue;
+                        throw new InvalidOperationException(
+                            "Выбранное оборудование имеет внешнюю связь вне ячейки; безопасная замена запрещена"
+                        );
+                    }
+
+                    if (!members.Contains(sourceId) && owner == targetId)
+                        throw new InvalidOperationException(
+                            "К выбранному оборудованию подключён внешний элемент вне ячейки; безопасная замена запрещена"
+                        );
+
+                    if (members.Contains(sourceId) && owner == targetId && glue.TargetId != targetId)
+                        throw new InvalidOperationException(
+                            "Оборудование использует вложенную connection point; для такой замены нужен отдельный mapping profile"
+                        );
+                }
+            }
+        }
+
+        private int RestoreReplacementTopology(
+            dynamic page,
+            CellInfo cell,
+            IEnumerable<GlueEdgeInfo> internalGlue,
+            int oldId,
+            int newId,
+            dynamic replacement)
+        {
+            int restored = 0;
+
+            // The bus anchor must be authoritative first; VTD may rewrite dependent
+            // internal formulas when the anchor changes.
+            if (oldId == cell.AnchorId)
+            {
+                GlueTarget anchorGlue = TryGetGlueTarget(replacement, cell.Endpoint);
+                if (anchorGlue == null ||
+                    anchorGlue.TargetId != cell.BusTerminalId ||
+                    anchorGlue.Row != cell.ConnectionRow)
+                {
+                    GlueEndpointWithRetry(
+                        replacement,
+                        cell.Endpoint,
+                        page.Shapes.ItemFromID(cell.BusTerminalId),
+                        cell.ConnectionRow
+                    );
+                    restored++;
+                }
+            }
+            else
+            {
+                dynamic anchor = page.Shapes.ItemFromID(cell.AnchorId);
+                VerifyGlue(anchor, cell.Endpoint, cell.BusTerminalId, cell.ConnectionRow);
+            }
+
+            foreach (GlueEdgeInfo edge in internalGlue)
+            {
+                if (edge.SourceId != oldId && edge.TargetId != oldId) continue;
+                int sourceId = edge.SourceId == oldId ? newId : edge.SourceId;
+                int targetId = edge.TargetId == oldId ? newId : edge.TargetId;
+                dynamic source = sourceId == newId ? replacement : page.Shapes.ItemFromID(sourceId);
+                dynamic target = targetId == newId ? replacement : page.Shapes.ItemFromID(targetId);
+                GlueTarget current = TryGetGlueTarget(source, edge.Endpoint);
+                if (current != null && current.TargetId == targetId && current.Row == edge.Row)
+                    continue;
+                GlueEndpointWithRetry(source, edge.Endpoint, target, edge.Row);
+                restored++;
+            }
+            return restored;
+        }
+
+        private void VerifyReplacementTopology(
+            dynamic page,
+            CellInfo cell,
+            IEnumerable<GlueEdgeInfo> internalGlue,
+            int oldId,
+            int newId,
+            dynamic replacement)
+        {
+            if (oldId == cell.AnchorId)
+                VerifyGlue(replacement, cell.Endpoint, cell.BusTerminalId, cell.ConnectionRow);
+            else
+                VerifyGlue(page.Shapes.ItemFromID(cell.AnchorId), cell.Endpoint, cell.BusTerminalId, cell.ConnectionRow);
+
+            foreach (GlueEdgeInfo edge in internalGlue)
+            {
+                int sourceId = edge.SourceId == oldId ? newId : edge.SourceId;
+                int targetId = edge.TargetId == oldId ? newId : edge.TargetId;
+                dynamic source = sourceId == newId ? replacement : page.Shapes.ItemFromID(sourceId);
+                VerifyGlue(source, edge.Endpoint, targetId, edge.Row);
+            }
         }
 
         internal string ExactOffset(double dx, double dy)
@@ -1945,9 +2210,11 @@ namespace EnergoLogicVisioEditor
             Button bindIdentity = ButtonWide("Закрепить состав ячейки", (s,e)=>Run(()=>_addin.BindCellIdentity()));
             cells.Controls.Add(bindIdentity,0,3);
             cells.SetColumnSpan(bindIdentity,2);
+            cells.Controls.Add(Button("Запомнить образец", (s,e)=>Run(()=>_addin.CaptureReplacementSample())),0,4);
+            cells.Controls.Add(Button("Заменить по образцу", (s,e)=>Run(()=>_addin.ReplaceEquipmentFromSample())),1,4);
             _renumber = new TextBox { Dock=DockStyle.Fill, Margin=new Padding(5), AccessibleName="Новое обозначение ячейки" };
-            cells.Controls.Add(_renumber,0,4);
-            cells.Controls.Add(Button("Перенумеровать", (s,e)=>Run(()=>_addin.RenumberCell(_renumber.Text))),1,4);
+            cells.Controls.Add(_renumber,0,5);
+            cells.Controls.Add(Button("Перенумеровать", (s,e)=>Run(()=>_addin.RenumberCell(_renumber.Text))),1,5);
             cellTab.Controls.Add(cells);
 
             FlowLayoutPanel gluePanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 120, FlowDirection = FlowDirection.TopDown, Padding = new Padding(10) };
@@ -2089,7 +2356,7 @@ namespace EnergoLogicVisioEditor
 
         private TableLayoutPanel Panel2()
         {
-            TableLayoutPanel p=new TableLayoutPanel{Dock=DockStyle.Top,Height=270,ColumnCount=2,RowCount=5,Padding=new Padding(10)};
+            TableLayoutPanel p=new TableLayoutPanel{Dock=DockStyle.Top,Height=320,ColumnCount=2,RowCount=6,Padding=new Padding(10)};
             p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50)); p.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,50));
             return p;
         }
