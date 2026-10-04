@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.26.0")]
+[assembly: AssemblyVersion("0.3.27.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("B0DB7395-E237-4F35-BED6-AE59C2C5F326")]
-    [ProgId("EnergoLogic.VisioEditorAddinV326")]
+    [Guid("9A7903D3-1371-4AF6-B80A-01F6C039F327")]
+    [ProgId("EnergoLogic.VisioEditorAddinV327")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.26"; }
+        public string ApiVersion() { return "0.3.27"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -538,17 +538,25 @@ namespace EnergoLogicVisioEditor
             {
                 dynamic replacement;
                 string backend;
-                if (SupportsNativeReplaceShape())
+                // Native Shape.ReplaceShape is deliberately NOT the default even on
+                // Visio 2013+. On this VTD-managed electrical drawing it schedules a
+                // delayed dependency rewrite that corrupts an unrelated internal
+                // endpoint (244.End) after every apparently clean topology check.
+                // The drop/rewire transaction is also the required Visio 2010 path,
+                // so one deterministic backend is preferable across all supported
+                // Visio versions. Keep the native code behind an explicit future gate.
+                bool useNativeReplaceShape = false;
+                if (useNativeReplaceShape && SupportsNativeReplaceShape())
                 {
                     replacement = target.ReplaceShape(_replacementMaster, 1);
                     backend = "native ReplaceShape";
                 }
                 else
                 {
-                    replacement = page.Drop(_replacementMaster, oldX / 25.4, oldY / 25.4);
-                    backend = "Visio 2010 compatibility";
                     if (targetWasAnchor)
                         DetachEndpoint(target, cell.Endpoint);
+                    replacement = page.Drop(_replacementMaster, oldX / 25.4, oldY / 25.4);
+                    backend = "drop/rewire compatibility";
                 }
                 if (replacement == null)
                     throw new InvalidOperationException("Visio не вернул replacement shape");
@@ -560,12 +568,12 @@ namespace EnergoLogicVisioEditor
                     replacement.CellsU("Angle").FormulaU =
                         oldAngle.ToString("0.############", CultureInfo.InvariantCulture) + " rad";
 
-                if (!SupportsNativeReplaceShape())
+                if (!useNativeReplaceShape)
                 {
                     try { target.Delete(); }
                     catch (Exception ex)
                     {
-                        throw new InvalidOperationException("Не удалось удалить исходный shape после compatibility replacement", ex);
+                        throw new InvalidOperationException("Не удалось удалить исходный shape после drop/rewire replacement", ex);
                     }
                 }
 
