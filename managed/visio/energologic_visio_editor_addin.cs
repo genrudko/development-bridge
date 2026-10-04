@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.21.0")]
+[assembly: AssemblyVersion("0.3.22.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("9D1B5AC1-0C47-4C18-BB03-7ED263E8F321")]
-    [ProgId("EnergoLogic.VisioEditorAddinV321")]
+    [Guid("D65447E9-8176-4EBB-8CC4-4DAA1C3AF322")]
+    [ProgId("EnergoLogic.VisioEditorAddinV322")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -140,6 +140,8 @@ namespace EnergoLogicVisioEditor
         private Process _pendingTopologyHelperProcess = null;
         private string _pendingTopologyPlanPath = "";
         private string _pendingTopologyResultPath = "";
+        private int _pendingTopologyCycles = 0;
+        private int _pendingStablePasses = 0;
         private readonly Regex _glueRegex = new Regex(
             @"(?<target>[^!(),]+)!Connections(?:\.X(?<rowx>\d+)|\.(?<row>\d+)\.X)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -265,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.21"; }
+        public string ApiVersion() { return "0.3.22"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -649,6 +651,8 @@ namespace EnergoLogicVisioEditor
                 if (_asyncPending)
                     throw new InvalidOperationException("Предыдущая операция EnergoLogic ещё завершается");
                 CleanupTopologyHelperArtifacts();
+                _pendingTopologyCycles = 0;
+                _pendingStablePasses = 0;
                 _asyncPending = true;
                 _asyncToken = token;
                 _asyncState = "pending";
@@ -1656,6 +1660,8 @@ namespace EnergoLogicVisioEditor
                 if (_asyncPending)
                     throw new InvalidOperationException("Предыдущая операция EnergoLogic ещё завершается");
                 CleanupTopologyHelperArtifacts();
+                _pendingTopologyCycles = 0;
+                _pendingStablePasses = 0;
                 _asyncPending = true;
                 _asyncToken = token;
                 _asyncState = "pending";
@@ -1731,6 +1737,7 @@ namespace EnergoLogicVisioEditor
                         "Внешний topology helper завершился с ошибкой: exit=" + exitCode +
                         "; result=" + helperResult
                     );
+                int repairedByHelper = ParseTopologyHelperRepairCount(helperResult);
 
                 dynamic livePage = ResolveLivePage(documentName, pageNameU);
                 int verifiedGlue = 0;
@@ -1764,9 +1771,44 @@ namespace EnergoLogicVisioEditor
                         );
 
                     SelectIds(livePage, finalSelection);
+
+                    int completedCycles;
+                    int stablePasses;
+                    lock (_asyncSync)
+                    {
+                        _pendingTopologyCycles++;
+                        if (repairedByHelper == 0)
+                            _pendingStablePasses++;
+                        else
+                            _pendingStablePasses = 0;
+                        completedCycles = _pendingTopologyCycles;
+                        stablePasses = _pendingStablePasses;
+
+                        if (stablePasses < 2)
+                        {
+                            if (completedCycles >= 6)
+                                throw new InvalidOperationException(
+                                    "Topology replacement не стабилизировалась за 6 внешних циклов"
+                                );
+
+                            CleanupTopologyHelperArtifacts();
+                            _asyncState = "stabilizing";
+                            _asyncMessage = String.Format(
+                                CultureInfo.CurrentCulture,
+                                "Проверка стабилизации VTD: clean {0}/2, цикл {1}/6; последний repair: {2}.",
+                                stablePasses,
+                                completedCycles,
+                                repairedByHelper
+                            );
+                            return "state=stabilizing; token=" + token + "; message=" + _asyncMessage;
+                        }
+                    }
+
                     finalState = "success";
                     finalMessage = successPrefix +
-                        "; внешним COM-процессом проверено Glue: " + verifiedGlue + ".";
+                        "; topology стабилизирована за " + completedCycles +
+                        " внешних циклов; подряд clean-проверок: " + stablePasses +
+                        "; проверено Glue: " + verifiedGlue + ".";
                 }
                 else
                 {
@@ -1806,6 +1848,8 @@ namespace EnergoLogicVisioEditor
                 _pendingReplacement = null;
                 _pendingFinalSelection = null;
                 _pendingSuccessPrefix = "";
+                _pendingTopologyCycles = 0;
+                _pendingStablePasses = 0;
                 CleanupTopologyHelperArtifacts();
             }
             try { if (_form != null && !_form.IsDisposed) _form.SetStatus(finalMessage); } catch { }
@@ -1886,6 +1930,22 @@ namespace EnergoLogicVisioEditor
             _pendingTopologyHelperProcess = Process.Start(info);
             if (_pendingTopologyHelperProcess == null)
                 throw new InvalidOperationException("Не удалось запустить внешний topology helper");
+        }
+
+        private int ParseTopologyHelperRepairCount(string helperResult)
+        {
+            try
+            {
+                string[] parts = (helperResult ?? "").Trim().Split('	');
+                if (parts.Length >= 2 && String.Equals(parts[0], "PASS", StringComparison.Ordinal))
+                {
+                    int count;
+                    if (Int32.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out count))
+                        return Math.Max(0, count);
+                }
+            }
+            catch { }
+            throw new InvalidOperationException("Некорректный результат topology helper: " + helperResult);
         }
 
         private string QuoteProcessArgument(string value)
@@ -2477,7 +2537,8 @@ namespace EnergoLogicVisioEditor
                 {
                     string result = _addin.CompletePendingTopology();
                     _status.Text = result;
-                    if (result.StartsWith("state=external_restoring", StringComparison.Ordinal))
+                    if (result.StartsWith("state=external_restoring", StringComparison.Ordinal) ||
+                        result.StartsWith("state=stabilizing", StringComparison.Ordinal))
                         StartTopologyCompletionTimer();
                 }
                 catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
