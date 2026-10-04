@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.43.0")]
+[assembly: AssemblyVersion("0.3.44.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -121,8 +121,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("8A0C9D8A-956F-4E64-B991-9A88F39AF343")]
-    [ProgId("EnergoLogic.VisioEditorAddinV343")]
+    [Guid("42C03C70-F217-4EFF-8F44-D51063BEF344")]
+    [ProgId("EnergoLogic.VisioEditorAddinV344")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -571,7 +571,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.43"; }
+        public string ApiVersion() { return "0.3.44"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -3496,34 +3496,9 @@ namespace EnergoLogicVisioEditor
                 }
                 catch { }
 
-                // Bounded fallback for the short post-GlueTo interval where Visio
-                // may expose the ShapeSheet formula before Shape.Connects catches up.
-                foreach (string endpoint in new[] { "begin", "end" })
-                {
-                    if (nativeEndpoints.Contains(endpoint) ||
-                        !HasEndpoint(source, endpoint))
-                        continue;
-
-                    GlueTarget formulaTarget = null;
-                    try { formulaTarget = TryGetGlueTargetFromFormula(source, endpoint); }
-                    catch { formulaTarget = null; }
-                    if (formulaTarget == null) continue;
-
-                    connected.Add(EndpointKey(sourceId, endpoint));
-                    try
-                    {
-                        dynamic target = page.Shapes.ItemFromID(formulaTarget.TargetId);
-                        MarkReceivingEndpointConnected(
-                            page,
-                            childParent,
-                            target,
-                            formulaTarget.TargetId,
-                            formulaTarget.Row,
-                            connected
-                        );
-                    }
-                    catch { }
-                }
+                // Diagnostics runs against a stable page snapshot. Native
+                // Shape.Connects is authoritative here; FormulaU lag fallback remains
+                // confined to VerifyGlue immediately after GlueTo.
 
                 try
                 {
@@ -3611,34 +3586,25 @@ namespace EnergoLogicVisioEditor
         {
             pageX = 0.0;
             pageY = 0.0;
-            const short visSectionConnectionPts = 7;
-            const short visCnnctX = 0;
-            const short visCnnctY = 1;
-            if (row <= 0) return false;
-
-            try
+            string rowText = row.ToString(CultureInfo.InvariantCulture);
+            string[][] aliases = new[] {
+                new[] { "Connections.X" + rowText, "Connections.Y" + rowText },
+                new[] { "Connections." + rowText + ".X", "Connections." + rowText + ".Y" }
+            };
+            foreach (string[] names in aliases)
             {
-                int rowCount = GetConnectionPointRowCount(shape);
-                if (row > rowCount) return false;
-
-                // Connection-point display rows are 1-based (Connections.X1),
-                // while CellsSRC uses zero-based row indices in section 7.
-                dynamic xCell = shape.CellsSRC(
-                    visSectionConnectionPts,
-                    (short)(row - 1),
-                    visCnnctX
-                );
-                dynamic yCell = shape.CellsSRC(
-                    visSectionConnectionPts,
-                    (short)(row - 1),
-                    visCnnctY
-                );
-                double localX = (double)xCell.ResultIU;
-                double localY = (double)yCell.ResultIU;
-                shape.XYToPage(localX, localY, out pageX, out pageY);
-                return true;
+                try
+                {
+                    if (!CellExists(shape, names[0]) || !CellExists(shape, names[1]))
+                        continue;
+                    double localX = (double)shape.CellsU(names[0]).ResultIU;
+                    double localY = (double)shape.CellsU(names[1]).ResultIU;
+                    shape.XYToPage(localX, localY, out pageX, out pageY);
+                    return true;
+                }
+                catch { }
             }
-            catch { return false; }
+            return false;
         }
 
         private List<ConnectionPointInfo> GetAllConnectionPoints(dynamic page)
