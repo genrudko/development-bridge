@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.24.0")]
+[assembly: AssemblyVersion("0.3.25.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("7F0BF42E-719C-4A53-9926-DFE2B0EEF324")]
-    [ProgId("EnergoLogic.VisioEditorAddinV324")]
+    [Guid("8E9D3160-A441-4944-9471-728178F5F325")]
+    [ProgId("EnergoLogic.VisioEditorAddinV325")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.24"; }
+        public string ApiVersion() { return "0.3.25"; }
 
         internal string DuplicateCell(int direction)
         {

@@ -22,34 +22,65 @@ namespace EnergoLogicTopologyRestore
             return Encoding.UTF8.GetString(Convert.FromBase64String(value));
         }
 
-        private static bool ConnectionCellMatches(string nameU, int row)
+        private static bool FormulaReferencesTarget(
+            string formula,
+            dynamic target,
+            int row,
+            string axis)
         {
-            string expected1 = "Connections.X" + row.ToString(CultureInfo.InvariantCulture);
-            string expected2 = "Connections." + row.ToString(CultureInfo.InvariantCulture) + ".X";
-            return String.Equals(nameU ?? "", expected1, StringComparison.OrdinalIgnoreCase) ||
-                   String.Equals(nameU ?? "", expected2, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsGlueCorrect(dynamic source, Edge edge)
-        {
-            string sourceCellName = edge.Endpoint == "begin" ? "BeginX" : "EndX";
+            string value = formula ?? "";
+            string rowText = row.ToString(CultureInfo.InvariantCulture);
+            string[] suffixes = new[] {
+                "!Connections." + rowText + "." + axis,
+                "!Connections." + axis + rowText
+            };
+            List<string> refs = new List<string>();
+            refs.Add("Sheet." + Convert.ToInt32(target.ID, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture));
             try
             {
-                dynamic connects = source.Connects;
-                for (int index = 1; index <= (int)connects.Count; index++)
+                string name = Convert.ToString(target.Name, CultureInfo.InvariantCulture) ?? "";
+                if (!String.IsNullOrWhiteSpace(name)) refs.Add(name);
+            }
+            catch { }
+            try
+            {
+                string nameU = Convert.ToString(target.NameU, CultureInfo.InvariantCulture) ?? "";
+                if (!String.IsNullOrWhiteSpace(nameU)) refs.Add(nameU);
+            }
+            catch { }
+
+            foreach (string targetRef in refs)
+            {
+                foreach (string suffix in suffixes)
                 {
-                    dynamic connect = connects.Item(index);
-                    string fromName = Convert.ToString(connect.FromCell.NameU, CultureInfo.InvariantCulture) ?? "";
-                    if (!String.Equals(fromName, sourceCellName, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    int targetId = Convert.ToInt32(connect.ToSheet.ID, CultureInfo.InvariantCulture);
-                    string targetCell = Convert.ToString(connect.ToCell.NameU, CultureInfo.InvariantCulture) ?? "";
-                    if (targetId == edge.TargetId && ConnectionCellMatches(targetCell, edge.Row))
+                    string direct = targetRef + suffix;
+                    string quoted = "'" + targetRef + "'" + suffix;
+                    if (value.IndexOf(direct, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        value.IndexOf(quoted, StringComparison.OrdinalIgnoreCase) >= 0)
                         return true;
                 }
             }
-            catch { }
             return false;
+        }
+
+        private static bool IsGlueCorrect(dynamic page, Edge edge)
+        {
+            try
+            {
+                dynamic source = page.Shapes.ItemFromID(edge.SourceId);
+                dynamic target = page.Shapes.ItemFromID(edge.TargetId);
+                string xName = edge.Endpoint == "begin" ? "BeginX" : "EndX";
+                string yName = edge.Endpoint == "begin" ? "BeginY" : "EndY";
+                string xFormula = Convert.ToString(source.CellsU(xName).FormulaU, CultureInfo.InvariantCulture) ?? "";
+                string yFormula = Convert.ToString(source.CellsU(yName).FormulaU, CultureInfo.InvariantCulture) ?? "";
+
+                // A valid 1-D Glue must bind BOTH coordinates to the same connection
+                // point. This deliberately rejects VTD's half-Glue state where X is
+                // numeric but Y still contains PAR(PNT(...)).
+                return FormulaReferencesTarget(xFormula, target, edge.Row, "X") &&
+                       FormulaReferencesTarget(yFormula, target, edge.Row, "Y");
+            }
+            catch { return false; }
         }
 
         private static void GlueAndVerify(dynamic page, Edge edge)
@@ -59,11 +90,11 @@ namespace EnergoLogicTopologyRestore
             string sourceCellName = edge.Endpoint == "begin" ? "BeginX" : "EndX";
             string targetCellName = "Connections.X" + edge.Row.ToString(CultureInfo.InvariantCulture);
             source.CellsU(sourceCellName).GlueTo(target.CellsU(targetCellName));
-            if (!IsGlueCorrect(source, edge))
+            if (!IsGlueCorrect(page, edge))
                 throw new InvalidOperationException(
                     String.Format(
                         CultureInfo.InvariantCulture,
-                        "External GlueTo verification failed: source {0} {1}; target {2}/{3}",
+                        "External GlueTo formula verification failed: source {0} {1}; target {2}/{3}",
                         edge.SourceId,
                         edge.Endpoint,
                         edge.TargetId,
@@ -143,7 +174,7 @@ namespace EnergoLogicTopologyRestore
                     try
                     {
                         dynamic source = page.Shapes.ItemFromID(edge.SourceId);
-                        if (!IsGlueCorrect(source, edge))
+                        if (!IsGlueCorrect(page, edge))
                         {
                             GlueAndVerify(page, edge);
                             repaired++;
@@ -152,7 +183,7 @@ namespace EnergoLogicTopologyRestore
                         {
                             // Re-read through the external COM process so PASS always
                             // means the actual live Visio topology matched the plan.
-                            if (!IsGlueCorrect(source, edge))
+                            if (!IsGlueCorrect(page, edge))
                                 throw new InvalidOperationException("External Glue verification was not stable");
                         }
                         verified++;
