@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.31.0")]
+[assembly: AssemblyVersion("0.3.32.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("C75AF3B8-3C1A-4F39-9D26-B76A21F4F331")]
-    [ProgId("EnergoLogic.VisioEditorAddinV331")]
+    [Guid("4AD14F1D-A796-4E3E-B386-6E9DB2E9F332")]
+    [ProgId("EnergoLogic.VisioEditorAddinV332")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.31"; }
+        public string ApiVersion() { return "0.3.32"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -607,6 +607,30 @@ namespace EnergoLogicVisioEditor
                 {
                     replacement.CellsU("Angle").FormulaU =
                         oldAngle.ToString("0.############", CultureInfo.InvariantCulture) + " rad";
+                }
+
+                // The VTD bus-terminal shape (for example Sheet.106) cannot be
+                // targeted reliably by GlueTo from an out-of-process COM client:
+                // Visio returns "Недопустимый код листа". Bind the replacement
+                // anchor while still inside the add-in callback, where the same
+                // Glue path is proven by Duplicate Cell. The external helper then
+                // verifies/stabilizes the complete topology but must not need to
+                // create this bus Glue from scratch.
+                if (targetWasAnchor)
+                {
+                    dynamic busTerminal = page.Shapes.ItemFromID(cell.BusTerminalId);
+                    GlueEndpoint(
+                        replacement,
+                        cell.Endpoint,
+                        busTerminal,
+                        cell.ConnectionRow
+                    );
+                    VerifyGlue(
+                        replacement,
+                        cell.Endpoint,
+                        cell.BusTerminalId,
+                        cell.ConnectionRow
+                    );
                 }
 
                 if (!useNativeReplaceShape)
