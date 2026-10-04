@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.28.0")]
+[assembly: AssemblyVersion("0.3.29.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("8E75F86D-AF28-455B-B20C-62492D9BF328")]
-    [ProgId("EnergoLogic.VisioEditorAddinV328")]
+    [Guid("A07B90DB-F873-45A8-82A5-286E83C0F329")]
+    [ProgId("EnergoLogic.VisioEditorAddinV329")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.28"; }
+        public string ApiVersion() { return "0.3.29"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -555,6 +555,21 @@ namespace EnergoLogicVisioEditor
             string oldText = SafeText(target);
             double oldX = GetMm(target, "PinX");
             double oldY = GetMm(target, "PinY");
+            bool hasEndpointGeometry =
+                HasEndpoint(target, "begin") &&
+                HasEndpoint(target, "end");
+            double oldBeginX = 0.0;
+            double oldBeginY = 0.0;
+            double oldEndX = 0.0;
+            double oldEndY = 0.0;
+            if (hasEndpointGeometry)
+            {
+                oldBeginX = GetMm(target, "BeginX");
+                oldBeginY = GetMm(target, "BeginY");
+                oldEndX = GetMm(target, "EndX");
+                oldEndY = GetMm(target, "EndY");
+            }
+
             double oldAngle = 0.0;
             bool hasAngle = CellExists(target, "Angle");
             if (hasAngle)
@@ -562,6 +577,14 @@ namespace EnergoLogicVisioEditor
                 try { oldAngle = Convert.ToDouble(target.CellsU("Angle").ResultIU, CultureInfo.InvariantCulture); }
                 catch { hasAngle = false; }
             }
+            double oldWidth = 0.0;
+            bool hasWidth = CellExists(target, "Width");
+            if (hasWidth)
+            {
+                try { oldWidth = GetMm(target, "Width"); }
+                catch { hasWidth = false; }
+            }
+
             List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
             bool targetWasAnchor = oldId == cell.AnchorId;
 
@@ -597,9 +620,26 @@ namespace EnergoLogicVisioEditor
                 int newId = Convert.ToInt32(replacement.ID, CultureInfo.InvariantCulture);
                 try { replacement.Text = oldText; } catch { }
                 SetCellIdentity(replacement, cellId);
-                if (hasAngle && CellExists(replacement, "Angle"))
+
+                // For 1-D electrical apparatus the engineering geometry is the
+                // endpoint pair, not merely PinX/PinY. A dropped master may carry a
+                // different default length even when its sample instance is identical.
+                // Materialize the target's exact endpoint coordinates before topology
+                // restoration so Begin/End, length, angle and centre are preserved.
+                if (hasEndpointGeometry &&
+                    HasEndpoint(replacement, "begin") &&
+                    HasEndpoint(replacement, "end"))
+                {
+                    SetMm(replacement, "BeginX", oldBeginX);
+                    SetMm(replacement, "BeginY", oldBeginY);
+                    SetMm(replacement, "EndX", oldEndX);
+                    SetMm(replacement, "EndY", oldEndY);
+                }
+                else if (hasAngle && CellExists(replacement, "Angle"))
+                {
                     replacement.CellsU("Angle").FormulaU =
                         oldAngle.ToString("0.############", CultureInfo.InvariantCulture) + " rad";
+                }
 
                 if (!useNativeReplaceShape)
                 {
@@ -613,6 +653,9 @@ namespace EnergoLogicVisioEditor
                 if (Math.Abs(GetMm(replacement, "PinX") - oldX) > 0.1 ||
                     Math.Abs(GetMm(replacement, "PinY") - oldY) > 0.1)
                     throw new InvalidOperationException("После замены изменился engineering anchor оборудования");
+                if (hasWidth && CellExists(replacement, "Width") &&
+                    Math.Abs(GetMm(replacement, "Width") - oldWidth) > 0.1)
+                    throw new InvalidOperationException("После замены изменилась engineering length оборудования");
                 if (!String.Equals(GetCellIdentity(replacement), cellId, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidOperationException("После замены потеряна identity ячейки");
 
