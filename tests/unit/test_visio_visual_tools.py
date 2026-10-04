@@ -112,7 +112,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.04.134"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.04.135"}',
                     }
                 ],
                 "isError": False,
@@ -134,7 +134,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.04.134"
+    assert arguments["version"] == "2026.10.04.135"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -157,7 +157,7 @@ async def test_visio_managed_update_embeds_console_source():
         async def call(self, node_id, tool_name, arguments, journal):
             calls.append((node_id, tool_name, arguments, journal))
             return {
-                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.04.134"}'}],
+                "content": [{"type": "text", "text": '{"managed_update":"PASS","version":"2026.10.04.135"}'}],
                 "isError": False,
             }
 
@@ -1126,3 +1126,12 @@ def test_editor_v335_reconnect_and_visual_diagnostics_are_fail_closed():
     assert '"visual_diagnostics": "ApiVisualDiagnostics"' in ext
     assert '"reconnect_begin": "ApiReconnectBegin"' in ext
     assert '"reconnect_end": "ApiReconnectEnd"' in ext
+
+
+def test_editor_v335_diagnostic_strings_are_csharp_escaped():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    assert 'SafeText(bus).Replace("\\r", " ").Replace("\\n", " ").Trim()' in cs
+    assert 'result += "\\r\\nStructural: "' in cs
+    assert '". Проблемные top-level элементы выделены.\\r\\n" +' in cs
+    assert 'String.Join("\\r\\n", messages.Take(12).ToArray())' in cs

@@ -1640,9 +1640,7 @@ namespace EnergoLogicVisioEditor
                 "{0} Шина {1} (shape {2}): точек {3}; шаг {4:0.###} мм; ширина {5:0.###} мм. " +
                 "Занято: [{6}]. Свободно: [{7}].",
                 prefix,
-                SafeText(bus).Replace("
-", " ").Replace("
-", " ").Trim(),
+                SafeText(bus).Replace("\r", " ").Replace("\n", " ").Trim(),
                 busId,
                 pointCount,
                 pitch,
@@ -1651,8 +1649,7 @@ namespace EnergoLogicVisioEditor
                 String.Join(", ", free.ToArray())
             );
             if (structural.Count > 0)
-                result += "
-Structural: " + String.Join("; ", structural.ToArray());
+                result += "\r\nStructural: " + String.Join("; ", structural.ToArray());
             return result;
         }
 
@@ -1950,10 +1947,8 @@ Structural: " + String.Join("; ", structural.ToArray());
                 );
 
             return "⚠ Visual Diagnostics: найдено проблем: " + messages.Count +
-                ". Проблемные top-level элементы выделены.
-" +
-                String.Join("
-", messages.Take(12).ToArray());
+                ". Проблемные top-level элементы выделены.\r\n" +
+                String.Join("\r\n", messages.Take(12).ToArray());
         }
 
         private dynamic ResolveSelectedBus(dynamic page)
