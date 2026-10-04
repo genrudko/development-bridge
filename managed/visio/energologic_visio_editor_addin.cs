@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.16.0")]
+[assembly: AssemblyVersion("0.3.17.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -98,8 +98,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("89DDBB87-8513-5078-9BF3-1DA6D75B2454")]
-    [ProgId("EnergoLogic.VisioEditorAddinV316")]
+    [Guid("D0F27C51-9E15-4C2D-A584-170EA8B7F317")]
+    [ProgId("EnergoLogic.VisioEditorAddinV317")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -244,7 +244,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.16"; }
+        public string ApiVersion() { return "0.3.17"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1291,19 +1291,31 @@ namespace EnergoLogicVisioEditor
             HashSet<string> unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (CellMoveState state in states)
             {
+                dynamic livePage = ResolveLivePage(documentName, pageNameU);
                 foreach (GlueEdgeInfo edge in state.InternalGlue)
                 {
+                    dynamic source = livePage.Shapes.ItemFromID(edge.SourceId);
+                    GlueTarget current = TryGetGlueTarget(source, edge.Endpoint);
+                    if (current != null && current.TargetId == edge.TargetId && current.Row == edge.Row)
+                        continue;
                     string key = EndpointKey(edge.SourceId, edge.Endpoint);
                     if (unique.Add(key))
                         lines.Add(String.Format(CultureInfo.InvariantCulture,
                             "EDGE\t{0}\t{1}\t{2}\t{3}",
                             edge.SourceId, edge.Endpoint, edge.TargetId, edge.Row));
                 }
-                string anchorKey = EndpointKey(state.Cell.AnchorId, state.Cell.Endpoint);
-                if (unique.Add(anchorKey))
-                    lines.Add(String.Format(CultureInfo.InvariantCulture,
-                        "EDGE\t{0}\t{1}\t{2}\t{3}",
-                        state.Cell.AnchorId, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow));
+                dynamic anchor = livePage.Shapes.ItemFromID(state.Cell.AnchorId);
+                GlueTarget currentAnchor = TryGetGlueTarget(anchor, state.Cell.Endpoint);
+                if (currentAnchor == null ||
+                    currentAnchor.TargetId != state.TargetTerminalId ||
+                    currentAnchor.Row != state.Cell.ConnectionRow)
+                {
+                    string anchorKey = EndpointKey(state.Cell.AnchorId, state.Cell.Endpoint);
+                    if (unique.Add(anchorKey))
+                        lines.Add(String.Format(CultureInfo.InvariantCulture,
+                            "EDGE\t{0}\t{1}\t{2}\t{3}",
+                            state.Cell.AnchorId, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow));
+                }
             }
             File.WriteAllLines(_pendingTopologyPlanPath, lines.ToArray(), Encoding.UTF8);
 

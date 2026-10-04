@@ -91,11 +91,22 @@ namespace EnergoLogicTopologyRestore
 
                 foreach (Edge edge in edges)
                 {
-                    dynamic source = page.Shapes.ItemFromID(edge.SourceId);
-                    dynamic target = page.Shapes.ItemFromID(edge.TargetId);
-                    string sourceCellName = edge.Endpoint == "begin" ? "BeginX" : "EndX";
-                    string targetCellName = "Connections.X" + edge.Row.ToString(CultureInfo.InvariantCulture);
-                    source.CellsU(sourceCellName).GlueTo(target.CellsU(targetCellName));
+                    try
+                    {
+                        dynamic source = page.Shapes.ItemFromID(edge.SourceId);
+                        dynamic target = page.Shapes.ItemFromID(edge.TargetId);
+                        string sourceCellName = edge.Endpoint == "begin" ? "BeginX" : "EndX";
+                        string targetCellName = "Connections.X" + edge.Row.ToString(CultureInfo.InvariantCulture);
+                        source.CellsU(sourceCellName).GlueTo(target.CellsU(targetCellName));
+                    }
+                    catch (Exception edgeError)
+                    {
+                        throw new InvalidOperationException(
+                            String.Format(CultureInfo.InvariantCulture,
+                                "External GlueTo failed: source {0} {1}; target {2}/{3}",
+                                edge.SourceId, edge.Endpoint, edge.TargetId, edge.Row),
+                            edgeError);
+                    }
                 }
 
                 File.WriteAllText(resultPath, "PASS\t" + edges.Count.ToString(CultureInfo.InvariantCulture), Encoding.UTF8);
