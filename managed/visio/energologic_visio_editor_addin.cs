@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.22.0")]
+[assembly: AssemblyVersion("0.3.23.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -113,8 +113,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("D65447E9-8176-4EBB-8CC4-4DAA1C3AF322")]
-    [ProgId("EnergoLogic.VisioEditorAddinV322")]
+    [Guid("3C74BB1A-284A-414B-BAE0-5D413682F323")]
+    [ProgId("EnergoLogic.VisioEditorAddinV323")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -267,7 +267,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.22"; }
+        public string ApiVersion() { return "0.3.23"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1770,8 +1770,10 @@ namespace EnergoLogicVisioEditor
                             "После замены изменился логический состав ячейки"
                         );
 
-                    SelectIds(livePage, finalSelection);
-
+                    // Do not touch Visio after the final topology verification.
+                    // The replacement is already selected by the phase-1 command.
+                    // Any extra UI/selection callback here gives VTD another chance
+                    // to rewrite dependent ShapeSheet formulas after our clean check.
                     int completedCycles;
                     int stablePasses;
                     lock (_asyncSync)
@@ -1852,7 +1854,9 @@ namespace EnergoLogicVisioEditor
                 _pendingStablePasses = 0;
                 CleanupTopologyHelperArtifacts();
             }
-            try { if (_form != null && !_form.IsDisposed) _form.SetStatus(finalMessage); } catch { }
+            // The caller owns status rendering. In particular, never BeginInvoke
+            // UI work after the last clean topology check: VTD can process that queued
+            // UI callback after this method returns and rewrite a dependent Glue edge.
             return "state=" + finalState + "; token=" + token + "; message=" + finalMessage;
         }
 
