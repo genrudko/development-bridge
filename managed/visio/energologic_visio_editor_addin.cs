@@ -12,7 +12,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.13.0")]
+[assembly: AssemblyVersion("0.3.14.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -95,8 +95,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("1A6AF8E1-2576-4EF3-96EC-676904B6DA57")]
-    [ProgId("EnergoLogic.VisioEditorAddinV313")]
+    [Guid("6989E63C-E667-4B14-B85B-210710468940")]
+    [ProgId("EnergoLogic.VisioEditorAddinV314")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi
     {
@@ -238,7 +238,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.13"; }
+        public string ApiVersion() { return "0.3.14"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1400,6 +1400,22 @@ namespace EnergoLogicVisioEditor
             shape.CellsU(sourceName).GlueTo(target.CellsU(targetName));
         }
 
+        private void NormalizeEndpointPairForGlue(dynamic shape, string endpoint)
+        {
+            string xName = endpoint == "begin" ? "BeginX" : "EndX";
+            string yName = endpoint == "begin" ? "BeginY" : "EndY";
+            double x = GetMm(shape, xName);
+            double y = GetMm(shape, yName);
+
+            // VTD can leave a moved 1-D endpoint half-glued: X becomes a literal
+            // while Y still contains PAR(PNT(...)). GlueTo from inside the add-in is
+            // not reliable from that asymmetric state. Materialize both coordinates
+            // immediately before every GlueTo attempt so the endpoint starts from one
+            // coherent detached state without changing its visible position.
+            SetMm(shape, xName, x);
+            SetMm(shape, yName, y);
+        }
+
         private void GlueEndpointWithRetry(dynamic shape, string endpoint, dynamic target, int row)
         {
             int targetId = Convert.ToInt32(target.ID, CultureInfo.InvariantCulture);
@@ -1408,27 +1424,44 @@ namespace EnergoLogicVisioEditor
             {
                 try
                 {
+                    NormalizeEndpointPairForGlue(shape, endpoint);
                     GlueEndpoint(shape, endpoint, target, row);
-                    for (int pump = 0; pump < 4; pump++)
+
+                    // Prefer the state produced synchronously by native GlueTo. Pumping
+                    // the UI before the first verification gives VTD a chance to rewrite
+                    // a freshly restored endpoint back into the observed half-glued form.
+                    try
+                    {
+                        VerifyGlue(shape, endpoint, targetId, row);
+                        return;
+                    }
+                    catch (Exception immediateError)
+                    {
+                        lastError = immediateError;
+                    }
+
+                    for (int pump = 0; pump < 2; pump++)
                     {
                         System.Windows.Forms.Application.DoEvents();
-                        System.Threading.Thread.Sleep(50);
+                        System.Threading.Thread.Sleep(25);
+                        try
+                        {
+                            VerifyGlue(shape, endpoint, targetId, row);
+                            return;
+                        }
+                        catch (Exception settleError)
+                        {
+                            lastError = settleError;
+                        }
                     }
-                    VerifyGlue(shape, endpoint, targetId, row);
-                    return;
                 }
                 catch (Exception ex)
                 {
                     lastError = ex;
-                    for (int pump = 0; pump < 2; pump++)
-                    {
-                        System.Windows.Forms.Application.DoEvents();
-                        System.Threading.Thread.Sleep(75);
-                    }
                 }
             }
             throw new InvalidOperationException(
-                "Glue не стабилизировался после 6 проверенных попыток: " +
+                "Glue не стабилизировался после 6 нормализованных попыток: " +
                 (lastError == null ? "неизвестная причина" : lastError.Message),
                 lastError
             );
