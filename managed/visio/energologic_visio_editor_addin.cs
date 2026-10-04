@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.46.0")]
+[assembly: AssemblyVersion("0.3.47.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -103,6 +103,10 @@ namespace EnergoLogicVisioEditor
         string ApiAlignY();
         string ApiBaseCopy(double bx, double by, double tx, double ty);
         string ApiBaseMove(double bx, double by, double tx, double ty);
+        string ApiStartBaseCopyInteractive();
+        string ApiStartBaseMoveInteractive();
+        string ApiCancelInteractiveMode();
+        string ApiInteractionStatus();
         string ApiMeasurePitch();
         string ApiDistributePitch(double pitchMm);
         string ApiCoordinates();
@@ -121,8 +125,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("A91D7D4D-2466-4B49-889D-674E914DF346")]
-    [ProgId("EnergoLogic.VisioEditorAddinV346")]
+    [Guid("C44C4B47-8A58-4E17-9D14-661C91EEF347")]
+    [ProgId("EnergoLogic.VisioEditorAddinV347")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -155,6 +159,18 @@ namespace EnergoLogicVisioEditor
         private string _replacementMasterName = "";
         private string _replacementInsertSourceEndpoint = "";
         private int _replacementInsertReceiveRow = 0;
+
+        // Interactive CAD-like base-point copy/move.
+        private object _interactiveMouseEvent = null;
+        private bool _interactiveBaseActive = false;
+        private bool _interactiveBaseCopy = false;
+        private int _interactiveBaseStage = 0;
+        private List<int> _interactiveBaseSelectionIds = new List<int>();
+        private string _interactiveBaseDocumentName = "";
+        private string _interactiveBasePageNameU = "";
+        private double _interactiveBaseXmm = 0.0;
+        private double _interactiveBaseYmm = 0.0;
+
         private Process _pendingTopologyHelperProcess = null;
         private string _pendingTopologyPlanPath = "";
         private string _pendingTopologyResultPath = "";
@@ -215,6 +231,7 @@ namespace EnergoLogicVisioEditor
             _ribbon = null;
             _contextMenuInstalled = false;
             _contextMenuError = "";
+            try { CancelInteractiveBasePoint(false); } catch { }
             try { if (_addInInstance != null) { dynamic host = _addInInstance; host.Object = null; } } catch { }
             _addInInstance = null;
             _application = null;
@@ -287,41 +304,52 @@ namespace EnergoLogicVisioEditor
     <tabs>
       <tab id=""tabEnergoLogic"" label=""EnergoLogic"" keytip=""EL"">
         <group id=""grpEnergoCell"" label=""Ячейка"">
-          <button id=""btnELSelectCell"" label=""Выделить ячейку"" imageMso=""FindDialog"" onAction=""OnRibbonSelectCell"" keytip=""S""/>
-          <button id=""btnELDuplicateLeft"" label=""Копировать ←"" imageMso=""Copy"" onAction=""OnRibbonDuplicateLeft"" keytip=""L""/>
-          <button id=""btnELDuplicateRight"" label=""Копировать →"" imageMso=""Copy"" onAction=""OnRibbonDuplicateRight"" keytip=""R""/>
-          <button id=""btnELMoveLeft"" label=""Переместить ←"" imageMso=""Cut"" onAction=""OnRibbonMoveLeft""/>
-          <button id=""btnELMoveRight"" label=""Переместить →"" imageMso=""Cut"" onAction=""OnRibbonMoveRight""/>
+          <button id=""btnELSelectCell"" label=""Выделить ячейку"" imageMso=""FindDialog"" onAction=""OnRibbonSelectCell"" keytip=""S"" screentip=""Выделить всю электрическую ячейку"" supertip=""Выберите любой элемент ячейки. EnergoLogic найдёт её состав по электрической топологии и служебной идентичности и выделит все элементы."" />
+          <button id=""btnELDuplicateLeft"" label=""Копировать ←"" imageMso=""Copy"" onAction=""OnRibbonDuplicateLeft"" keytip=""L"" screentip=""Копировать ячейку влево"" supertip=""Создаёт соседнюю копию выбранной ячейки на один шаг шины влево и восстанавливает внутренние электрические соединения."" />
+          <button id=""btnELDuplicateRight"" label=""Копировать →"" imageMso=""Copy"" onAction=""OnRibbonDuplicateRight"" keytip=""R"" screentip=""Копировать ячейку вправо"" supertip=""Создаёт соседнюю копию выбранной ячейки на один шаг шины вправо и восстанавливает внутренние электрические соединения."" />
+          <button id=""btnELMoveLeft"" label=""Переместить ←"" imageMso=""Cut"" onAction=""OnRibbonMoveLeft"" screentip=""Переместить ячейку влево"" supertip=""Перемещает выбранную ячейку на соседнее свободное место шины влево. Занятое место блокирует операцию."" />
+          <button id=""btnELMoveRight"" label=""Переместить →"" imageMso=""Cut"" onAction=""OnRibbonMoveRight"" screentip=""Переместить ячейку вправо"" supertip=""Перемещает выбранную ячейку на соседнее свободное место шины вправо. Занятое место блокирует операцию."" />
         </group>
+
         <group id=""grpEnergoEquipment"" label=""Оборудование"">
-          <button id=""btnELCaptureSample"" label=""Запомнить образец"" imageMso=""Copy"" onAction=""OnRibbonCaptureSample""/>
-          <button id=""btnELReplace"" label=""Заменить"" imageMso=""ReplaceDialog"" onAction=""OnRibbonReplace""/>
-          <button id=""btnELInsert"" label=""Вставить в связь"" imageMso=""Paste"" onAction=""OnRibbonInsert""/>
+          <button id=""btnELCaptureSample"" label=""Запомнить образец"" imageMso=""Copy"" onAction=""OnRibbonCaptureSample"" screentip=""Запомнить тип оборудования"" supertip=""Выберите одну фигуру оборудования. Её мастер-фигура будет использована командами «Заменить» и «Вставить в связь»."" />
+          <button id=""btnELReplace"" label=""Заменить"" imageMso=""ReplaceDialog"" onAction=""OnRibbonReplace"" screentip=""Заменить оборудование по образцу"" supertip=""Выберите один элемент ячейки. EnergoLogic заменит его ранее запомненной мастер-фигурой и восстановит электрическую топологию."" />
+          <button id=""btnELInsert"" label=""Вставить в связь"" imageMso=""Paste"" onAction=""OnRibbonInsert"" screentip=""Вставить оборудование в существующую связь"" supertip=""Выберите внутреннюю линейную связь ячейки. EnergoLogic разрежет её и вставит запомненное оборудование, сохраняя естественную длину условного обозначения."" />
         </group>
+
+        <group id=""grpEnergoBasePoint"" label=""Базовая точка"">
+          <button id=""btnELBaseCopy"" label=""Копировать по точке"" imageMso=""Copy"" onAction=""OnRibbonBaseCopy"" keytip=""BC"" screentip=""Копирование относительно базовой точки"" supertip=""1. Выделите элементы. 2. Нажмите команду. 3. Щёлкните базовую точку на схеме. 4. Щёлкните целевую точку. Правый щелчок отменяет режим."" />
+          <button id=""btnELBaseMove"" label=""Переместить по точке"" imageMso=""Cut"" onAction=""OnRibbonBaseMove"" keytip=""BM"" screentip=""Перемещение относительно базовой точки"" supertip=""1. Выделите элементы. 2. Нажмите команду. 3. Щёлкните базовую точку на схеме. 4. Щёлкните целевую точку. Правый щелчок отменяет режим."" />
+          <button id=""btnELCancelMode"" label=""Отменить режим"" imageMso=""CancelRequest"" onAction=""OnRibbonCancelMode"" screentip=""Отменить интерактивную команду"" supertip=""Отменяет текущий режим выбора базовой/целевой точки и ничего не изменяет на схеме."" />
+        </group>
+
         <group id=""grpEnergoConnections"" label=""Соединения и шина"">
-          <button id=""btnELRepairGlue"" label=""Восстановить соединение"" imageMso=""RefreshAll"" onAction=""OnRibbonRepairGlue""/>
-          <button id=""btnELReconnectBegin"" label=""Переподключить начало"" imageMso=""HyperlinkInsert"" onAction=""OnRibbonReconnectBegin""/>
-          <button id=""btnELReconnectEnd"" label=""Переподключить конец"" imageMso=""HyperlinkInsert"" onAction=""OnRibbonReconnectEnd""/>
-          <button id=""btnELExtendBus"" label=""Расширить шину →"" imageMso=""Paste"" onAction=""OnRibbonExtendBus""/>
-          <button id=""btnELTrimBus"" label=""Обрезать шину"" imageMso=""Cut"" onAction=""OnRibbonTrimBus""/>
-          <button id=""btnELBusDiag"" label=""Диагностика шины"" imageMso=""FindDialog"" onAction=""OnRibbonBusDiagnostics""/>
+          <button id=""btnELRepairGlue"" label=""Восстановить соединение"" imageMso=""RefreshAll"" onAction=""OnRibbonRepairGlue"" screentip=""Найти и восстановить потерянное соединение"" supertip=""Для выбранного линейного элемента ищет ближайшую однозначную точку подключения. Перед изменением показывает, что именно будет восстановлено."" />
+          <button id=""btnELReconnectBegin"" label=""Переподключить начало"" imageMso=""HyperlinkInsert"" onAction=""OnRibbonReconnectBegin"" screentip=""Переподключить начало линейного элемента"" supertip=""Выберите один линейный элемент. Его начало будет подключено к ближайшей однозначной активной точке подключения в пределах допуска."" />
+          <button id=""btnELReconnectEnd"" label=""Переподключить конец"" imageMso=""HyperlinkInsert"" onAction=""OnRibbonReconnectEnd"" screentip=""Переподключить конец линейного элемента"" supertip=""Выберите один линейный элемент. Его конец будет подключен к ближайшей однозначной активной точке подключения в пределах допуска."" />
+          <button id=""btnELExtendBus"" label=""Расширить шину →"" imageMso=""Paste"" onAction=""OnRibbonExtendBus"" screentip=""Добавить место подключения справа"" supertip=""Выберите шину или элемент её ячейки. Команда увеличивает штатное количество точек подключения VTD на одну, сохраняя шаг шины."" />
+          <button id=""btnELTrimBus"" label=""Обрезать шину"" imageMso=""Cut"" onAction=""OnRibbonTrimBus"" screentip=""Удалить крайнее свободное место шины"" supertip=""Уменьшает шину справа на одно место. Команда разрешена только если крайняя точка подключения свободна."" />
+          <button id=""btnELBusDiag"" label=""Диагностика шины"" imageMso=""FindDialog"" onAction=""OnRibbonBusDiagnostics"" screentip=""Проверить структуру и занятость шины"" supertip=""Показывает число точек подключения, шаг, ширину, занятые и свободные места и сообщает о структурных несоответствиях."" />
         </group>
+
         <group id=""grpEnergoGeometry"" label=""Геометрия"">
-          <button id=""btnELAlignX"" label=""Выровнять X"" imageMso=""AlignCenter"" onAction=""OnRibbonAlignX""/>
-          <button id=""btnELAlignY"" label=""Выровнять Y"" imageMso=""AlignMiddle"" onAction=""OnRibbonAlignY""/>
-          <button id=""btnELCoords"" label=""Координаты"" imageMso=""FindDialog"" onAction=""OnRibbonCoordinates""/>
-          <menu id=""menuELPresets"" label=""Пресеты"" imageMso=""FileProperties"" keytip=""P"">
-            <button id=""btnELNudge5Left"" label=""Сдвиг 5 мм ←"" imageMso=""Cut"" onAction=""OnRibbonNudge5Left""/>
-            <button id=""btnELNudge5Right"" label=""Сдвиг 5 мм →"" imageMso=""Cut"" onAction=""OnRibbonNudge5Right""/>
-            <button id=""btnELNudge5Up"" label=""Сдвиг 5 мм ↑"" imageMso=""Cut"" onAction=""OnRibbonNudge5Up""/>
-            <button id=""btnELNudge5Down"" label=""Сдвиг 5 мм ↓"" imageMso=""Cut"" onAction=""OnRibbonNudge5Down""/>
-            <button id=""btnELPitch40"" label=""Шаг ячеек 40 мм"" imageMso=""AlignCenter"" onAction=""OnRibbonPitch40""/>
+          <button id=""btnELAlignX"" label=""Выровнять X"" imageMso=""AlignCenter"" onAction=""OnRibbonAlignX"" screentip=""Выровнять выделение по X"" supertip=""Выравнивает центры выбранных элементов по вертикальной оси без изменения электрической топологии."" />
+          <button id=""btnELAlignY"" label=""Выровнять Y"" imageMso=""AlignMiddle"" onAction=""OnRibbonAlignY"" screentip=""Выровнять выделение по Y"" supertip=""Выравнивает центры выбранных элементов по горизонтальной оси без изменения электрической топологии."" />
+          <button id=""btnELCoords"" label=""Координаты"" imageMso=""FindDialog"" onAction=""OnRibbonCoordinates"" screentip=""Показать координаты выделения"" supertip=""Показывает инженерные координаты и размеры выбранных элементов в миллиметрах."" />
+          <menu id=""menuELPresets"" label=""Пресеты"" imageMso=""FileProperties"" keytip=""P"" screentip=""Частые точные операции"" supertip=""Набор готовых геометрических операций без открытия дополнительной панели."">
+            <button id=""btnELNudge5Left"" label=""Сдвиг 5 мм ←"" imageMso=""Cut"" onAction=""OnRibbonNudge5Left"" screentip=""Сдвинуть на 5 мм влево"" supertip=""Точный сдвиг выделения на −5 мм по X."" />
+            <button id=""btnELNudge5Right"" label=""Сдвиг 5 мм →"" imageMso=""Cut"" onAction=""OnRibbonNudge5Right"" screentip=""Сдвинуть на 5 мм вправо"" supertip=""Точный сдвиг выделения на +5 мм по X."" />
+            <button id=""btnELNudge5Up"" label=""Сдвиг 5 мм ↑"" imageMso=""Cut"" onAction=""OnRibbonNudge5Up"" screentip=""Сдвинуть на 5 мм вверх"" supertip=""Точный сдвиг выделения на +5 мм по Y."" />
+            <button id=""btnELNudge5Down"" label=""Сдвиг 5 мм ↓"" imageMso=""Cut"" onAction=""OnRibbonNudge5Down"" screentip=""Сдвинуть на 5 мм вниз"" supertip=""Точный сдвиг выделения на −5 мм по Y."" />
+            <button id=""btnELPitch40"" label=""Шаг ячеек 40 мм"" imageMso=""AlignCenter"" onAction=""OnRibbonPitch40"" screentip=""Распределить ячейки с шагом 40 мм"" supertip=""Распределяет выбранные ячейки по принятому шагу 40 мм с последующим восстановлением и проверкой топологии."" />
           </menu>
         </group>
-        <group id=""grpEnergoCheck"" label=""Проверка"">
-          <button id=""btnELVisualDiag"" label=""Визуальная диагностика"" imageMso=""FindDialog"" onAction=""OnRibbonVisualDiagnostics"" keytip=""D""/>
-          <button id=""btnELDoctor"" label=""Проверка связей"" imageMso=""RefreshAll"" onAction=""OnRibbonDoctor""/>
-          <button id=""btnELPanel"" label=""Панель…"" size=""large"" imageMso=""FileProperties"" onAction=""OnRibbonPanel"" keytip=""O""/>
+
+        <group id=""grpEnergoCheck"" label=""Проверка и справка"">
+          <button id=""btnELVisualDiag"" label=""Визуальная диагностика"" imageMso=""FindDialog"" onAction=""OnRibbonVisualDiagnostics"" keytip=""D"" screentip=""Полная структурная диагностика схемы"" supertip=""Ищет визуальные касания без реального соединения, проверяет структуру шин и закреплённые ячейки. На большой схеме может выполняться около 30 секунд."" />
+          <button id=""btnELDoctor"" label=""Проверка связей"" imageMso=""RefreshAll"" onAction=""OnRibbonDoctor"" screentip=""Проверить электрические соединения"" supertip=""Проверяет потенциально опасные разрывы: визуальное касание к точке подключения без реального Glue/Connects. Результат показывается отдельным сообщением."" />
+          <button id=""btnELHelp"" label=""Справка"" imageMso=""Help"" onAction=""OnRibbonHelp"" keytip=""H"" screentip=""Справка по всем действиям EnergoLogic"" supertip=""Открывает описание всех команд Ribbon: что выбрать, что изменяется, возможные ограничения и способы отмены."" />
+          <button id=""btnELPanel"" label=""Точные параметры…"" size=""large"" imageMso=""FileProperties"" onAction=""OnRibbonPanel"" keytip=""O"" screentip=""Панель точных параметров"" supertip=""Открывает дополнительную панель для числового ввода ΔX/ΔY, координат базовой и целевой точки, произвольного шага ячеек и служебных операций."" />
         </group>
       </tab>
     </tabs>
@@ -334,6 +362,33 @@ namespace EnergoLogicVisioEditor
             _ribbon = ribbonUI;
         }
 
+        private string HumanizeResult(string result)
+        {
+            string value = result ?? "";
+            foreach (string prefix in new[] {
+                "state=success; ",
+                "state=failed; ",
+                "state=idle; "
+            })
+                if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    value = value.Substring(prefix.Length);
+            return value.Trim();
+        }
+
+        internal void ShowTransientStatus(string message)
+        {
+            string value = HumanizeResult(message);
+            if (String.IsNullOrWhiteSpace(value)) return;
+            try { StatusToastForm.ShowMessage(value); } catch { }
+        }
+
+        internal void NotifyAsyncResult(string result)
+        {
+            string value = HumanizeResult(result);
+            if (String.IsNullOrWhiteSpace(value)) return;
+            ShowTransientStatus(value);
+        }
+
         private void PublishUserCommand(Func<string> action)
         {
             EditorForm form = EnsureForm();
@@ -341,14 +396,67 @@ namespace EnergoLogicVisioEditor
             {
                 string result = action();
                 form.AcceptExternalResult(result);
+                ShowTransientStatus(result);
             }
             catch (Exception ex)
             {
-                form.SetStatus("⚠ " + ex.GetBaseException().Message);
+                string message = "⚠ " + ex.GetBaseException().Message;
+                form.SetStatus(message);
+                ShowTransientStatus(message);
+            }
+        }
+
+        private void PublishDiagnosticCommand(string title, Func<string> action)
+        {
+            EditorForm form = EnsureForm();
+            try
+            {
+                string result = action();
+                form.AcceptExternalResult(result);
+                string value = HumanizeResult(result);
+                MessageBoxIcon icon = value.StartsWith("✓", StringComparison.Ordinal)
+                    ? MessageBoxIcon.Information
+                    : value.StartsWith("⚠", StringComparison.Ordinal)
+                        ? MessageBoxIcon.Warning
+                        : MessageBoxIcon.Information;
+                MessageBox.Show(
+                    value,
+                    "EnergoLogic — " + title,
+                    MessageBoxButtons.OK,
+                    icon
+                );
+            }
+            catch (Exception ex)
+            {
+                string message = ex.GetBaseException().Message;
+                form.SetStatus("⚠ " + message);
+                MessageBox.Show(
+                    message,
+                    "EnergoLogic — " + title,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
+            }
+        }
+
+        private void StartBasePointFromRibbon(bool copy)
+        {
+            try
+            {
+                string result = StartInteractiveBasePoint(copy);
+                EnsureForm().SetStatus(result);
+                ShowTransientStatus(result);
+            }
+            catch (Exception ex)
+            {
+                string message = "⚠ " + ex.GetBaseException().Message;
+                EnsureForm().SetStatus(message);
+                ShowTransientStatus(message);
             }
         }
 
         public void OnRibbonPanel(IRibbonControl control) { ShowPanel(); }
+        public void OnRibbonHelp(IRibbonControl control) { HelpForm.ShowHelp(BuildHelpText()); }
         public void OnRibbonSelectCell(IRibbonControl control) { PublishUserCommand(() => SelectCell()); }
         public void OnRibbonDuplicateLeft(IRibbonControl control) { PublishUserCommand(() => DuplicateCell(-1)); }
         public void OnRibbonDuplicateRight(IRibbonControl control) { PublishUserCommand(() => DuplicateCell(1)); }
@@ -357,22 +465,110 @@ namespace EnergoLogicVisioEditor
         public void OnRibbonCaptureSample(IRibbonControl control) { PublishUserCommand(() => CaptureReplacementSample()); }
         public void OnRibbonReplace(IRibbonControl control) { PublishUserCommand(() => ReplaceEquipmentFromSample()); }
         public void OnRibbonInsert(IRibbonControl control) { PublishUserCommand(() => InsertEquipmentIntoConnectionFromSample()); }
+        public void OnRibbonBaseCopy(IRibbonControl control) { StartBasePointFromRibbon(true); }
+        public void OnRibbonBaseMove(IRibbonControl control) { StartBasePointFromRibbon(false); }
+        public void OnRibbonCancelMode(IRibbonControl control) { ShowTransientStatus(CancelInteractiveBasePoint(true)); }
         public void OnRibbonRepairGlue(IRibbonControl control) { PublishUserCommand(() => RepairGlue(false, true)); }
         public void OnRibbonReconnectBegin(IRibbonControl control) { PublishUserCommand(() => ReconnectEndpoint("begin")); }
         public void OnRibbonReconnectEnd(IRibbonControl control) { PublishUserCommand(() => ReconnectEndpoint("end")); }
         public void OnRibbonExtendBus(IRibbonControl control) { PublishUserCommand(() => ExtendBusRight()); }
         public void OnRibbonTrimBus(IRibbonControl control) { PublishUserCommand(() => TrimBusRight()); }
-        public void OnRibbonBusDiagnostics(IRibbonControl control) { PublishUserCommand(() => BusDiagnostics()); }
+        public void OnRibbonBusDiagnostics(IRibbonControl control) { PublishDiagnosticCommand("диагностика шины", () => BusDiagnostics()); }
         public void OnRibbonAlignX(IRibbonControl control) { PublishUserCommand(() => Align("x")); }
         public void OnRibbonAlignY(IRibbonControl control) { PublishUserCommand(() => Align("y")); }
-        public void OnRibbonCoordinates(IRibbonControl control) { PublishUserCommand(() => Coordinates()); }
+        public void OnRibbonCoordinates(IRibbonControl control) { PublishDiagnosticCommand("координаты", () => Coordinates()); }
         public void OnRibbonNudge5Left(IRibbonControl control) { PublishUserCommand(() => ExactOffset(-5.0, 0.0)); }
         public void OnRibbonNudge5Right(IRibbonControl control) { PublishUserCommand(() => ExactOffset(5.0, 0.0)); }
         public void OnRibbonNudge5Up(IRibbonControl control) { PublishUserCommand(() => ExactOffset(0.0, 5.0)); }
         public void OnRibbonNudge5Down(IRibbonControl control) { PublishUserCommand(() => ExactOffset(0.0, -5.0)); }
         public void OnRibbonPitch40(IRibbonControl control) { PublishUserCommand(() => DistributePitch(40.0)); }
-        public void OnRibbonVisualDiagnostics(IRibbonControl control) { PublishUserCommand(() => VisualDiagnostics()); }
-        public void OnRibbonDoctor(IRibbonControl control) { PublishUserCommand(() => Doctor()); }
+        public void OnRibbonVisualDiagnostics(IRibbonControl control) { PublishDiagnosticCommand("визуальная диагностика", () => VisualDiagnostics()); }
+        public void OnRibbonDoctor(IRibbonControl control) { PublishDiagnosticCommand("проверка связей", () => Doctor()); }
+
+        private string BuildHelpText()
+        {
+            return
+@"ENERGOLOGIC — СПРАВКА ПО КОМАНДАМ
+
+ЯЧЕЙКА
+• Выделить ячейку
+  Выберите любой элемент электрической ячейки. EnergoLogic выделит весь её состав.
+
+• Копировать ← / →
+  Выберите элемент ячейки. Создаётся соседняя копия на один шаг шины с восстановлением внутренних соединений.
+
+• Переместить ← / →
+  Перемещает ячейку на соседнее свободное место. Если место занято — операция блокируется.
+
+ОБОРУДОВАНИЕ
+• Запомнить образец
+  Выберите одну фигуру оборудования. Её мастер-фигура станет текущим образцом.
+
+• Заменить
+  Сначала запомните образец, затем выберите один элемент ячейки. Геометрия и электрическая топология проверяются после замены.
+
+• Вставить в связь
+  Сначала запомните образец. Затем выберите внутреннюю линейную связь ячейки. Связь разрезается, а оборудование вставляется с естественной длиной.
+
+БАЗОВАЯ ТОЧКА
+• Копировать по точке
+  1) Выделите элементы.
+  2) Нажмите команду.
+  3) Левой кнопкой укажите базовую точку.
+  4) Левой кнопкой укажите целевую точку.
+  Смещение определяется как «цель − база».
+  Правый щелчок отменяет режим.
+
+• Переместить по точке
+  Те же два щелчка, но исходное выделение перемещается вместо копирования.
+
+• Отменить режим
+  Отменяет незавершённый интерактивный выбор точек без изменения схемы.
+
+СОЕДИНЕНИЯ И ШИНА
+• Восстановить соединение
+  Ищет ближайшую однозначную точку подключения для потерянного конца линейного элемента. Перед изменением показывает подтверждение.
+
+• Переподключить начало / конец
+  Выберите один линейный элемент. Соответствующий конец подключается к ближайшей активной точке в пределах допуска.
+
+• Расширить шину →
+  Добавляет одно место подключения справа через штатные параметры VTD, сохраняя шаг.
+
+• Обрезать шину
+  Удаляет крайнее правое место только если оно свободно.
+
+• Диагностика шины
+  Показывает число точек, шаг, ширину, занятые и свободные места. Результат всегда выводится отдельным сообщением.
+
+ГЕОМЕТРИЯ
+• Выровнять X / Y
+  Выравнивает выбранные элементы по соответствующей координате.
+
+• Координаты
+  Показывает координаты и размеры выделения в миллиметрах.
+
+• Пресеты
+  Быстрые сдвиги на 5 мм и распределение ячеек с шагом 40 мм.
+
+ПРОВЕРКА
+• Проверка связей
+  Ищет визуальные касания к точке подключения без реального электрического соединения. Всегда показывает явный результат.
+
+• Визуальная диагностика
+  Полная проверка структурных проблем, шин и закреплённых ячеек. На большой схеме может выполняться около 30 секунд. Всегда показывает итог.
+
+ТОЧНЫЕ ПАРАМЕТРЫ
+• Точные параметры…
+  Открывает дополнительную панель для произвольных ΔX/ΔY, числовых координат базовой/целевой точки, произвольного шага ячеек и служебных операций.
+
+ОБОЗНАЧЕНИЯ РЕЗУЛЬТАТА
+✓ операция выполнена / проверка пройдена
+⚠ обнаружено предупреждение или требуется внимание
+ошибка — операция не выполнена; схема должна остаться без частичного изменения
+
+EnergoLogic использует миллиметры в пользовательском интерфейсе. Внутренние единицы Visio преобразуются автоматически.";
+        }
 
         private void InstallContextMenu()
         {
@@ -442,6 +638,10 @@ namespace EnergoLogicVisioEditor
                     () => PublishUserCommand(() => DuplicateCell(1)), false);
                 AddContextButton(menu, "Переместить ячейку →", "MoveRight",
                     () => PublishUserCommand(() => MoveCell(1)), false);
+                AddContextButton(menu, "Копировать по базовой точке", "BaseCopy",
+                    () => StartBasePointFromRibbon(true), true);
+                AddContextButton(menu, "Переместить по базовой точке", "BaseMove",
+                    () => StartBasePointFromRibbon(false), false);
                 AddContextButton(menu, "Переподключить начало", "ReconnectBegin",
                     () => PublishUserCommand(() => ReconnectEndpoint("begin")), true);
                 AddContextButton(menu, "Переподключить конец", "ReconnectEnd",
@@ -449,7 +649,9 @@ namespace EnergoLogicVisioEditor
                 AddContextButton(menu, "Восстановить соединение…", "RepairGlue",
                     () => PublishUserCommand(() => RepairGlue(false, true)), false);
                 AddContextButton(menu, "Визуальная диагностика", "VisualDiagnostics",
-                    () => PublishUserCommand(() => VisualDiagnostics()), true);
+                    () => PublishDiagnosticCommand("визуальная диагностика", () => VisualDiagnostics()), true);
+                AddContextButton(menu, "Справка EnergoLogic", "Help",
+                    () => HelpForm.ShowHelp(BuildHelpText()), true);
 
                 _contextRoots.Add(root);
                 string hostName = "";
@@ -553,6 +755,10 @@ namespace EnergoLogicVisioEditor
         public string ApiAlignY() { return Align("y"); }
         public string ApiBaseCopy(double bx, double by, double tx, double ty) { return BasePointTransform(true, bx, by, tx, ty); }
         public string ApiBaseMove(double bx, double by, double tx, double ty) { return BasePointTransform(false, bx, by, tx, ty); }
+        public string ApiStartBaseCopyInteractive() { return StartInteractiveBasePoint(true); }
+        public string ApiStartBaseMoveInteractive() { return StartInteractiveBasePoint(false); }
+        public string ApiCancelInteractiveMode() { return CancelInteractiveBasePoint(true); }
+        public string ApiInteractionStatus() { return InteractiveModeStatus(); }
         public string ApiMeasurePitch() { return MeasurePitch(); }
         public string ApiDistributePitch(double pitchMm) { return DistributePitch(pitchMm); }
         public string ApiCoordinates() { return Coordinates(); }
@@ -571,7 +777,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.46"; }
+        public string ApiVersion() { return "0.3.47"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -1505,6 +1711,209 @@ namespace EnergoLogicVisioEditor
                 return String.Format(CultureInfo.CurrentCulture, "✓ Точный сдвиг: X {0:0.###} мм, Y {1:0.###} мм. Внутренние Glue проверены, восстановлено: {2}.", dx, dy, restoredInternal);
             }
             finally { app.EndUndoScope(scope, commit); }
+        }
+
+        internal string StartInteractiveBasePoint(bool copy)
+        {
+            dynamic app = App;
+            dynamic page = app.ActivePage;
+            List<int> ids = CurrentTopLevelSelection(page);
+            if (ids.Count == 0)
+                throw new InvalidOperationException(
+                    "Сначала выделите элементы, которые нужно " +
+                    (copy ? "скопировать" : "переместить")
+                );
+
+            CancelInteractiveBasePoint(false);
+
+            _interactiveBaseCopy = copy;
+            _interactiveBaseStage = 1;
+            _interactiveBaseSelectionIds = new List<int>(ids);
+            _interactiveBaseDocumentName = Convert.ToString(
+                page.Document.Name,
+                CultureInfo.InvariantCulture
+            ) ?? "";
+            _interactiveBasePageNameU = Convert.ToString(
+                page.NameU,
+                CultureInfo.InvariantCulture
+            ) ?? "";
+
+            // Visio visEvtCodeMouseDown = 709. AddAdvise notifications provide a
+            // MouseEvent subject with Button/x/y in internal drawing units.
+            dynamic eventList = app.EventList;
+            _interactiveMouseEvent = eventList.AddAdvise(
+                (short)709,
+                this,
+                "",
+                "EnergoLogic.BasePoint"
+            );
+            _interactiveBaseActive = true;
+
+            return (copy
+                ? "Копирование по базовой точке"
+                : "Перемещение по базовой точке") +
+                ": щёлкните ЛКМ базовую точку. Правый щелчок — отмена.";
+        }
+
+        internal string InteractiveModeStatus()
+        {
+            if (!_interactiveBaseActive)
+                return "Интерактивный режим не активен.";
+            if (_interactiveBaseStage == 1)
+                return "Ожидание базовой точки.";
+            if (_interactiveBaseStage == 2)
+                return String.Format(
+                    CultureInfo.CurrentCulture,
+                    "Базовая точка: X={0:0.###} мм, Y={1:0.###} мм. Ожидание целевой точки.",
+                    _interactiveBaseXmm,
+                    _interactiveBaseYmm
+                );
+            return "Интерактивный режим активен.";
+        }
+
+        internal string CancelInteractiveBasePoint(bool report)
+        {
+            if (_interactiveMouseEvent != null)
+            {
+                try { ((dynamic)_interactiveMouseEvent).Delete(); } catch { }
+            }
+            bool wasActive = _interactiveBaseActive;
+            _interactiveMouseEvent = null;
+            _interactiveBaseActive = false;
+            _interactiveBaseCopy = false;
+            _interactiveBaseStage = 0;
+            _interactiveBaseSelectionIds = new List<int>();
+            _interactiveBaseDocumentName = "";
+            _interactiveBasePageNameU = "";
+            _interactiveBaseXmm = 0.0;
+            _interactiveBaseYmm = 0.0;
+            return report
+                ? (wasActive
+                    ? "✓ Интерактивный режим отменён."
+                    : "Интерактивный режим не был активен.")
+                : "";
+        }
+
+        [ComVisible(true)]
+        public object VisEventProc(
+            short nEventCode,
+            object pSourceObj,
+            int nEventID,
+            int nEventSeqNum,
+            object pSubjectObj,
+            object vMoreInfo)
+        {
+            if (nEventCode != 709 || !_interactiveBaseActive)
+                return false;
+
+            try
+            {
+                dynamic mouse = pSubjectObj;
+                int button = Convert.ToInt32(
+                    mouse.Button,
+                    CultureInfo.InvariantCulture
+                );
+
+                // Right-click cancels the point-picking mode and suppresses the
+                // normal context menu for that cancellation click.
+                if (button == 2)
+                {
+                    string canceled = CancelInteractiveBasePoint(true);
+                    ShowTransientStatus(canceled);
+                    return true;
+                }
+
+                if (button != 1)
+                    return false;
+
+                double xmm = Convert.ToDouble(
+                    mouse.x,
+                    CultureInfo.InvariantCulture
+                ) * 25.4;
+                double ymm = Convert.ToDouble(
+                    mouse.y,
+                    CultureInfo.InvariantCulture
+                ) * 25.4;
+
+                dynamic page = App.ActivePage;
+                string currentDocument = Convert.ToString(
+                    page.Document.Name,
+                    CultureInfo.InvariantCulture
+                ) ?? "";
+                string currentPage = Convert.ToString(
+                    page.NameU,
+                    CultureInfo.InvariantCulture
+                ) ?? "";
+                if (!String.Equals(
+                        currentDocument,
+                        _interactiveBaseDocumentName,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    !String.Equals(
+                        currentPage,
+                        _interactiveBasePageNameU,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    CancelInteractiveBasePoint(false);
+                    ShowTransientStatus(
+                        "⚠ Страница изменилась. Режим базовой точки отменён."
+                    );
+                    return true;
+                }
+
+                if (_interactiveBaseStage == 1)
+                {
+                    _interactiveBaseXmm = xmm;
+                    _interactiveBaseYmm = ymm;
+                    _interactiveBaseStage = 2;
+                    ShowTransientStatus(
+                        String.Format(
+                            CultureInfo.CurrentCulture,
+                            "Базовая точка: X={0:0.###} мм, Y={1:0.###} мм. " +
+                            "Теперь щёлкните целевую точку.",
+                            xmm,
+                            ymm
+                        )
+                    );
+                    return true;
+                }
+
+                if (_interactiveBaseStage == 2)
+                {
+                    bool copy = _interactiveBaseCopy;
+                    double bx = _interactiveBaseXmm;
+                    double by = _interactiveBaseYmm;
+                    List<int> selection = new List<int>(
+                        _interactiveBaseSelectionIds
+                    );
+                    CancelInteractiveBasePoint(false);
+
+                    // MouseDown is cancelled, so normal Visio selection should
+                    // remain intact; explicitly restore it as an additional guard.
+                    SelectIds(page, selection);
+                    string result = BasePointTransform(
+                        copy,
+                        bx,
+                        by,
+                        xmm,
+                        ymm
+                    );
+                    EnsureForm().SetStatus(result);
+                    ShowTransientStatus(result);
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                string message =
+                    "⚠ Режим базовой точки остановлен: " +
+                    ex.GetBaseException().Message;
+                CancelInteractiveBasePoint(false);
+                EnsureForm().SetStatus(message);
+                ShowTransientStatus(message);
+                return true;
+            }
+
+            return false;
         }
 
         internal string BasePointTransform(bool copy, double bx, double by, double tx, double ty)
@@ -3637,6 +4046,104 @@ namespace EnergoLogicVisioEditor
         }
     }
 
+    internal sealed class StatusToastForm : Form
+    {
+        private readonly Timer _timer;
+
+        private StatusToastForm(string message)
+        {
+            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            Width = 520;
+            Height = 110;
+            Text = "EnergoLogic";
+            Font = new Font("Segoe UI", 9F);
+
+            Label label = new Label {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(14),
+                Text = message ?? ""
+            };
+            Controls.Add(label);
+
+            Rectangle area = Screen.PrimaryScreen.WorkingArea;
+            Location = new Point(
+                Math.Max(area.Left, area.Right - Width - 24),
+                Math.Max(area.Top, area.Bottom - Height - 24)
+            );
+
+            _timer = new Timer { Interval = 5000 };
+            _timer.Tick += delegate
+            {
+                _timer.Stop();
+                Close();
+            };
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            _timer.Start();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _timer != null)
+            {
+                _timer.Stop();
+                _timer.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public static void ShowMessage(string message)
+        {
+            StatusToastForm form = new StatusToastForm(message);
+            form.Show();
+        }
+    }
+
+    internal sealed class HelpForm : Form
+    {
+        private HelpForm(string text)
+        {
+            Text = "EnergoLogic — справка";
+            Width = 760;
+            Height = 720;
+            MinimumSize = new Size(620, 520);
+            StartPosition = FormStartPosition.CenterScreen;
+            ShowInTaskbar = false;
+            Font = new Font("Segoe UI", 9F);
+
+            RichTextBox help = new RichTextBox {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                BorderStyle = BorderStyle.None,
+                BackColor = SystemColors.Window,
+                ForeColor = SystemColors.WindowText,
+                Text = text ?? "",
+                DetectUrls = false
+            };
+            Controls.Add(help);
+        }
+
+        public static void ShowHelp(string text)
+        {
+            HelpForm form = new HelpForm(text);
+            form.Show();
+            form.BringToFront();
+        }
+    }
+
     internal sealed class EditorForm : Form
     {
         private readonly Connect _addin;
@@ -3854,6 +4361,8 @@ namespace EnergoLogicVisioEditor
                     if (result.StartsWith("state=external_restoring", StringComparison.Ordinal) ||
                         result.StartsWith("state=stabilizing", StringComparison.Ordinal))
                         StartTopologyCompletionTimer();
+                    else
+                        _addin.NotifyAsyncResult(result);
                 }
                 catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
             };
