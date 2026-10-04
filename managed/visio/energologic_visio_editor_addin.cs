@@ -15,7 +15,7 @@ using Microsoft.Office.Core;
 
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.45.0")]
+[assembly: AssemblyVersion("0.3.46.0")]
 
 namespace EnergoLogicVisioEditor
 {
@@ -121,8 +121,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("0E77C5C8-611C-4B8F-AD4E-AD1F1E8CF345")]
-    [ProgId("EnergoLogic.VisioEditorAddinV345")]
+    [Guid("A91D7D4D-2466-4B49-889D-674E914DF346")]
+    [ProgId("EnergoLogic.VisioEditorAddinV346")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -287,41 +287,41 @@ namespace EnergoLogicVisioEditor
     <tabs>
       <tab id=""tabEnergoLogic"" label=""EnergoLogic"" keytip=""EL"">
         <group id=""grpEnergoCell"" label=""Ячейка"">
-          <button id=""btnELSelectCell"" label=""Выделить ячейку"" onAction=""OnRibbonSelectCell"" keytip=""S""/>
-          <button id=""btnELDuplicateLeft"" label=""Копировать ←"" onAction=""OnRibbonDuplicateLeft"" keytip=""L""/>
-          <button id=""btnELDuplicateRight"" label=""Копировать →"" onAction=""OnRibbonDuplicateRight"" keytip=""R""/>
-          <button id=""btnELMoveLeft"" label=""Переместить ←"" onAction=""OnRibbonMoveLeft""/>
-          <button id=""btnELMoveRight"" label=""Переместить →"" onAction=""OnRibbonMoveRight""/>
+          <button id=""btnELSelectCell"" label=""Выделить ячейку"" imageMso=""FindDialog"" onAction=""OnRibbonSelectCell"" keytip=""S""/>
+          <button id=""btnELDuplicateLeft"" label=""Копировать ←"" imageMso=""Copy"" onAction=""OnRibbonDuplicateLeft"" keytip=""L""/>
+          <button id=""btnELDuplicateRight"" label=""Копировать →"" imageMso=""Copy"" onAction=""OnRibbonDuplicateRight"" keytip=""R""/>
+          <button id=""btnELMoveLeft"" label=""Переместить ←"" imageMso=""Cut"" onAction=""OnRibbonMoveLeft""/>
+          <button id=""btnELMoveRight"" label=""Переместить →"" imageMso=""Cut"" onAction=""OnRibbonMoveRight""/>
         </group>
         <group id=""grpEnergoEquipment"" label=""Оборудование"">
-          <button id=""btnELCaptureSample"" label=""Запомнить образец"" onAction=""OnRibbonCaptureSample""/>
-          <button id=""btnELReplace"" label=""Заменить"" onAction=""OnRibbonReplace""/>
-          <button id=""btnELInsert"" label=""Вставить в связь"" onAction=""OnRibbonInsert""/>
+          <button id=""btnELCaptureSample"" label=""Запомнить образец"" imageMso=""Copy"" onAction=""OnRibbonCaptureSample""/>
+          <button id=""btnELReplace"" label=""Заменить"" imageMso=""ReplaceDialog"" onAction=""OnRibbonReplace""/>
+          <button id=""btnELInsert"" label=""Вставить в связь"" imageMso=""Paste"" onAction=""OnRibbonInsert""/>
         </group>
         <group id=""grpEnergoConnections"" label=""Соединения и шина"">
-          <button id=""btnELRepairGlue"" label=""Repair Glue"" onAction=""OnRibbonRepairGlue""/>
-          <button id=""btnELReconnectBegin"" label=""Reconnect Begin"" onAction=""OnRibbonReconnectBegin""/>
-          <button id=""btnELReconnectEnd"" label=""Reconnect End"" onAction=""OnRibbonReconnectEnd""/>
-          <button id=""btnELExtendBus"" label=""Расширить шину →"" onAction=""OnRibbonExtendBus""/>
-          <button id=""btnELTrimBus"" label=""Обрезать шину"" onAction=""OnRibbonTrimBus""/>
-          <button id=""btnELBusDiag"" label=""Диагностика шины"" onAction=""OnRibbonBusDiagnostics""/>
+          <button id=""btnELRepairGlue"" label=""Восстановить соединение"" imageMso=""RefreshAll"" onAction=""OnRibbonRepairGlue""/>
+          <button id=""btnELReconnectBegin"" label=""Переподключить начало"" imageMso=""HyperlinkInsert"" onAction=""OnRibbonReconnectBegin""/>
+          <button id=""btnELReconnectEnd"" label=""Переподключить конец"" imageMso=""HyperlinkInsert"" onAction=""OnRibbonReconnectEnd""/>
+          <button id=""btnELExtendBus"" label=""Расширить шину →"" imageMso=""Paste"" onAction=""OnRibbonExtendBus""/>
+          <button id=""btnELTrimBus"" label=""Обрезать шину"" imageMso=""Cut"" onAction=""OnRibbonTrimBus""/>
+          <button id=""btnELBusDiag"" label=""Диагностика шины"" imageMso=""FindDialog"" onAction=""OnRibbonBusDiagnostics""/>
         </group>
         <group id=""grpEnergoGeometry"" label=""Геометрия"">
-          <button id=""btnELAlignX"" label=""Выровнять X"" onAction=""OnRibbonAlignX""/>
-          <button id=""btnELAlignY"" label=""Выровнять Y"" onAction=""OnRibbonAlignY""/>
-          <button id=""btnELCoords"" label=""Координаты"" onAction=""OnRibbonCoordinates""/>
-          <menu id=""menuELPresets"" label=""Пресеты"" keytip=""P"">
-            <button id=""btnELNudge5Left"" label=""Сдвиг 5 мм ←"" onAction=""OnRibbonNudge5Left""/>
-            <button id=""btnELNudge5Right"" label=""Сдвиг 5 мм →"" onAction=""OnRibbonNudge5Right""/>
-            <button id=""btnELNudge5Up"" label=""Сдвиг 5 мм ↑"" onAction=""OnRibbonNudge5Up""/>
-            <button id=""btnELNudge5Down"" label=""Сдвиг 5 мм ↓"" onAction=""OnRibbonNudge5Down""/>
-            <button id=""btnELPitch40"" label=""Шаг ячеек 40 мм"" onAction=""OnRibbonPitch40""/>
+          <button id=""btnELAlignX"" label=""Выровнять X"" imageMso=""AlignCenter"" onAction=""OnRibbonAlignX""/>
+          <button id=""btnELAlignY"" label=""Выровнять Y"" imageMso=""AlignMiddle"" onAction=""OnRibbonAlignY""/>
+          <button id=""btnELCoords"" label=""Координаты"" imageMso=""FindDialog"" onAction=""OnRibbonCoordinates""/>
+          <menu id=""menuELPresets"" label=""Пресеты"" imageMso=""FileProperties"" keytip=""P"">
+            <button id=""btnELNudge5Left"" label=""Сдвиг 5 мм ←"" imageMso=""Cut"" onAction=""OnRibbonNudge5Left""/>
+            <button id=""btnELNudge5Right"" label=""Сдвиг 5 мм →"" imageMso=""Cut"" onAction=""OnRibbonNudge5Right""/>
+            <button id=""btnELNudge5Up"" label=""Сдвиг 5 мм ↑"" imageMso=""Cut"" onAction=""OnRibbonNudge5Up""/>
+            <button id=""btnELNudge5Down"" label=""Сдвиг 5 мм ↓"" imageMso=""Cut"" onAction=""OnRibbonNudge5Down""/>
+            <button id=""btnELPitch40"" label=""Шаг ячеек 40 мм"" imageMso=""AlignCenter"" onAction=""OnRibbonPitch40""/>
           </menu>
         </group>
         <group id=""grpEnergoCheck"" label=""Проверка"">
-          <button id=""btnELVisualDiag"" label=""Визуальная диагностика"" onAction=""OnRibbonVisualDiagnostics"" keytip=""D""/>
-          <button id=""btnELDoctor"" label=""Scheme Doctor"" onAction=""OnRibbonDoctor""/>
-          <button id=""btnELPanel"" label=""Панель…"" size=""large"" onAction=""OnRibbonPanel"" keytip=""O""/>
+          <button id=""btnELVisualDiag"" label=""Визуальная диагностика"" imageMso=""FindDialog"" onAction=""OnRibbonVisualDiagnostics"" keytip=""D""/>
+          <button id=""btnELDoctor"" label=""Проверка связей"" imageMso=""RefreshAll"" onAction=""OnRibbonDoctor""/>
+          <button id=""btnELPanel"" label=""Панель…"" size=""large"" imageMso=""FileProperties"" onAction=""OnRibbonPanel"" keytip=""O""/>
         </group>
       </tab>
     </tabs>
@@ -442,11 +442,11 @@ namespace EnergoLogicVisioEditor
                     () => PublishUserCommand(() => DuplicateCell(1)), false);
                 AddContextButton(menu, "Переместить ячейку →", "MoveRight",
                     () => PublishUserCommand(() => MoveCell(1)), false);
-                AddContextButton(menu, "Reconnect Begin", "ReconnectBegin",
+                AddContextButton(menu, "Переподключить начало", "ReconnectBegin",
                     () => PublishUserCommand(() => ReconnectEndpoint("begin")), true);
-                AddContextButton(menu, "Reconnect End", "ReconnectEnd",
+                AddContextButton(menu, "Переподключить конец", "ReconnectEnd",
                     () => PublishUserCommand(() => ReconnectEndpoint("end")), false);
-                AddContextButton(menu, "Repair Glue…", "RepairGlue",
+                AddContextButton(menu, "Восстановить соединение…", "RepairGlue",
                     () => PublishUserCommand(() => RepairGlue(false, true)), false);
                 AddContextButton(menu, "Визуальная диагностика", "VisualDiagnostics",
                     () => PublishUserCommand(() => VisualDiagnostics()), true);
@@ -571,7 +571,7 @@ namespace EnergoLogicVisioEditor
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.45"; }
+        public string ApiVersion() { return "0.3.46"; }
 
         internal string DuplicateCell(int direction)
         {
@@ -633,7 +633,7 @@ namespace EnergoLogicVisioEditor
                 List<GlueEdgeInfo> duplicateInternalGlue = CaptureInternalGlue(page, newIds);
                 if (duplicateInternalGlue.Count != sourceInternalGlue.Count)
                     throw new InvalidOperationException(
-                        "Visio потерял внутренние Glue при копировании ячейки; операция отменена"
+                        "Visio потерял внутренние соединения при копировании ячейки; операция отменена"
                     );
                 commit = true;
                 return String.Format(CultureInfo.CurrentCulture,
@@ -757,7 +757,7 @@ namespace EnergoLogicVisioEditor
                     string actual = GetCellIdentity(page.Shapes.ItemFromID(id));
                     if (!String.Equals(actual, cellId, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidOperationException(
-                            "Не удалось подтвердить EnergoLogicCellId у shape " + id
+                            "Не удалось подтвердить идентификатор ячейки у фигуры " + id
                         );
                 }
 
@@ -786,7 +786,7 @@ namespace EnergoLogicVisioEditor
             dynamic master = null;
             try { master = shape.Master; } catch { }
             if (master == null)
-                throw new InvalidOperationException("У выбранного элемента нет master — использовать его как образец нельзя");
+                throw new InvalidOperationException("У выбранного элемента нет мастер-фигуры — использовать его как образец нельзя");
 
             string name = MasterName(shape);
             if (String.IsNullOrWhiteSpace(name))
@@ -794,7 +794,7 @@ namespace EnergoLogicVisioEditor
                 try { name = Convert.ToString(master.Name, CultureInfo.CurrentCulture) ?? ""; } catch { }
             }
             if (String.IsNullOrWhiteSpace(name))
-                throw new InvalidOperationException("Не удалось определить имя master у образца");
+                throw new InvalidOperationException("Не удалось определить имя мастер-фигуры у образца");
 
             _replacementMaster = master;
             _replacementMasterName = name;
@@ -827,7 +827,7 @@ namespace EnergoLogicVisioEditor
                 _replacementInsertReceiveRow > 0
                 ? String.Format(
                     CultureInfo.CurrentCulture,
-                    " Профиль вставки: {0} → Connections.{1}.",
+                    " Профиль подключения: {0} → Connections.{1}.",
                     _replacementInsertSourceEndpoint,
                     _replacementInsertReceiveRow
                 )
@@ -851,7 +851,7 @@ namespace EnergoLogicVisioEditor
             string cellId = GetCellIdentity(target);
             if (String.IsNullOrWhiteSpace(cellId))
                 throw new InvalidOperationException(
-                    "Перед заменой закрепите состав ячейки, чтобы EnergoLogic мог проверить topology после операции"
+                    "Перед заменой закрепите состав ячейки, чтобы EnergoLogic мог проверить топологию после операции"
                 );
 
             CellInfo cell = DiscoverCell(page, oldId);
@@ -911,7 +911,7 @@ namespace EnergoLogicVisioEditor
                 if (useNativeReplaceShape && SupportsNativeReplaceShape())
                 {
                     replacement = target.ReplaceShape(_replacementMaster, 1);
-                    backend = "native ReplaceShape";
+                    backend = "штатная замена Visio";
                 }
                 else
                 {
@@ -976,7 +976,7 @@ namespace EnergoLogicVisioEditor
                     try { target.Delete(); }
                     catch (Exception ex)
                     {
-                        throw new InvalidOperationException("Не удалось удалить исходный shape после drop/rewire replacement", ex);
+                        throw new InvalidOperationException("Не удалось удалить исходную фигуру после замены с переподключением", ex);
                     }
                 }
 
@@ -1008,7 +1008,7 @@ namespace EnergoLogicVisioEditor
                     ExpectedGlue = expected,
                     SuccessPrefix = String.Format(
                         CultureInfo.CurrentCulture,
-                        "✓ Оборудование заменено: {0} → {1}. Backend: {2}",
+                        "✓ Оборудование заменено: {0} → {1}. Механизм: {2}",
                         String.IsNullOrWhiteSpace(oldMasterName) ? ("shape " + oldId) : oldMasterName,
                         _replacementMasterName,
                         backend
@@ -1029,7 +1029,7 @@ namespace EnergoLogicVisioEditor
             if (String.IsNullOrWhiteSpace(_replacementInsertSourceEndpoint) ||
                 _replacementInsertReceiveRow <= 0)
                 throw new InvalidOperationException(
-                    "У образца не удалось определить безопасный VTD port profile для вставки. " +
+                    "У образца не удалось определить безопасный профиль подключения VTD для вставки. " +
                     "Для этого master доступна только замена оборудования."
                 );
 
@@ -1058,7 +1058,7 @@ namespace EnergoLogicVisioEditor
             GlueTarget endTarget = TryGetGlueTarget(connection, "end");
             if (beginTarget == null || endTarget == null)
                 throw new InvalidOperationException(
-                    "Для вставки выбранная связь должна иметь Glue на обоих концах"
+                    "Для вставки выбранная связь должна быть подключена с обоих концов"
                 );
 
             List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
@@ -1100,7 +1100,7 @@ namespace EnergoLogicVisioEditor
                 int liveReceiveRow = FindConnectionPointRowAtEndpoint(inserted, receiveEndpoint, 0.10);
                 if (liveReceiveRow != _replacementInsertReceiveRow)
                     throw new InvalidOperationException(
-                        "Port profile master изменился после Drop; автоматическая вставка остановлена"
+                        "Профиль подключения мастер-фигуры изменился после вставки; автоматическая операция остановлена"
                     );
 
                 double nativeBeginX = GetMm(inserted, "BeginX");
@@ -1113,12 +1113,12 @@ namespace EnergoLogicVisioEditor
                 );
                 const double minLeadMm = 1.0;
                 if (nativeLength < 0.5)
-                    throw new InvalidOperationException("У master некорректная инженерная длина");
+                    throw new InvalidOperationException("У мастер-фигуры некорректная инженерная длина");
                 if (nativeLength + 2.0 * minLeadMm > connectionLength)
                     throw new InvalidOperationException(
                         String.Format(
                             CultureInfo.CurrentCulture,
-                            "Оборудование не помещается в выбранную связь: длина master {0:0.###} мм, " +
+                            "Оборудование не помещается в выбранную связь: длина мастер-фигуры {0:0.###} мм, " +
                             "доступно {1:0.###} мм. Нужна более длинная связь или другой аппарат.",
                             nativeLength,
                             connectionLength
@@ -1406,7 +1406,7 @@ namespace EnergoLogicVisioEditor
 
                     if (members.Contains(sourceId) && owner == targetId && glue.TargetId != targetId)
                         throw new InvalidOperationException(
-                            "Оборудование использует вложенную connection point; для такой замены нужен отдельный mapping profile"
+                            "Оборудование использует вложенную точку подключения; для такой замены нужен отдельный профиль сопоставления"
                         );
                 }
             }
@@ -1549,7 +1549,7 @@ namespace EnergoLogicVisioEditor
                     foreach (int id in newIds) if (HasCellIdentity(page.Shapes.ItemFromID(id))) SetCellIdentity(page.Shapes.ItemFromID(id), cellId);
                     List<GlueEdgeInfo> duplicateGlue = CaptureInternalGlue(page, newIds);
                     if (duplicateGlue.Count != internalGlue.Count)
-                        throw new InvalidOperationException("Visio потерял внутренние Glue при копировании по базовой точке; операция отменена");
+                        throw new InvalidOperationException("Visio потерял внутренние соединения при копировании по базовой точке; операция отменена");
                 }
                 else
                 {
@@ -1607,7 +1607,7 @@ namespace EnergoLogicVisioEditor
                 if (memberIds.Contains(candidateId)) continue;
                 string text = SafeText(candidate).Trim();
                 if (String.Equals(text, value, StringComparison.CurrentCultureIgnoreCase))
-                    throw new InvalidOperationException("Обозначение \"" + value + "\" уже используется shape " + candidateId);
+                    throw new InvalidOperationException("Обозначение \"" + value + "\" уже используется фигурой " + candidateId);
             }
 
             string oldShort = ShortDesignation(oldDesignation);
@@ -1785,7 +1785,7 @@ namespace EnergoLogicVisioEditor
             dynamic app = App;
             dynamic page = app.ActivePage;
             List<int> ids = CurrentTopLevelSelection(page);
-            if (ids.Count != 1) throw new InvalidOperationException("Для Repair Glue выберите один элемент");
+            if (ids.Count != 1) throw new InvalidOperationException("Для восстановления соединения выберите один элемент");
             dynamic shape = page.Shapes.ItemFromID(ids[0]);
             List<ConnectionPointInfo> points = GetAllConnectionPoints(page);
             HashSet<string> connectedEndpoints = BuildConnectedEndpointIndex(page);
@@ -1818,30 +1818,30 @@ namespace EnergoLogicVisioEditor
                 }
             }
             candidates = candidates.OrderBy(c => c.Item2.DistanceMm).ToList();
-            if (candidates.Count == 0) throw new InvalidOperationException("Рядом не найдено ни одной реальной connection point (≤ 1 мм)");
+            if (candidates.Count == 0) throw new InvalidOperationException("Рядом не найдено ни одной реальной точки подключения (≤ 1 мм)");
             if (candidates.Count > 1 && Math.Abs(candidates[0].Item2.DistanceMm - candidates[1].Item2.DistanceMm) < 0.05)
             {
                 string ambiguity = String.Join("; ", candidates.Take(6).Select(c => String.Format(
                     CultureInfo.InvariantCulture,
                     "{0}->shape {1}/Connections.{2}@{3:0.###}mm",
                     c.Item1, c.Item2.ShapeId, c.Item2.Row, c.Item2.DistanceMm)).ToArray());
-                throw new InvalidOperationException("Найдено несколько одинаково близких connection point — автоматический ремонт запрещён: " + ambiguity);
+                throw new InvalidOperationException("Найдено несколько одинаково близких точек подключения — автоматическое восстановление запрещено: " + ambiguity);
             }
             var best = candidates[0];
             string description = String.Format(CultureInfo.CurrentCulture, "{0}: shape {1}, Connections.{2}, расстояние {3:0.###} мм", best.Item1, best.Item2.ShapeId, best.Item2.Row, best.Item2.DistanceMm);
-            if (previewOnly) return "Кандидат Repair Glue: " + description;
+            if (previewOnly) return "Кандидат на восстановление соединения: " + description;
             if (requireConfirmation)
             {
-                DialogResult answer = MessageBox.Show("Найден кандидат:\n\n" + description + "\n\nИсправить Glue?", "EnergoLogic — Repair Glue", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (answer != DialogResult.Yes) return "Repair Glue отменён пользователем.";
+                DialogResult answer = MessageBox.Show("Найден кандидат:\n\n" + description + "\n\nИсправить Glue?", "EnergoLogic — восстановление соединения", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes) return "Восстановление соединения отменено пользователем.";
             }
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Repair Glue");
+            int scope = (int)app.BeginUndoScope("EnergoLogic: восстановить соединение");
             bool commit = false;
             try
             {
                 GlueEndpointWithRetry(shape, best.Item1, page.Shapes.ItemFromID(best.Item2.ShapeId), best.Item2.Row);
                 commit = true;
-                return "✓ Glue восстановлен. " + description;
+                return "✓ Соединение восстановлено. " + description;
             }
             finally { app.EndUndoScope(scope, commit); }
         }
@@ -1877,13 +1877,13 @@ namespace EnergoLogicVisioEditor
                     if (near.Count > 0)
                     {
                         bad.Add(id);
-                        messages.Add("Shape " + id + " " + ep + ": визуально касается connection point, но Glue отсутствует");
+                        messages.Add("Shape " + id + " " + ep + ": визуально касается точки подключения, но соединение отсутствует");
                     }
                 }
             }
             if (bad.Count > 0) SelectIds(page, bad.Distinct().ToList());
-            if (messages.Count == 0) return "✓ Scheme Doctor: явных structural-проблем Glue не найдено.";
-            return "⚠ Scheme Doctor: найдено проблем: " + messages.Count + ". Проблемные элементы выделены.\r\n" + String.Join("\r\n", messages.Take(8).ToArray());
+            if (messages.Count == 0) return "✓ Проверка связей: явных структурных проблем соединений не найдено.";
+            return "⚠ Проверка связей: найдено проблем: " + messages.Count + ". Проблемные элементы выделены.\r\n" + String.Join("\r\n", messages.Take(8).ToArray());
         }
 
         internal string BusDiagnostics()
@@ -1900,11 +1900,11 @@ namespace EnergoLogicVisioEditor
             if (terminals.Count != pointCount)
                 structural.Add(
                     "активных terminal " + terminals.Count +
-                    ", Shape Data ожидает " + pointCount
+                    ", параметры шины ожидают " + pointCount
                 );
             for (int slot = 1; slot <= pointCount; slot++)
                 if (!terminals.ContainsKey(slot))
-                    structural.Add("не найден slot " + slot);
+                    structural.Add("не найдено место " + slot);
 
             Dictionary<int, List<int>> occupancy = new Dictionary<int, List<int>>();
             foreach (int slot in terminals.Keys)
@@ -1942,7 +1942,7 @@ namespace EnergoLogicVisioEditor
             string prefix = structural.Count == 0 ? "✓" : "⚠";
             string result = String.Format(
                 CultureInfo.CurrentCulture,
-                "{0} Шина {1} (shape {2}): точек {3}; шаг {4:0.###} мм; ширина {5:0.###} мм. " +
+                "{0} Шина {1} (фигура {2}): точек {3}; шаг {4:0.###} мм; ширина {5:0.###} мм. " +
                 "Занято: [{6}]. Свободно: [{7}].",
                 prefix,
                 SafeText(bus).Replace("\r", " ").Replace("\n", " ").Trim(),
@@ -1954,7 +1954,7 @@ namespace EnergoLogicVisioEditor
                 String.Join(", ", free.ToArray())
             );
             if (structural.Count > 0)
-                result += "\r\nStructural: " + String.Join("; ", structural.ToArray());
+                result += "\r\nСтруктура: " + String.Join("; ", structural.ToArray());
             return result;
         }
 
@@ -1966,7 +1966,7 @@ namespace EnergoLogicVisioEditor
             int busId = Convert.ToInt32(bus.ID, CultureInfo.InvariantCulture);
             int current = GetBusPointCount(bus);
             if (current >= 10)
-                throw new InvalidOperationException("VTD master поддерживает максимум 10 точек подключения");
+                throw new InvalidOperationException("Master VTD поддерживает максимум 10 точек подключения");
 
             double oldPitch = GetBusPitchMm(bus);
             SortedDictionary<int, int> before = GetActiveBusTerminals(bus);
@@ -1979,7 +1979,7 @@ namespace EnergoLogicVisioEditor
                 SettleVisioAfterGeometryChange();
 
                 if (GetBusPointCount(bus) != current + 1)
-                    throw new InvalidOperationException("Shape Data шины не приняла новое количество точек");
+                    throw new InvalidOperationException("Параметры шины не приняли новое количество точек подключения");
                 if (Math.Abs(GetBusPitchMm(bus) - oldPitch) > 0.01)
                     throw new InvalidOperationException("При расширении неожиданно изменился шаг шины");
 
@@ -1997,7 +1997,7 @@ namespace EnergoLogicVisioEditor
                 commit = true;
                 return String.Format(
                     CultureInfo.CurrentCulture,
-                    "✓ Шина расширена вправо: {0} → {1} точек; шаг {2:0.###} мм; новый slot {3}.",
+                    "✓ Шина расширена вправо: {0} → {1} точек; шаг {2:0.###} мм; новое место {3}.",
                     current,
                     current + 1,
                     oldPitch,
@@ -2032,7 +2032,7 @@ namespace EnergoLogicVisioEditor
                 SettleVisioAfterGeometryChange();
 
                 if (GetBusPointCount(bus) != current - 1)
-                    throw new InvalidOperationException("Shape Data шины не приняла уменьшение количества точек");
+                    throw new InvalidOperationException("Параметры шины не приняли уменьшение количества точек подключения");
                 if (Math.Abs(GetBusPitchMm(bus) - oldPitch) > 0.01)
                     throw new InvalidOperationException("При обрезке неожиданно изменился шаг шины");
 
@@ -2046,7 +2046,7 @@ namespace EnergoLogicVisioEditor
                 commit = true;
                 return String.Format(
                     CultureInfo.CurrentCulture,
-                    "✓ Шина обрезана справа: {0} → {1} точек; удалён свободный slot {2}.",
+                    "✓ Шина обрезана справа: {0} → {1} точек; удалено свободное место {2}.",
                     current,
                     current - 1,
                     current
@@ -2065,7 +2065,7 @@ namespace EnergoLogicVisioEditor
             dynamic page = app.ActivePage;
             List<int> ids = CurrentTopLevelSelection(page);
             if (ids.Count != 1)
-                throw new InvalidOperationException("Для Reconnect выберите один 1-D элемент");
+                throw new InvalidOperationException("Для переподключения выберите один линейный элемент");
             int sourceId = ids[0];
             dynamic source = page.Shapes.ItemFromID(sourceId);
             if (!HasEndpoint(source, endpoint))
@@ -2114,12 +2114,12 @@ namespace EnergoLogicVisioEditor
             candidates = candidates.OrderBy(item => item.DistanceMm).ToList();
             if (candidates.Count == 0)
                 throw new InvalidOperationException(
-                    "Рядом с endpoint не найдено активной connection point (≤ 1 мм)"
+                    "Рядом с концом элемента не найдено активной точки подключения (≤ 1 мм)"
                 );
             if (candidates.Count > 1 &&
                 Math.Abs(candidates[0].DistanceMm - candidates[1].DistanceMm) < 0.05)
                 throw new InvalidOperationException(
-                    "Reconnect неоднозначен: найдено несколько одинаково близких connection point"
+                    "Переподключение неоднозначно: найдено несколько одинаково близких точек подключения"
                 );
 
             ConnectionPointInfo best = candidates[0];
@@ -2128,13 +2128,13 @@ namespace EnergoLogicVisioEditor
                 current.Row == best.Row)
                 return String.Format(
                     CultureInfo.CurrentCulture,
-                    "✓ {0} уже подключён к shape {1}/Connections.{2}.",
+                    "✓ {0} уже подключён к фигуре {1}/Connections.{2}.",
                     endpoint,
                     best.ShapeId,
                     best.Row
                 );
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Reconnect " + endpoint);
+            int scope = (int)app.BeginUndoScope("EnergoLogic: переподключить " + endpoint);
             bool commit = false;
             try
             {
@@ -2148,7 +2148,7 @@ namespace EnergoLogicVisioEditor
                     : current.TargetId + "/Connections." + current.Row;
                 return String.Format(
                     CultureInfo.CurrentCulture,
-                    "✓ Reconnect {0}: {1} → {2}/Connections.{3}; расстояние {4:0.###} мм.",
+                    "✓ Переподключение {0}: {1} → {2}/Connections.{3}; расстояние {4:0.###} мм.",
                     endpoint,
                     previous,
                     best.ShapeId,
@@ -2194,7 +2194,7 @@ namespace EnergoLogicVisioEditor
                     if (near)
                     {
                         problemIds.Add(id);
-                        messages.Add("shape " + id + " " + endpoint + ": касание без Glue");
+                        messages.Add("shape " + id + " " + endpoint + ": касание без соединения");
                     }
                 }
             }
@@ -2257,12 +2257,12 @@ namespace EnergoLogicVisioEditor
             if (messages.Count == 0)
                 return String.Format(
                     CultureInfo.CurrentCulture,
-                    "✓ Visual Diagnostics: structural-проблем не найдено. Проверено cell_id: {0}.",
+                    "✓ Визуальная диагностика: структурных проблем не найдено. Проверено ячеек: {0}.",
                     identityRepresentative.Count
                 );
 
-            return "⚠ Visual Diagnostics: найдено проблем: " + messages.Count +
-                ". Проблемные top-level элементы выделены.\r\n" +
+            return "⚠ Визуальная диагностика: найдено проблем: " + messages.Count +
+                ". Проблемные элементы верхнего уровня выделены.\r\n" +
                 String.Join("\r\n", messages.Take(12).ToArray());
         }
 
@@ -2279,7 +2279,7 @@ namespace EnergoLogicVisioEditor
             CellInfo cell = DiscoverCellFromSelection(page);
             dynamic bus = page.Shapes.ItemFromID(cell.BusId);
             if (!CellExists(bus, "Prop.tp") || !CellExists(bus, "Prop.rt"))
-                throw new InvalidOperationException("Шина ячейки не поддерживает VTD Shape Data tp/rt");
+                throw new InvalidOperationException("Шина ячейки не поддерживает штатные параметры VTD tp/rt");
             return bus;
         }
 
@@ -2322,7 +2322,7 @@ namespace EnergoLogicVisioEditor
                 try { slot = GetSlot(child); }
                 catch { continue; }
                 if (result.ContainsKey(slot))
-                    throw new InvalidOperationException("На шине дублируется slot " + slot);
+                    throw new InvalidOperationException("На шине дублируется место " + slot);
                 result.Add(slot, Convert.ToInt32(child.ID, CultureInfo.InvariantCulture));
             }
             return result;
@@ -2358,7 +2358,7 @@ namespace EnergoLogicVisioEditor
             Dictionary<int, int> childParent = BuildChildParentMap(page);
             HashSet<int> top = TopLevelIds(page);
             if (!top.Contains(selectedId))
-                throw new InvalidOperationException("Выбранный объект не является top-level элементом схемы");
+                throw new InvalidOperationException("Выбранный объект не является элементом верхнего уровня схемы");
 
             string explicitCellId = GetCellIdentity(page.Shapes.ItemFromID(selectedId));
             if (!String.IsNullOrWhiteSpace(explicitCellId))
@@ -2416,7 +2416,7 @@ namespace EnergoLogicVisioEditor
                         anchors.Add(Tuple.Create(id, target, parentId));
                 }
             }
-            if (anchors.Count != 1) throw new InvalidOperationException("У ячейки должен быть ровно один внешний Glue к шине; найдено: " + anchors.Count);
+            if (anchors.Count != 1) throw new InvalidOperationException("У ячейки должно быть ровно одно внешнее соединение с шиной; найдено: " + anchors.Count);
             var anchor = anchors[0];
             dynamic terminal = page.Shapes.ItemFromID(anchor.Item2.TargetId);
             int slot = GetSlot(terminal);
@@ -2442,7 +2442,7 @@ namespace EnergoLogicVisioEditor
                 double y = GetMm(shape, "PinY");
                 double distance = Math.Abs(x - anchorX);
                 if (Math.Abs(distance - half) <= 0.01 && y >= minY && y <= maxY)
-                    throw new InvalidOperationException("Неоднозначная граница ячейки: shape " + id + " лежит ровно между соседними ячейками");
+                    throw new InvalidOperationException("Неоднозначная граница ячейки: фигура " + id + " лежит ровно между соседними ячейками");
                 if (distance < half - 0.01 && y >= minY && y <= maxY && !members.Contains(id)) members.Add(id);
             }
             members.Sort();
@@ -2511,7 +2511,7 @@ namespace EnergoLogicVisioEditor
             if (anchors.Count != 1)
                 throw new InvalidOperationException(
                     "Ячейка с identity " + cellId +
-                    " должна иметь ровно один внешний Glue к шине; найдено: " + anchors.Count
+                    " должна иметь ровно одно внешнее соединение с шиной; найдено: " + anchors.Count
                 );
 
             var anchor = anchors[0];
@@ -2631,7 +2631,7 @@ namespace EnergoLogicVisioEditor
             }
             catch { }
 
-            throw new InvalidOperationException("У connection point шины отсутствует активный номер места");
+            throw new InvalidOperationException("У точки подключения шины отсутствует активный номер места");
         }
 
         private void EnsureTerminalFree(dynamic page, int terminalId, HashSet<int> allowedOwners)
@@ -2645,7 +2645,7 @@ namespace EnergoLogicVisioEditor
                 {
                     GlueTarget t = TryGetGlueTarget(shape, ep);
                     if (t != null && t.TargetId == terminalId)
-                        throw new InvalidOperationException("Целевое место шины уже занято shape " + id);
+                        throw new InvalidOperationException("Целевое место шины уже занято фигурой " + id);
                 }
             }
         }
@@ -2663,7 +2663,7 @@ namespace EnergoLogicVisioEditor
                     if (target == null) continue;
                     int owner = childParent.ContainsKey(target.TargetId) ? childParent[target.TargetId] : target.TargetId;
                     if (!selected.Contains(owner))
-                        throw new InvalidOperationException("Выделение имеет внешнюю электрическую связь. Используйте предметную команду ячейки, чтобы не порвать Glue.");
+                        throw new InvalidOperationException("Выделение имеет внешнюю электрическую связь. Используйте предметную команду ячейки, чтобы не нарушить соединение.");
                 }
             }
         }
@@ -2720,7 +2720,7 @@ namespace EnergoLogicVisioEditor
                     }
                     catch { }
                 }
-                if (!top.Contains(id)) throw new InvalidOperationException("Выбран дочерний объект, который не удалось нормализовать до top-level shape");
+                if (!top.Contains(id)) throw new InvalidOperationException("Выбран дочерний объект, который не удалось сопоставить с фигурой верхнего уровня");
                 if (!ids.Contains(id)) ids.Add(id);
             }
             return ids;
@@ -2911,7 +2911,7 @@ namespace EnergoLogicVisioEditor
                     : "";
                 if (exitCode != 0 || !helperResult.StartsWith("PASS", StringComparison.Ordinal))
                     throw new InvalidOperationException(
-                        "Внешний topology helper завершился с ошибкой: exit=" + exitCode +
+                        "Вспомогательный модуль топологии завершился с ошибкой: код=" + exitCode +
                         "; result=" + helperResult
                     );
                 int repairedByHelper = ParseTopologyHelperRepairCount(helperResult);
@@ -2950,7 +2950,7 @@ namespace EnergoLogicVisioEditor
                             _asyncState = "stabilizing";
                             _asyncMessage = String.Format(
                                 CultureInfo.CurrentCulture,
-                                "Проверка стабилизации VTD: clean {0}/2, цикл {1}/6; последний repair: {2}.",
+                                "Проверка стабилизации VTD: без исправлений {0}/2, цикл {1}/6; последнее восстановление: {2}.",
                                 stablePasses,
                                 completedCycles,
                                 repairedByHelper
@@ -2961,9 +2961,9 @@ namespace EnergoLogicVisioEditor
 
                     finalState = "success";
                     finalMessage = successPrefix +
-                        "; topology стабилизирована за " + completedCycles +
-                        " внешних циклов; подряд clean-проверок: " + stablePasses +
-                        "; проверено Glue: " + verifiedGlue + ".";
+                        "; топология стабилизирована за " + completedCycles +
+                        " внешних циклов; подряд проверок без исправлений: " + stablePasses +
+                        "; проверено соединений: " + verifiedGlue + ".";
                 }
                 else
                 {
@@ -2980,7 +2980,7 @@ namespace EnergoLogicVisioEditor
                     SelectIds(livePage, finalSelection);
                     finalState = "success";
                     finalMessage = successPrefix +
-                        "; внешним COM-процессом проверено внутренних Glue: " +
+                        "; внешним COM-процессом проверено внутренних соединений: " +
                         verifiedInternal + ".";
                 }
             }
@@ -3044,7 +3044,7 @@ namespace EnergoLogicVisioEditor
             string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "";
             string helperPath = Path.Combine(assemblyDir, "EnergoLogic.TopologyRestoreHelper.exe");
             if (!File.Exists(helperPath))
-                throw new FileNotFoundException("Не найден внешний topology helper", helperPath);
+                throw new FileNotFoundException("Не найден внешний вспомогательный модуль топологии", helperPath);
 
             string suffix = token.Replace(":", "-");
             string tempDir = Path.GetTempPath();
@@ -3091,7 +3091,7 @@ namespace EnergoLogicVisioEditor
             info.CreateNoWindow = true;
             _pendingTopologyHelperProcess = Process.Start(info);
             if (_pendingTopologyHelperProcess == null)
-                throw new InvalidOperationException("Не удалось запустить внешний topology helper");
+                throw new InvalidOperationException("Не удалось запустить внешний вспомогательный модуль топологии");
         }
 
         private int ParseTopologyHelperRepairCount(string helperResult)
@@ -3107,7 +3107,7 @@ namespace EnergoLogicVisioEditor
                 }
             }
             catch { }
-            throw new InvalidOperationException("Некорректный результат topology helper: " + helperResult);
+            throw new InvalidOperationException("Некорректный результат вспомогательного модуля топологии: " + helperResult);
         }
 
         private string QuoteProcessArgument(string value)
@@ -3205,7 +3205,7 @@ namespace EnergoLogicVisioEditor
                     failures.Add("ячейка " + state.Cell.AnchorId + ": " + ex.Message);
                 }
             }
-            if (failures.Count == 0) return "Исходная геометрия и Glue восстановлены.";
+            if (failures.Count == 0) return "Исходная геометрия и соединения восстановлены.";
             return "ВНИМАНИЕ: автоматическое восстановление исходной схемы неполное: " + String.Join(" | ", failures.ToArray()) + ".";
         }
 
@@ -3622,7 +3622,7 @@ namespace EnergoLogicVisioEditor
             const short visSectionUser = 242;
             dynamic page = shape.ContainingPage;
             if (page == null)
-                throw new InvalidOperationException("Shape не принадлежит странице Visio");
+                throw new InvalidOperationException("Фигура не принадлежит странице Visio");
             dynamic pageSheet = page.PageSheet;
             object sectionExistsRaw = pageSheet.SectionExists(visSectionUser, 0);
             if (Convert.ToInt32(sectionExistsRaw, CultureInfo.InvariantCulture) == 0)
@@ -3691,8 +3691,8 @@ namespace EnergoLogicVisioEditor
             cellTab.Controls.Add(cells);
 
             FlowLayoutPanel gluePanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 120, FlowDirection = FlowDirection.TopDown, Padding = new Padding(10) };
-            gluePanel.Controls.Add(ButtonWide("Найти проблему Glue", (s,e)=>Run(()=>_addin.RepairGlue(true, false))));
-            gluePanel.Controls.Add(ButtonWide("Repair Glue…", (s,e)=>Run(()=>_addin.RepairGlue(false, true))));
+            gluePanel.Controls.Add(ButtonWide("Найти потерянное соединение", (s,e)=>Run(()=>_addin.RepairGlue(true, false))));
+            gluePanel.Controls.Add(ButtonWide("Восстановить соединение…", (s,e)=>Run(()=>_addin.RepairGlue(false, true))));
             cellTab.Controls.Add(gluePanel);
 
             TableLayoutPanel geo = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 9, Padding = new Padding(10) };
@@ -3730,14 +3730,14 @@ namespace EnergoLogicVisioEditor
             checks.Controls.Add(ButtonWide("Диагностика шины", (s,e)=>Run(()=>_addin.BusDiagnostics())));
             checks.Controls.Add(ButtonWide("Расширить шину →", (s,e)=>Run(()=>_addin.ExtendBusRight())));
             checks.Controls.Add(ButtonWide("Обрезать шину справа", (s,e)=>Run(()=>_addin.TrimBusRight())));
-            checks.Controls.Add(ButtonWide("Reconnect Begin", (s,e)=>Run(()=>_addin.ReconnectEndpoint("begin"))));
-            checks.Controls.Add(ButtonWide("Reconnect End", (s,e)=>Run(()=>_addin.ReconnectEndpoint("end"))));
-            checks.Controls.Add(new Label { AutoSize=true, MaximumSize=new Size(350,0), Text="Диагностика не перекрашивает схему: проблемные top-level элементы только выделяются. Extend/Trim используют штатные VTD Shape Data Prop.tp/Prop.rt." });
+            checks.Controls.Add(ButtonWide("Переподключить начало", (s,e)=>Run(()=>_addin.ReconnectEndpoint("begin"))));
+            checks.Controls.Add(ButtonWide("Переподключить конец", (s,e)=>Run(()=>_addin.ReconnectEndpoint("end"))));
+            checks.Controls.Add(new Label { AutoSize=true, MaximumSize=new Size(350,0), Text="Диагностика не перекрашивает схему: проблемные элементы только выделяются. Расширение и обрезка шины используют штатные параметры VTD Prop.tp/Prop.rt." });
             checkTab.Controls.Add(checks);
 
             _status = new TextBox { Dock=DockStyle.Fill, Multiline=true, ReadOnly=true, ScrollBars=ScrollBars.Vertical, BackColor=SystemColors.Window, Text="EnergoLogic готов. Выберите объект на схеме и используйте команду выше." };
             _status.Name = "EnergoLogicStatus";
-            _status.AccessibleName = "EnergoLogic status";
+            _status.AccessibleName = "Состояние EnergoLogic";
             Panel statusPanel = new Panel { Dock=DockStyle.Fill, Padding=new Padding(8) };
             statusPanel.Controls.Add(_status);
 
