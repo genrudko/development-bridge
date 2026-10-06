@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import uuid
 from pathlib import Path
 
 from mcp import types
 
-MANAGED_EXTENSION_VERSION = "2026.10.04.149"
+MANAGED_EXTENSION_VERSION = "2026.10.06.153"
 CONSOLE_SOURCE_B64 = "__CONSOLE_SOURCE_B64__"
+PORTABLE_KIT_TEMPLATE_B64 = "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"
 TOPOLOGY_HELPER_SOURCE_B64 = "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"
 
 
@@ -96,6 +98,262 @@ def install(namespace: dict) -> None:
                 "total_size": expected_size,
                 "sha256": expected_sha,
                 "ready": ready,
+            })
+        except Exception as exc:
+            return err(exc)
+
+    @mcp.tool()
+    def build_energologic_portable_kit(
+        include_personal_stencils: bool = True,
+    ) -> str:
+        """Build an offline EnergoLogic Visio Editor ZIP on the local desktop."""
+        try:
+            import io
+            import json
+            import os
+            import shutil
+            import zipfile
+            from datetime import datetime, timezone
+
+            version = "0.3.49"
+            kit_name = "EnergoLogic-Visio-Editor-Kit-" + version
+            staged_editor_source = (
+                payload_dir / "EnergoLogicVisioEditorAddin.cs"
+            )
+            if not staged_editor_source.is_file():
+                raise FileNotFoundError(
+                    "EnergoLogic editor payload is not staged; "
+                    "run visio_managed_update first"
+                )
+
+            home = Path.home()
+            desktop_candidates = [
+                home / "Desktop",
+                home / "Рабочий стол",
+            ]
+            for env_name in (
+                "OneDrive",
+                "OneDriveConsumer",
+                "OneDriveCommercial",
+            ):
+                value = os.environ.get(env_name, "")
+                if value:
+                    desktop_candidates.extend([
+                        Path(value) / "Desktop",
+                        Path(value) / "Рабочий стол",
+                    ])
+
+            export_root = next(
+                (item for item in desktop_candidates if item.is_dir()),
+                workspace / "exports",
+            )
+            export_root.mkdir(parents=True, exist_ok=True)
+
+            kit_dir = export_root / kit_name
+            zip_path = export_root / (kit_name + ".zip")
+            if kit_dir.exists():
+                shutil.rmtree(kit_dir)
+            if zip_path.exists():
+                zip_path.unlink()
+            kit_dir.mkdir(parents=True, exist_ok=True)
+
+            # The embedded template contains only repo-maintained scripts/docs.
+            template_raw = gzip.decompress(
+                base64.b64decode(PORTABLE_KIT_TEMPLATE_B64)
+            )
+            with zipfile.ZipFile(io.BytesIO(template_raw), "r") as archive:
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+                    relative = Path(info.filename)
+                    if (
+                        relative.is_absolute()
+                        or ".." in relative.parts
+                        or len(relative.parts) != 1
+                    ):
+                        raise RuntimeError(
+                            "Portable kit template contains unsafe path"
+                        )
+                    target = kit_dir / relative.name
+                    target.write_bytes(archive.read(info))
+
+            payload = kit_dir / "payload"
+            payload.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(
+                staged_editor_source,
+                payload / "EnergoLogicVisioEditorAddin.cs",
+            )
+            (payload / "EnergoLogicTopologyRestoreHelper.cs").write_bytes(
+                gzip.decompress(
+                    base64.b64decode(TOPOLOGY_HELPER_SOURCE_B64)
+                )
+            )
+
+            stencils_dir = kit_dir / "stencils"
+            stencils_dir.mkdir(parents=True, exist_ok=True)
+            copied_stencils = []
+            searched_roots = []
+            if bool(include_personal_stencils):
+                stencil_roots = []
+                for env_name in (
+                    "OneDrive",
+                    "OneDriveConsumer",
+                    "OneDriveCommercial",
+                ):
+                    value = os.environ.get(env_name, "")
+                    if value:
+                        stencil_roots.append(
+                            Path(value)
+                            / "Documents"
+                            / "Мои фигуры"
+                            / "ГОСТ"
+                        )
+                stencil_roots.extend([
+                    home / "OneDrive" / "Documents" / "Мои фигуры" / "ГОСТ",
+                    home / "Documents" / "Мои фигуры" / "ГОСТ",
+                ])
+                try:
+                    stencil_roots.extend(
+                        home.glob(
+                            "OneDrive*/Documents/Мои фигуры/ГОСТ"
+                        )
+                    )
+                except Exception:
+                    pass
+
+                seen_roots = set()
+                seen_names = set()
+                for stencil_root in stencil_roots:
+                    try:
+                        resolved = stencil_root.resolve()
+                    except Exception:
+                        resolved = stencil_root
+                    key = str(resolved).lower()
+                    if key in seen_roots or not stencil_root.is_dir():
+                        continue
+                    seen_roots.add(key)
+                    searched_roots.append(str(stencil_root))
+
+                    for source in sorted(stencil_root.iterdir()):
+                        if not source.is_file():
+                            continue
+                        if source.suffix.lower() not in {
+                            ".vss",
+                            ".vssx",
+                            ".vssm",
+                        }:
+                            continue
+                        source_lower = str(source).lower().replace("/", "\\")
+                        if "\\programdata\\" in source_lower:
+                            continue
+                        if "\\vtd\\" in source_lower:
+                            continue
+                        name_key = source.name.lower()
+                        if name_key in seen_names:
+                            continue
+                        target = stencils_dir / source.name
+                        shutil.copy2(source, target)
+                        seen_names.add(name_key)
+                        copied_stencils.append({
+                            "name": source.name,
+                            "source": str(source),
+                            "size": target.stat().st_size,
+                            "sha256": hashlib.sha256(
+                                target.read_bytes()
+                            ).hexdigest(),
+                        })
+
+            manifest_files = []
+            for item in sorted(kit_dir.rglob("*")):
+                if not item.is_file() or item.name == "MANIFEST.json":
+                    continue
+                raw = item.read_bytes()
+                manifest_files.append({
+                    "path": item.relative_to(kit_dir).as_posix(),
+                    "size": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                })
+
+            manifest = {
+                "schema": 1,
+                "product": "EnergoLogic Visio Editor Kit",
+                "version": version,
+                "editor_api_version": "0.3.49",
+                "managed_extension_version": MANAGED_EXTENSION_VERSION,
+                "built_utc": datetime.now(timezone.utc).isoformat(),
+                "personal_stencils_included": len(copied_stencils),
+                "files": manifest_files,
+            }
+            (kit_dir / "MANIFEST.json").write_text(
+                json.dumps(
+                    manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            # Validate the exact portable payload with the target-side
+            # installer before publishing the ZIP. CompileOnly does not touch COM
+            # registration and is safe while Visio is running.
+            import subprocess
+            install_script = kit_dir / "Install-EnergoLogic.ps1"
+            validation = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(install_script),
+                    "-CompileOnly",
+                    "-NoShortcut",
+                ],
+                cwd=str(kit_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            if validation.returncode != 0:
+                raise RuntimeError(
+                    "Portable kit CompileOnly validation failed: "
+                    + (validation.stdout + "\n" + validation.stderr)[-6000:]
+                )
+
+            with zipfile.ZipFile(
+                zip_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            ) as archive:
+                for item in sorted(kit_dir.rglob("*")):
+                    if item.is_file():
+                        archive.write(
+                            item,
+                            arcname=(
+                                kit_name
+                                + "/"
+                                + item.relative_to(kit_dir).as_posix()
+                            ),
+                        )
+
+            zip_raw = zip_path.read_bytes()
+            return ok({
+                "kit_name": kit_name,
+                "kit_directory": str(kit_dir),
+                "zip_path": str(zip_path),
+                "zip_size": len(zip_raw),
+                "zip_sha256": hashlib.sha256(zip_raw).hexdigest(),
+                "personal_stencils_included": len(copied_stencils),
+                "stencils": copied_stencils,
+                "stencil_roots": searched_roots,
+                "manifest_files": len(manifest_files),
+                "portable_compile_validation": "PASS",
+                "portable_compile_stdout_tail": validation.stdout[-2000:],
+                "third_party_vtd_included": False,
             })
         except Exception as exc:
             return err(exc)

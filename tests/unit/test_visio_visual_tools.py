@@ -123,7 +123,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.04.149"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.06.153"}',
                     }
                 ],
                 "isError": False,
@@ -146,7 +146,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.04.149"
+    assert arguments["version"] == "2026.10.06.153"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -210,7 +210,7 @@ async def test_visio_managed_update_embeds_console_source():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.04.149"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.06.153"}',
                     }
                 ],
                 "isError": False,
@@ -1670,3 +1670,79 @@ def test_editor_v349_compiles_identity_clear_and_distribution_without_dynamic_li
     assert "double coordinate = GetMm(" in block
     assert "ordered.Add(Tuple.Create(id, coordinate));" in block
     assert ".Select(id => Tuple.Create(" not in block
+
+
+def test_managed_extension_builds_offline_portable_kit():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
+    assert 'def build_energologic_portable_kit(' in ext
+    assert 'EnergoLogic-Visio-Editor-Kit-' in ext
+    assert 'EnergoLogicVisioEditorAddin.cs' in ext
+    assert 'EnergoLogicTopologyRestoreHelper.cs' in ext
+    assert '"MANIFEST.json"' in ext
+    assert '"zip_sha256"' in ext
+    assert '"third_party_vtd_included": False' in ext
+    assert '"\\\\programdata\\\\" in source_lower' in ext
+    assert '"\\\\vtd\\\\" in source_lower' in ext
+    assert '"Мои фигуры"' in ext
+    assert '"ГОСТ"' in ext
+
+
+def test_portable_kit_installer_is_offline_per_user_and_manifest_verified():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    kit = root / "managed" / "visio" / "portable_kit"
+    install = (kit / "Install-EnergoLogic.ps1").read_text()
+    start = (kit / "Start-EnergoLogic-Visio.ps1").read_text()
+    readme = (kit / "README-RU.txt").read_text()
+    collect = (kit / "Collect-Stencils.ps1").read_text()
+    assert 'MANIFEST.json' in install
+    assert 'Get-FileHash' in install
+    assert 'RegistryHive]::CurrentUser' in install
+    assert 'LOCALAPPDATA' in install
+    assert 'LoadBehavior' in install and ' 0' in install
+    assert 'COMAddIns.Item($ProgId)' in start
+    assert 'Documents.OpenEx($file.FullName, 6)' in start
+    assert 'ChatGPT, MCP, Python, Visual Studio и Интернет не нужны' in readme
+    assert 'ProgramData' in readme and 'НЕ копируются' in readme
+    assert 'Join-Path $documents "Мои фигуры"' in collect
+    assert 'Join-Path $myShapes "ГОСТ"' in collect
+    assert 'ProgramData' in collect and 'VTD' in collect
+
+
+
+def test_portable_builder_uses_only_top_level_personal_stencils():
+    from pathlib import Path
+    ext = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text()
+    start = ext.index("def build_energologic_portable_kit(")
+    end = ext.index("@mcp.tool()", start + 20)
+    block = ext[start:end]
+    assert "stencil_root.iterdir()" in block
+    assert 'stencil_root.rglob("*")' not in block
+    assert '"powershell.exe"' in block
+    assert '"-CompileOnly"' in block
+    assert '"portable_compile_validation": "PASS"' in block
+
+
+def test_portable_kit_has_no_openai_or_user_specific_runtime_paths():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    kit = root / "managed" / "visio" / "portable_kit"
+    combined = "\n".join(
+        f.read_text()
+        for f in kit.iterdir()
+        if f.is_file() and f.suffix.lower() in {".ps1", ".cmd", ".txt"}
+    )
+    assert "OpenAI\\VisioMCP" not in combined
+    assert "C:\\Users\\Gennadiy" not in combined
+    assert "OneDrive\\Documents\\Мои фигуры" not in combined
+
+
+def test_portable_powershell_scripts_have_utf8_bom():
+    from pathlib import Path
+    kit = Path(__file__).resolve().parents[2] / "managed" / "visio" / "portable_kit"
+    scripts = list(kit.glob("*.ps1"))
+    assert scripts
+    for script in scripts:
+        assert script.read_bytes().startswith(b"\xef\xbb\xbf"), script.name
