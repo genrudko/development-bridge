@@ -7,15 +7,83 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Extensibility;
 using Microsoft.Office.Core;
 
+
 [assembly: ComVisible(true)]
 [assembly: AssemblyTitle("EnergoLogic Visio Editor")]
-[assembly: AssemblyVersion("0.3.49.0")]
+[assembly: AssemblyVersion("0.3.64.0")]
+
+namespace Extensibility
+{
+    [ComVisible(true)]
+    [Guid("289E9AF1-4973-11D1-AE81-00A0C90F26F4")]
+    public enum ext_ConnectMode
+    {
+        ext_cm_AfterStartup = 0,
+        ext_cm_Startup = 1,
+        ext_cm_External = 2,
+        ext_cm_CommandLine = 3,
+        ext_cm_Solution = 4,
+        ext_cm_UISetup = 5,
+    }
+
+    [ComVisible(true)]
+    [Guid("289E9AF2-4973-11D1-AE81-00A0C90F26F4")]
+    public enum ext_DisconnectMode
+    {
+        ext_dm_HostShutdown = 0,
+        ext_dm_UserClosed = 1,
+        ext_dm_UISetupComplete = 2,
+        ext_dm_SolutionClosed = 3,
+    }
+
+    [ComVisible(true)]
+    [Guid("B65AD801-ABAF-11D0-BB8B-00A0C90F2744")]
+    [InterfaceType(ComInterfaceType.InterfaceIsDual)]
+    [TypeLibType(TypeLibTypeFlags.FDual | TypeLibTypeFlags.FDispatchable)]
+    public interface IDTExtensibility2
+    {
+        [DispId(1)]
+        [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+        void OnConnection(
+            [In, MarshalAs(UnmanagedType.IDispatch)] object Application,
+            [In] ext_ConnectMode ConnectMode,
+            [In, MarshalAs(UnmanagedType.IDispatch)] object AddInInst,
+            [In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom
+        );
+
+        [DispId(2)]
+        [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+        void OnDisconnection(
+            [In] ext_DisconnectMode RemoveMode,
+            [In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom
+        );
+
+        [DispId(3)]
+        [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+        void OnAddInsUpdate(
+            [In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom
+        );
+
+        [DispId(4)]
+        [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+        void OnStartupComplete(
+            [In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom
+        );
+
+        [DispId(5)]
+        [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
+        void OnBeginShutdown(
+            [In, MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)] ref Array custom
+        );
+    }
+}
 
 namespace EnergoLogicVisioEditor
 {
@@ -78,7 +146,7 @@ namespace EnergoLogicVisioEditor
 
 
     [ComVisible(true)]
-    [Guid("C4AC16D4-DB4F-416B-BB13-1D84E22B781C")]
+    [Guid("51D5C0C7-7E9D-4A9F-8F71-A7E0F364B001")]
     [InterfaceType(ComInterfaceType.InterfaceIsDual)]
     public interface IEnergoLogicEditorApi
     {
@@ -136,8 +204,8 @@ namespace EnergoLogicVisioEditor
     }
 
     [ComVisible(true)]
-    [Guid("7FA902A8-D36C-4ED0-B299-445A538AF349")]
-    [ProgId("EnergoLogic.VisioEditorAddinV349")]
+    [Guid("8B7F2A13-1F51-47F4-9D1A-A7E0F364C001")]
+    [ProgId("EnergoLogic.VisioEditorAddinV364")]
     [ClassInterface(ClassInterfaceType.AutoDual)]
     public sealed class Connect : IDTExtensibility2, IEnergoLogicEditorApi, IRibbonExtensibility
     {
@@ -166,6 +234,8 @@ namespace EnergoLogicVisioEditor
         private List<int> _pendingFinalSelection = null;
         private string _pendingSuccessPrefix = "";
         private ReplacementCompletionState _pendingReplacement = null;
+        private int _pendingUndoScopeId = 0;
+        private bool _pendingHelperOwnsUndoScope = false;
         private object _replacementMaster = null;
         private string _replacementMasterName = "";
         private string _replacementInsertSourceEndpoint = "";
@@ -198,6 +268,7 @@ namespace EnergoLogicVisioEditor
         private string _pendingTopologyResultPath = "";
         private int _pendingTopologyCycles = 0;
         private int _pendingStablePasses = 0;
+
         private readonly Regex _glueRegex = new Regex(
             @"(?<target>[^!(),]+)!Connections(?:\.X(?<rowx>\d+)|\.(?<row>\d+)\.X)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -256,6 +327,7 @@ namespace EnergoLogicVisioEditor
             _contextMenuError = "";
             try { CancelInteractiveBasePoint(false); } catch { }
             try { ClearBaseClipboard(false); } catch { }
+            try { AbortPendingTopologyOperation(); } catch { }
             try { if (_addInInstance != null) { dynamic host = _addInInstance; host.Object = null; } } catch { }
             _addInInstance = null;
             _application = null;
@@ -271,6 +343,22 @@ namespace EnergoLogicVisioEditor
             {
                 if (_application == null) throw new InvalidOperationException("Visio не подключён");
                 return _application;
+            }
+        }
+
+        private int BeginUserUndoScope(string name)
+        {
+            lock (_asyncSync)
+            {
+                if (_asyncPending)
+                    throw new InvalidOperationException(
+                        "Предыдущая составная операция EnergoLogic ещё завершается. " +
+                        "Дождитесь её результата перед следующей командой."
+                    );
+                return Convert.ToInt32(
+                    App.BeginUndoScope(name),
+                    CultureInfo.InvariantCulture
+                );
             }
         }
 
@@ -1055,7 +1143,7 @@ EnergoLogic использует миллиметры в пользовател�
                 return "state=" + _asyncState + "; token=" + _asyncToken + "; message=" + _asyncMessage;
         }
         public string ApiCompletePendingTopology() { return CompletePendingTopology(); }
-        public string ApiVersion() { return "0.3.49"; }
+        public string ApiVersion() { return "0.3.64"; }
 
         private int CountExternalGlue(dynamic page, List<int> ids)
         {
@@ -1208,7 +1296,7 @@ EnergoLogic использует миллиметры в пользовател�
                 });
             }
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: " + operationName);
+            int scope = BeginUserUndoScope("EnergoLogic: " + operationName);
             bool commit = false;
             try
             {
@@ -1341,7 +1429,7 @@ EnergoLogic использует миллиметры в пользовател�
                 sourceTexts.Add(SafeText(sourceShape));
             }
 
-            int scope = (int)app.BeginUndoScope(direction > 0 ? "EnergoLogic: Копировать ячейку вправо" : "EnergoLogic: Копировать ячейку влево");
+            int scope = BeginUserUndoScope(direction > 0 ? "EnergoLogic: Копировать ячейку вправо" : "EnergoLogic: Копировать ячейку влево");
             bool commit = false;
             try
             {
@@ -1390,8 +1478,7 @@ EnergoLogic использует миллиметры в пользовател�
 
         internal string MoveCell(int direction)
         {
-            dynamic app = App;
-            dynamic page = app.ActivePage;
+            dynamic page = App.ActivePage;
             CellInfo cell = DiscoverCellFromSelection(page);
             dynamic sourceTerminal = page.Shapes.ItemFromID(cell.BusTerminalId);
             dynamic targetTerminal = GetBusTerminalBySlot(page, cell.BusId, cell.Slot + direction);
@@ -1399,6 +1486,7 @@ EnergoLogic использует миллиметры в пользовател�
             EnsureTerminalFree(page, (int)targetTerminal.ID, own);
             double dx = GetMm(targetTerminal, "PinX") - GetMm(sourceTerminal, "PinX");
             double dy = GetMm(targetTerminal, "PinY") - GetMm(sourceTerminal, "PinY");
+            int targetSlot = GetSlot(targetTerminal);
             CellMoveState state = new CellMoveState {
                 Cell = cell,
                 TargetTerminalId = (int)targetTerminal.ID,
@@ -1407,42 +1495,24 @@ EnergoLogic использует миллиметры в пользовател�
                 InternalGlue = CaptureInternalGlue(page, cell.MemberIds)
             };
 
-            int scope = (int)app.BeginUndoScope(direction > 0 ? "EnergoLogic: Переместить ячейку вправо" : "EnergoLogic: Переместить ячейку влево");
-            bool geometryCommit = false;
-            try
-            {
-                dynamic anchor = page.Shapes.ItemFromID(cell.AnchorId);
-                DetachEndpoint(anchor, cell.Endpoint);
-                SelectIds(page, cell.MemberIds);
-                app.ActiveWindow.Selection.Move(dx, dy, "mm");
-                geometryCommit = true;
-            }
-            finally
-            {
-                app.EndUndoScope(scope, geometryCommit);
-            }
-
-            if (!geometryCommit)
-                throw new InvalidOperationException("Перемещение ячейки не было завершено");
-
-            SettleVisioAfterGeometryChange();
-            try
-            {
-                int restoredInternal = RestoreCellTopologyAfterMove(page, state);
-                SelectIds(page, cell.MemberIds);
-                return String.Format(CultureInfo.CurrentCulture,
-                    "✓ Ячейка перемещена {0}. Место {1} → {2}; сдвиг {3:0.00} мм; внутренние Glue проверены, восстановлено: {4}.",
-                    direction > 0 ? "вправо" : "влево", cell.Slot, GetSlot(targetTerminal), dx, restoredInternal);
-            }
-            catch (Exception topologyError)
-            {
-                string compensation = CompensateCellMoves(page, new List<CellMoveState> { state });
-                throw new InvalidOperationException(
-                    "Перемещение отменено: не удалось восстановить электрические связи после геометрического сдвига. " +
-                    compensation + " Причина: " + topologyError.Message,
-                    topologyError
-                );
-            }
+            string operationName = direction > 0
+                ? "EnergoLogic: Переместить ячейку вправо"
+                : "EnergoLogic: Переместить ячейку влево";
+            string successPrefix = String.Format(
+                CultureInfo.CurrentCulture,
+                "✓ Ячейка перемещена {0}. Место {1} → {2}; сдвиг {3:0.00} мм",
+                direction > 0 ? "вправо" : "влево",
+                cell.Slot,
+                targetSlot,
+                dx
+            );
+            return ScheduleTopologyCompletion(
+                page,
+                new List<CellMoveState> { state },
+                new List<int>(cell.MemberIds),
+                successPrefix,
+                operationName
+            );
         }
 
         internal string SelectCell()
@@ -1487,7 +1557,7 @@ EnergoLogic использует миллиметры в пользовател�
                 }
             }
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Закрепить состав ячейки");
+            int scope = BeginUserUndoScope("EnergoLogic: Закрепить состав ячейки");
             bool commit = false;
             try
             {
@@ -1636,8 +1706,8 @@ EnergoLogic использует миллиметры в пользовател�
             List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, cell.MemberIds);
             bool targetWasAnchor = oldId == cell.AnchorId;
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Заменить оборудование по образцу");
-            bool commit = false;
+            int scope = BeginUserUndoScope("EnergoLogic: Заменить оборудование по образцу");
+            bool scopeTransferred = false;
             try
             {
                 dynamic replacement;
@@ -1758,10 +1828,15 @@ EnergoLogic использует миллиметры в пользовател�
                 };
 
                 SelectIds(page, new[] { newId });
-                commit = true;
-                return ScheduleStableTopologyCompletion(page, pending);
+                string scheduled = ScheduleStableTopologyCompletion(page, pending, scope);
+                scopeTransferred = true;
+                return scheduled;
             }
-            finally { app.EndUndoScope(scope, commit); }
+            finally
+            {
+                if (!scopeTransferred)
+                    app.EndUndoScope(scope, false);
+            }
         }
 
         internal string InsertEquipmentIntoConnectionFromSample()
@@ -1824,8 +1899,8 @@ EnergoLogic использует миллиметры в пользовател�
             double centerX = (beginX + endX) / 2.0;
             double centerY = (beginY + endY) / 2.0;
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Вставить оборудование в связь");
-            bool commit = false;
+            int scope = BeginUserUndoScope("EnergoLogic: Вставить оборудование в связь");
+            bool scopeTransferred = false;
             try
             {
                 dynamic inserted = page.Drop(_replacementMaster, centerX / 25.4, centerY / 25.4);
@@ -1997,10 +2072,15 @@ EnergoLogic использует миллиметры в пользовател�
                 };
 
                 SelectIds(page, new[] { insertedId });
-                commit = true;
-                return ScheduleStableTopologyCompletion(page, pending);
+                string scheduled = ScheduleStableTopologyCompletion(page, pending, scope);
+                scopeTransferred = true;
+                return scheduled;
             }
-            finally { app.EndUndoScope(scope, commit); }
+            finally
+            {
+                if (!scopeTransferred)
+                    app.EndUndoScope(scope, false);
+            }
         }
 
         private int FindConnectionPointRowAtEndpoint(
@@ -2071,8 +2151,12 @@ EnergoLogic использует миллиметры в пользовател�
 
         private string ScheduleStableTopologyCompletion(
             dynamic page,
-            ReplacementCompletionState pending)
+            ReplacementCompletionState pending,
+            int undoScopeId)
         {
+            if (undoScopeId <= 0 ||
+                !Convert.ToBoolean(App.IsInScope(undoScopeId), CultureInfo.InvariantCulture))
+                throw new InvalidOperationException("UndoScope составной операции уже не открыт");
             string documentName = Convert.ToString(page.Document.Name, CultureInfo.InvariantCulture) ?? "";
             string pageNameU = "";
             try { pageNameU = Convert.ToString(page.NameU, CultureInfo.InvariantCulture) ?? ""; }
@@ -2096,6 +2180,7 @@ EnergoLogic использует миллиметры в пользовател�
                 _pendingReplacement = pending;
                 _pendingFinalSelection = new List<int> { pending.ReplacementId };
                 _pendingSuccessPrefix = pending.SuccessPrefix;
+                _pendingUndoScopeId = undoScopeId;
             }
             return "⏳ Изменение выполнено. EnergoLogic завершит электрические связи следующим шагом… token=" + token;
         }
@@ -2234,7 +2319,7 @@ EnergoLogic использует миллиметры в пользовател�
             List<int> ids = CurrentTopLevelSelection(page);
             EnsureNoExternalGlue(page, ids);
             List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, ids);
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Точный сдвиг");
+            int scope = BeginUserUndoScope("EnergoLogic: Точный сдвиг");
             bool commit = false;
             try
             {
@@ -2659,7 +2744,7 @@ EnergoLogic использует миллиметры в пользовател�
             if (!copy) EnsureNoExternalGlue(page, ids);
             List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, ids);
             int sourceExternalGlue = copy ? CountExternalGlue(page, ids) : 0;
-            int scope = (int)app.BeginUndoScope(copy ? "EnergoLogic: Копировать с базовой точкой" : "EnergoLogic: Переместить с базовой точкой");
+            int scope = BeginUserUndoScope(copy ? "EnergoLogic: Копировать с базовой точкой" : "EnergoLogic: Переместить с базовой точкой");
             bool commit = false;
             try
             {
@@ -2776,7 +2861,7 @@ EnergoLogic использует миллиметры в пользовател�
 
             string oldShort = ShortDesignation(oldDesignation);
             string newShort = ShortDesignation(value);
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Перенумеровать ячейку");
+            int scope = BeginUserUndoScope("EnergoLogic: Перенумеровать ячейку");
             bool commit = false;
             int changed = 0;
             try
@@ -2838,7 +2923,7 @@ EnergoLogic использует миллиметры в пользовател�
             List<GlueEdgeInfo> internalGlue = CaptureInternalGlue(page, ids);
             dynamic first = page.Shapes.ItemFromID(ids[0]);
             double target = GetMm(first, axis == "x" ? "PinX" : "PinY");
-            int scope = (int)app.BeginUndoScope(axis == "x" ? "EnergoLogic: Выровнять по X" : "EnergoLogic: Выровнять по Y");
+            int scope = BeginUserUndoScope(axis == "x" ? "EnergoLogic: Выровнять по X" : "EnergoLogic: Выровнять по Y");
             bool commit = false;
             try
             {
@@ -2890,7 +2975,7 @@ EnergoLogic использует миллиметры в пользовател�
                     "Крайние элементы имеют одинаковую координату"
                 );
 
-            int scope = (int)app.BeginUndoScope(
+            int scope = BeginUserUndoScope(
                 axis == "x"
                     ? "EnergoLogic: Равномерно распределить по X"
                     : "EnergoLogic: Равномерно распределить по Y"
@@ -3025,32 +3110,23 @@ EnergoLogic использует миллиметры в пользовател�
                 return "✓ Ячейки уже распределены по реальным точкам шины. Шаг: " + pitch.ToString("0.###", CultureInfo.CurrentCulture) + " мм.";
             }
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Геометрия распределения ячеек");
-            bool geometryCommit = false;
-            try
-            {
-                foreach (CellMoveState state in plan)
-                {
-                    dynamic anchor = page.Shapes.ItemFromID(state.Cell.AnchorId);
-                    DetachEndpoint(anchor, state.Cell.Endpoint);
-                    SelectIds(page, state.Cell.MemberIds);
-                    app.ActiveWindow.Selection.Move(state.Dx, state.Dy, "mm");
-                }
-                geometryCommit = true;
-            }
-            finally
-            {
-                app.EndUndoScope(scope, geometryCommit);
-            }
-
-            if (!geometryCommit)
-                throw new InvalidOperationException("Геометрия распределения ячеек не была завершена");
-
-            List<int> finalSelection = cells.SelectMany(c => c.MemberIds).Distinct().ToList();
-            string successPrefix = String.Format(CultureInfo.CurrentCulture,
+            List<int> finalSelection = cells
+                .SelectMany(c => c.MemberIds)
+                .Distinct()
+                .ToList();
+            string successPrefix = String.Format(
+                CultureInfo.CurrentCulture,
                 "✓ Ячейки распределены по реальным точкам шины. Шаг: {0:0.###} мм. Перемещено: {1}",
-                pitch, plan.Count);
-            return ScheduleTopologyCompletion(page, plan, finalSelection, successPrefix);
+                pitch,
+                plan.Count
+            );
+            return ScheduleTopologyCompletion(
+                page,
+                plan,
+                finalSelection,
+                successPrefix,
+                "EnergoLogic: Распределить ячейки"
+            );
         }
 
         internal string RepairGlue(bool previewOnly, bool requireConfirmation)
@@ -3108,7 +3184,7 @@ EnergoLogic использует миллиметры в пользовател�
                 DialogResult answer = MessageBox.Show("Найден кандидат:\n\n" + description + "\n\nИсправить Glue?", "EnergoLogic — восстановление соединения", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (answer != DialogResult.Yes) return "Восстановление соединения отменено пользователем.";
             }
-            int scope = (int)app.BeginUndoScope("EnergoLogic: восстановить соединение");
+            int scope = BeginUserUndoScope("EnergoLogic: восстановить соединение");
             bool commit = false;
             try
             {
@@ -3244,7 +3320,7 @@ EnergoLogic использует миллиметры в пользовател�
             double oldPitch = GetBusPitchMm(bus);
             SortedDictionary<int, int> before = GetActiveBusTerminals(bus);
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Расширить шину вправо");
+            int scope = BeginUserUndoScope("EnergoLogic: Расширить шину вправо");
             bool commit = false;
             try
             {
@@ -3297,7 +3373,7 @@ EnergoLogic использует миллиметры в пользовател�
             double oldPitch = GetBusPitchMm(bus);
             SortedDictionary<int, int> before = GetActiveBusTerminals(bus);
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: Обрезать шину справа");
+            int scope = BeginUserUndoScope("EnergoLogic: Обрезать шину справа");
             bool commit = false;
             try
             {
@@ -3407,7 +3483,7 @@ EnergoLogic использует миллиметры в пользовател�
                     best.Row
                 );
 
-            int scope = (int)app.BeginUndoScope("EnergoLogic: переподключить " + endpoint);
+            int scope = BeginUserUndoScope("EnergoLogic: переподключить " + endpoint);
             bool commit = false;
             try
             {
@@ -4098,13 +4174,21 @@ EnergoLogic использует миллиметры в пользовател�
             return CellExists(shape, endpoint == "begin" ? "BeginX" : "EndX");
         }
 
-        private string ScheduleTopologyCompletion(dynamic page, List<CellMoveState> states, List<int> finalSelection, string successPrefix)
+        private string ScheduleTopologyCompletion(
+            dynamic page,
+            List<CellMoveState> states,
+            List<int> finalSelection,
+            string successPrefix,
+            string undoScopeName)
         {
+            if (states == null || states.Count == 0)
+                throw new InvalidOperationException("План перемещения пуст");
             string documentName = Convert.ToString(page.Document.Name, CultureInfo.InvariantCulture) ?? "";
             string pageNameU = "";
             try { pageNameU = Convert.ToString(page.NameU, CultureInfo.InvariantCulture) ?? ""; }
             catch { pageNameU = Convert.ToString(page.Name, CultureInfo.InvariantCulture) ?? ""; }
             string token = "topology:" + Guid.NewGuid().ToString("N");
+
             lock (_asyncSync)
             {
                 if (_asyncPending)
@@ -4114,15 +4198,49 @@ EnergoLogic использует миллиметры в пользовател�
                 _pendingStablePasses = 0;
                 _asyncPending = true;
                 _asyncToken = token;
-                _asyncState = "pending";
-                _asyncMessage = "Геометрия готова. Ожидается завершение электрических связей…";
+                _asyncState = "launching";
+                _asyncMessage = "Операция передаётся внешнему COM-модулю…";
                 _pendingDocumentName = documentName;
                 _pendingPageNameU = pageNameU;
                 _pendingStates = new List<CellMoveState>(states);
+                _pendingReplacement = null;
                 _pendingFinalSelection = new List<int>(finalSelection);
                 _pendingSuccessPrefix = successPrefix;
+                _pendingUndoScopeId = 0;
+                _pendingHelperOwnsUndoScope = true;
             }
-            return "⏳ Геометрия выполнена. EnergoLogic завершит электрические связи следующим шагом… token=" + token;
+
+            try
+            {
+                StartExternalMoveTransaction(
+                    documentName,
+                    pageNameU,
+                    states,
+                    finalSelection,
+                    undoScopeName,
+                    token
+                );
+                lock (_asyncSync)
+                {
+                    _asyncState = "external_restoring";
+                    _asyncMessage = "Внешний COM-модуль выполняет геометрию и электрические связи в одном UndoScope…";
+                }
+            }
+            catch
+            {
+                lock (_asyncSync)
+                {
+                    _asyncPending = false;
+                    _pendingStates = null;
+                    _pendingFinalSelection = null;
+                    _pendingSuccessPrefix = "";
+                    _pendingHelperOwnsUndoScope = false;
+                }
+                CleanupTopologyHelperArtifacts();
+                throw;
+            }
+
+            return "⏳ EnergoLogic выполняет составную операцию внешним COM-модулем в одном UndoScope… token=" + token;
         }
 
         internal string CompletePendingTopology()
@@ -4134,6 +4252,10 @@ EnergoLogic использует миллиметры в пользовател�
             List<int> finalSelection;
             string successPrefix;
             string token;
+            bool helperOwnsUndoScope;
+            bool startHelper = false;
+            bool missingUndoScope = false;
+            bool missingHelperProcess = false;
 
             lock (_asyncSync)
             {
@@ -4148,8 +4270,60 @@ EnergoLogic использует миллиметры в пользовател�
                 finalSelection = new List<int>(_pendingFinalSelection ?? new List<int>());
                 successPrefix = _pendingSuccessPrefix;
                 token = _asyncToken;
+                helperOwnsUndoScope = _pendingHelperOwnsUndoScope;
 
-                if (_pendingTopologyHelperProcess == null)
+                if (helperOwnsUndoScope)
+                {
+                    if (_pendingTopologyHelperProcess == null)
+                        missingHelperProcess = true;
+                    else if (!_pendingTopologyHelperProcess.HasExited)
+                    {
+                        _asyncState = "external_restoring";
+                        _asyncMessage = "Внешний COM-модуль выполняет геометрию и электрические связи в одном UndoScope…";
+                        return "state=external_restoring; token=" + token + "; message=" + _asyncMessage;
+                    }
+                    else
+                    {
+                        _asyncState = "verifying";
+                        _asyncMessage = "Проверяется результат атомарной внешней транзакции…";
+                    }
+                }
+                else
+                {
+                    if (_pendingUndoScopeId <= 0)
+                        missingUndoScope = true;
+                    else if (_pendingTopologyHelperProcess == null)
+                        startHelper = true;
+                    else if (!_pendingTopologyHelperProcess.HasExited)
+                    {
+                        _asyncState = "external_restoring";
+                        _asyncMessage = "Электрические связи восстанавливаются внешним COM-процессом…";
+                        return "state=external_restoring; token=" + token + "; message=" + _asyncMessage;
+                    }
+                    else
+                    {
+                        _asyncState = "verifying";
+                        _asyncMessage = "Проверяются восстановленные электрические связи…";
+                    }
+                }
+            }
+
+            if (missingHelperProcess)
+                return FinalizePendingTopologyOperation(
+                    false,
+                    "Внешний модуль атомарной транзакции не был запущен.",
+                    false
+                );
+
+            if (missingUndoScope)
+                return FinalizePendingTopologyOperation(
+                    false,
+                    "Потерян UndoScope составной операции до завершения топологии."
+                );
+
+            if (startHelper)
+            {
+                try
                 {
                     if (replacement != null)
                         StartExternalExpectedGlueRestore(
@@ -4158,112 +4332,196 @@ EnergoLogic использует миллиметры в пользовател�
                     else
                         StartExternalTopologyRestore(documentName, pageNameU, states, token);
 
-                    _asyncState = "external_restoring";
-                    _asyncMessage = "Электрические связи восстанавливаются внешним COM-процессом…";
-                    return "state=external_restoring; token=" + token + "; message=" + _asyncMessage;
-                }
-
-                if (!_pendingTopologyHelperProcess.HasExited)
-                {
-                    _asyncState = "external_restoring";
-                    _asyncMessage = "Электрические связи восстанавливаются внешним COM-процессом…";
-                    return "state=external_restoring; token=" + token + "; message=" + _asyncMessage;
-                }
-
-                _asyncState = "verifying";
-                _asyncMessage = "Проверяются восстановленные электрические связи…";
-            }
-
-            string finalMessage;
-            string finalState;
-            try
-            {
-                int exitCode = _pendingTopologyHelperProcess.ExitCode;
-                string helperResult = File.Exists(_pendingTopologyResultPath)
-                    ? File.ReadAllText(_pendingTopologyResultPath, Encoding.UTF8)
-                    : "";
-                if (exitCode != 0 || !helperResult.StartsWith("PASS", StringComparison.Ordinal))
-                    throw new InvalidOperationException(
-                        "Вспомогательный модуль топологии завершился с ошибкой: код=" + exitCode +
-                        "; result=" + helperResult
-                    );
-                int repairedByHelper = ParseTopologyHelperRepairCount(helperResult);
-
-                int verifiedGlue = 0;
-
-                if (replacement != null)
-                {
-                    // The external helper owns the complete post-callback topology
-                    // truth and its stabilization window. Phase 1 already verified
-                    // replacement geometry + identity before scheduling. Do not touch
-                    // Visio at all after helper PASS; even read-only COM access can
-                    // give VTD another callback opportunity after the clean window.
-                    verifiedGlue = replacement.ExpectedGlue.Count;
-
-                    int completedCycles;
-                    int stablePasses;
                     lock (_asyncSync)
                     {
-                        _pendingTopologyCycles++;
-                        if (repairedByHelper == 0)
-                            _pendingStablePasses++;
-                        else
-                            _pendingStablePasses = 0;
-                        completedCycles = _pendingTopologyCycles;
-                        stablePasses = _pendingStablePasses;
+                        _asyncState = "external_restoring";
+                        _asyncMessage = "Электрические связи восстанавливаются внешним COM-процессом…";
+                    }
+                    return "state=external_restoring; token=" + token + "; message=" + _asyncMessage;
+                }
+                catch (Exception startError)
+                {
+                    return FinalizePendingTopologyOperation(
+                        false,
+                        "Не удалось запустить внешний модуль восстановления топологии. Причина: " +
+                        startError.Message
+                    );
+                }
+            }
 
-                        if (stablePasses < 2)
-                        {
-                            if (completedCycles >= 6)
-                                throw new InvalidOperationException(
-                                    "Topology replacement не стабилизировалась за 6 внешних циклов"
-                                );
+            string helperResult = File.Exists(_pendingTopologyResultPath)
+                ? File.ReadAllText(_pendingTopologyResultPath, Encoding.UTF8)
+                : "";
+            int exitCode = _pendingTopologyHelperProcess == null
+                ? -1
+                : _pendingTopologyHelperProcess.ExitCode;
+            bool rollbackConfirmed = helperResult.StartsWith(
+                "ERROR_ROLLED_BACK",
+                StringComparison.Ordinal
+            );
+            if (exitCode != 0 || !helperResult.StartsWith("PASS", StringComparison.Ordinal))
+            {
+                return FinalizePendingTopologyOperation(
+                    false,
+                    "Внешний модуль завершился с ошибкой: код=" + exitCode +
+                    "; result=" + helperResult,
+                    rollbackConfirmed
+                );
+            }
 
-                            CleanupTopologyHelperArtifacts();
-                            _asyncState = "stabilizing";
-                            _asyncMessage = String.Format(
-                                CultureInfo.CurrentCulture,
-                                "Проверка стабилизации VTD: без исправлений {0}/2, цикл {1}/6; последнее восстановление: {2}.",
-                                stablePasses,
-                                completedCycles,
-                                repairedByHelper
+            int repairedByHelper;
+            try
+            {
+                repairedByHelper = ParseTopologyHelperRepairCount(helperResult);
+            }
+            catch (Exception parseError)
+            {
+                return FinalizePendingTopologyOperation(
+                    false,
+                    "Некорректный результат внешнего модуля: " + parseError.Message,
+                    false
+                );
+            }
+
+            if (helperOwnsUndoScope)
+            {
+                int verifiedGlue = states == null
+                    ? 0
+                    : states.Sum(state => 1 + state.InternalGlue.Count);
+                string finalMessage = successPrefix +
+                    "; внешний COM-модуль атомарно выполнил геометрию и топологию" +
+                    "; восстановлено Glue: " + repairedByHelper +
+                    "; проверено соединений: " + verifiedGlue +
+                    "; один native Undo/Redo unit.";
+                return FinalizePendingTopologyOperation(true, finalMessage, false);
+            }
+
+            // Legacy async-scope path retained temporarily for Replace/Insert until
+            // their master/drop/delete mutation plans move into the same helper owner.
+            if (replacement != null)
+            {
+                int verifiedGlue = replacement.ExpectedGlue.Count;
+                int completedCycles;
+                int stablePasses;
+                lock (_asyncSync)
+                {
+                    _pendingTopologyCycles++;
+                    if (repairedByHelper == 0)
+                        _pendingStablePasses++;
+                    else
+                        _pendingStablePasses = 0;
+                    completedCycles = _pendingTopologyCycles;
+                    stablePasses = _pendingStablePasses;
+
+                    if (stablePasses < 2)
+                    {
+                        if (completedCycles >= 6)
+                            return FinalizePendingTopologyOperation(
+                                false,
+                                "Topology replacement не стабилизировалась за 6 внешних циклов"
                             );
-                            return "state=stabilizing; token=" + token + "; message=" + _asyncMessage;
+
+                        CleanupTopologyHelperArtifacts();
+                        _asyncState = "stabilizing";
+                        _asyncMessage = String.Format(
+                            CultureInfo.CurrentCulture,
+                            "Проверка стабилизации VTD: без исправлений {0}/2, цикл {1}/6; " +
+                            "последнее восстановление: {2}.",
+                            stablePasses,
+                            completedCycles,
+                            repairedByHelper
+                        );
+                        return "state=stabilizing; token=" + token + "; message=" + _asyncMessage;
+                    }
+                }
+
+                string finalMessage = successPrefix +
+                    "; топология стабилизирована за " + completedCycles +
+                    " внешних циклов; подряд проверок без исправлений: " + stablePasses +
+                    "; проверено соединений: " + verifiedGlue +
+                    "; legacy async UndoScope (ожидает миграции в helper owner).";
+                return FinalizePendingTopologyOperation(true, finalMessage);
+            }
+
+            return FinalizePendingTopologyOperation(
+                false,
+                "Получен результат topology-only helper без ожидаемого replacement state."
+            );
+        }
+
+        private string FinalizePendingTopologyOperation(
+            bool success,
+            string message,
+            bool rollbackConfirmed = false)
+        {
+            int scopeId;
+            string token;
+            bool helperOwnsUndoScope;
+            lock (_asyncSync)
+            {
+                scopeId = _pendingUndoScopeId;
+                token = _asyncToken;
+                helperOwnsUndoScope = _pendingHelperOwnsUndoScope;
+            }
+
+            string scopeError = "";
+            if (!helperOwnsUndoScope)
+            {
+                if (scopeId > 0)
+                {
+                    try
+                    {
+                        App.EndUndoScope(scopeId, success);
+                        if (!success) rollbackConfirmed = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        scopeError = ex.GetBaseException().Message;
+                        if (success)
+                        {
+                            try
+                            {
+                                App.EndUndoScope(scopeId, false);
+                                rollbackConfirmed = true;
+                            }
+                            catch { }
                         }
                     }
-
-                    finalState = "success";
-                    finalMessage = successPrefix +
-                        "; топология стабилизирована за " + completedCycles +
-                        " внешних циклов; подряд проверок без исправлений: " + stablePasses +
-                        "; проверено соединений: " + verifiedGlue + ".";
                 }
                 else
                 {
-                    dynamic livePage = ResolveLivePage(documentName, pageNameU);
-                    int verifiedInternal = 0;
-                    foreach (CellMoveState state in states)
-                    {
-                        VerifyInternalGlue(livePage, state.InternalGlue);
-                        dynamic anchor = livePage.Shapes.ItemFromID(state.Cell.AnchorId);
-                        VerifyGlue(anchor, state.Cell.Endpoint, state.TargetTerminalId, state.Cell.ConnectionRow);
-                        verifiedInternal += state.InternalGlue.Count;
-                    }
-                    VerifyMovedCellsComplete(livePage, states);
-                    SelectIds(livePage, finalSelection);
-                    finalState = "success";
-                    finalMessage = successPrefix +
-                        "; внешним COM-процессом проверено внутренних соединений: " +
-                        verifiedInternal + ".";
+                    scopeError = "UndoScope не найден";
                 }
             }
-            catch (Exception topologyError)
+
+            string finalState;
+            string finalMessage;
+            if (!String.IsNullOrWhiteSpace(scopeError))
             {
                 finalState = "failed_needs_attention";
                 finalMessage =
-                    "⚠ Не удалось завершить электрические связи внешним COM-процессом. " +
-                    "Изменение оставлено для диагностики; исходная страница не затронута. Причина: " +
-                    topologyError.Message;
+                    "⚠ Не удалось корректно закрыть UndoScope составной операции. " +
+                    "Документ требует проверки. Причина: " + scopeError +
+                    ". Исходный результат: " + message;
+            }
+            else if (success)
+            {
+                finalState = "success";
+                finalMessage = message;
+            }
+            else if (rollbackConfirmed)
+            {
+                finalState = "failed_rolled_back";
+                finalMessage =
+                    "⚠ Операция отменена. Visio откатил геометрию и электрические связи " +
+                    "целиком в исходное состояние. " + message;
+            }
+            else
+            {
+                finalState = "failed_needs_attention";
+                finalMessage =
+                    "⚠ Внешняя транзакция завершилась неуспешно без подтверждённого rollback. " +
+                    "Документ требует проверки. " + message;
             }
 
             lock (_asyncSync)
@@ -4277,14 +4535,151 @@ EnergoLogic использует миллиметры в пользовател�
                 _pendingReplacement = null;
                 _pendingFinalSelection = null;
                 _pendingSuccessPrefix = "";
+                _pendingUndoScopeId = 0;
+                _pendingHelperOwnsUndoScope = false;
                 _pendingTopologyCycles = 0;
                 _pendingStablePasses = 0;
                 CleanupTopologyHelperArtifacts();
             }
-            // The caller owns status rendering. In particular, never BeginInvoke
-            // UI work after the last clean topology check: VTD can process that queued
-            // UI callback after this method returns and rewrite a dependent Glue edge.
+
+            // Helper-owned success must not touch Visio here: the helper's committed
+            // native unit must remain the next user-visible Ctrl+Z action.
             return "state=" + finalState + "; token=" + token + "; message=" + finalMessage;
+        }
+
+        private void AbortPendingTopologyOperation()
+        {
+            int scopeId = 0;
+            bool helperOwnsUndoScope = false;
+            bool helperStillRunning = false;
+            lock (_asyncSync)
+            {
+                scopeId = _pendingUndoScopeId;
+                helperOwnsUndoScope = _pendingHelperOwnsUndoScope;
+                helperStillRunning = _pendingTopologyHelperProcess != null &&
+                                     !_pendingTopologyHelperProcess.HasExited;
+                _pendingUndoScopeId = 0;
+                _pendingHelperOwnsUndoScope = false;
+                _asyncPending = false;
+                _pendingStates = null;
+                _pendingReplacement = null;
+                _pendingFinalSelection = null;
+                _pendingSuccessPrefix = "";
+                _pendingTopologyCycles = 0;
+                _pendingStablePasses = 0;
+            }
+
+            if (!helperOwnsUndoScope)
+            {
+                try
+                {
+                    if (helperStillRunning)
+                        _pendingTopologyHelperProcess.Kill();
+                }
+                catch { }
+                CleanupTopologyHelperArtifacts();
+                if (scopeId > 0)
+                {
+                    try { App.EndUndoScope(scopeId, false); }
+                    catch { }
+                }
+            }
+            // A helper-owned transaction must not be killed from another COM owner:
+            // the helper itself owns rollback/commit and will close its native scope.
+        }
+
+        private void StartExternalMoveTransaction(
+            string documentName,
+            string pageNameU,
+            IEnumerable<CellMoveState> states,
+            IEnumerable<int> finalSelection,
+            string undoScopeName,
+            string token)
+        {
+            string assemblyDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "";
+            string helperPath = Path.Combine(assemblyDir, "EnergoLogic.TopologyRestoreHelper.exe");
+            if (!File.Exists(helperPath))
+                throw new FileNotFoundException("Не найден внешний вспомогательный модуль топологии", helperPath);
+
+            string suffix = token.Replace(":", "-");
+            string tempDir = Path.GetTempPath();
+            _pendingTopologyPlanPath = Path.Combine(tempDir, "energologic-" + suffix + ".plan");
+            _pendingTopologyResultPath = Path.Combine(tempDir, "energologic-" + suffix + ".result");
+            try { File.Delete(_pendingTopologyResultPath); } catch { }
+
+            List<string> lines = new List<string>();
+            lines.Add("DOC\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(documentName)));
+            lines.Add("PAGE\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(pageNameU)));
+            lines.Add("SCOPE\t" + Convert.ToBase64String(Encoding.UTF8.GetBytes(undoScopeName ?? "EnergoLogic: составная операция")));
+
+            Dictionary<string, GlueEdgeInfo> unique =
+                new Dictionary<string, GlueEdgeInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (CellMoveState state in states)
+            {
+                string memberIds = String.Join(",", state.Cell.MemberIds.Select(
+                    id => id.ToString(CultureInfo.InvariantCulture)
+                ).ToArray());
+                lines.Add(String.Format(
+                    CultureInfo.InvariantCulture,
+                    "MOVE\t{0}\t{1}\t{2:R}\t{3:R}\t{4}\t{5}",
+                    state.Cell.AnchorId,
+                    state.Cell.Endpoint,
+                    state.Dx,
+                    state.Dy,
+                    memberIds,
+                    state.Cell.Slot
+                ));
+
+                List<GlueEdgeInfo> expected = new List<GlueEdgeInfo>();
+                expected.Add(new GlueEdgeInfo {
+                    SourceId = state.Cell.AnchorId,
+                    Endpoint = state.Cell.Endpoint,
+                    TargetId = state.TargetTerminalId,
+                    Row = state.Cell.ConnectionRow
+                });
+                expected.AddRange(state.InternalGlue);
+                foreach (GlueEdgeInfo edge in expected)
+                {
+                    string key = EndpointKey(edge.SourceId, edge.Endpoint);
+                    GlueEdgeInfo existing;
+                    if (unique.TryGetValue(key, out existing))
+                    {
+                        if (existing.TargetId != edge.TargetId || existing.Row != edge.Row)
+                            throw new InvalidOperationException(
+                                "Transaction plan contains conflicting targets for " + key
+                            );
+                        continue;
+                    }
+                    unique[key] = edge;
+                    lines.Add(String.Format(
+                        CultureInfo.InvariantCulture,
+                        "EDGE\t{0}\t{1}\t{2}\t{3}",
+                        edge.SourceId,
+                        edge.Endpoint,
+                        edge.TargetId,
+                        edge.Row
+                    ));
+                }
+            }
+
+            List<int> selection = finalSelection == null
+                ? new List<int>()
+                : finalSelection.Distinct().ToList();
+            if (selection.Count > 0)
+                lines.Add("SELECT\t" + String.Join(",", selection.Select(
+                    id => id.ToString(CultureInfo.InvariantCulture)
+                ).ToArray()));
+
+            File.WriteAllLines(_pendingTopologyPlanPath, lines.ToArray(), Encoding.UTF8);
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = helperPath;
+            info.Arguments = QuoteProcessArgument(_pendingTopologyPlanPath) + " " +
+                             QuoteProcessArgument(_pendingTopologyResultPath);
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            _pendingTopologyHelperProcess = Process.Start(info);
+            if (_pendingTopologyHelperProcess == null)
+                throw new InvalidOperationException("Не удалось запустить внешний модуль составной транзакции");
         }
 
         private void StartExternalTopologyRestore(
@@ -4443,43 +4838,6 @@ EnergoLogic использует миллиметры в пользовател�
                         ", стало " + rediscovered.MemberIds.Count
                     );
             }
-        }
-
-        private int RestoreCellTopologyAfterMove(dynamic page, CellMoveState state)
-        {
-            int restored = RestoreInternalGlue(page, state.InternalGlue);
-            dynamic anchor = page.Shapes.ItemFromID(state.Cell.AnchorId);
-            dynamic target = page.Shapes.ItemFromID(state.TargetTerminalId);
-            GlueEndpointWithRetry(anchor, state.Cell.Endpoint, target, state.Cell.ConnectionRow);
-            VerifyInternalGlue(page, state.InternalGlue);
-            return restored;
-        }
-
-        private string CompensateCellMoves(dynamic page, IList<CellMoveState> states)
-        {
-            List<string> failures = new List<string>();
-            for (int index = states.Count - 1; index >= 0; index--)
-            {
-                CellMoveState state = states[index];
-                try
-                {
-                    dynamic anchor = page.Shapes.ItemFromID(state.Cell.AnchorId);
-                    try { DetachEndpoint(anchor, state.Cell.Endpoint); } catch { }
-                    SelectIds(page, state.Cell.MemberIds);
-                    App.ActiveWindow.Selection.Move(-state.Dx, -state.Dy, "mm");
-                    SettleVisioAfterGeometryChange();
-                    RestoreInternalGlue(page, state.InternalGlue);
-                    dynamic originalTerminal = page.Shapes.ItemFromID(state.Cell.BusTerminalId);
-                    GlueEndpointWithRetry(anchor, state.Cell.Endpoint, originalTerminal, state.Cell.ConnectionRow);
-                    VerifyInternalGlue(page, state.InternalGlue);
-                }
-                catch (Exception ex)
-                {
-                    failures.Add("ячейка " + state.Cell.AnchorId + ": " + ex.Message);
-                }
-            }
-            if (failures.Count == 0) return "Исходная геометрия и соединения восстановлены.";
-            return "ВНИМАНИЕ: автоматическое восстановление исходной схемы неполное: " + String.Join(" | ", failures.ToArray()) + ".";
         }
 
         private void SettleVisioAfterGeometryChange()
@@ -5153,7 +5511,11 @@ EnergoLogic использует миллиметры в пользовател�
 
         private void Run(Func<string> action)
         {
-            try { _status.Text = action(); }
+            try
+            {
+                string result = action();
+                AcceptExternalResult(result);
+            }
             catch(Exception ex) { _status.Text = "⚠ " + Friendly(ex); }
         }
 

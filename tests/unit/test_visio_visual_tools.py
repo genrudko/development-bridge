@@ -123,7 +123,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.06.153"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.06.213"}',
                     }
                 ],
                 "isError": False,
@@ -146,7 +146,7 @@ async def test_visio_managed_update_sends_only_server_pinned_extension():
     node_id, tool_name, arguments, journal = calls[0]
     assert node_id == "visio-workstation"
     assert tool_name == "__openai_visio_managed_update"
-    assert arguments["version"] == "2026.10.06.153"
+    assert arguments["version"] == "2026.10.06.213"
     assert arguments["file_name"] == "visio_managed_extension.py"
     assert len(arguments["sha256"]) == 64
     assert arguments["content_b64"]
@@ -210,7 +210,7 @@ async def test_visio_managed_update_embeds_console_source():
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"managed_update":"PASS","version":"2026.10.06.153"}',
+                        "text": '{"managed_update":"PASS","version":"2026.10.06.213"}',
                     }
                 ],
                 "isError": False,
@@ -341,8 +341,8 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV349")' in cs
-    assert 'AssemblyVersion("0.3.49.0")' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV364")' in cs
+    assert 'AssemblyVersion("0.3.64.0")' in cs
     assert "public interface IEnergoLogicEditorApi" in cs
     assert "ClassInterface(ClassInterfaceType.AutoDual)" in cs
     assert "ApiDuplicateRight" in cs
@@ -350,7 +350,7 @@ def test_energologic_editor_v2_exposes_bounded_com_api():
     assert "ApiShowPanel" in cs
     assert "host.Object = this" in cs
     assert "def invoke_energologic_editor_api(" in ext
-    assert 'addins.Item("EnergoLogic.VisioEditorAddinV349")' in ext
+    assert 'addins.Item("EnergoLogic.VisioEditorAddinV364")' in ext
     assert '"duplicate_right": "ApiDuplicateRight"' in ext
     assert '"repair_glue_apply": "ApiRepairGlueApply"' in ext
 
@@ -388,7 +388,7 @@ def test_editor_cell_discovery_surfaces_inner_reason():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "Причина: " in cs
     assert "last.Message" in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_uses_robust_com_cell_exists_conversion():
@@ -399,7 +399,7 @@ def test_editor_uses_robust_com_cell_exists_conversion():
     assert "(bool)shape.CellExistsU" not in cs
     assert "(bool)target.CellExistsU" not in cs
     assert "(bool)terminal.CellExistsU" not in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_has_no_unsafe_explicit_dynamic_bool_casts():
@@ -407,7 +407,7 @@ def test_editor_has_no_unsafe_explicit_dynamic_bool_casts():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     assert "(bool)" not in cs
     assert "Convert.ToInt32(sectionExistsRaw, CultureInfo.InvariantCulture) == 0" in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_uses_native_visio_connects_as_topology_source():
@@ -418,7 +418,7 @@ def test_editor_uses_native_visio_connects_as_topology_source():
     assert "connect.ToCell.NameU" in cs
     assert "connect.ToSheet.ID" in cs
     assert 'private readonly Regex _connectionCellRegex' in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_formula_fallback_resolves_vtd_shape_names_not_only_sheet_ids():
@@ -428,7 +428,7 @@ def test_editor_formula_fallback_resolves_vtd_shape_names_not_only_sheet_ids():
     assert "candidate.NameU" in cs
     assert "candidate.Name" in cs
     assert 'Regex.Match(targetRef, @"^Sheet\\.(\\d+)$"' in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v28_repair_glue_understands_incoming_native_connects():
@@ -522,24 +522,21 @@ def test_editor_v33_distribute_pitch_avoids_dynamic_tuple_binder():
     assert "new CellMoveState" in cs
     assert "Tuple.Create(cells[i], target)" not in cs
     assert "Tuple<CellInfo, dynamic>" not in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
-def test_editor_v34_restores_and_verifies_internal_glue_after_moves():
+def test_editor_v356_move_plans_glue_but_does_not_mutate_inside_addin_callback():
     from pathlib import Path
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
-    assert "internal sealed class GlueEdgeInfo" in cs
-    assert "private List<GlueEdgeInfo> CaptureInternalGlue" in cs
-    assert "private int RestoreInternalGlue" in cs
-    assert "private void VerifyInternalGlue" in cs
-    assert "InternalGlue = CaptureInternalGlue(page, cell.MemberIds)" in cs
-    assert "RestoreCellTopologyAfterMove(page, state)" in cs
-    assert "RestoreInternalGlue(page, state.InternalGlue)" in cs
-    assert "VerifyInternalGlue(page, state.InternalGlue)" in cs
-    assert "RestoreInternalGlue(page, internalGlue)" in cs
-    assert "Visio потерял внутренние соединения при копировании ячейки" in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
-
+    move = cs[cs.index("internal string MoveCell(int direction)"):cs.index("internal string SelectCell()")]
+    assert "InternalGlue = CaptureInternalGlue(page, cell.MemberIds)" in move
+    assert "ScheduleTopologyCompletion(" in move
+    assert "new List<CellMoveState> { state }" in move
+    assert "successPrefix" in move
+    assert "BeginUserUndoScope(" not in move
+    assert "DetachEndpoint(" not in move
+    assert "Selection.Move(" not in move
+    assert "scopeTransferred" not in move
 
 def test_editor_v35_verifies_glue_against_formula_when_connects_lag():
     from pathlib import Path
@@ -548,7 +545,7 @@ def test_editor_v35_verifies_glue_against_formula_when_connects_lag():
     assert "GlueTarget formulaTarget = TryGetGlueTargetFromFormula(shape, endpoint)" in cs
     assert "formulaTarget.TargetId == targetId && formulaTarget.Row == row" in cs
     assert "source {0} {1}; expected {2}/{3}" in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v36_settles_visio_before_restoring_glue():
@@ -558,22 +555,22 @@ def test_editor_v36_settles_visio_before_restoring_glue():
     assert "System.Windows.Forms.Application.DoEvents()" in cs
     assert "System.Threading.Thread.Sleep(25)" in cs
     assert cs.count("SettleVisioAfterGeometryChange();") >= 5
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
-def test_editor_v37_restores_topology_after_geometry_scope_and_compensates():
+def test_editor_v356_move_undo_scope_is_owned_by_external_helper_process():
     from pathlib import Path
-    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
-    assert "internal sealed class CellMoveState" in cs
-    assert "EnergoLogic: Геометрия распределения ячеек" in cs
-    assert "app.EndUndoScope(scope, geometryCommit);" in cs
-    assert "private int RestoreCellTopologyAfterMove" in cs
-    assert "private string CompensateCellMoves" in cs
-    assert "Исходная геометрия и соединения восстановлены." in cs
-    assert 'App.ActiveWindow.Selection.Move(-state.Dx, -state.Dy, "mm")' in cs
-    assert "RestoreCellTopologyAfterMove(page, state)" in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
-
+    root = Path(__file__).resolve().parents[2]
+    cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    helper = (root / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text()
+    move = cs[cs.index("internal string MoveCell(int direction)"):cs.index("internal string SelectCell()")]
+    assert "BeginUserUndoScope(" not in move
+    schedule = cs[cs.index("private string ScheduleTopologyCompletion("):cs.index("internal string CompletePendingTopology()")]
+    assert "_pendingHelperOwnsUndoScope = true" in schedule
+    assert "StartExternalMoveTransaction(" in schedule
+    assert 'app.BeginUndoScope(scopeName)' in helper
+    assert 'app.EndUndoScope(transactionScope, true)' in helper
+    assert 'transactionApp.EndUndoScope(transactionScope, false)' in helper
 
 def test_editor_v38_schedules_post_return_topology_completion():
     from pathlib import Path
@@ -589,7 +586,7 @@ def test_editor_v38_schedules_post_return_topology_completion():
     assert "VerifyMovedCellsComplete" in cs
     assert "public void SetStatus(string value)" in cs
     assert '"operation_status": "ApiOperationStatus"' in ext
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v38_installer_migrates_legacy_versions_and_disconnect_cleans_ui():
@@ -602,7 +599,7 @@ def test_editor_v38_installer_migrates_legacy_versions_and_disconnect_cleans_ui(
     for version in range(31, 38):
         assert f"EnergoLogic.VisioEditorAddinV{version}" in ext
     assert 'stale_bar = app.CommandBars.Item("EnergoLogic")' in ext
-    assert '"migration": "all legacy editor registrations -> v3.49"' in ext
+    assert '"migration": "all legacy editor registrations -> v3.64"' in ext
 
 
 def test_editor_v39_normalizes_non_bus_child_glue_into_cell_graph():
@@ -641,15 +638,15 @@ def test_editor_v311_retries_glue_until_visio_vtd_stabilizes():
     assert "GlueEndpointWithRetry(source, edge.Endpoint, target, edge.Row)" in cs
 
 
-def test_editor_v312_resolves_fresh_page_after_deferred_boundary():
+def test_editor_v356_helper_owned_move_has_no_post_commit_visio_readback():
     from pathlib import Path
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
-    assert "string documentName = Convert.ToString(page.Document.Name" in cs
-    assert "dynamic livePage = ResolveLivePage(documentName, pageNameU)" in cs
-    assert "private dynamic ResolveLivePage" in cs
-    assert "VerifyInternalGlue(livePage, state.InternalGlue)" in cs
-    assert "StartExternalTopologyRestore(documentName, pageNameU, states, token)" in cs
-
+    complete = cs[cs.index("internal string CompletePendingTopology()"):cs.index("private string FinalizePendingTopologyOperation")]
+    helper_branch = complete[complete.index("if (helperOwnsUndoScope)"):complete.index("// Legacy async-scope path")]
+    assert "ResolveLivePage(" not in helper_branch
+    assert "SelectIds(" not in helper_branch
+    assert "VerifyInternalGlue(" not in helper_branch
+    assert "один native Undo/Redo unit" in helper_branch
 
 def test_editor_v313_uses_explicit_second_phase_for_topology_completion():
     from pathlib import Path
@@ -678,7 +675,7 @@ def test_editor_v314_normalizes_half_glued_endpoint_before_native_glue():
     glue_retry = cs[cs.index("private void GlueEndpointWithRetry"):cs.index("private void VerifyGlue")]
     assert glue_retry.index("VerifyGlue(shape, endpoint, targetId, row);") < glue_retry.index("System.Windows.Forms.Application.DoEvents();")
     assert "attempt <= 6" in glue_retry
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v315_suppresses_visio_events_only_around_native_glue_retry():
@@ -691,28 +688,24 @@ def test_editor_v315_suppresses_visio_events_only_around_native_glue_retry():
     assert "App.EventsEnabled = previousEventsEnabled;" in glue_retry
     assert glue_retry.index("App.EventsEnabled = 0;") < glue_retry.index("GlueEndpoint(shape, endpoint, target, row);")
     assert "6 event-isolated попыток" in glue_retry
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
-def test_editor_v316_uses_external_process_boundary_for_pending_topology():
+def test_editor_v356_move_transaction_plan_runs_in_external_helper_boundary():
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     helper = (root / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text()
-    ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    complete = cs[cs.index("internal string CompletePendingTopology()"):cs.index("private dynamic ResolveLivePage")]
-    assert "StartExternalTopologyRestore" in complete
-    assert '"external_restoring"' in complete
-    assert "RestoreCellTopologyAfterMove(livePage, state)" not in complete
-    assert "VerifyInternalGlue(livePage, state.InternalGlue)" in complete
-    assert "EnergoLogic.TopologyRestoreHelper.exe" in cs
-    assert 'Marshal.GetActiveObject("Visio.Application")' in helper
-    assert ".GlueTo(" in helper
-    assert "TOPOLOGY_HELPER_SOURCE_B64" in ext
-    assert "helper_compile_args" in ext
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
-
-
+    start = cs[cs.index("private void StartExternalMoveTransaction"):cs.index("private void StartExternalTopologyRestore")]
+    assert '"SCOPE\\t"' in start
+    assert '"MOVE\\t{0}\\t{1}\\t{2:R}\\t{3:R}\\t{4}\\t{5}"' in start
+    assert '"EDGE\\t{0}\\t{1}\\t{2}\\t{3}"' in start
+    assert '"SELECT\\t"' in start
+    assert "Process.Start(info)" in start
+    assert "class MoveStep" in helper
+    assert "ApplyMoveStep(" in helper
+    assert "glueOwnedEndpoints, geometryExpectations" in helper
+    assert "Selection.Move(step.DxMm, step.DyMm, \"mm\")" in helper
 
 def test_editor_v317_external_plan_is_complete_and_not_inprocess_prefiltered():
     from pathlib import Path
@@ -724,7 +717,7 @@ def test_editor_v317_external_plan_is_complete_and_not_inprocess_prefiltered():
     assert "Dictionary<string, GlueEdgeInfo> unique" in block
     assert '"EDGE\\t{0}\\t{1}\\t{2}\\t{3}"' in block
     assert "Topology plan contains conflicting targets" in block
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 def test_editor_v318_restores_bus_anchor_before_internal_edges():
     from pathlib import Path
@@ -736,7 +729,7 @@ def test_editor_v318_restores_bus_anchor_before_internal_edges():
     internal = block.index("foreach (GlueEdgeInfo edge in state.InternalGlue)")
     assert anchor < internal
     assert "TargetId = state.TargetTerminalId" in block
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 def test_editor_v319_binds_and_resolves_explicit_cell_identity():
     from pathlib import Path
@@ -756,7 +749,7 @@ def test_editor_v319_binds_and_resolves_explicit_cell_identity():
     assert "conflicting" not in bind.lower() or "конфликтующие EnergoLogicCellId" in bind
     assert '"bind_cell_identity": "ApiBindCellIdentity"' in ext
     assert 'ButtonWide("Закрепить состав ячейки"' in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v319_identity_membership_is_not_geometry_derived():
@@ -787,11 +780,13 @@ def test_editor_v320_replaces_equipment_from_sample_fail_closed():
     assert "EnsureReplaceTargetSafe(page, cell, oldId)" in replace
     assert "CaptureInternalGlue(page, cell.MemberIds)" in replace
     assert "BuildReplacementExpectedGlue(" in replace
-    assert "ScheduleStableTopologyCompletion(page, pending)" in replace
-    assert "app.EndUndoScope(scope, commit)" in replace
+    assert "ScheduleStableTopologyCompletion(page, pending, scope)" in replace
+    assert "scopeTransferred = true" in replace
+    assert "if (!scopeTransferred)" in replace
+    assert "app.EndUndoScope(scope, false)" in replace
     assert '"capture_replacement_sample": "ApiCaptureReplacementSample"' in ext
     assert '"replace_equipment_from_sample": "ApiReplaceEquipmentFromSample"' in ext
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 def test_editor_v320_has_visio_2010_replacement_fallback():
     from pathlib import Path
@@ -814,11 +809,11 @@ def test_editor_v321_defers_replacement_topology_until_after_callback():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     replace = cs[cs.index("internal string ReplaceEquipmentFromSample()"):cs.index("private List<GlueEdgeInfo> BuildReplacementExpectedGlue")]
     assert "BuildReplacementExpectedGlue(" in replace
-    assert "ScheduleStableTopologyCompletion(page, pending)" in replace
+    assert "ScheduleStableTopologyCompletion(page, pending, scope)" in replace
     assert "RestoreReplacementTopology(" not in replace
     assert "VerifyReplacementTopology(" not in replace
     assert "ReplacementCompletionState pending" in replace
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 
@@ -855,7 +850,7 @@ def test_editor_v322_requires_consecutive_clean_replacement_topology_cycles():
     assert "completedCycles >= 6" in complete
     assert '"state=stabilizing; token="' in complete
     assert "топология стабилизирована" in complete
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v322_ui_keeps_polling_while_stabilizing():
@@ -867,17 +862,14 @@ def test_editor_v322_ui_keeps_polling_while_stabilizing():
     assert "StartTopologyCompletionTimer();" in timer
 
 
-def test_editor_v323_has_no_post_verification_visio_or_ui_mutation():
+def test_editor_v356_finalizer_does_not_touch_visio_after_helper_owned_commit():
     from pathlib import Path
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
-    complete = cs[cs.index("internal string CompletePendingTopology()"):cs.index("private void StartExternalTopologyRestore")]
-    replacement_branch = complete[complete.index("if (replacement != null)"):complete.index("else\n                {", complete.index("if (replacement != null)"))]
-    assert "SelectIds(livePage, finalSelection)" not in replacement_branch
-    tail = complete[complete.index("lock (_asyncSync)", complete.index("catch (Exception topologyError)")):]
-    assert "_form.SetStatus(finalMessage)" not in tail
-    assert "The caller owns status rendering" in tail
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
-
+    finalizer = cs[cs.index("private string FinalizePendingTopologyOperation"):cs.index("private void AbortPendingTopologyOperation")]
+    assert "if (!helperOwnsUndoScope)" in finalizer
+    assert "App.EndUndoScope(scopeId, success)" in finalizer  # legacy Replace/Insert only
+    assert "Helper-owned success must not touch Visio here" in finalizer
+    assert "_form.SetStatus(finalMessage)" not in finalizer
 
 def test_editor_v323_ui_timer_owns_topology_status_rendering():
     from pathlib import Path
@@ -904,20 +896,19 @@ def test_editor_v324_external_helper_owns_glue_truth():
     assert '"PASS\\t" +' in helper
     assert "repaired.ToString" in helper
     assert "verified.ToString" in helper
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 
-def test_editor_v324_replacement_does_not_use_inprocess_glue_verifier_after_helper():
+def test_editor_v356_keeps_replacement_on_explicit_legacy_path_until_master_transaction_migration():
     from pathlib import Path
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
-    complete = cs[cs.index("internal string CompletePendingTopology()"):cs.index("private void StartExternalTopologyRestore")]
-    branch_start = complete.index("if (replacement != null)")
-    branch_end = complete.index("else\n                {", branch_start)
-    branch = complete[branch_start:branch_end]
-    assert "VerifyGlue(" not in branch
-    assert "verifiedGlue = replacement.ExpectedGlue.Count;" in branch
-    assert "external helper owns the complete post-callback topology" in branch
+    complete = cs[cs.index("internal string CompletePendingTopology()"):cs.index("private string FinalizePendingTopologyOperation")]
+    legacy = complete[complete.index("// Legacy async-scope path"):]
+    assert "if (replacement != null)" in legacy
+    assert "replacement.ExpectedGlue.Count" in legacy
+    assert "VerifyGlue(" not in legacy
+    assert "legacy async UndoScope" in legacy
 
 def test_editor_v325_helper_rejects_half_glue_by_formula_pair():
     from pathlib import Path
@@ -946,7 +937,7 @@ def test_editor_v326_helper_has_bounded_stability_window():
     assert "const int requiredCleanRounds = 8;" in helper
     assert "const int maxRounds = 20;" in helper
     assert "const int pollMilliseconds = 250;" in helper
-    assert "if (repairedThisRound == 0)" in helper
+    assert "if (repairedThisRound == 0 && geometryRepairedThisRound == 0)" in helper
     assert "cleanRounds++" in helper
     assert "cleanRounds = 0" in helper
     assert "Thread.Sleep(pollMilliseconds);" in helper
@@ -965,7 +956,7 @@ def test_editor_v326_replacement_does_not_touch_visio_after_helper_pass():
     for forbidden in ("ResolveLivePage(", "Shapes.ItemFromID", "GetMm(", "GetCellIdentity(", "DiscoverCell(", "SelectIds("):
         assert forbidden not in branch
     assert "verifiedGlue = replacement.ExpectedGlue.Count;" in branch
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v327_defaults_to_drop_rewire_on_modern_visio():
@@ -978,7 +969,7 @@ def test_editor_v327_defaults_to_drop_rewire_on_modern_visio():
     assert "if (!useNativeReplaceShape)" in replace
     assert "target.Delete();" in replace
     assert "delayed dependency rewrite" in replace
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v328_bind_identity_no_longer_mutates_electrical_shapes():
@@ -999,7 +990,7 @@ def test_editor_v328_stable_scheduler_is_reserved_for_topology_mutations():
     cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     replace = cs[cs.index("internal string ReplaceEquipmentFromSample()"):cs.index("private List<GlueEdgeInfo> BuildReplacementExpectedGlue")]
     bind = cs[cs.index("internal string BindCellIdentity()"):cs.index("internal string CaptureReplacementSample()")]
-    assert "ScheduleStableTopologyCompletion(page, pending)" in replace
+    assert "ScheduleStableTopologyCompletion(page, pending, scope)" in replace
     assert "ScheduleStableTopologyCompletion" not in bind
 
 def test_editor_v329_preserves_one_dimensional_endpoint_geometry():
@@ -1017,7 +1008,7 @@ def test_editor_v329_preserves_one_dimensional_endpoint_geometry():
     assert 'SetMm(replacement, "EndX", oldEndX)' in replace
     assert 'SetMm(replacement, "EndY", oldEndY)' in replace
     assert "engineering length оборудования" in replace
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v330_cell_identity_is_pagesheet_backed():
@@ -1035,7 +1026,7 @@ def test_editor_v330_cell_identity_is_pagesheet_backed():
     assert "page.PageSheet" in setter
     assert "pageSheet.AddNamedRow" in setter
     assert 'shape.AddNamedRow' not in setter
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v330_bind_identity_does_not_schedule_topology_repair():
@@ -1062,10 +1053,10 @@ def test_editor_current_build_has_unique_com_class_guid():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert '[Guid("7FA902A8-D36C-4ED0-B299-445A538AF349")]' in cs
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV349")' in cs
-    assert 'clsid = "{7FA902A8-D36C-4ED0-B299-445A538AF349}"' in ext
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert '[Guid("8B7F2A13-1F51-47F4-9D1A-A7E0F364C001")]' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV364")' in cs
+    assert 'clsid = "{8B7F2A13-1F51-47F4-9D1A-A7E0F364C001}"' in ext
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 def test_editor_v332_glues_replacement_bus_anchor_in_process():
     from pathlib import Path
@@ -1079,7 +1070,7 @@ def test_editor_v332_glues_replacement_bus_anchor_in_process():
     assert anchor < glue < delete
     assert "page.Shapes.ItemFromID(cell.BusTerminalId)" in block[anchor:delete]
     assert "VerifyGlue(" in block[anchor:delete]
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v332_has_unique_com_class_guid():
@@ -1087,9 +1078,9 @@ def test_editor_v332_has_unique_com_class_guid():
     root = Path(__file__).resolve().parents[2]
     cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
     ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert '[Guid("7FA902A8-D36C-4ED0-B299-445A538AF349")]' in cs
-    assert 'ProgId("EnergoLogic.VisioEditorAddinV349")' in cs
-    assert 'clsid = "{7FA902A8-D36C-4ED0-B299-445A538AF349}"' in ext
+    assert '[Guid("8B7F2A13-1F51-47F4-9D1A-A7E0F364C001")]' in cs
+    assert 'ProgId("EnergoLogic.VisioEditorAddinV364")' in cs
+    assert 'clsid = "{8B7F2A13-1F51-47F4-9D1A-A7E0F364C001}"' in ext
 
 
 def test_editor_insert_equipment_api_is_exposed_in_ui_and_managed_bridge():
@@ -1103,7 +1094,7 @@ def test_editor_insert_equipment_api_is_exposed_in_ui_and_managed_bridge():
     assert '"insert_equipment_into_connection_from_sample": "ApiInsertEquipmentIntoConnectionFromSample"' in ext
     assert 'ButtonWide("Вставить образец в связь"' in cs
     assert "RunInsertEquipment()" in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 def test_editor_v334_splits_connection_around_natural_length_equipment():
     from pathlib import Path
@@ -1125,7 +1116,7 @@ def test_editor_v334_splits_connection_around_natural_length_equipment():
     assert 'connection,\n                        "end"' in block
     assert "ExpectedMemberCount = cell.MemberIds.Count + 1" in block
     assert "FindConnectionPointRowAtEndpoint" in block
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v334_capture_sample_builds_vtd_insert_port_profile():
@@ -1155,7 +1146,7 @@ def test_editor_v335_bus_editing_uses_native_vtd_shape_data():
     assert "EnsureTerminalFree(page, lastTerminalId" in cs
     assert '"extend_bus_right": "ApiExtendBusRight"' in ext
     assert '"trim_bus_right": "ApiTrimBusRight"' in ext
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v335_dynamic_bus_slots_use_vtd_user_nt_ut():
@@ -1209,7 +1200,7 @@ def test_editor_v336_normalizes_incoming_child_glue_to_top_level_endpoint():
     assert "endpointOwnerId = ownerId" in block
     assert "dynamic endpointOwner = page.Shapes.ItemFromID(endpointOwnerId)" in block
     assert "connected.Add(EndpointKey(endpointOwnerId, targetEndpoint))" in block
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v336_repair_and_diagnostics_ignore_own_group_children():
@@ -1236,7 +1227,7 @@ def test_editor_v337_resolves_both_vtd_connection_row_name_forms():
     assert "shape.XYToPage(localX, localY, out pageX, out pageY)" in block
     index = cs[cs.index("private HashSet<string> BuildConnectedEndpointIndex"):start]
     assert "TryGetConnectionPointPageCoordinates" in index
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v337_connection_point_scan_deduplicates_aliases():
@@ -1269,7 +1260,7 @@ def test_editor_v338_exposes_native_ribbon_and_context_menu():
     assert "ApiUiStatus()" in cs
     assert '"ui_status": "ApiUiStatus"' in ext
     assert 'native RibbonX + drawing context menu + modeless WinForms parameter panel' in ext
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v338_ribbon_commands_use_shared_async_aware_command_runner():
@@ -1317,7 +1308,7 @@ def test_editor_v339_installs_submenu_into_existing_visio_drawing_popups():
     assert "RemoveExistingEnergoLogicContextRoot(host)" in block
     assert "_contextRoots.Add(root)" in block
     assert "_contextHostNames.Add(hostName)" in block
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v339_disconnect_deletes_only_energologic_context_roots():
@@ -1336,7 +1327,7 @@ def test_editor_v340_context_submenu_uses_static_commandbar_type():
     assert "CommandBar menu = root.CommandBar;" in cs
     assert "private CommandBarButton AddContextButton(\n            CommandBar menu," in cs
     assert "dynamic menu = root.CommandBar" not in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v341_uses_live_qualified_visio_popup_context_ids():
@@ -1350,7 +1341,7 @@ def test_editor_v341_uses_live_qualified_visio_popup_context_ids():
     assert 'String.Equals(context, "2"' not in block
     assert "Drawing Object Selected" in block
     assert "Drawing Page Selected" in block
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v345_restores_live_proven_diagnostic_connectivity_algorithm():
@@ -1368,7 +1359,7 @@ def test_editor_v345_restores_live_proven_diagnostic_connectivity_algorithm():
     assert "inspect(source.Shapes.Item(child))" in block
     visual = cs[cs.index("internal string VisualDiagnostics()"):cs.index("private dynamic ResolveSelectedBus")]
     assert "BuildConnectedEndpointIndex(page)" in visual
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v345_keeps_ribbon_and_qualified_context_menu():
@@ -1399,7 +1390,7 @@ def test_editor_v346_ribbon_is_russian_and_uses_builtin_office_icons():
     assert 'imageMso=""Copy""' in ribbon
     assert 'imageMso=""Paste""' in ribbon
     assert 'imageMso=""RefreshAll""' in ribbon
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v346_context_and_panel_have_no_english_command_labels():
@@ -1417,7 +1408,7 @@ def test_editor_v346_context_and_panel_have_no_english_command_labels():
 def test_editor_v346_installer_discovers_and_removes_all_legacy_editor_addins():
     from pathlib import Path
     ext = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text()
-    assert 'current_progid = "EnergoLogic.VisioEditorAddinV349"' in ext
+    assert 'current_progid = "EnergoLogic.VisioEditorAddinV364"' in ext
     assert 'editor_progid_prefix = "EnergoLogic.VisioEditorAddinV"' in ext
     assert 'candidate.startswith(editor_progid_prefix)' in ext
     assert 'legacy_progids.add(candidate)' in ext
@@ -1427,7 +1418,7 @@ def test_editor_v346_installer_discovers_and_removes_all_legacy_editor_addins():
     assert '"removed_build_dirs": removed_build_dirs' in ext
     assert '"editor_addins_after": editor_addins_after' in ext
     assert '"single_editor_addin": (' in ext
-    assert '"migration": "all legacy editor registrations -> v3.49"' in ext
+    assert '"migration": "all legacy editor registrations -> v3.64"' in ext
 
 
 def test_editor_v346_uninstall_removes_all_energologic_editor_versions():
@@ -1500,7 +1491,7 @@ def test_editor_v347_exposes_interactive_base_point_copy_move():
     assert 'label=""Переместить по базовой точке""' in cs
     assert '"start_base_copy_interactive": "ApiStartBaseCopyInteractive"' in ext
     assert '"interaction_status": "ApiInteractionStatus"' in ext
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v347_help_documents_every_ribbon_group():
@@ -1558,7 +1549,7 @@ def test_editor_v348_has_reusable_base_point_clipboard():
     assert "ValidateBaseClipboardShapes(page)" in cs
     assert "Буфер сохранён — можно вставить ещё одну копию." in cs
     assert "UpdateContextPasteButtons();" in cs
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v348_ribbon_exposes_split_copy_and_paste_base_point_commands():
@@ -1605,7 +1596,7 @@ def test_editor_v349_selected_copy_is_not_cell_copy():
     assert '"Копировать выбранное →"' in cs
     assert '"Дублировать выбранное"' in cs
     assert '"duplicate_selected_left": "ApiDuplicateSelectedLeft"' in ext
-    assert 'ApiVersion() { return "0.3.49"; }' in cs
+    assert 'ApiVersion() { return "0.3.64"; }' in cs
 
 
 def test_editor_v349_generic_copy_allows_source_external_glue_but_drops_it_on_copy():
@@ -1746,3 +1737,341 @@ def test_portable_powershell_scripts_have_utf8_bom():
     assert scripts
     for script in scripts:
         assert script.read_bytes().startswith(b"\xef\xbb\xbf"), script.name
+
+
+def test_editor_v356_distribute_pitch_delegates_entire_mutation_to_helper_owned_scope():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    distribute = cs[cs.index("internal string DistributePitch(double pitch)"):cs.index("internal string RepairGlue", cs.index("internal string DistributePitch(double pitch)"))]
+    assert "ScheduleTopologyCompletion(" in distribute
+    assert '"EnergoLogic: Распределить ячейки"' in distribute
+    assert "BeginUserUndoScope(" not in distribute
+    assert "DetachEndpoint(" not in distribute
+    assert "Selection.Move(" not in distribute
+    assert "scopeTransferred" not in distribute
+
+def test_editor_v356_finalizes_helper_owned_transaction_without_cross_owner_scope_close():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    finalizer = cs[cs.index("private string FinalizePendingTopologyOperation"):cs.index("private void AbortPendingTopologyOperation")]
+    assert "bool helperOwnsUndoScope" in finalizer
+    assert "if (!helperOwnsUndoScope)" in finalizer
+    assert "App.EndUndoScope(scopeId, success)" in finalizer
+    assert 'finalState = "success"' in finalizer
+    assert 'finalState = "failed_rolled_back"' in finalizer
+    assert 'finalState = "failed_needs_attention"' in finalizer
+    assert "rollbackConfirmed" in finalizer
+    assert "_pendingHelperOwnsUndoScope = false" in finalizer
+
+def test_editor_v351_disconnect_aborts_pending_topology_scope_fail_closed():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    disconnect = cs[
+        cs.index("public void OnDisconnection"):
+        cs.index("public void OnAddInsUpdate")
+    ]
+    assert "AbortPendingTopologyOperation()" in disconnect
+
+    abort = cs[
+        cs.index("private void AbortPendingTopologyOperation"):
+        cs.index("private void StartExternalTopologyRestore")
+    ]
+    assert "_pendingUndoScopeId = 0" in abort
+    assert "_pendingTopologyHelperProcess.Kill()" in abort
+    assert "App.EndUndoScope(scopeId, false)" in abort
+
+
+def test_editor_v351_installer_reports_only_connected_current_addin_as_single():
+    from pathlib import Path
+    ext = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text()
+    assert 'current_progid = "EnergoLogic.VisioEditorAddinV364"' in ext
+    assert 'len([item for item in editor_addins_after if item["connected"]]) == 1' in ext
+    assert 'item["progid"] == progid and item["connected"]' in ext
+    assert '"migration": "all legacy editor registrations -> v3.64"' in ext
+
+
+def test_editor_v351_blocks_new_energologic_transactions_while_async_scope_is_pending():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    gate = cs[
+        cs.index("private int BeginUserUndoScope"):
+        cs.index("private void InstallToggleButton")
+    ]
+    assert "lock (_asyncSync)" in gate
+    assert "if (_asyncPending)" in gate
+    assert "Предыдущая составная операция EnergoLogic ещё завершается" in gate
+    assert "App.BeginUndoScope(name)" in gate
+    assert cs.count("BeginUndoScope(") == 1
+    assert cs.count("BeginUserUndoScope(") >= 15  # Move/Distribute use helper-owned scopes
+
+
+def test_editor_v351_generic_panel_run_starts_async_topology_timer_for_pending_results():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    run = cs[cs.index("private void Run(Func<string> action)"):cs.index("private void RunBindCellIdentity") ]
+    assert "string result = action();" in run
+    assert "AcceptExternalResult(result);" in run
+    assert "_status.Text = action();" not in run
+    accept = cs[cs.index("internal void AcceptExternalResult"):cs.index("private void Run(Func<string> action)")]
+    assert 'result.StartsWith("⏳", StringComparison.Ordinal)' in accept
+    assert "StartTopologyCompletionTimer();" in accept
+
+
+
+
+
+
+
+
+def test_editor_v356_helper_transaction_result_is_fail_closed_and_rollback_aware():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text()
+    helper = (root / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text()
+    complete = cs[cs.index("internal string CompletePendingTopology()"):cs.index("private string FinalizePendingTopologyOperation")]
+    assert 'ERROR_ROLLED_BACK' in complete and 'rollbackConfirmed' in complete
+    assert "rollbackConfirmed" in complete
+    assert 'helperResult.StartsWith("PASS"' in complete
+    assert '"failed_needs_attention"' in cs
+    assert '"ERROR_ROLLED_BACK\\t"' in helper
+    assert "transactionApp.EndUndoScope(transactionScope, false)" in helper
+
+
+def test_editor_v356_helper_move_transaction_verifies_every_member_delta_and_expected_glue():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    helper = (root / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text()
+    apply = helper[helper.index("private static void ApplyMoveStep"):helper.index("[STAThread]")]
+    assert "Dictionary<int, double[]> before" in apply
+    assert "actualDx" in apply and "actualDy" in apply
+    assert "Move verification failed for shape" in apply
+    assert "DetachEndpoint(anchor, step.Endpoint)" in apply
+    assert "preparedSelection.Move(step.DxMm, step.DyMm, \"mm\")" in apply
+    assert "SelectIds(app, page, step.MemberIds)" not in apply
+    assert "app.ActiveWindow.Selection.Move" not in apply
+    assert "preparedSelection.Move(step.DxMm, step.DyMm, \"mm\")" in apply
+    assert "GlueAndVerify(page, edge)" in helper
+    assert "requiredCleanRounds = 8" in helper
+
+
+def test_topology_helper_v357_stabilizes_after_final_selection_before_commit():
+    from pathlib import Path
+    helper = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text()
+    stability_loop = helper.index("for (rounds = 1; rounds <= maxRounds; rounds++)")
+    commit = helper.index("app.EndUndoScope(transactionScope, true)")
+    selection = helper.index("SelectIds(app, page, finalSelection);", commit)
+    assert stability_loop < commit < selection
+    assert "no window selection changes are allowed while the compound" in helper
+    assert helper.index("page.CreateSelection(0, 0x100)") < helper.index("app.BeginUndoScope(scopeName)")
+
+
+def test_topology_helper_v358_enforces_post_move_geometry_during_vtd_stabilization():
+    from pathlib import Path
+    helper = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text()
+    assert "internal sealed class GeometryExpectation" in helper
+    assert "CapturePostMoveGeometry(" in helper
+    assert "HashSet<string> glueOwnedEndpoints" in helper
+    assert 'glueOwnedEndpoints.Contains(EndpointKey(id, "begin"))' in helper
+    assert 'glueOwnedEndpoints.Contains(EndpointKey(id, "end"))' in helper
+    assert 'AddGeometryExpectation(shape, id, "BeginX", expectations)' in helper
+    assert 'AddGeometryExpectation(shape, id, "EndX", expectations)' in helper
+    assert 'AddGeometryExpectation(shape, id, "PinX", expectations)' in helper
+    assert "RepairExpectedGeometry(" in helper
+    assert "VerifyExpectedGeometry(" in helper
+    assert "geometryRepairedThisRound == 0" in helper
+    assert "geometryRepaired.ToString(CultureInfo.InvariantCulture)" in helper
+    loop = helper.index("for (rounds = 1; rounds <= maxRounds; rounds++)")
+    commit = helper.index("app.EndUndoScope(transactionScope, true)")
+    selection = helper.index("SelectIds(app, page, finalSelection);", commit)
+    assert loop < commit < selection
+
+
+def test_topology_helper_v359_commit_precedes_any_optional_selection_restore():
+    from pathlib import Path
+    helper = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text()
+    loop = helper.index("for (rounds = 1; rounds <= maxRounds; rounds++)")
+    commit = helper.index("app.EndUndoScope(transactionScope, true)")
+    guarded_selection = helper.index("if (moves.Count == 0 && finalSelection.Count > 0)", commit)
+    selection = helper.index("SelectIds(app, page, finalSelection);", guarded_selection)
+    assert loop < commit < guarded_selection < selection
+    assert "short-lived external COM owner must make no" in helper
+
+
+def test_topology_helper_v360_move_commits_after_one_verified_pass_without_sleep():
+    from pathlib import Path
+    helper = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text()
+    verify = helper.index("VerifyExpectedGeometry(")
+    move_fast = helper.index("if (moves.Count > 0)", verify)
+    sleep = helper.index("Thread.Sleep(pollMilliseconds);", move_fast)
+    commit = helper.index("app.EndUndoScope(transactionScope, true)", move_fast)
+    assert move_fast < sleep < commit
+    fast_block = helper[move_fast:sleep]
+    assert "cleanRounds = 1;" in fast_block
+    assert "break;" in fast_block
+    assert "MOVE commits immediately after one complete verified repair pass" in helper
+    assert "Topology-only/replacement work still needs" in helper
+
+
+def test_topology_helper_v361_uses_sta_and_no_post_commit_visio_calls_for_moves():
+    from pathlib import Path
+    helper = Path("managed/visio/energologic_topology_restore_helper.cs").read_text(encoding="utf-8")
+    assert "[STAThread]" in helper
+    assert "POST_COMMIT_VISIO_CALLS_SKIPPED" in helper
+    commit = helper.index('app.EndUndoScope(transactionScope, true)')
+    guarded_selection = helper.index('if (moves.Count == 0 && finalSelection.Count > 0)')
+    assert commit < guarded_selection
+    tail = helper[commit:guarded_selection]
+    assert 'SelectIds(app, page, finalSelection)' not in tail
+    assert 'Trace(tracePath, "SCOPE_COMMIT_END")' in helper
+    assert 'Trace(tracePath, "RESULT_WRITTEN PASS")' in helper
+
+
+def test_v361_uses_unique_com_clsid_and_build_directory():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text(encoding="utf-8")
+    ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    assert '[Guid("8B7F2A13-1F51-47F4-9D1A-A7E0F364C001")]' in cs
+    assert 'clsid = "{8B7F2A13-1F51-47F4-9D1A-A7E0F364C001}"' in ext
+    assert 'energologic_visio_editor_addin_v364' in ext
+    assert 'EnergoLogic.VisioEditorAddinV360": "{8B7F2A13-1F51-47F4-9D1A-A7E0F360C001}"' in ext
+
+
+def test_topology_helper_prepares_offscreen_selections_before_undo_scope():
+    from pathlib import Path
+    helper = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text(encoding="utf-8")
+    prepare = helper.index("page.CreateSelection(0, 0x100)")
+    scope = helper.index("app.BeginUndoScope(scopeName)")
+    assert prepare < scope
+    apply_start = helper.index("private static void ApplyMoveStep(")
+    apply_end = helper.index("[STAThread]", apply_start)
+    apply = helper[apply_start:apply_end]
+    assert "preparedSelection.Move(step.DxMm, step.DyMm, \"mm\")" in apply
+    assert "SelectIds(app, page, step.MemberIds)" not in apply
+    assert "app.ActiveWindow.Selection.Move" not in apply
+    assert "MOVE_SELECTIONS_PREPARED" in helper
+
+
+def test_topology_helper_compound_scope_is_application_bound():
+    from pathlib import Path
+    helper = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text(encoding="utf-8")
+    main = helper[helper.index("private static int Main(string[] args)"):]
+    assert "app.BeginUndoScope(scopeName)" in main
+    assert "app.EndUndoScope(transactionScope, true)" in main
+    assert "transactionApp = app;" in main
+    assert "SCOPE_BEGIN owner=application" in main
+
+
+def test_topology_helper_auto_detaches_only_double_ended_managed_sources():
+    from pathlib import Path
+    helper = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_topology_restore_helper.cs").read_text(encoding="utf-8")
+    assert "managedEndpointsBySource" in helper
+    assert 'item.Value.Contains("begin")' in helper
+    assert 'item.Value.Contains("end")' in helper
+    assert "movedMemberIds.Contains(item.Key)" in helper
+    assert "moveAnchorEndpoints.Contains(key)" in helper
+    assert "AUTO_DETACH_DOUBLE_ENDED" in helper
+    assert "EXPLICIT_DETACHES_APPLIED" in helper
+
+
+def test_editor_api_hot_path_does_not_refresh_com_addins():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    start = source.index("    def invoke_energologic_editor_api(")
+    end = source.index("    @mcp.tool()", start + 10)
+    body = source[start:end]
+    assert "addins = app.COMAddIns" in body
+    assert "addins.Update()" not in body
+    assert 'addins.Item("EnergoLogic.VisioEditorAddinV364")' in body
+
+
+def test_editor_api_hot_path_does_not_reactivate_same_page():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    start = source.index("    def invoke_energologic_editor_api(")
+    end = source.index("    @mcp.tool()", start + 10)
+    body = source[start:end]
+    assert "active_name != target_name or active_doc != target_doc" in body
+    assert "window.Page = page_obj" in body
+    prefix = body[:body.index("if active_name != target_name or active_doc != target_doc") ]
+    assert "app.ActiveWindow.Page = page_obj" not in prefix
+
+
+
+
+def test_v362_migrates_v361_registration():
+    from pathlib import Path
+    ext = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    assert '"EnergoLogic.VisioEditorAddinV361": "{8B7F2A13-1F51-47F4-9D1A-A7E0F361C001}"' in ext
+
+
+def test_v364_compilation_embeds_office_interop_and_is_anycpu():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    cs = (root / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text(encoding="utf-8")
+    ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    installer = (root / "managed" / "visio" / "portable_kit" / "Install-EnergoLogic.ps1").read_text(encoding="utf-8-sig")
+    assert '"/platform:anycpu"' in ext
+    assert 'f"/link:{office_ref}"' in ext
+    assert 'extensibility_ref' not in ext[ext.index("def install_energologic_editor_ui"):ext.index("def get_energologic_editor_ui_status")]
+    assert 'namespace Extensibility' in cs
+    assert 'B65AD801-ABAF-11D0-BB8B-00A0C90F2744' in cs
+    assert '289E9AF1-4973-11D1-AE81-00A0C90F26F4' in cs
+    assert '289E9AF2-4973-11D1-AE81-00A0C90F26F4' in cs
+    assert 'csc.exe' not in installer
+    assert '$OfficeRef' not in installer
+    assert '$ExtensibilityRef' not in installer
+    assert '$PrebuiltDllPath' in installer
+    assert 'runtime PIA dependency' in installer
+
+
+def test_v364_migrates_v362_registration():
+    from pathlib import Path
+    ext = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    assert '"EnergoLogic.VisioEditorAddinV362": "{8B7F2A13-1F51-47F4-9D1A-A7E0F362C001}"' in ext
+
+
+def test_managed_v364_registration_covers_both_registry_views():
+    from pathlib import Path
+    ext = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    body = ext[ext.index("def install_energologic_editor_ui"):ext.index("def get_energologic_editor_ui_status")]
+    assert "winreg.KEY_WOW64_64KEY" in body
+    assert "winreg.KEY_WOW64_32KEY" in body
+    assert "for view in registry_views" in body
+    assert "discover_editor_progids" in body
+    assert "delete_tree_view" in body
+
+
+def test_local_idtextensibility2_matches_office_com_marshaling_contract():
+    from pathlib import Path
+    cs = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "energologic_visio_editor_addin.cs").read_text(encoding="utf-8")
+    assert '[DispId(1)]' in cs and '[DispId(5)]' in cs
+    assert 'MarshalAs(UnmanagedType.IDispatch)' in cs
+    assert 'MarshalAs(UnmanagedType.SafeArray, SafeArraySubType = VarEnum.VT_VARIANT)' in cs
+    assert 'MethodImplOptions.InternalCall' in cs
+    assert 'MethodCodeType.Runtime' in cs
+
+
+def test_v364_migrates_failed_v363_registration():
+    from pathlib import Path
+    ext = (Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    assert '"EnergoLogic.VisioEditorAddinV363": "{8B7F2A13-1F51-47F4-9D1A-A7E0F363C001}"' in ext
+
+
+def test_portable_v364_installer_uses_prebuilt_binaries_without_target_compiler_or_pia():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    installer = (root / "managed" / "visio" / "portable_kit" / "Install-EnergoLogic.ps1").read_text(encoding="utf-8-sig")
+    ext = (root / "managed" / "visio" / "visio_managed_extension.py").read_text(encoding="utf-8")
+    assert '$PrebuiltDllPath' in installer and '$PrebuiltHelperPath' in installer
+    assert 'Copy-Item -LiteralPath $PrebuiltDllPath' in installer
+    assert 'Copy-Item -LiteralPath $PrebuiltHelperPath' in installer
+    assert 'csc.exe' not in installer
+    assert '$OfficeRef' not in installer
+    assert 'OfficeCandidates' not in installer
+    assert 'runtime PIA dependency' in installer
+    builder = ext[ext.index("def build_energologic_portable_kit"):ext.index("def render_page_png") ]
+    assert 'portable_dll = bin_dir / "EnergoLogic.VisioEditorAddinV364.dll"' in builder
+    assert '"/platform:anycpu"' in builder
+    assert 'f"/link:{office_ref}"' in builder
+    assert 'RUNTIME_PIA_DEPENDENCY=NONE' in builder

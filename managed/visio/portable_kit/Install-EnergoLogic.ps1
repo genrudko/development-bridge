@@ -6,11 +6,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Version = "0.3.49"
-$ProgId = "EnergoLogic.VisioEditorAddinV349"
-$Clsid = "{7FA902A8-D36C-4ED0-B299-445A538AF349}"
+$Version = "0.3.64"
+$ProgId = "EnergoLogic.VisioEditorAddinV364"
+$Clsid = "{8B7F2A13-1F51-47F4-9D1A-A7E0F364C001}"
 $ClassName = "EnergoLogicVisioEditor.Connect"
-$AssemblyName = "EnergoLogic.VisioEditorAddinV349, Version=0.3.49.0, Culture=neutral, PublicKeyToken=null"
+$AssemblyName = "EnergoLogic.VisioEditorAddinV364, Version=0.3.64.0, Culture=neutral, PublicKeyToken=null"
 $Category = "{62C8FE65-4EBB-45E7-B440-6E39B2CDBF29}"
 
 $KitRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -40,11 +40,34 @@ if (Test-Path -LiteralPath $ManifestPath) {
 $PayloadRoot = Join-Path $KitRoot "payload"
 $SourcePath = Join-Path $PayloadRoot "EnergoLogicVisioEditorAddin.cs"
 $HelperSourcePath = Join-Path $PayloadRoot "EnergoLogicTopologyRestoreHelper.cs"
+$KitBinRoot = Join-Path $KitRoot "bin"
+$PrebuiltDllPath = Join-Path $KitBinRoot "EnergoLogic.VisioEditorAddinV364.dll"
+$PrebuiltHelperPath = Join-Path $KitBinRoot "EnergoLogic.TopologyRestoreHelper.exe"
 
 if (-not (Test-Path -LiteralPath $SourcePath)) { throw "Не найден payload: $SourcePath" }
 if (-not (Test-Path -LiteralPath $HelperSourcePath)) { throw "Не найден payload: $HelperSourcePath" }
+if (-not (Test-Path -LiteralPath $PrebuiltDllPath)) { throw "Не найден готовый add-in: $PrebuiltDllPath" }
+if (-not (Test-Path -LiteralPath $PrebuiltHelperPath)) { throw "Не найден готовый topology helper: $PrebuiltHelperPath" }
 
-if (-not $CompileOnly -and (Get-Process VISIO -ErrorAction SilentlyContinue)) {
+$ReferencedAssemblies = @([Reflection.Assembly]::ReflectionOnlyLoadFrom($PrebuiltDllPath).GetReferencedAssemblies())
+$InteropRuntimeRefs = @($ReferencedAssemblies | Where-Object {
+    $_.Name -match '^(Office|Extensibility|Microsoft\.VisualStudio\.Interop)$'
+})
+if ($InteropRuntimeRefs.Count -gt 0) {
+    throw ("Готовая DLL содержит запрещенную runtime-зависимость от Office/Extensibility PIA: " +
+        (($InteropRuntimeRefs | ForEach-Object { $_.FullName }) -join '; '))
+}
+
+Write-Host "Проверка готовых бинарников: OK" -ForegroundColor Green
+Write-Host "Architecture: AnyCPU; runtime PIA dependency: NONE" -ForegroundColor Green
+Write-Host "IDTExtensibility2: embedded local COM contract" -ForegroundColor Green
+
+if ($CompileOnly) {
+    Write-Host "CompileOnly: пакет и готовые бинарники проверены; регистрация COM пропущена." -ForegroundColor Yellow
+    exit 0
+}
+
+if (Get-Process VISIO -ErrorAction SilentlyContinue) {
     throw "Перед установкой полностью закройте Microsoft Visio."
 }
 
@@ -57,104 +80,10 @@ New-Item -ItemType Directory -Force -Path $BinRoot, $InstalledPayload | Out-Null
 Copy-Item -LiteralPath $SourcePath -Destination (Join-Path $InstalledPayload "EnergoLogicVisioEditorAddin.cs") -Force
 Copy-Item -LiteralPath $HelperSourcePath -Destination (Join-Path $InstalledPayload "EnergoLogicTopologyRestoreHelper.cs") -Force
 
-$DllPath = Join-Path $BinRoot "EnergoLogic.VisioEditorAddinV349.dll"
+$DllPath = Join-Path $BinRoot "EnergoLogic.VisioEditorAddinV364.dll"
 $HelperExePath = Join-Path $BinRoot "EnergoLogic.TopologyRestoreHelper.exe"
-
-function First-ExistingFile([string[]]$Candidates) {
-    foreach ($candidate in $Candidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-        $items = @(Get-ChildItem -Path $candidate -File -ErrorAction SilentlyContinue)
-        if ($items.Count -gt 0) { return $items[0].FullName }
-    }
-    return $null
-}
-
-$FrameworkCandidates = @(
-    (Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319"),
-    (Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319")
-)
-$Framework = $null
-foreach ($candidate in $FrameworkCandidates) {
-    if (Test-Path -LiteralPath (Join-Path $candidate "csc.exe")) {
-        $Framework = $candidate
-        break
-    }
-}
-if (-not $Framework) {
-    throw ".NET Framework 4.x csc.exe не найден. На Windows 10/11 включите .NET Framework 4.x."
-}
-
-$ProgramFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
-
-$OfficeCandidates = @(
-    (Join-Path $env:WINDIR "Microsoft.NET\assembly\GAC_MSIL\Office\*\Office.dll"),
-    (Join-Path $env:WINDIR "assembly\GAC_MSIL\Office\*\Office.dll"),
-    (Join-Path $env:ProgramFiles "Microsoft Office\root\Office16\ADDINS\PowerPivot Excel Add-in\OFFICE.dll")
-)
-if ($ProgramFilesX86) {
-    $OfficeCandidates += (Join-Path $ProgramFilesX86 "Microsoft Office\root\Office16\ADDINS\PowerPivot Excel Add-in\OFFICE.dll")
-}
-$OfficeRef = First-ExistingFile $OfficeCandidates
-if (-not $OfficeRef) {
-    throw "Не найдена Microsoft Office PIA (Office.dll). Установите компоненты .NET/PIA Microsoft Office/Visio."
-}
-
-$ExtensibilityCandidates = @(
-    (Join-Path $env:WINDIR "Microsoft.NET\assembly\GAC_MSIL\Extensibility\*\Extensibility.dll"),
-    (Join-Path $env:WINDIR "assembly\GAC_MSIL\Extensibility\*\Extensibility.dll"),
-    (Join-Path $env:WINDIR "Microsoft.NET\assembly\GAC_MSIL\Microsoft.VisualStudio.Interop\*\Microsoft.VisualStudio.Interop.dll"),
-    (Join-Path $env:WINDIR "assembly\GAC_MSIL\Microsoft.VisualStudio.Interop\*\Microsoft.VisualStudio.Interop.dll"),
-    (Join-Path $env:ProgramFiles "Microsoft Visual Studio\2022\*\Common7\IDE\PublicAssemblies\Microsoft.VisualStudio.Interop.dll")
-)
-if ($ProgramFilesX86) {
-    $ExtensibilityCandidates += (Join-Path $ProgramFilesX86 "Microsoft Visual Studio\2022\*\Common7\IDE\PublicAssemblies\Microsoft.VisualStudio.Interop.dll")
-}
-$ExtensibilityRef = First-ExistingFile $ExtensibilityCandidates
-if (-not $ExtensibilityRef) {
-    throw "Не найдена Extensibility/Visual Studio Interop assembly для IDTExtensibility2."
-}
-
-$Csc = Join-Path $Framework "csc.exe"
-$EditorSource = Join-Path $InstalledPayload "EnergoLogicVisioEditorAddin.cs"
-$HelperSource = Join-Path $InstalledPayload "EnergoLogicTopologyRestoreHelper.cs"
-
-$EditorArgs = @(
-    "/nologo", "/target:library", "/platform:anycpu", "/optimize+",
-    ("/out:" + $DllPath),
-    ("/reference:" + $ExtensibilityRef),
-    ("/reference:" + $OfficeRef),
-    ("/reference:" + (Join-Path $Framework "System.Windows.Forms.dll")),
-    ("/reference:" + (Join-Path $Framework "System.Drawing.dll")),
-    ("/reference:" + (Join-Path $Framework "Microsoft.CSharp.dll")),
-    $EditorSource
-)
-& $Csc @EditorArgs
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $DllPath)) {
-    throw "Не удалось скомпилировать EnergoLogic Visio Editor."
-}
-
-$HelperArgs = @(
-    "/nologo", "/target:exe", "/platform:anycpu", "/optimize+",
-    ("/out:" + $HelperExePath),
-    ("/reference:" + (Join-Path $Framework "Microsoft.CSharp.dll")),
-    $HelperSource
-)
-& $Csc @HelperArgs
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $HelperExePath)) {
-    throw "Не удалось скомпилировать EnergoLogic topology helper."
-}
-
-Copy-Item -LiteralPath $OfficeRef -Destination (Join-Path $BinRoot ([IO.Path]::GetFileName($OfficeRef))) -Force
-Copy-Item -LiteralPath $ExtensibilityRef -Destination (Join-Path $BinRoot ([IO.Path]::GetFileName($ExtensibilityRef))) -Force
-
-Write-Host "Компиляция EnergoLogic Editor: OK" -ForegroundColor Green
-Write-Host "Office reference: $OfficeRef"
-Write-Host "Extensibility reference: $ExtensibilityRef"
-
-if ($CompileOnly) {
-    Write-Host "CompileOnly: регистрация COM и установка трафаретов пропущены." -ForegroundColor Yellow
-    exit 0
-}
+Copy-Item -LiteralPath $PrebuiltDllPath -Destination $DllPath -Force
+Copy-Item -LiteralPath $PrebuiltHelperPath -Destination $HelperExePath -Force
 
 function Registry-Views {
     if ([Environment]::Is64BitOperatingSystem) {

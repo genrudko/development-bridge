@@ -3,8 +3,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$ProgId = "EnergoLogic.VisioEditorAddinV349"
-$Version = "0.3.49"
+$ProgId = "EnergoLogic.VisioEditorAddinV364"
+$Version = "0.3.64"
 $StencilsRoot = Join-Path $env:LOCALAPPDATA "EnergoLogic\Stencils"
 
 function Get-VisioApplication {

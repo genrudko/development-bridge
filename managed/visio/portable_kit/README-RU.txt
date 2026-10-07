@@ -1,4 +1,4 @@
-EnergoLogic Visio Editor Kit 0.3.49
+﻿EnergoLogic Visio Editor Kit 0.3.64
 ===================================
 
 Офлайн-пакет EnergoLogic Editor для Microsoft Visio.
@@ -8,8 +8,8 @@ EnergoLogic Visio Editor Kit 0.3.49
 ----------
 - Windows 10/11.
 - Microsoft Visio desktop. Целевая совместимость проекта: Visio 2010 и новее.
-- .NET Framework 4.x.
-- Office/Visio PIA (Office.dll + Extensibility/Interop) из установленного Office/Visio.
+- .NET Framework 4.x runtime.
+- Office/Visio PIA, Visual Studio, C# compiler и .NET Programmability Support НЕ требуются.
 
 Установка
 ---------
@@ -42,6 +42,7 @@ EnergoLogic намеренно не грузится автоматически 
 Проверка без регистрации
 ------------------------
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-EnergoLogic.ps1 -CompileOnly
+Команда проверяет MANIFEST.json и готовые AnyCPU DLL/EXE; ничего не компилирует и COM не регистрирует.
 
 Удаление
 --------
@@ -49,8 +50,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-EnergoLogic.ps
 
 Совместимость
 -------------
-Installer не привязан к Office16/OneDrive и компилирует add-in на целевом ПК.
-Полная матрица Visio 2010/2013/2016/2019/2021/M365 остаётся отдельным WS-3 qualification gate.
+Installer не привязан к Office16/OneDrive и не компилирует add-in на целевом ПК.
+Add-in и topology helper поставляются готовыми AnyCPU-бинарниками. Office interop types встроены
+в DLL, IDTExtensibility2 встроен как локальный COM-контракт; runtime PIA dependency отсутствует.
+Архитектурная целевая совместимость: Visio 2010 и новее, 32/64-bit. Физически live-проверен
+текущий Visio 16.x; старые версии требуют отдельной машинной qualification на соответствующих SKU.
 
 Целостность пакета
 ------------------
@@ -60,5 +64,5 @@ Install-EnergoLogic.ps1 проверяет manifest до компиляции и
 
 Что переносить
 --------------
-Достаточно одного ZIP EnergoLogic-Visio-Editor-Kit-0.3.49.zip.
+Достаточно одного ZIP EnergoLogic-Visio-Editor-Kit-0.3.64.zip.
 На рабочем ПК Интернет, ChatGPT, MCP, Python и Visual Studio не требуются.
