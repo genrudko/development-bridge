@@ -19,7 +19,7 @@ from app.container import ApplicationContainer
 
 
 VISIO_MANAGED_UPDATE_TOOL = "__openai_visio_managed_update"
-VISIO_MANAGED_EXTENSION_VERSION = "2026.10.09.1"
+VISIO_MANAGED_EXTENSION_VERSION = "2026.10.09.2"
 VISIO_MANAGED_EXTENSION_PATH = (
     Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py"
 )
