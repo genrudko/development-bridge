@@ -166,14 +166,23 @@ class SenderRoundTripTest(unittest.IsolatedAsyncioTestCase):
             desktop=FakeDesktop(directory)
             outbox=directory/"visio-outbox"
             outbox.mkdir()
-            # Repeating a deflated dummy part creates an OPC-valid file >160 KiB
-            # without modifying the trusted fixture.
+            # Preserve every existing Visio OPC part. Add only ignorable XML
+            # whitespace to a known page, then store that part uncompressed;
+            # the earlier orphan-media test was rejected by native Visio.
             from zipfile import ZipFile, ZIP_STORED
+            from xml.etree import ElementTree as ET
             out=outbox/"Large.vsdx"
             with ZipFile(FIXTURE) as orig, ZipFile(out, "w") as large:
                 for info in orig.infolist():
-                    large.writestr(info.filename, orig.read(info.filename))
-                large.writestr("visio/media/test.bin", b"Z"*340000, compress_type=ZIP_STORED)
+                    raw = orig.read(info.filename)
+                    if info.filename == "visio/pages/page1.xml":
+                        closing = raw.rfind(b"</")
+                        assert closing > 0
+                        raw = raw[:closing] + b" "*350000 + raw[closing:]
+                        ET.fromstring(raw)
+                        large.writestr(info, raw, compress_type=ZIP_STORED)
+                    else:
+                        large.writestr(info, raw)
             result=await transfer_artifact(SimpleNamespace(desktop_nodes=desktop),
                                            node_id="visio-workstation", file_name="Large.vsdx",
                                            open_in_visio=True, error_reader=lambda response: None)
