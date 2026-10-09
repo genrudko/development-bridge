@@ -19,6 +19,7 @@ VISIO_SURFACE = {
     "visio_operator_reply",
     "visio_operator_ack",
     "visio_operator_notes",
+    "visio_transfer_artifact",
     "visio_call",
     "visio_submit",
     "visio_operation_status",
