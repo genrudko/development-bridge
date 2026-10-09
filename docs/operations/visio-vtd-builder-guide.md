@@ -287,3 +287,28 @@ U2 winding = star          -> INDEX(4,...)
 ```
 
 A COM-dropped `ТСН2` can look superficially plausible while retaining default `U2 = undefined` and undefined winding connections. Visual QA alone is not sufficient for this class of error because the symbol can still resemble the intended transformer. For multi-winding apparatus, acceptance must include both rendered-image inspection and Shape Data verification of all voltage/winding fields.
+
+## Original VTD binary stencils — qualified safe COM open (2026-10-09)
+
+Do not copy or replace source VSS files. The eight originals at
+`C:\ProgramData\VTD\nsps\ГОСТ` are SHA-256-pinned to the supplied VTD archive.
+The upstream `open_stencil` helper internally calls `Documents.OpenEx(path,18)`;
+seven original legacy VSS files failed in the live Visio session under that mode.
+**Verified safe path:** call the server-pinned managed tool
+`probe_original_vtd_stencil(master_library="Трансформаторы.vss", flags=394)`.
+It only accepts eight fixed original filenames and reads from the fixed VTD
+path. Flag `394` requests read-only, macros disabled, no workspace and no MRU.
+After one safe open, the library is registered as an actual Visio stencil and
+is available to normal `list_masters`/`drop_shape` and ShapeSheet inspection.
+Live acceptance: **8 original VSS, 107 masters**, all opened through COM.
+
+**Critical identity:** `Masters.ItemU` expects `NameU`, not displayed `Name`.
+Ten of 107 masters differ (e.g. `Т2` -> `Т 2_х обмоточный`,
+`Шина20` -> `Шина15`). Renderers MUST retain and use stable `NameU`.
+Authentic catalog with 107 Name+NameU pairs and stencil hashes is recorded
+in the EnergoLogic VPS work-item checkpoint.
+
+When saving a new native VSDM via `save_document_as`, use the approved
+Windows `VisioMCP\workspace` directory, not the Desktop or OneDrive.
+Use a fresh filename for every revision. Do not confuse drawing-save policy
+with native master-loading errors.
