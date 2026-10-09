@@ -56,6 +56,7 @@ VISIO_READ_ONLY_TOOLS = frozenset({
     "get_energologic_editor_ui_diagnostics",
     "render_page_png",
     "read_connection_points",
+    "inventory_original_vtd_stencils",
     "operator_notes_peek",
     "open_document",
     "open_stencil",
