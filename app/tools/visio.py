@@ -14,11 +14,12 @@ from mcp.server.mcpserver.utilities.types import Image
 from app.api.errors import BridgeError, ErrorCode
 from app.api.registry import RegisteredTool
 from app.api.results import failure, success, to_mcp_result
+from app.tools.visio_artifact_transfer import transfer_artifact, outbox_path
 from app.container import ApplicationContainer
 
 
 VISIO_MANAGED_UPDATE_TOOL = "__openai_visio_managed_update"
-VISIO_MANAGED_EXTENSION_VERSION = "2026.10.06.213"
+VISIO_MANAGED_EXTENSION_VERSION = "2026.10.09.1"
 VISIO_MANAGED_EXTENSION_PATH = (
     Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_managed_extension.py"
 )
@@ -27,6 +28,9 @@ VISIO_EDITOR_SOURCE_PATH = (
 )
 VISIO_CONSOLE_SOURCE_PATH = (
     Path(__file__).resolve().parents[2] / "managed" / "visio" / "visio_bridge_console.pyw"
+)
+VISIO_ARTIFACT_RECEIVER_SOURCE_PATH = (
+    Path(__file__).resolve().parents[2] / "managed" / "visio" / "artifact_receiver.py"
 )
 
 VISIO_READ_ONLY_TOOLS = frozenset({
@@ -362,6 +366,8 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         raw = VISIO_MANAGED_EXTENSION_PATH.read_bytes()
         console_b64 = base64.b64encode(VISIO_CONSOLE_SOURCE_PATH.read_bytes())
         raw = raw.replace(b"__CONSOLE_SOURCE_B64__", console_b64)
+        artifact_receiver_b64 = base64.b64encode(VISIO_ARTIFACT_RECEIVER_SOURCE_PATH.read_bytes())
+        raw = raw.replace(b"__ARTIFACT_RECEIVER_SOURCE_B64__", artifact_receiver_b64)
         compressed = lzma.compress(raw, preset=9)
         loader = (
             b"import base64,lzma\n"
@@ -501,6 +507,23 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
             )
         )
 
+    async def artifact_transfer_explicit(ctx, params, request_context):
+        args = params.arguments
+        try:
+            result = await transfer_artifact(
+                container,
+                node_id=args["node_id"],
+                file_name=args["file_name"],
+                open_in_visio=args.get("open_in_visio", True),
+                error_reader=_payload_error,
+            )
+            return to_mcp_result(success(request_context.request_id, result))
+        except Exception as exc:
+            return to_mcp_result(
+                failure(request_context.request_id,
+                        BridgeError(ErrorCode.INTERNAL_ERROR, str(exc)))
+            )
+
     async def submit(ctx, params, request_context):
         args = params.arguments
         _validate_visio_invocation(args)
@@ -572,6 +595,17 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
         "required": ["node_id"],
         "additionalProperties": False,
     }
+    artifact_transfer_schema = {
+        "type": "object",
+        "properties": {
+            "node_id": node,
+            "file_name": {"type": "string", "minLength": 6, "maxLength": 128},
+            "open_in_visio": {"type": "boolean", "default": True},
+        },
+        "required": ["node_id", "file_name"],
+        "additionalProperties": False,
+    }
+
     invocation = {
         "type": "object",
         "properties": {
@@ -743,6 +777,15 @@ def visio_tools(container: ApplicationContainer) -> tuple[RegisteredTool, ...]:
                 inputSchema=common,
             ),
             managed_update_explicit,
+            "visio-desktop",
+        ),
+        RegisteredTool(
+            types.Tool(
+                name="visio_transfer_artifact",
+                description="Transfer a pre-created .vsdx/.vsdm from server-pinned outbox to the authorized Windows Visio node, SHA-256 verify and optionally open macro-disabled.",
+                inputSchema=artifact_transfer_schema,
+            ),
+            artifact_transfer_explicit,
             "visio-desktop",
         ),
         RegisteredTool(
