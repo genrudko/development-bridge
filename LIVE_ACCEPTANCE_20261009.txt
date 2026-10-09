@@ -1,0 +1,14 @@
+EnergoLogic VISIO ARTIFACT TRANSFER — LIVE ACCEPTANCE 2026-10-09
+STATUS: MVP ACCEPTED for connected visio-workstation. Existing bridge updated via official Master MCP visio_managed_update; Windows extension 2026.10.09.1 PASS SHA verification.
+Server visio-bridge.service ACTIVE with reversible systemd override WorkingDirectory=/home/admin/experiments/visio-artifact-transfer-mvp. Main and production repo sources unmodified.
+Branch feature/visio-artifact-transfer-mvp: implementation 2970bff; corrected large-file test a712119. 162 Python tests PASS. No GitHub Actions and no merge.
+Node published 85 tools including stage_visio_artifact_chunk, visio_artifact_status, open_received_visio_artifact.
+ACCEPTED native COM evidence:
+1) EnergoLogic_Transfer_Smoke_20261009.vsdx: size=11024 SHA256=0b044f1a7a5649ebcde36cd0619e074a884c517aa3d2f4aef356f18eae3c095d, 1 chunk, opened, 1 page.
+2) EnergoLogic_Transfer_MacroDisabled_20261009.vsdm: size=17914 SHA256=4999e7ab1a04906532f1229a0292909dd5a4612331215c13b0b8edef19c657ca, 1 chunk, opened, 1 page, OpenEx flags=394 (read-only, macros disabled).
+3) EnergoLogic_Transfer_Multichunk_Valid_20261009.vsdx: size=376178 SHA256=4afecaaf292f1642e0165496a280d4576eb56a9bc13fb32269f838f1a9143282, 3 chunks, opened, 1 page.
+All 3 open docs independently confirmed through live Visio COM list_open_documents, paths under %LOCALAPPDATA%/OpenAI/VisioMCP/workspace/received_artifacts/<transfer-id>/.
+An earlier deliberately malformed multichunk package had intact SHA256 but native Visio rejected an orphan media part. Corrected to large native-openable file keeping OPC part names identical and adding only XML whitespace; COM opened successfully. Transport does not guarantee arbitrary OPC semantic validity.
+Usage: place a .vsdx/.vsdm (<=32 MiB) in /home/admin/.local/state/development-bridge/visio-outbox/; invoke Master MCP server visio-bridge tool visio_transfer_artifact with node_id=visio-workstation, file_name=<safe basename>, open_in_visio=true.
+Separate issues still open: native SaveAs bridge error, actual WTG1/KTP1 .vsdm not generated/accepted yet. Do not claim electrical topo done.
+Rollback: remove /home/admin/.config/systemd/user/visio-bridge.service.d/visio-transfer-mvp.conf, reload and restart user systemd visio-bridge.service.

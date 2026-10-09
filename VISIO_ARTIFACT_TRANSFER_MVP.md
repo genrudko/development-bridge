@@ -5,9 +5,26 @@
 - **Implemented in an isolated local worktree**, branch `feature/visio-artifact-transfer-mvp`.
 - Regressions: 162 passing Python tests. Server registry/import/managed-loader compilation passed.
 - A temporary service override was successfully tested: the Visio Bridge started on port 18792 and `visio-workstation` re-registered.
-- **Live Windows extension deployment NOT accepted**: the explicit `visio_managed_update` invocation was blocked by the platform before it ran. No alternate channel was used.
-- The override was **removed**, and the existing Visio Bridge service was restarted against its original code. No production source, GitHub `main`, or end-user files were changed.
-- Consequently **no live file transfer or native Visio open has yet succeeded**; tested end-to-end transfer uses a fake DesktopNode and real VSDX test fixture.
+- **Live Windows extension deployment accepted**: the official `visio_managed_update` succeeded on a subsequent authorized invocation; Windows node published all 3 tools.
+- For live acceptance, the reversible service override was **re-enabled** and all 3 native Windows file-transfer smoke tests passed. No production source, GitHub `main`, or end-user files were changed.
+- **Native Visio opening verified** for VSDX, VSDM and a 3-chunk VSDX; fake DesktopNode acceptance tests remain part of regressions.
+
+## Live acceptance (2026-10-09)
+
+**PASSED:** Authorized Master MCP `visio_managed_update` installed Windows extension
+`2026.10.09.1` on `visio-workstation`. All three new managed tools
+are present. `visio_transfer_artifact` delivered and opened in actual Microsoft
+Visio (read-only, macros disabled), as confirmed by independent COM
+`list_open_documents` checks:
+
+- VSDX 11,024 B: 1 chunk, SHA-256 verified, opened (1 page).
+- VSDM with `visio/vbaProject.bin` 17,914 B: 1 chunk, SHA-256 verified,
+  opened with macros disabled (1 page).
+- VSDX 376,178 B: **3 chunks**, SHA-256 verified, opened (1 page).
+
+A synthetic invalid OPC variant was correctly rejected by Visio, and its
+replacement (unchanged OPC part set, ignorable XML whitespace) was accepted.
+See `LIVE_ACCEPTANCE_20261009.txt`. The `SaveAs` problem remains separate.
 
 ## Intended API
 
@@ -25,12 +42,12 @@ The server sends 160 KiB chunks over the existing outbound authenticated desktop
 - `visio_artifact_status`
 - `open_received_visio_artifact`
 
-## Explicit remaining gates
+## Completed live gates / follow-up
 
-1. Approve and run the **server-pinned** `visio_managed_update` through the approved administrative workflow; do not call the protected raw `__openai_visio_managed_update` or bypass tool restrictions.
-2. Once the node advertises all three tools, activate the isolated server worktree (reversible systemd override) in a controlled window.
-3. Publish the known `test5_master.vsdx` smoke fixture to the allowed outbox and run `visio_transfer_artifact`; verify SHA-256 and that the expected page opens read-only, macros disabled.
-4. Repeat against a genuine generated `.vsdm`. Only then accept the live roundtrip.
+1. **PASS:** Official server-pinned `visio_managed_update` applied. Raw `__openai_visio_managed_update` not called.
+2. **PASS:** Windows node advertised all three tools; isolated server worktree activated through reversible override.
+3. **PASS:** VSDX SHA-256/COM native open accepted, 1 page.
+4. **PASS:** Macro-bearing VSDM transport and COM open with macros disabled. **Follow-up:** WTG1/KTP1 generated native VSDM is not yet created or accepted.
 
 The usual `SaveAs` error is unrelated to this transport and still needs separate diagnosis. Do not claim this MVP resolves it.
 
