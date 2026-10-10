@@ -347,7 +347,7 @@ async def test_probe_ignores_conversation_body_containing_auth_and_cloudflare_ph
 
 
 @pytest.mark.asyncio
-async def test_probe_process_failure_is_owner_input_required_and_never_sends(tmp_path: Path):
+async def test_probe_process_failure_browser_unavailable_is_retryable(tmp_path: Path):
     target = WakeTarget(
         route_id="r1",
         channel_id="c1",
@@ -370,7 +370,8 @@ async def test_probe_process_failure_is_owner_input_required_and_never_sends(tmp
 
     result = await transport.probe(target)
     assert result.ready is False
-    assert result.owner_input_required is True
+    assert result.owner_input_required is False
+    assert result.disposition == "browser_unavailable"
     assert "--send" not in runner.calls[0][0]
 
 
@@ -441,7 +442,7 @@ async def test_probe_generic_nonzero_failure_is_transient_not_owner_input(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_probe_explicit_endpoint_and_auth_nonzero_failure_requires_owner_input(tmp_path: Path):
+async def test_probe_distinguishes_endpoint_failure_from_authentication_failure(tmp_path: Path):
     target = WakeTarget(
         route_id="r1",
         channel_id="c1",
@@ -470,7 +471,9 @@ async def test_probe_explicit_endpoint_and_auth_nonzero_failure_requires_owner_i
         )
         result = await transport.probe(target)
         assert result.ready is False
-        assert result.owner_input_required is True
+        is_auth = "cloudflare" in err.lower() or "log in" in err.lower() or "sign up" in err.lower()
+        assert result.owner_input_required is is_auth
+        assert result.disposition == ("authentication_required" if is_auth else "browser_unavailable")
         assert "--send" not in runner.calls[0][0]
 
 
@@ -504,7 +507,7 @@ async def test_probe_runner_exception_classification(tmp_path: Path):
         assert result.owner_input_required is False
         assert "--send" not in runner.calls[0][0]
 
-    # 2. Runner exception proving endpoint/connection failure -> owner_input_required
+    # 2. Runner exception proving endpoint/connection failure remains retryable
     owner_exceptions = [
         ConnectionRefusedError("connect ECONNREFUSED 127.0.0.1:9222"),
         RuntimeError("Browser endpoint unreachable at http://127.0.0.1:9222"),
@@ -521,7 +524,8 @@ async def test_probe_runner_exception_classification(tmp_path: Path):
         )
         result = await transport.probe(target)
         assert result.ready is False
-        assert result.owner_input_required is True
+        assert result.owner_input_required is False
+        assert result.disposition == "browser_unavailable"
         assert "--send" not in runner.calls[0][0]
 
 

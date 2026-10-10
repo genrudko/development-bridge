@@ -33,6 +33,7 @@ class PendingWake:
     escalation_delay_seconds: float = 0.0
     escalation_message: str | None = None
     escalation_at: float | None = None
+    escalation_notified_at: float | None = None
     transport_delivered: bool = False
     transport_delivered_at: float | None = None
     last_transport_name: str | None = None
@@ -72,6 +73,7 @@ class CoordinatorService:
     LEASE_SECONDS = 20.0
     BROWSER_PREFLIGHT_TTL_SECONDS = 15.0
     X_LISTENER_HEARTBEAT_TTL_SECONDS = 15.0
+    X_DIRECT_FALLBACK_GRACE_SECONDS = 20.0
     MAX_UNDELIVERED_AGE_SECONDS = 1800.0
     SESSION_BINDING_TTL_SECONDS = 86_400.0
     MAX_SESSION_BINDINGS = 256
@@ -344,6 +346,20 @@ class CoordinatorService:
         # that existing lease one normal heartbeat TTL to reconnect before direct fallback.
         last_seen_at = max(refreshed_at, self._started_at)
         return last_seen_at + self.X_LISTENER_HEARTBEAT_TTL_SECONDS >= now
+
+    def _x_listener_blocks_direct(
+        self, wake: PendingWake, now: float, x_listener_active: bool
+    ) -> bool:
+        """Give X a short opportunity to claim, then admit atomic direct fallback.
+
+        X and direct still share one claim lock; this does not send twice or
+        alter the mounted physical chat's delivery lease.
+        """
+        return (
+            x_listener_active
+            and not self._undelivered_expired(wake, now)
+            and now < wake.available_at + self.X_DIRECT_FALLBACK_GRACE_SECONDS
+        )
 
     def _delivery_lease_matches(
         self, channel_id: str, delivery_lease: str | None, *, delivery_mode: str = "x"
@@ -710,7 +726,11 @@ class CoordinatorService:
                     return {"channel_id": channel_id, "state": "idle", "ready": False}
             claimed = self._lease_active(wake, now)
             exhausted = wake.model_ack_required and wake.delivery_attempts >= wake.max_delivery_attempts
-            expired_undelivered = self._undelivered_expired(wake, now)
+            # Direct transport can safely retry an unclaimed wake after a long
+            # browser outage; X/UI mode retains the legacy expiry guard.
+            expired_undelivered = (
+                delivery_mode != "direct" and self._undelivered_expired(wake, now)
+            )
             web_backoff_until = self._web_backoff_until(now)
             web_cooldown_until = self._web_turn_cooldown_until(channel_id)
             other_claim_until = self._other_claim_until(channel_id, now)
@@ -720,7 +740,14 @@ class CoordinatorService:
                 self._browser_preflight_authorized(wake, now)
                 or (delivery_mode == "x" and explicit_current_lease)
             )
-            direct_listener_blocked = delivery_mode == "direct" and x_listener_active
+            # A live X listener gets a bounded exclusive claim window.
+            # Afterwards both delivery modes share the same atomic claim;
+            # an already-claimed or delivered turn remains impossible to
+            # submit again. Expired X-only wakes remain direct-recoverable.
+            direct_listener_blocked = (
+                delivery_mode == "direct"
+                and self._x_listener_blocks_direct(wake, now, x_listener_active)
+            )
             browser_preflight_blocked = (
                 delivery_mode == "x"
                 and not wake.transport_delivered
@@ -945,12 +972,15 @@ class CoordinatorService:
                 or self._web_backoff_until(now) > now
                 or self._web_turn_cooldown_until(channel_id) > now
                 or self._other_claim_until(channel_id, now) > now
-                or (delivery_mode == "direct" and x_listener_active)
+                or (
+                    delivery_mode == "direct"
+                    and self._x_listener_blocks_direct(wake, now, x_listener_active)
+                )
                 or self._lease_active(wake, now)
                 or wake.transport_delivered
                 or wake.model_acknowledged
                 or self._automatic_delivery_blocked(wake)
-                or self._undelivered_expired(wake, now)
+                or (delivery_mode != "direct" and self._undelivered_expired(wake, now))
                 or (
                     delivery_mode == "x"
                     and not explicit_current_lease
@@ -989,6 +1019,63 @@ class CoordinatorService:
                     }
                 )
             return data
+
+    async def mark_preclaim_auth_required(
+        self, channel_id: str, continuation_id: str, transport_name: str,
+        *, detail: str | None = None,
+    ) -> dict:
+        """Block an authenticated-browser preflight without claiming or sending."""
+        channel_id = self.validate_channel(channel_id)
+        continuation_id = self.validate_continuation_id(continuation_id)
+        transport_name = self._validate_transport_name(transport_name)
+        detail = self._bounded_transport_detail(detail)
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if (wake is None or wake.continuation_id != continuation_id
+                    or wake.claim_id is not None or wake.transport_delivered
+                    or wake.model_acknowledged or self._automatic_delivery_blocked(wake)):
+                return {"marked": False}
+            wake.owner_input_required = True
+            wake.last_transport_name = transport_name
+            wake.last_transport_disposition = "owner_input_required"
+            wake.last_transport_detail = ("auth_preflight: " + (detail or ""))[:self.MAX_TRANSPORT_DETAIL_CHARS]
+            wake.escalation_at = time.time()
+            self._save_state()
+            return {"marked": True, "continuation_id": continuation_id}
+
+    async def clear_preclaim_auth_block(
+        self, channel_id: str, continuation_id: str, transport_name: str,
+    ) -> dict:
+        """Only a successful read-only probe may release a proven pre-send auth block."""
+        channel_id = self.validate_channel(channel_id)
+        continuation_id = self.validate_continuation_id(continuation_id)
+        transport_name = self._validate_transport_name(transport_name)
+        async with self._lock:
+            wake = self._pending.get(channel_id)
+            if wake is None or wake.continuation_id != continuation_id:
+                return {"released": False}
+            detail = wake.last_transport_detail or ""
+            fresh_marker = detail.startswith("auth_preflight:")
+            legacy_marker = detail.startswith(("Probe failed", "Probe process", "Target ChatGPT page requires login"))
+            if (not wake.owner_input_required
+                    or wake.last_transport_disposition != "owner_input_required"
+                    or wake.last_transport_name != transport_name
+                    or not (fresh_marker or legacy_marker)
+                    or wake.transport_delivered or wake.model_acknowledged
+                    or wake.claim_id is not None):
+                return {"released": False}
+            if legacy_marker and wake.delivery_attempts > 0:
+                # Older versions incorrectly consumed a delivery attempt at preflight.
+                wake.delivery_attempts -= 1
+            wake.owner_input_required = False
+            wake.last_transport_name = None
+            wake.last_transport_disposition = None
+            wake.last_transport_detail = None
+            wake.escalation_at = None
+            wake.escalation_notified_at = None
+            wake.available_at = min(wake.available_at, time.time())
+            self._save_state()
+            return {"released": True, "continuation_id": continuation_id}
 
     async def finalize_transport(
         self,
@@ -1271,7 +1358,8 @@ class CoordinatorService:
         async with self._lock:
             due = []
             for channel_id, wake in self._pending.items():
-                if wake.continuation_id is None or wake.model_acknowledged:
+                if (wake.continuation_id is None or wake.model_acknowledged
+                        or wake.escalation_notified_at is not None):
                     continue
                 stale_undelivered = self._undelivered_expired(wake, now)
                 blocked_disposition = (
@@ -1308,7 +1396,10 @@ class CoordinatorService:
                         "channel_id": channel_id,
                         "delivery_attempts": wake.delivery_attempts,
                         "max_delivery_attempts": wake.max_delivery_attempts,
-                        "escalation_message": escalation_message[: self.MAX_ESCALATION_MESSAGE_CHARS],
+                        "escalation_message": (
+                            escalation_message or
+                            f"Coordinator continuation {wake.continuation_id} requires delivery review."
+                        )[: self.MAX_ESCALATION_MESSAGE_CHARS],
                         "queued_events": len(wake.queued_messages),
                         "reason": (
                             "undelivered_timeout"
@@ -1322,6 +1413,24 @@ class CoordinatorService:
                     }
                 )
             return due
+
+    async def mark_escalation_notified(self, continuation_id: str) -> dict:
+        """Persist one Telegram notice, without treating it as model ACK or deleting a wake."""
+        continuation_id = self.validate_continuation_id(continuation_id)
+        async with self._lock:
+            for channel_id, wake in self._pending.items():
+                if wake.continuation_id != continuation_id:
+                    continue
+                if wake.escalation_notified_at is None:
+                    wake.escalation_notified_at = time.time()
+                    self._save_state()
+                return {
+                    "continuation_id": continuation_id,
+                    "channel_id": channel_id,
+                    "notified": True,
+                    "model_acknowledged": wake.model_acknowledged,
+                }
+            return {"continuation_id": continuation_id, "notified": False}
 
     async def resolve_escalation(self, continuation_id: str) -> dict:
         continuation_id = self.validate_continuation_id(continuation_id)
