@@ -18,6 +18,7 @@ from app.coordinator.wake_transport import (
     WakeDeliveryRequest,
     WakeDeliveryResult,
     WakeProbeResult,
+    WakeProbeDisposition,
     WakeTarget,
 )
 
@@ -45,13 +46,20 @@ async def default_process_runner(argv: Sequence[str], timeout: float) -> Process
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             proc.communicate(), timeout=timeout
         )
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        # Cancellation of an outer probe deadline must also reap the child.
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
         try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
+            await asyncio.wait_for(proc.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
             pass
-        raise TimeoutError(f"Process timed out after {timeout}s: {argv[0]}")
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise TimeoutError(f"Process timed out after {timeout}s: {argv[0]}") from exc
     return ProcessResult(
         exit_code=proc.returncode if proc.returncode is not None else -1,
         stdout=stdout_bytes.decode("utf-8", errors="replace"),
@@ -153,34 +161,37 @@ def _bound_detail(text: str, max_chars: int = MAX_DETAIL_CHARS) -> str:
     return clean[:max_chars] + "..."
 
 
-def is_owner_input_required_error(text: str) -> bool:
-    """Classifies whether probe/delivery error output indicates owner intervention is required.
-
-    Returns True ONLY when explicit evidence proves:
-    - CDP/browser endpoint is unreachable/refused;
-    - Cloudflare challenge page is active;
-    - Login / authentication / sign-up is required.
-
-    Transient errors (such as timeouts waiting for thread content, navigation timing,
-    or generic non-zero CLI failures) return False so the coordinator can safely retry.
-    """
+def classify_probe_failure(text: str) -> WakeProbeDisposition:
+    """Classify pre-claim failures without leaking physical browser identity."""
     lower = text.lower()
-    return any(
-        marker in lower
-        for marker in (
-            "just a moment",
-            "cloudflare",
-            "log in",
-            "login",
-            "sign up",
-            "welcome to chatgpt",
-            "econnrefused",
-            "unreachable",
-            "connection refused",
-            "failed to connect to browser endpoint",
-            "browser endpoint unavailable",
-        )
-    )
+    if any(s in lower for s in (
+        "just a moment", "cloudflare", "log in", "login",
+        "sign up", "welcome to chatgpt",
+    )):
+        return "authentication_required"
+    if any(s in lower for s in (
+        "target chat url mismatch", "exact captured browser target",
+        "target_mismatch",
+    )):
+        return "target_mismatch"
+    if any(s in lower for s in ("timed out", "timeout", "deadline exceeded")):
+        return "timeout"
+    if any(s in lower for s in (
+        "econnrefused", "unreachable", "connection refused",
+        "failed to connect to browser endpoint", "browser endpoint unavailable",
+        "cdp socket closed", "cdp socket failed",
+    )):
+        return "browser_unavailable"
+    if any(s in lower for s in (
+        "statusbusy", "stopvisible", "actively generating", "chatgpt busy",
+    )):
+        return "busy"
+    return "unknown"
+
+
+def is_owner_input_required_error(text: str) -> bool:
+    """A transient CDP failure must not permanently block autonomous retries."""
+    return classify_probe_failure(text) == "authentication_required"
 
 
 class ReviewGptWakeTransport:
@@ -305,6 +316,7 @@ class ReviewGptWakeTransport:
                     ready=False,
                     owner_input_required=is_owner_input_required_error(err_text),
                     detail=f"Probe process error: {_bound_detail(err_text)}",
+                    disposition=classify_probe_failure(err_text),
                 )
 
             if result.exit_code != 0:
@@ -313,6 +325,7 @@ class ReviewGptWakeTransport:
                     ready=False,
                     owner_input_required=is_owner_input_required_error(error_output),
                     detail=f"Probe failed with exit code {result.exit_code}: {_bound_detail(result.stderr or result.stdout)}",
+                    disposition=classify_probe_failure(error_output),
                 )
 
             if not temp_path.is_file():
@@ -320,6 +333,7 @@ class ReviewGptWakeTransport:
                     ready=False,
                     owner_input_required=False,
                     detail="Probe export output missing",
+                    disposition="unknown",
                 )
 
             try:
@@ -329,6 +343,7 @@ class ReviewGptWakeTransport:
                     ready=False,
                     owner_input_required=False,
                     detail="Probe export output is malformed JSON",
+                    disposition="unknown",
                 )
 
             if not isinstance(export_data, dict):
@@ -336,6 +351,7 @@ class ReviewGptWakeTransport:
                     ready=False,
                     owner_input_required=False,
                     detail="Probe export output format unexpected",
+                    disposition="unknown",
                 )
 
             title = str(export_data.get("title", ""))
@@ -344,6 +360,7 @@ class ReviewGptWakeTransport:
                     ready=False,
                     owner_input_required=True,
                     detail="Target ChatGPT page requires login or Cloudflare verification",
+                    disposition="authentication_required",
                 )
 
             chat_url = str(export_data.get("chatUrl", "")).strip()
@@ -351,7 +368,8 @@ class ReviewGptWakeTransport:
                 return WakeProbeResult(
                     ready=False,
                     owner_input_required=False,
-                    detail=f"Target chat URL mismatch (expected: {probe_url}, found: {chat_url})",
+                    detail="Target chat URL mismatch",
+                    disposition="target_mismatch",
                 )
 
             status_busy = bool(export_data.get("statusBusy", False))
@@ -361,9 +379,10 @@ class ReviewGptWakeTransport:
                     ready=False,
                     owner_input_required=False,
                     detail="ChatGPT target is actively generating (statusBusy or stopVisible)",
+                    disposition="busy",
                 )
 
-            return WakeProbeResult(ready=True, owner_input_required=False, detail=None)
+            return WakeProbeResult(ready=True, owner_input_required=False, detail=None, disposition="ready")
         finally:
             try:
                 temp_path.unlink(missing_ok=True)

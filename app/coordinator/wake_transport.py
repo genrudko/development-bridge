@@ -11,6 +11,11 @@ WakeDeliveryDisposition = Literal[
     "owner_input_required",
 ]
 
+WakeProbeDisposition = Literal[
+    "ready", "busy", "timeout", "authentication_required",
+    "browser_unavailable", "target_mismatch", "unknown",
+]
+
 
 @dataclass(frozen=True, slots=True)
 class WakeTarget:
@@ -25,6 +30,7 @@ class WakeProbeResult:
     ready: bool
     owner_input_required: bool = False
     detail: str | None = None
+    disposition: WakeProbeDisposition | None = None
 
 
 @dataclass(frozen=True, slots=True)

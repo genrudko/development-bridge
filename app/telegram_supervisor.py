@@ -289,7 +289,7 @@ class TelegramSupervisorService:
                 "Please check ChatGPT / Browser Host."
             )
             if await self._notice(text):
-                await self.coordinator.resolve_escalation(escalation["continuation_id"])
+                await self.coordinator.mark_escalation_notified(escalation["continuation_id"])
 
     async def _notice(self, text: str) -> bool:
         if self._client is None or self.chat_id is None:

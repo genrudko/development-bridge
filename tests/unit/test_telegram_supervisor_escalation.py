@@ -8,7 +8,7 @@ from app.telegram_supervisor import TelegramSupervisorService
 
 
 @pytest.mark.asyncio
-async def test_telegram_supervisor_resolves_due_escalation_after_notice(tmp_path):
+async def test_telegram_supervisor_preserves_pending_wake_after_notice(tmp_path):
     coordinator = CoordinatorService(tmp_path / "wakes.json")
     registry = RouteRegistry(tmp_path / "routes.json")
     supervisor = TelegramSupervisorService(
@@ -43,7 +43,10 @@ async def test_telegram_supervisor_resolves_due_escalation_after_notice(tmp_path
     await supervisor._drain_escalations_once()
 
     assert notices == ["final fallback"]
-    assert (await coordinator.model_ack(armed["continuation_id"]))["acknowledged"] is False
+    assert (await coordinator.escalations_due()) == []
+    await supervisor._drain_escalations_once()
+    assert notices == ["final fallback"]
+    assert (await coordinator.model_ack(armed["continuation_id"]))["acknowledged"] is True
     assert (await coordinator.status("route-g2"))["state"] == "idle"
 
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from contextlib import suppress
 
 from app.api.errors import BridgeError, ErrorCode
@@ -27,12 +29,16 @@ class CoordinatorWakeDeliveryService:
         transport: WakeTransport | None = None,
         enabled: bool = False,
         poll_interval_seconds: float = 5.0,
+        probe_timeout_seconds: float = 65.0,
     ) -> None:
         self._coordinator = coordinator
         self._route_registry = route_registry
         self._transport = transport
         self._enabled = bool(enabled)
         self._poll_interval_seconds = max(1.0, min(float(poll_interval_seconds), 300.0))
+        self._probe_timeout_seconds = max(1.0, min(float(probe_timeout_seconds), 90.0))
+        self._auth_reprobe_after: dict[str, float] = {}
+        self._last_status_log: dict[str, tuple[tuple, float]] = {}
         self._task: asyncio.Task | None = None
 
     @property
@@ -84,6 +90,7 @@ class CoordinatorWakeDeliveryService:
                 await task
 
     async def _loop(self) -> None:
+        logger.warning("wake_loop_started transport=%s interval=%s", self._transport.name if self._transport else "none", self._poll_interval_seconds)
         while True:
             try:
                 await self.run_once()
@@ -170,11 +177,33 @@ class CoordinatorWakeDeliveryService:
                 channel_id = channel_id.strip()
                 status = await self._coordinator.status(channel_id, delivery_mode="direct")
                 continuation_id = status.get("continuation_id")
-                if (
-                    not status.get("ready")
-                    or not isinstance(continuation_id, str)
-                    or not continuation_id.strip()
-                ):
+                if isinstance(continuation_id, str):
+                    signature = (
+                        continuation_id, status.get("state"), status.get("ready"),
+                        status.get("x_listener_active"), status.get("delivery_attempts"),
+                    )
+                    previous, last_logged = self._last_status_log.get(route_id, (None, 0.0))
+                    if signature != previous or time.monotonic() - last_logged >= 120.0:
+                        logger.warning("wake_status %s", json.dumps({
+                            "route": route_id, "continuation": continuation_id,
+                            "state": status.get("state"), "ready": status.get("ready"),
+                            "x_listener_active": status.get("x_listener_active"),
+                            "delivery_attempts": status.get("delivery_attempts"),
+                        }))
+                        self._last_status_log[route_id] = (signature, time.monotonic())
+                if not isinstance(continuation_id, str) or not continuation_id.strip():
+                    continue
+                auth_recovery = (
+                    status.get("state") == "owner_input_required"
+                    and status.get("last_transport_name") == self._transport.name
+                    and str(status.get("last_transport_detail") or "").startswith((
+                        "auth_preflight:", "Probe failed", "Probe process",
+                        "Target ChatGPT page requires login",
+                    ))
+                )
+                if not status.get("ready") and not auth_recovery:
+                    continue
+                if auth_recovery and time.monotonic() < self._auth_reprobe_after.get(route_id, 0.0):
                     continue
 
                 target = WakeTarget(
@@ -184,10 +213,58 @@ class CoordinatorWakeDeliveryService:
                     route_url=route_url.strip(),
                 )
 
+                # Never claim on probe failure. Record classified pre-claim
+                # failures so that zero delivery attempts is not mistaken for
+                # proof that no probe has run.
+                started = time.monotonic()
+                if auth_recovery:
+                    # Owner sign-in may happen later. Recheck read-only at a
+                    # bounded cadence; never replay an uncertain post-send turn.
+                    self._auth_reprobe_after[route_id] = started + 60.0
+                logger.warning("wake_probe %s", json.dumps({
+                    "event": "start", "route": route_id,
+                    "continuation": continuation_id, "transport": self._transport.name,
+                }))
                 try:
-                    probe_result = await self._transport.probe(target)
+                    probe_result = await asyncio.wait_for(
+                        self._transport.probe(target),
+                        timeout=self._probe_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("wake_probe %s", json.dumps({
+                        "event": "finish", "route": route_id,
+                        "continuation": continuation_id,
+                        "disposition": "timeout",
+                        "duration_ms": round((time.monotonic() - started) * 1000),
+                    }))
+                    continue
                 except Exception as exc:
-                    logger.warning("Probe exception for route %s: %s", route_id, exc)
+                    logger.warning("wake_probe %s", json.dumps({
+                        "event": "finish", "route": route_id,
+                        "continuation": continuation_id, "disposition": "unknown",
+                        "error_type": type(exc).__name__,
+                        "duration_ms": round((time.monotonic() - started) * 1000),
+                    }))
+                    continue
+                disposition = probe_result.disposition or (
+                    "ready" if probe_result.ready else
+                    "authentication_required" if probe_result.owner_input_required else
+                    "unknown"
+                )
+                logger.warning("wake_probe %s", json.dumps({
+                    "event": "finish", "route": route_id,
+                    "continuation": continuation_id, "disposition": disposition,
+                    "duration_ms": round((time.monotonic() - started) * 1000),
+                }))
+                if auth_recovery:
+                    if probe_result.ready and not probe_result.owner_input_required:
+                        recovery = await self._coordinator.clear_preclaim_auth_block(
+                            channel_id, continuation_id, self._transport.name,
+                        )
+                        logger.warning("wake_auth_recovery %s", json.dumps({
+                            "route": route_id, "continuation": continuation_id,
+                            "released": recovery.get("released", False),
+                        }))
                     continue
 
                 if not probe_result.ready and not probe_result.owner_input_required:
@@ -202,18 +279,14 @@ class CoordinatorWakeDeliveryService:
                         self._transport.name,
                         probe_result.detail,
                     )
-                    claim_result = await self._coordinator.claim(channel_id, delivery_mode="direct")
-                    if claim_result.get("claimed"):
-                        claim_id = str(claim_result["claim_id"])
-                        await self._coordinator.finalize_transport(
-                            channel_id,
-                            claim_id,
-                            self._transport.name,
-                            "owner_input_required",
-                            detail=probe_result.detail,
-                        )
-                        return
-                    continue
+                    await self._coordinator.mark_preclaim_auth_required(
+                        channel_id,
+                        continuation_id,
+                        self._transport.name,
+                        detail=probe_result.detail,
+                    )
+                    self._auth_reprobe_after[route_id] = time.monotonic() + 60.0
+                    return
 
                 claim_result = await self._coordinator.claim(channel_id, delivery_mode="direct")
                 if not claim_result.get("claimed"):

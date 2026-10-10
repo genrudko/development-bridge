@@ -201,7 +201,8 @@ async def test_owner_input_probe_persists_owner_input_required_and_never_calls_d
     assert status["owner_input_required"] is True
     assert status["last_transport_name"] == "mock-transport"
     assert status["last_transport_disposition"] == "owner_input_required"
-    assert status["last_transport_detail"] == "Cloudflare challenge"
+    assert status["last_transport_detail"] == "auth_preflight: Cloudflare challenge"
+    assert status["delivery_attempts"] == 0
 
 
 @pytest.mark.asyncio
